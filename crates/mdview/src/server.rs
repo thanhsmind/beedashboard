@@ -167,6 +167,11 @@ fn router(state: AppState) -> Router {
         // agent-terminal-6: one pane's polled screen, same gate shape as the
         // page above (`any(...)` + `MethodGate<Get>` inside the handler).
         .route("/p/:id/_terminal/:pane_id/screen", any(terminal_screen))
+        // agent-terminal-9 (D3): the write side — free text and named keys
+        // into a pane. Same `any(...)` + `MethodGate<Post>` shape as every
+        // other gated terminal route, never `.post(...)`.
+        .route("/p/:id/_terminal/:pane_id/input", any(terminal_input))
+        .route("/p/:id/_terminal/:pane_id/keys", any(terminal_keys))
         .route("/p/:id/*path", get(project_path))
         .with_state(state)
 }
@@ -685,6 +690,113 @@ fn herdr_down_response() -> Response {
         Json(json!({ "error": HERDR_DOWN_REMEDY })),
     )
         .into_response()
+}
+
+/// Shared by every write route below (`terminal_input`, `terminal_keys`) and
+/// mirrors the read side's own check in `terminal_screen`: a pane id is only
+/// ever acted on if it is already present in this project's own D2
+/// containment-boundary-filtered pane list, never trusted from the URL
+/// alone. Returns the project on success; a `Response` (project-not-found,
+/// herdr-down, or pane-not-found) on any refusal, so callers `return` it
+/// unchanged via `?` in spirit — used as `match ... { Ok(p) => p, Err(r) =>
+/// return r }` at each call site.
+async fn project_and_verify_pane_in_boundary(
+    st: &AppState,
+    id: &str,
+    pane_id: &str,
+) -> std::result::Result<mdview_core::domain::Project, Response> {
+    let Ok(Some(project)) = st.engine.get_project(id) else {
+        return Err(not_found("project not found"));
+    };
+    let snapshot = match st.herdr.snapshot().await {
+        Ok(s) => s,
+        Err(_) => return Err(herdr_down_response()),
+    };
+    let in_project = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+        .map(|boundary| project_panes(&snapshot, &boundary))
+        .unwrap_or_default()
+        .iter()
+        .any(|p| p.pane_id == pane_id);
+    if !in_project {
+        return Err(not_found("pane not found"));
+    }
+    Ok(project)
+}
+
+#[derive(serde::Deserialize)]
+struct ReplyBody {
+    text: String,
+    /// Whether to press Enter after the text (a separate herdr call — see
+    /// `Herdr::send_input`'s send≠submit doc). Deliberately defaulting to
+    /// `false` (`#[serde(default)]` on a `bool`) — the opposite of
+    /// herdr-go's `ReplyBody`, which defaults `submit` to `true` — so an
+    /// omitted flag never accidentally submits and text can be staged in a
+    /// pane without being sent, exactly as this cell's action requires.
+    #[serde(default)]
+    submit: bool,
+}
+
+/// `POST /p/:id/_terminal/:pane_id/input` (D3/D4) — a free-text reply into
+/// a pane. Modeled on herdr-go's `ReplyBody { text, submit }`
+/// (`herdr-go/src/web/screen.rs`): staging text into the pane's composer and
+/// pressing Enter are two separate herdr calls (`Herdr::send_input` makes
+/// both, only the second when `submit` is set), so `submit` absent leaves
+/// the text staged without ever being sent.
+///
+/// Guarded exactly like `terminal_screen`: `MethodGate<Post>` + `AuthSession`
+/// run before this body, then the D7 enabled switch, then the same D2
+/// containment boundary via `project_and_verify_pane_in_boundary`.
+async fn terminal_input(
+    _method: terminal_auth::MethodGate<terminal_auth::Post>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+    Path((id, pane_id)): Path<(String, String)>,
+    Json(body): Json<ReplyBody>,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
+    if let Err(refusal) = project_and_verify_pane_in_boundary(&st, &id, &pane_id).await {
+        return refusal;
+    }
+    match st.herdr.send_input(&pane_id, &body.text, body.submit).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
+        // Any other herdr failure collapses to the same D6 remedy the
+        // screen poll uses — never a raw error type.
+        Err(_) => herdr_down_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct KeysBody {
+    /// herdr key names to press in order (e.g. `["down", "enter"]`) — driving
+    /// a TUI option menu the free-text reply can't reach.
+    keys: Vec<String>,
+}
+
+/// `POST /p/:id/_terminal/:pane_id/keys` (D3/D4) — named key presses into a
+/// pane, for menu navigation the free-text reply above can't reach (arrow
+/// keys, Enter, Escape, Tab, …). Modeled on herdr-go's `KeysBody { keys }`.
+/// Guarded identically to `terminal_input`.
+async fn terminal_keys(
+    _method: terminal_auth::MethodGate<terminal_auth::Post>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+    Path((id, pane_id)): Path<(String, String)>,
+    Json(body): Json<KeysBody>,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
+    if let Err(refusal) = project_and_verify_pane_in_boundary(&st, &id, &pane_id).await {
+        return refusal;
+    }
+    match st.herdr.send_keys(&pane_id, &body.keys).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
+        Err(_) => herdr_down_response(),
+    }
 }
 
 /// Join each of the snapshot's agents to its own pane's working directory —
@@ -4376,6 +4488,503 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A POST request to `/p/{id}/_terminal/{pane_id}/input` carrying a JSON
+    /// `{ "text": ..., "submit": ... }` body (the `submit` key omitted
+    /// entirely when `submit` is `None`, proving the real absent-flag case —
+    /// not just a JSON `false`), optionally carrying the given session
+    /// cookie value.
+    fn terminal_input_req(
+        id: &str,
+        pane_id: &str,
+        text: &str,
+        submit: Option<bool>,
+        cookie: Option<&str>,
+    ) -> Request<Body> {
+        let body = match submit {
+            Some(s) => serde_json::json!({ "text": text, "submit": s }),
+            None => serde_json::json!({ "text": text }),
+        };
+        let mut b = Request::builder()
+            .uri(format!("/p/{id}/_terminal/{pane_id}/input"))
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    }
+
+    /// A POST request to `/p/{id}/_terminal/{pane_id}/keys` carrying a JSON
+    /// `{ "keys": [...] }` body, optionally carrying the given session
+    /// cookie value — the keys sibling of `terminal_input_req`.
+    fn terminal_keys_req(
+        id: &str,
+        pane_id: &str,
+        keys: &[&str],
+        cookie: Option<&str>,
+    ) -> Request<Body> {
+        let body = serde_json::json!({ "keys": keys });
+        let mut b = Request::builder()
+            .uri(format!("/p/{id}/_terminal/{pane_id}/keys"))
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    }
+
+    /// agent-terminal-9, truth: "Typed text reaches the pane's input without
+    /// being submitted when the submit flag is absent" — posted with no
+    /// `submit` key at all (the real omitted-flag case), the text lands in
+    /// the pane's screen but no Enter follows it.
+    #[tokio::test]
+    async fn terminal_input_without_submit_stages_text_but_never_submits_it() {
+        let dir = fresh_root("terminal-input-stage");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-input-stage-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "input-stage");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_input_req(
+                &project.id,
+                &started.pane_id,
+                "draft reply",
+                None,
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ok_body = body_string(resp).await;
+        assert!(ok_body.contains("\"ok\":true"), "{ok_body}");
+
+        let screen_resp = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, Some(&cookie)))
+            .await
+            .unwrap();
+        let body = body_string(screen_resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let text = json["text"].as_str().unwrap();
+        assert!(text.contains("draft reply"), "{text}");
+        assert!(
+            !text.ends_with('\n'),
+            "an omitted submit flag must never press Enter: {text:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// agent-terminal-9, truth: "With the submit flag set, the text is sent
+    /// and the Enter keypress is a separate call after it" — the pane's
+    /// screen carries the text followed by the newline `Herdr::send_input`
+    /// pushes only for its second, submit-only call (see
+    /// `FakeHerdr::send_input`'s doc-mirrored behavior and
+    /// `SocketHerdr::send_input`'s two real `pane.send_input` calls).
+    #[tokio::test]
+    async fn terminal_input_with_submit_sends_text_then_enter() {
+        let dir = fresh_root("terminal-input-submit");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-input-submit-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "input-submit");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_input_req(
+                &project.id,
+                &started.pane_id,
+                "go ahead",
+                Some(true),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let screen_resp = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, Some(&cookie)))
+            .await
+            .unwrap();
+        let body = body_string(screen_resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let text = json["text"].as_str().unwrap();
+        assert!(
+            text.ends_with("go ahead\n"),
+            "submit=true must send the text then a separate Enter: {text:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// agent-terminal-9, truth: "Named keys reach the pane through the keys
+    /// path" — pinned against `FakeHerdr::send_keys`'s own echo shape
+    /// (non-Enter keys as `<key>` tokens, `enter` as a bare newline) so the
+    /// test fails if the handler ever stopped forwarding to `Herdr::send_keys`.
+    #[tokio::test]
+    async fn terminal_keys_reach_the_pane() {
+        let dir = fresh_root("terminal-keys-reach");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-keys-reach-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "keys-reach");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_keys_req(
+                &project.id,
+                &started.pane_id,
+                &["down", "enter"],
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let screen_resp = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, Some(&cookie)))
+            .await
+            .unwrap();
+        let body = body_string(screen_resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let text = json["text"].as_str().unwrap();
+        assert!(
+            text.ends_with("<down>\n"),
+            "named keys must reach the pane in order: {text:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// agent-terminal-9, truth: "A write aimed at a pane outside the
+    /// project's root is refused, even with a valid session" — the D2
+    /// containment boundary applied to both write routes, mirroring
+    /// `terminal_screen_refuses_a_pane_outside_the_project_root`. The
+    /// outside pane's screen is read directly off the fake afterward to
+    /// prove the refused write never reached herdr at all, not only that
+    /// the HTTP response was a 404.
+    #[tokio::test]
+    async fn terminal_write_routes_refuse_a_pane_outside_the_project_root() {
+        let dir = fresh_root("terminal-write-boundary");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminal-write-boundary-scratch");
+        let root_a = scratch.join("project-a");
+        let outside = scratch.join("outside-a");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let outside_agent = fake
+            .agent_start("w1", Some(&outside.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let project_a = register(&st, &root_a, "project-a-write");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let input_resp = app
+            .clone()
+            .oneshot(terminal_input_req(
+                &project_a.id,
+                &outside_agent.pane_id,
+                "should never land",
+                Some(true),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(input_resp.status(), StatusCode::NOT_FOUND);
+        let input_body = body_string(input_resp).await;
+        assert!(input_body.contains("pane not found"), "{input_body}");
+
+        let keys_resp = app
+            .oneshot(terminal_keys_req(
+                &project_a.id,
+                &outside_agent.pane_id,
+                &["enter"],
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(keys_resp.status(), StatusCode::NOT_FOUND);
+        let keys_body = body_string(keys_resp).await;
+        assert!(keys_body.contains("pane not found"), "{keys_body}");
+
+        // Both refusals must never have reached herdr: the outside pane's
+        // screen is exactly what `agent_start` seeded it with.
+        let read = fake
+            .read_pane(&outside_agent.pane_id, herdr::ReadSource::Visible, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            read.text, "❯ ",
+            "a refused write must never reach the pane it targeted: {}",
+            read.text
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// agent-terminal-9, truth: "Without a terminal session, and with the
+    /// terminal switch off, both write endpoints answer byte-identically to
+    /// an unrouted path" — the no-session half, mirroring
+    /// `terminal_screen_without_a_session_is_byte_identical_to_an_unrouted_path`
+    /// for both `/input` and `/keys`.
+    #[tokio::test]
+    async fn terminal_write_routes_without_a_session_are_byte_identical_to_an_unrouted_path() {
+        let dir = fresh_root("terminal-write-no-session");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-write-no-session-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "write-no-session");
+        let app = router(st);
+
+        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let unrouted_status = unrouted.status();
+            let unrouted_headers = unrouted.headers().clone();
+            let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
+
+            let input = app
+                .clone()
+                .oneshot(terminal_input_req(&project.id, "w1:p1", "hi", Some(true), cookie))
+                .await
+                .unwrap();
+            assert_eq!(input.status(), unrouted_status);
+            assert_eq!(input.headers(), &unrouted_headers);
+            let input_body = input.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(input_body, unrouted_body);
+
+            let keys = app
+                .clone()
+                .oneshot(terminal_keys_req(&project.id, "w1:p1", &["enter"], cookie))
+                .await
+                .unwrap();
+            assert_eq!(keys.status(), unrouted_status);
+            assert_eq!(keys.headers(), &unrouted_headers);
+            let keys_body = keys.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(keys_body, unrouted_body);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The other half of the same truth: with a valid session but the D7
+    /// `terminal.enabled` switch off, both write endpoints still answer
+    /// exactly as an unrouted path would — mirroring
+    /// `terminal_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session`.
+    #[tokio::test]
+    async fn terminal_write_routes_disabled_are_byte_identical_to_unrouted_even_with_a_valid_session()
+    {
+        let dir = fresh_root("terminal-write-disabled");
+        // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
+        let root = fresh_root("terminal-write-disabled-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "write-disabled");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let unrouted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted_status = unrouted.status();
+        let unrouted_headers = unrouted.headers().clone();
+        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
+
+        let input = app
+            .clone()
+            .oneshot(terminal_input_req(&project.id, "w1:p1", "hi", Some(true), Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(input.status(), unrouted_status);
+        assert_eq!(input.headers(), &unrouted_headers);
+        let input_body = input.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            input_body, unrouted_body,
+            "the input endpoint must be unreachable while the switch is off, even with a valid session"
+        );
+
+        let keys = app
+            .oneshot(terminal_keys_req(&project.id, "w1:p1", &["enter"], Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(keys.status(), unrouted_status);
+        assert_eq!(keys.headers(), &unrouted_headers);
+        let keys_body = keys.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            keys_body, unrouted_body,
+            "the keys endpoint must be unreachable while the switch is off, even with a valid session"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// agent-terminal-9, truth: "A wrong-method request to either write
+    /// endpoint is byte-identical to an unrouted path" — mounted with
+    /// `any(...)` + `MethodGate<Post>`, never `.post(...)`, mirroring
+    /// `terminal_screen_wrong_method_is_byte_identical_to_unrouted`.
+    #[tokio::test]
+    async fn terminal_write_routes_wrong_method_are_byte_identical_to_unrouted() {
+        let dir = fresh_root("terminal-write-wrong-method");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-write-wrong-method-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "write-wrong-method");
+        let app = router(st);
+
+        for path_suffix in ["input", "keys"] {
+            let got = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/p/{}/_terminal/w1:p1/{path_suffix}", project.id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(got.status(), StatusCode::NOT_FOUND);
+            assert_eq!(got.status(), unrouted.status());
+            assert_eq!(got.headers(), unrouted.headers());
+            let a = got.into_body().collect().await.unwrap().to_bytes();
+            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(a, b);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// D3/agent-terminal-9: the reply bar and the named-key buttons render on
+    /// every pane's card, so `assets/app.js` has a `.term-reply`/`.term-keys`
+    /// element to wire up — a view-only assertion that would fail if the
+    /// markup were ever dropped independent of the route wiring above.
+    #[tokio::test]
+    async fn terminal_page_renders_the_reply_bar_and_key_buttons() {
+        let dir = fresh_root("terminal-reply-bar-render");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-reply-bar-render-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "reply-bar-render");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(terminal_req(&project.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("class=\"term-reply\" data-pane-id=\"{}\"", started.pane_id)),
+            "no reply bar for the pane: {body}"
+        );
+        assert!(body.contains("class=\"term-reply__send\""), "{body}");
+        assert!(body.contains("data-key=\"enter\""), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// agent-terminal-9, truth: "Text sent to a pane never reaches mdview's
+    /// logs" — a grep-based proof over this file's own source (the shape
+    /// `crates/mdview-core/src/bee.rs`'s `no_web_framework_dependency_declared`
+    /// already uses for a source-level guarantee `cargo test` alone can't
+    /// otherwise express): no `tracing::*` call anywhere in this file may
+    /// reference a typed reply's or key press's body fields. Catches a
+    /// regression the instant a future debug log is added, rather than
+    /// relying on nobody ever adding one.
+    #[test]
+    fn typed_text_and_named_keys_never_appear_in_a_tracing_call() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/server.rs"))
+            .expect("server.rs must be readable from its own crate");
+        for (n, line) in src.lines().enumerate() {
+            if line.contains("tracing::") {
+                assert!(
+                    !line.contains("body.text") && !line.contains("body.keys"),
+                    "line {}: a typed reply or key press must never reach a tracing/log call: {line}",
+                    n + 1
+                );
+            }
+        }
     }
 
     /// agent-terminal-8, truth: "A request presenting no token, or a wrong

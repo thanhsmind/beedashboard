@@ -140,6 +140,11 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .term-pane__cwd { color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }
 .term-pane__meta { color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
 .term-screen { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
+.term-reply { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
+.term-reply__text { flex: 1; min-width: 0; padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); background: var(--color-bg); color: var(--color-text); }
+.term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; }
+.term-keys { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
+.term-keys button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
 </style>"#;
 
 /// D6: the Terminal tab is always present on a project page, whether or not
@@ -196,6 +201,20 @@ pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
   <div class="term-pane__meta">{kind}{title_sep}{title}</div>
   <div class="term-pane__cwd">{cwd}</div>
   <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
+  <form class="term-reply" data-pane-id="{pane_id}">
+    <input type="text" class="term-reply__text" placeholder="Type a reply…" aria-label="Reply to {name}" autocomplete="off">
+    <button type="submit" class="term-reply__send">Send</button>
+    <button type="button" class="term-reply__stage">Stage</button>
+  </form>
+  <div class="term-keys" data-pane-id="{pane_id}" aria-label="Send a key to {name}">
+    <button type="button" data-key="up">↑</button>
+    <button type="button" data-key="down">↓</button>
+    <button type="button" data-key="left">←</button>
+    <button type="button" data-key="right">→</button>
+    <button type="button" data-key="enter">Enter</button>
+    <button type="button" data-key="escape">Esc</button>
+    <button type="button" data-key="tab">Tab</button>
+  </div>
 </div>"#,
                 pane_id = esc(&p.pane_id),
                 name = esc(&p.name),

@@ -769,4 +769,74 @@
     pollAll();
     setInterval(pollAll, POLL_MS);
   })();
+
+  // Terminal reply + keys (agent-terminal-9, D3): posts free text and named
+  // keys back to a pane. Send≠submit stays two distinct actions here too —
+  // "Send" posts with `submit: true` (herdr presses Enter as its own,
+  // separate call), "Stage" posts with `submit: false` so the text lands in
+  // the pane's composer without being sent. After either send, this never
+  // repaints the screen itself — the existing `.term-screen` poller above
+  // already runs on its own interval and will pick up the change on its
+  // next tick, per this cell's instruction not to invent a second refresh
+  // mechanism.
+  (function () {
+    var main = document.querySelector("main.fg-page[data-project-id]");
+    if (!main) return;
+    var projectId = main.getAttribute("data-project-id");
+    if (!projectId) return;
+
+    function inputUrl(paneId) {
+      return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/input";
+    }
+
+    function keysUrl(paneId) {
+      return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/keys";
+    }
+
+    function postJson(url, body) {
+      return fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    function sendReply(paneId, text, submit, input) {
+      if (!text) return;
+      postJson(inputUrl(paneId), { text: text, submit: submit })
+        .then(function (res) {
+          if (res.ok && input) input.value = "";
+        })
+        .catch(function () {});
+    }
+
+    Array.prototype.slice.call(document.querySelectorAll(".term-reply[data-pane-id]")).forEach(function (form) {
+      var paneId = form.getAttribute("data-pane-id");
+      var input = form.querySelector(".term-reply__text");
+      var stageBtn = form.querySelector(".term-reply__stage");
+
+      form.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        sendReply(paneId, input.value, true, input);
+      });
+
+      if (stageBtn) {
+        stageBtn.addEventListener("click", function () {
+          sendReply(paneId, input.value, false, input);
+        });
+      }
+    });
+
+    Array.prototype.slice.call(document.querySelectorAll(".term-keys[data-pane-id]")).forEach(function (group) {
+      var paneId = group.getAttribute("data-pane-id");
+      Array.prototype.slice.call(group.querySelectorAll("button[data-key]")).forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var key = btn.getAttribute("data-key");
+          if (!key) return;
+          postJson(keysUrl(paneId), { keys: [key] }).catch(function () {});
+        });
+      });
+    });
+  })();
 })();
