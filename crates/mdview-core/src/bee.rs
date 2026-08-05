@@ -99,6 +99,54 @@ pub struct BeeState {
     pub phase: Option<String>,
     pub feature: Option<String>,
     pub mode: Option<String>,
+    /// `state.json`'s `workers[]`, verbatim (raw, unjoined). bee's own docs
+    /// call this array hand-maintained and not fully trusted, so it is never
+    /// used to move a cell between D7 buckets — see [`BeeRunningWorker`] for
+    /// the joined, session-verified view this snapshot derives from it.
+    pub workers: Vec<BeeWorker>,
+}
+
+/// One raw entry from `.bee/state.json`'s `workers[]`. `cell`, `tier` and
+/// `status` are each commonly `null` in practice (bee updates this array
+/// best-effort, not transactionally with the cell it names), so every field
+/// but `nickname` is optional.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeWorker {
+    pub nickname: String,
+    pub cell: Option<String>,
+    pub tier: Option<String>,
+    pub status: Option<String>,
+}
+
+/// One worker from `.bee/state.json`'s `workers[]`, joined against the live
+/// cells and sessions this snapshot already read. A worker only ever
+/// appears here when a session sharing its exact nickname is live — bee
+/// names a worker-launched session's file after its worker's nickname
+/// (`.bee/sessions/<nickname>.json` carries `"id": "<nickname>"`), so that
+/// shared identifier is the join key between "a worker the store still
+/// lists" and "a process that is actually still reporting in". A worker
+/// with no matching session, or one whose matching session has gone stale,
+/// is silently absent from this list rather than claimed to be running on
+/// no evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeRunningWorker {
+    pub nickname: String,
+    /// The cell id this worker names, if any.
+    pub cell: Option<String>,
+    pub tier: Option<String>,
+    pub status: Option<String>,
+    /// The matching live session's heartbeat age, in minutes.
+    pub heartbeat_age_minutes: f64,
+    /// True when `cell` names a cell this snapshot actually read.
+    pub cell_found: bool,
+    /// The named cell's own `status`, when it was found.
+    pub cell_status: Option<String>,
+    /// True when the store and the running process disagree: the named
+    /// cell does not exist, or it exists but its own status is not
+    /// `claimed`. Never resolved automatically — surfaced so a human can
+    /// see it (D7's buckets stay a pure function of cell status either
+    /// way; see `compute_running_workers`).
+    pub discrepancy: bool,
 }
 
 /// The claim-to-cap span of one shipped feature (D11). Both timestamps are
@@ -312,6 +360,12 @@ pub struct BeeSnapshot {
     pub workspaces: Vec<BeeWorkspace>,
     /// `.bee/decisions.jsonl`, bounded (Slice 2).
     pub decisions: BeeDecisions,
+    /// Workers named in `state.json`'s `workers[]` whose session is
+    /// currently live — the "running now" view. Deliberately separate from
+    /// `buckets`: it never rewrites a cell's D7 bucket, it only tells a
+    /// reader that a `Waiting`/`Stuck` cell nonetheless has a live process
+    /// against it, or flags one that does not agree with the store.
+    pub running_workers: Vec<BeeRunningWorker>,
     /// Human-readable notes naming what could not be read. Every path
     /// mentioned here is relative to the project root.
     pub read_errors: Vec<String>,
@@ -332,6 +386,7 @@ impl BeeSnapshot {
             lanes: Vec::new(),
             workspaces: Vec::new(),
             decisions: BeeDecisions::default(),
+            running_workers: Vec::new(),
             read_errors: Vec::new(),
         }
     }
@@ -415,6 +470,11 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     let workspaces = read_workspaces(&bee_dir, root, &mut read_errors);
     let decisions = read_decisions(&bee_dir, root, &mut read_errors);
 
+    let running_workers = state
+        .as_ref()
+        .map(|s| compute_running_workers(&s.workers, &all_cells, &sessions))
+        .unwrap_or_default();
+
     BeeSnapshot {
         present: true,
         state,
@@ -427,8 +487,53 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         lanes,
         workspaces,
         decisions,
+        running_workers,
         read_errors,
     }
+}
+
+/// Join `state.json`'s raw `workers[]` against the live cells and sessions
+/// this snapshot already read (D4 — read-only, no additional I/O). Never
+/// mutates or is used to compute `buckets`: D7's buckets stay a pure
+/// function of each cell's own `status`, full stop. A worker only survives
+/// into the returned list when a session sharing its exact `nickname` is
+/// live (see [`BeeRunningWorker`]); a worker with no such session, or a
+/// stale one, is silently omitted rather than presented as running on no
+/// evidence.
+fn compute_running_workers(
+    workers: &[BeeWorker],
+    all_cells: &[BeeCell],
+    sessions: &[BeeSession],
+) -> Vec<BeeRunningWorker> {
+    let mut out = Vec::new();
+    for w in workers {
+        let Some(session) = sessions.iter().find(|s| s.id == w.nickname) else {
+            continue;
+        };
+        if !session.live {
+            continue;
+        }
+        let cell_match = w
+            .cell
+            .as_deref()
+            .and_then(|cid| all_cells.iter().find(|c| c.id == cid));
+        let cell_found = cell_match.is_some();
+        let cell_status = cell_match.map(|c| c.status.clone());
+        // A discrepancy is "the store disagrees with the running process":
+        // no such cell at all, or a cell whose own status is not `claimed`.
+        let discrepancy = cell_status.as_deref() != Some("claimed");
+        out.push(BeeRunningWorker {
+            nickname: w.nickname.clone(),
+            cell: w.cell.clone(),
+            tier: w.tier.clone(),
+            status: w.status.clone(),
+            heartbeat_age_minutes: session.heartbeat_age_minutes,
+            cell_found,
+            cell_status,
+            discrepancy,
+        });
+    }
+    out
 }
 
 fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Option<BeeState> {
@@ -450,12 +555,28 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
             phase: v.get("phase").and_then(Value::as_str).map(String::from),
             feature: v.get("feature").and_then(Value::as_str).map(String::from),
             mode: v.get("mode").and_then(Value::as_str).map(String::from),
+            workers: v
+                .get("workers")
+                .and_then(Value::as_array)
+                .map(|arr| arr.iter().filter_map(parse_worker).collect())
+                .unwrap_or_default(),
         }),
         Err(e) => {
             read_errors.push(format!("{}: could not parse ({e})", rel_str(&path, root)));
             None
         }
     }
+}
+
+/// Parse one `state.json` `workers[]` entry. `nickname` missing or
+/// non-string makes the whole entry unparseable — everything else is
+/// optional (see [`BeeWorker`]).
+fn parse_worker(v: &Value) -> Option<BeeWorker> {
+    let nickname = v.get("nickname").and_then(Value::as_str)?.to_string();
+    let cell = v.get("cell").and_then(Value::as_str).map(String::from);
+    let tier = v.get("tier").and_then(Value::as_str).map(String::from);
+    let status = v.get("status").and_then(Value::as_str).map(String::from);
+    Some(BeeWorker { nickname, cell, tier, status })
 }
 
 /// Parse one `.bee/cells/<id>.json` file into a [`BeeCell`], relativizing
@@ -1682,6 +1803,132 @@ mod tests {
         assert!(live.heartbeat_age_minutes < 30.0);
         assert!(!stale.live, "a 1-hour-old heartbeat must be stale: age={}", stale.heartbeat_age_minutes);
         assert!(stale.heartbeat_age_minutes > 30.0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- running_workers: the in-flight view joined from state.json's
+    // workers[], live cells and live sessions ---
+
+    fn session_json_with_age(id: &str, minutes_ago: i64) -> String {
+        let now = time::OffsetDateTime::now_utc();
+        let hb = (now - time::Duration::minutes(minutes_ago))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        format!(r#"{{"id":"{id}","started_at":"{hb}","last_heartbeat":"{hb}","workspace_id":"main","source":"startup"}}"#)
+    }
+
+    #[test]
+    fn running_worker_with_live_session_and_claimed_cell_has_no_discrepancy() {
+        let root = fresh_root("running-happy");
+        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "claimed"));
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"phase":"exploring","workers":[{"nickname":"kf1-worker","cell":"kf-1","tier":"generation","status":"running"}]}"#,
+        );
+        write(&root, ".bee/sessions/kf1-worker.json", &session_json_with_age("kf1-worker", 1));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.running_workers.len(), 1, "{:?}", snap.running_workers);
+        let w = &snap.running_workers[0];
+        assert_eq!(w.nickname, "kf1-worker");
+        assert_eq!(w.cell.as_deref(), Some("kf-1"));
+        assert!(w.cell_found);
+        assert_eq!(w.cell_status.as_deref(), Some("claimed"));
+        assert!(!w.discrepancy, "a claimed cell backing a live worker must not be a discrepancy");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn running_worker_named_cell_the_store_still_calls_open_is_a_discrepancy() {
+        // The exact shape reported live: a worker names a cell, a session
+        // shares its nickname and is live, yet the cell file itself is
+        // still "open" — the store and the running process disagree.
+        let root = fresh_root("running-discrepancy");
+        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "open"));
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"workers":[{"nickname":"kf1-worker","cell":"kf-1","tier":null,"status":null}]}"#,
+        );
+        write(&root, ".bee/sessions/kf1-worker.json", &session_json_with_age("kf1-worker", 1));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.running_workers.len(), 1, "{:?}", snap.running_workers);
+        let w = &snap.running_workers[0];
+        assert!(w.cell_found);
+        assert_eq!(w.cell_status.as_deref(), Some("open"));
+        assert!(w.discrepancy, "a worker naming a still-open cell must be flagged");
+
+        // D7: the cell must still land in Waiting, never moved to Doing by
+        // the presence of a worker naming it.
+        assert_eq!(snap.buckets.waiting.len(), 1);
+        assert_eq!(snap.buckets.doing.len(), 0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn running_worker_naming_nonexistent_cell_is_flagged_not_dropped() {
+        let root = fresh_root("running-no-cell");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"workers":[{"nickname":"ghost-worker","cell":"does-not-exist","tier":"generation","status":"running"}]}"#,
+        );
+        write(&root, ".bee/sessions/ghost-worker.json", &session_json_with_age("ghost-worker", 1));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.running_workers.len(), 1, "a worker naming an unknown cell must not be dropped: {:?}", snap.running_workers);
+        let w = &snap.running_workers[0];
+        assert!(!w.cell_found);
+        assert!(w.cell_status.is_none());
+        assert!(w.discrepancy, "a worker naming a nonexistent cell must be a discrepancy");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn running_worker_with_stale_session_is_absent() {
+        let root = fresh_root("running-stale");
+        write(&root, ".bee/cells/kl-1.json", &cell_json("kl-1", "claimed"));
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"workers":[{"nickname":"kl1-worker","cell":"kl-1","tier":"generation","status":"running"}]}"#,
+        );
+        // 1 hour old: stale per SESSION_LIVE_MINUTES (30).
+        write(&root, ".bee/sessions/kl1-worker.json", &session_json_with_age("kl1-worker", 60));
+
+        let snap = read_snapshot(&root);
+        assert!(
+            snap.running_workers.is_empty(),
+            "a worker backed only by a stale session must not be presented as running: {:?}",
+            snap.running_workers
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn worker_with_no_matching_session_is_absent_from_running() {
+        let root = fresh_root("running-no-session");
+        write(&root, ".bee/cells/kl-2.json", &cell_json("kl-2", "claimed"));
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"workers":[{"nickname":"kl2-worker","cell":"kl-2","tier":"generation","status":"running"}]}"#,
+        );
+        // No .bee/sessions/kl2-worker.json at all.
+
+        let snap = read_snapshot(&root);
+        assert!(
+            snap.running_workers.is_empty(),
+            "a worker with no backing session must not be presented as running: {:?}",
+            snap.running_workers
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -3,8 +3,8 @@
 //! `/highlight.css` (syntect class-based), so themes switch without re-render.
 
 use mdview_core::bee::{
-    BeeBacklog, BeeBuckets, BeeCell, BeeLane, BeeSession, BeeShippedFeature, BeeSnapshot,
-    BeeWorkspace,
+    BeeBacklog, BeeBuckets, BeeCell, BeeLane, BeeRunningWorker, BeeSession, BeeShippedFeature,
+    BeeSnapshot, BeeWorkspace,
 };
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
@@ -173,6 +173,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
       <span class="fg-chip fg-chip--neutral">feature: {feature}</span>
     </div>
   </div>
+  {running}
   {velocity}
   <div class="bee-buckets-top">
     {doing}
@@ -190,6 +191,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         name = esc(&project.name),
         phase = esc(phase),
         feature = esc(feature),
+        running = bee_running_now_section(&project.id, snapshot),
         velocity = bee_velocity_section(&project.id, snapshot),
         doing = bee_bucket_section(&project.id, "Doing", "doing", &b.doing, "neutral", false),
         waiting = bee_bucket_section(&project.id, "Waiting", "waiting", &b.waiting, "neutral", false),
@@ -199,6 +201,88 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         errors = bee_read_errors(&snapshot.read_errors),
     );
     layout(&format!("{} · bee", project.name), "", &body)
+}
+
+/// "Running now" — what is actually in flight this instant, above the
+/// velocity numbers: every live session (`.bee/sessions/*.json` reporting
+/// within the last 30 minutes) with its heartbeat age in plain relative
+/// language, plus every worker `state.json` names whose session is live
+/// (`snapshot.running_workers`, already joined and session-verified by
+/// `mdview_core::bee::read_snapshot`), each linking to the cell it names.
+/// This is deliberately a *separate* surface from the D7 buckets below it:
+/// bee's own docs call `state.json`'s `workers[]` hand-maintained and not
+/// fully trusted, so a worker naming a cell the store still calls
+/// open/waiting never moves that cell into Doing — it only earns an
+/// explicit discrepancy note here, right where a person is already looking
+/// for "what's running". When nothing is live at all, this renders one
+/// quiet empty-state line instead of an empty bordered panel, so it never
+/// costs space on a quiet board.
+fn bee_running_now_section(project_id: &str, snapshot: &BeeSnapshot) -> String {
+    let live_sessions: Vec<&BeeSession> = snapshot.sessions.iter().filter(|s| s.live).collect();
+    let workers = &snapshot.running_workers;
+
+    if live_sessions.is_empty() && workers.is_empty() {
+        return r#"<p class="fg-empty">Nothing running right now.</p>"#.to_string();
+    }
+
+    let mut rows = String::new();
+    for s in &live_sessions {
+        let source = s.source.as_deref().unwrap_or("session");
+        rows.push_str(&format!(
+            r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta">{source} · {age}</div></div>"#,
+            id = esc(&s.id),
+            source = esc(source),
+            age = esc(&bee_relative_minutes(s.heartbeat_age_minutes)),
+        ));
+    }
+    for w in workers.iter() {
+        rows.push_str(&bee_running_worker_row(project_id, w));
+    }
+
+    format!(
+        r#"<section class="fg-card bee-panel bee-running">
+  <h3 class="bee-panel__head">Running now</h3>
+  <div class="bee-panel__list">{rows}</div>
+</section>"#,
+        rows = rows,
+    )
+}
+
+/// One `bee_running_now_section` worker row: the cell it names (linked to
+/// that cell's detail page when the cell was actually found; plain text
+/// when it names a cell that does not exist, per must-have "flagged, not
+/// dropped") plus, when the store disagrees with the running process
+/// (`w.discrepancy`), an explicit note naming what the store still says.
+fn bee_running_worker_row(project_id: &str, w: &BeeRunningWorker) -> String {
+    let cell_ref = match (&w.cell, w.cell_found) {
+        (Some(cid), true) => format!(
+            r#"<a href="/p/{pid}/_bee/cell/{cid_href}">{cid}</a>"#,
+            pid = esc(project_id),
+            cid_href = esc(cid),
+            cid = esc(cid),
+        ),
+        (Some(cid), false) => esc(cid),
+        (None, _) => "no cell named".to_string(),
+    };
+    let discrepancy = if !w.discrepancy {
+        String::new()
+    } else {
+        let note = match (&w.cell, w.cell_found, w.cell_status.as_deref()) {
+            (Some(cid), true, Some(status)) => {
+                format!("store still calls {cid} {status}", cid = esc(cid), status = esc(status))
+            }
+            (Some(cid), false, _) => format!("store has no cell named {cid}", cid = esc(cid)),
+            _ => "worker names no cell".to_string(),
+        };
+        format!(r#"<div class="bee-cell__meta"><span class="fg-chip fg-chip--danger">{note}</span></div>"#)
+    };
+    format!(
+        r#"<div class="fg-card bee-cell"><div class="fg-card__title">{nickname}</div><div class="bee-cell__meta">{cell_ref} · {age}</div>{discrepancy}</div>"#,
+        nickname = esc(&w.nickname),
+        cell_ref = cell_ref,
+        age = esc(&bee_relative_minutes(w.heartbeat_age_minutes)),
+        discrepancy = discrepancy,
+    )
 }
 
 /// Ship-velocity section (D10/D11 downstream): the three headline numbers the

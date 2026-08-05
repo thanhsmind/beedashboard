@@ -2378,4 +2378,280 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&root).ok();
     }
+
+    // ── bee-board-ux-3: "running now" section ──────────────────────────
+
+    fn state_json_with_workers(workers_json: &str) -> String {
+        format!(r#"{{"phase":"exploring","feature":"demo","mode":"standard","workers":[{workers_json}]}}"#)
+    }
+
+    fn worker_json(nickname: &str, cell: &str, tier: &str, status: &str) -> String {
+        format!(r#"{{"nickname":"{nickname}","cell":"{cell}","tier":"{tier}","status":"{status}"}}"#)
+    }
+
+    /// (happy) A worker names a cell the store already calls `claimed`, and
+    /// a session sharing the worker's nickname is live: the running section
+    /// must show that worker's nickname, and it must link the cell it names
+    /// to that cell's own detail page.
+    #[tokio::test]
+    async fn running_worker_with_live_session_links_to_its_cell_detail_page() {
+        let root = fresh_root("running-happy");
+        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "claimed", &[], "w1"));
+        write(
+            &root,
+            ".bee/state.json",
+            &state_json_with_workers(&worker_json("kf1-worker", "kf-1", "generation", "running")),
+        );
+        write(
+            &root,
+            ".bee/sessions/kf1-worker.json",
+            &session_json("kf1-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "running-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Running now"), "{body}");
+        assert!(body.contains("kf1-worker"), "worker nickname must appear: {body}");
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/cell/kf-1\"", project.id)),
+            "the named cell must link to its own detail page: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) A worker names a cell the store still calls `open` (the
+    /// exact shape reported live: a claim never made it into the cell
+    /// file). The running section must state that disagreement explicitly
+    /// rather than hiding it.
+    #[tokio::test]
+    async fn running_worker_on_still_open_cell_shows_discrepancy_note() {
+        let root = fresh_root("running-discrepancy");
+        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/state.json",
+            &state_json_with_workers(&worker_json("kf1-worker", "kf-1", "generation", "running")),
+        );
+        write(
+            &root,
+            ".bee/sessions/kf1-worker.json",
+            &session_json("kf1-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "running-discrepancy");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("store still calls kf-1 open"),
+            "the page must say the store still calls this cell open: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) The presence of a worker naming a still-open cell must never
+    /// move that cell out of the Waiting bucket (D7 stays a pure function
+    /// of cell status).
+    #[tokio::test]
+    async fn d7_buckets_unchanged_by_worker_presence() {
+        let root = fresh_root("running-buckets-untouched");
+        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/state.json",
+            &state_json_with_workers(&worker_json("kf1-worker", "kf-1", "generation", "running")),
+        );
+        write(
+            &root,
+            ".bee/sessions/kf1-worker.json",
+            &session_json("kf1-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "running-buckets-untouched");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("data-bucket=\"waiting\" data-count=\"1\""),
+            "an open cell must stay in Waiting even though a live worker names it: {body}"
+        );
+        assert!(
+            body.contains("data-bucket=\"doing\" data-count=\"0\""),
+            "worker data must never move a cell into Doing: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) No workers and no live session: one quiet line, not an empty
+    /// bordered panel.
+    #[tokio::test]
+    async fn no_workers_and_no_live_session_renders_quiet_line() {
+        let root = fresh_root("running-quiet");
+        write(&root, ".bee/cells/a.json", &cell_json("a", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "running-quiet");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Nothing running right now."), "{body}");
+        assert!(
+            !body.contains("class=\"fg-card bee-panel bee-running\""),
+            "the quiet empty state must not render an empty running panel: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) A worker names a cell id that does not exist anywhere in the
+    /// live cell store — it must be flagged, not silently dropped, and the
+    /// page must still render.
+    #[tokio::test]
+    async fn worker_naming_nonexistent_cell_is_flagged_and_page_still_renders() {
+        let root = fresh_root("running-ghost-cell");
+        write(
+            &root,
+            ".bee/state.json",
+            &state_json_with_workers(&worker_json("ghost-worker", "does-not-exist", "generation", "running")),
+        );
+        write(
+            &root,
+            ".bee/sessions/ghost-worker.json",
+            &session_json("ghost-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "running-ghost-cell");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("ghost-worker"), "{body}");
+        assert!(
+            body.contains("store has no cell named does-not-exist"),
+            "a worker naming an unknown cell must be flagged, not dropped: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) A worker whose matching session has gone stale must not be
+    /// presented as running.
+    #[tokio::test]
+    async fn worker_with_stale_session_not_presented_as_running() {
+        let root = fresh_root("running-stale-session");
+        write(&root, ".bee/cells/kl-1.json", &cell_json("kl-1", "claimed", &[], "w1"));
+        write(
+            &root,
+            ".bee/state.json",
+            &state_json_with_workers(&worker_json("kl1-worker", "kl-1", "generation", "running")),
+        );
+        // 2 hours old: stale (session_live threshold is 30 minutes).
+        write(
+            &root,
+            ".bee/sessions/kl1-worker.json",
+            &session_json("kl1-worker", &rfc3339_minutes_ago(120), "/home/x/t.jsonl", "main", "startup"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "running-stale-session");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("Nothing running right now."),
+            "a worker backed only by a stale session must not be presented as running: {body}"
+        );
+        // The existing Sessions panel legitimately still lists a stale
+        // session (unrelated pre-existing behavior); what must be absent is
+        // any *running-section* worker card for it — the running-panel
+        // markup itself must not appear at all here.
+        assert!(
+            !body.contains("class=\"fg-card bee-panel bee-running\""),
+            "a stale-session worker must not produce a running panel: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (security) The running section must leak no transcript path, no
+    /// absolute path and no occurrence of the fixture root — named against
+    /// the fixture's own root and `Path::is_absolute`, never a production
+    /// literal (`docs/history/learnings/20260805-toothless-security-assertions.md`).
+    #[tokio::test]
+    async fn running_section_leaks_no_absolute_path_or_transcript() {
+        let root = fresh_root("running-security");
+        let root_str = root.to_string_lossy().into_owned();
+        let transcript_abs = root.join(".bee/sessions/kf1-worker.json").to_string_lossy().into_owned();
+
+        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "claimed", &[], "w1"));
+        write(
+            &root,
+            ".bee/state.json",
+            &state_json_with_workers(&worker_json("kf1-worker", "kf-1", "generation", "running")),
+        );
+        write(
+            &root,
+            ".bee/sessions/kf1-worker.json",
+            &session_json("kf1-worker", &rfc3339_minutes_ago(1), &transcript_abs, "main", "startup"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "running-security");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(!body.contains(&transcript_abs), "transcript path leaked into the body: {body}");
+        assert!(!body.contains(&root_str), "response body leaked the fixture root: {body}");
+        assert!(
+            body.contains("kf1-worker"),
+            "the security assertions above must exercise the running section, not skip it: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (read-only) Reading the board with live workers/sessions present must
+    /// not touch the fixture's `.bee/` tree (D4).
+    #[tokio::test]
+    async fn running_section_read_never_writes_the_fixtures_bee_tree() {
+        let root = fresh_root("running-read-only");
+        write(&root, "README.md", "# hi");
+        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "claimed", &[], "w1"));
+        write(
+            &root,
+            ".bee/state.json",
+            &state_json_with_workers(&worker_json("kf1-worker", "kf-1", "generation", "running")),
+        );
+        write(
+            &root,
+            ".bee/sessions/kf1-worker.json",
+            &session_json("kf1-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "running-read-only");
+        let before = snapshot_tree(&root);
+
+        let _ = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+
+        let after = snapshot_tree(&root);
+        assert_eq!(before, after, ".bee/ tree changed after a request");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
