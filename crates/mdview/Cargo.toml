@@ -38,6 +38,12 @@ async-trait.workspace = true
 interprocess.workspace = true
 rand.workspace = true
 
+# Constant-time token comparison in terminal_auth.rs (agent-terminal-7): a
+# hand-rolled XOR loop has no compiler barrier against being optimized into
+# an early-exit, which would reopen the timing leak the comparison exists
+# to close.
+subtle = "2.6"
+
 # setsid(2) for fully detaching the auto-spawned daemon (Unix only).
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
