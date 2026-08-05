@@ -93,8 +93,10 @@ pub fn project_home_page(project: &Project, entry: Option<&str>) -> String {
     };
     let body = format!(
         r#"{topbar}
+{tab_style}
 <main class="fg-page">
   <h2 class="fg-pagehead__title">{name}</h2>
+  {tabs}
   <div class="proj-cards">
     <a class="fg-card proj-card__link" href="/p/{pid}/_bee">
       <div class="fg-card__title">Bee board</div>
@@ -107,11 +109,136 @@ pub fn project_home_page(project: &Project, entry: Option<&str>) -> String {
             "<span class=\"crumb\">{name}</span>",
             name = esc(&project.name)
         )),
+        tab_style = PROJECT_TAB_STYLE,
         name = esc(&project.name),
+        tabs = project_tabs(&project.id, "overview"),
         pid = esc(&project.id),
         docs_card = docs_card,
     );
     layout(&project.name, "", &body)
+}
+
+/// Inline styling for [`project_tabs`] — kept beside the pages that render
+/// it (same precedent as `bee_board_page`'s own inline `<style>`), not added
+/// to `app.css`: this cell's declared files are `server.rs`/`views.rs` only.
+const PROJECT_TAB_STYLE: &str = r#"<style>
+.proj-tabs { display: flex; gap: var(--space-4); margin-bottom: var(--space-4); border-bottom: var(--border-width-hairline) solid var(--color-border); }
+.proj-tab { padding: var(--space-2) 0; color: var(--color-text-muted); text-decoration: none; border-bottom: 2px solid transparent; }
+.proj-tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
+.term-pane__cwd { color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }
+.term-pane__meta { color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
+</style>"#;
+
+/// D6: the Terminal tab is always present on a project page, whether or not
+/// herdr is running or the terminal has ever been reached — this renders
+/// from the project id alone, with no herdr call and no auth check, so its
+/// presence never depends on either. `active` is `"overview"` or
+/// `"terminal"`.
+fn project_tabs(project_id: &str, active: &str) -> String {
+    let id = esc(project_id);
+    let cls = |key: &str| {
+        if key == active {
+            "proj-tab proj-tab--active"
+        } else {
+            "proj-tab"
+        }
+    };
+    format!(
+        r#"<nav class="proj-tabs" aria-label="Project sections">
+  <a class="{overview_cls}" href="/p/{id}/">Overview</a>
+  <a class="{terminal_cls}" href="/p/{id}/_terminal">Terminal</a>
+</nav>"#,
+        overview_cls = cls("overview"),
+        terminal_cls = cls("terminal"),
+        id = id,
+    )
+}
+
+/// One agent already resolved against a project's D2 containment boundary
+/// (`server.rs::project_panes`) — plain display fields only, no herdr wire
+/// type crosses into this module.
+pub struct TerminalPaneView {
+    pub pane_id: String,
+    pub kind: String,
+    pub name: String,
+    pub status: String,
+    pub title: String,
+    pub cwd: String,
+}
+
+/// `GET /p/:id/_terminal` up state (D2/D6): the project-scoped pane list.
+/// Zero panes renders a named empty state, not a blank page — distinct
+/// wording from [`terminal_down_page`] so an empty list is never mistaken
+/// for herdr being unreachable, or the reverse.
+pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
+    let rows = if panes.is_empty() {
+        r#"<p class="fg-empty">No agents are running under this project right now.</p>"#
+            .to_string()
+    } else {
+        let mut out = String::new();
+        for p in panes {
+            out.push_str(&format!(
+                r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
+  <div class="fg-card__title">{name} <span class="fg-chip fg-chip--neutral">{status}</span></div>
+  <div class="term-pane__meta">{kind}{title_sep}{title}</div>
+  <div class="term-pane__cwd">{cwd}</div>
+</div>"#,
+                pane_id = esc(&p.pane_id),
+                name = esc(&p.name),
+                status = esc(&p.status),
+                kind = esc(&p.kind),
+                title_sep = if p.title.is_empty() { "" } else { " · " },
+                title = esc(&p.title),
+                cwd = esc(&p.cwd),
+            ));
+        }
+        out
+    };
+    let body = format!(
+        r#"{topbar}
+{tab_style}
+<main class="fg-page">
+  <h2 class="fg-pagehead__title">{name}</h2>
+  {tabs}
+  <div class="term-panes">{rows}</div>
+</main>"#,
+        topbar = topbar(&format!(
+            "<span class=\"crumb\">{name} · terminal</span>",
+            name = esc(&project.name)
+        )),
+        tab_style = PROJECT_TAB_STYLE,
+        name = esc(&project.name),
+        tabs = project_tabs(&project.id, "terminal"),
+        rows = rows,
+    );
+    layout(&format!("{} · terminal", project.name), "", &body)
+}
+
+/// `GET /p/:id/_terminal` down state (D6): herdr's socket did not answer.
+/// Names the remedy instead of hiding the tab or showing a raw error —
+/// deliberately different wording from the empty-panes state in
+/// [`terminal_page`] so the two are never visually or textually confusable.
+pub fn terminal_down_page(project: &Project) -> String {
+    let body = format!(
+        r#"{topbar}
+{tab_style}
+<main class="fg-page">
+  <h2 class="fg-pagehead__title">{name}</h2>
+  {tabs}
+  <div class="fg-card term-pane">
+    <div class="fg-card__title">herdr is not running</div>
+    <div class="term-pane__meta">Start herdr, then reload this page — mdview does not start it for you unless the herdr supervisor is switched on in Settings.</div>
+  </div>
+</main>"#,
+        topbar = topbar(&format!(
+            "<span class=\"crumb\">{name} · terminal</span>",
+            name = esc(&project.name)
+        )),
+        tab_style = PROJECT_TAB_STYLE,
+        name = esc(&project.name),
+        tabs = project_tabs(&project.id, "terminal"),
+    );
+    layout(&format!("{} · terminal", project.name), "", &body)
 }
 
 /// The read-only bee cell board (D4/D7): the project's four cell buckets,

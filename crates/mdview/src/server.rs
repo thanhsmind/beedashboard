@@ -1,5 +1,6 @@
 //! Axum daemon: routes, live-reload WebSocket, filesystem watcher.
 
+use crate::herdr::{self, Herdr};
 use crate::runtime::{self, DaemonInfo};
 use crate::terminal_auth::{self, HasTerminalAuth, TerminalAuth};
 use crate::views;
@@ -11,7 +12,7 @@ use axum::{
     },
     http::{header, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::{any, get, post},
     Json, Router,
 };
 use mdview_core::indexer::now_rfc3339;
@@ -40,6 +41,12 @@ pub struct AppState {
     /// (`TerminalAuth::new(Some(dir))`), or it will resolve the token at the
     /// real `~/.mdview` instead of the test's scratch dir.
     pub terminal_auth: TerminalAuth,
+    /// The herdr client (agent-terminal-2): a real `SocketHerdr` in
+    /// production, a `FakeHerdr` in every test — `Arc<dyn Herdr>` so a route
+    /// test can swap in a socket-free double without touching this field's
+    /// type. Every terminal route reaches herdr only through this handle,
+    /// never by constructing its own client.
+    pub herdr: Arc<dyn Herdr>,
 }
 
 impl HasTerminalAuth for AppState {
@@ -54,12 +61,20 @@ pub async fn serve() -> Result<()> {
     let (reload_tx, _) = broadcast::channel::<String>(32);
     let highlight_css = Arc::new(build_highlight_css(&engine));
 
+    // Best-effort: an unresolvable default socket path (platform/env
+    // oddity) never blocks the daemon from starting — it just means every
+    // `snapshot()` call fails with `Unavailable`, which the terminal route
+    // already renders as the D6 "herdr is not running" state rather than a
+    // raw error or a crash.
+    let herdr_socket_path = herdr::socket::default_socket_path()
+        .unwrap_or_else(|_| PathBuf::from("/nonexistent/herdr.sock"));
     let state = AppState {
         engine: engine.clone(),
         reload_tx: reload_tx.clone(),
         highlight_css,
         config_data_dir: None,
         terminal_auth: TerminalAuth::new(None),
+        herdr: Arc::new(herdr::socket::SocketHerdr::new(herdr_socket_path)),
     };
 
     // Filesystem watcher (kept alive for the process lifetime).
@@ -120,7 +135,13 @@ fn router(state: AppState) -> Router {
         .route("/settings", get(settings_page_handler))
         .route("/api/config", get(api_config).post(update_config))
         .route("/settings/terminal/token", post(rotate_terminal_token))
-        .route("/api/terminal-config", post(update_terminal_config))
+        // Carry-over from agent-terminal-4: mounted with `.post(...)` before
+        // `MethodGate` existed, which let a `GET` here answer `405 Allow:
+        // POST` — distinguishable from an unrouted path without a token ever
+        // being checked. `any(...)` + `MethodGate<Post>` (inside the
+        // handler) closes that oracle the same way every other gated
+        // terminal route does.
+        .route("/api/terminal-config", any(update_terminal_config))
         .route("/api/projects/:id/unregister", post(unregister_project))
         .route("/static/app.css", get(css_asset))
         .route("/static/app.js", get(js_asset))
@@ -133,6 +154,9 @@ fn router(state: AppState) -> Router {
         .route("/p/:id/_bee", get(bee_board))
         .route("/p/:id/_bee/cell/:cell_id", get(bee_cell_detail))
         .route("/p/:id/_bee/feature/:feature", get(bee_feature_detail))
+        // Gated (D4): `any(...)` + `MethodGate<Get>` inside the handler, not
+        // `.get(...)`, for the same method-mismatch-oracle reason as above.
+        .route("/p/:id/_terminal", any(terminal_page))
         .route("/p/:id/*path", get(project_path))
         .with_state(state)
 }
@@ -283,6 +307,7 @@ struct TerminalConfigForm {
 /// reaches this handler at all — `AuthSession`'s extractor short-circuits
 /// with the opaque 404 before the switches are read, let alone changed.
 async fn update_terminal_config(
+    _method: terminal_auth::MethodGate<terminal_auth::Post>,
     State(st): State<AppState>,
     _session: terminal_auth::AuthSession,
     Form(form): Form<TerminalConfigForm>,
@@ -475,6 +500,76 @@ async fn bee_cell_detail(
         Some(cell) => Html(views::bee_cell_page(&project, &cell)).into_response(),
         None => not_found("cell not found"),
     }
+}
+
+/// `GET /p/:id/_terminal` (D2/D4/D6) — the gated per-project pane list.
+/// `MethodGate<Get>` and `AuthSession` both run before this body ever
+/// executes: a wrong method or a missing/stale session never reaches the
+/// project lookup, let alone herdr — see the route table's comment on why
+/// this is mounted with `any(...)` rather than `.get(...)`. An unknown
+/// project id (a valid session, just the wrong id) still gets the ordinary
+/// `not_found` page, same as `bee_board` — that truth is about the *route*
+/// existing, not about any particular project id being valid.
+///
+/// A silent or errored herdr socket renders the D6 remedy state — never a
+/// raw error, and never an empty pane list that would look identical to a
+/// project that genuinely has zero agents running.
+async fn terminal_page(
+    _method: terminal_auth::MethodGate<terminal_auth::Get>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("project not found");
+    };
+    match st.herdr.snapshot().await {
+        Ok(snapshot) => {
+            // A boundary that fails to construct (e.g. a project registered
+            // on top of the hard-deny list) can never accept any pane —
+            // fail closed to zero panes, not a crash and not a laxer check.
+            let panes = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+                .map(|boundary| project_panes(&snapshot, &boundary))
+                .unwrap_or_default();
+            Html(views::terminal_page(&project, &panes)).into_response()
+        }
+        Err(_) => Html(views::terminal_down_page(&project)).into_response(),
+    }
+}
+
+/// Join each of the snapshot's agents to its own pane's working directory —
+/// `Agent` carries none directly (see `herdr::wire::Pane`'s doc: the folder
+/// lives on the *pane*, joined by `pane_id`) — and keep only the ones the D2
+/// containment boundary accepts under this project's root. The boundary does
+/// the actual decision (symlink resolution, component-wise containment,
+/// fail-closed on any ambiguity); this function only performs the join and
+/// discards anything the boundary refuses or that has no resolvable pane at
+/// all. `foreground_cwd` is not consulted here — `cwd` is the pane's own
+/// working directory, the literal quantity D2 names, and every panel this
+/// cell builds/tests sets it explicitly.
+fn project_panes(
+    snapshot: &herdr::Snapshot,
+    boundary: &mdview_core::paths_boundary::Boundary,
+) -> Vec<views::TerminalPaneView> {
+    snapshot
+        .agents
+        .iter()
+        .filter_map(|agent| {
+            let pane = snapshot.panes.iter().find(|p| p.pane_id == agent.pane_id)?;
+            let raw_cwd = pane.cwd.as_deref()?;
+            let resolved = boundary
+                .validate_existing(std::path::Path::new(raw_cwd))
+                .ok()?;
+            Some(views::TerminalPaneView {
+                pane_id: agent.pane_id.clone(),
+                kind: agent.kind.clone(),
+                name: agent.name.clone(),
+                status: agent.status.as_str().to_string(),
+                title: agent.title.clone(),
+                cwd: resolved.to_string_lossy().into_owned(),
+            })
+        })
+        .collect()
 }
 
 /// `GET /p/:id/_bee/feature/:feature` — one feature's cells grouped into the
@@ -1142,6 +1237,11 @@ mod bee_route_tests {
             highlight_css: Arc::new(String::new()),
             config_data_dir: None,
             terminal_auth: TerminalAuth::new(None),
+            // A fresh FakeHerdr per state — no route test ever reaches a
+            // real herdr socket. Tests that need specific panes replace this
+            // with their own `FakeHerdr` (see the `terminal_route_*` tests
+            // below in this module).
+            herdr: Arc::new(crate::herdr::fake::FakeHerdr::new()),
         }
     }
 
@@ -3389,5 +3489,335 @@ mod bee_route_tests {
         let rest = &body[start..];
         let end = rest.find("</code>").expect("full token banner unterminated");
         (rest[..end].to_string(), cookie)
+    }
+
+    /// A GET request to `/p/{id}/_terminal`, optionally carrying the given
+    /// session cookie value (e.g. the one `rotate_token` returns).
+    fn terminal_req(id: &str, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .uri(format!("/p/{id}/_terminal"))
+            .method("GET");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// Truth 1: "Without a terminal session the route returns an opaque
+    /// 404, identical to an unknown route" — both with no cookie at all and
+    /// with a stale/unknown one, and both compared byte-for-byte (status,
+    /// headers, body) against a path this router never mounts at all, the
+    /// same proof shape `terminal_auth`'s own generic test uses.
+    #[tokio::test]
+    async fn terminal_route_without_a_session_is_byte_identical_to_an_unrouted_path() {
+        let dir = fresh_root("terminal-no-session");
+        let root = fresh_root("terminal-no-session-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "no-session");
+        let app = router(st);
+
+        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
+            let with_no_session = app
+                .clone()
+                .oneshot(terminal_req(&project.id, cookie))
+                .await
+                .unwrap();
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
+            assert_eq!(with_no_session.status(), unrouted.status());
+            assert_eq!(
+                with_no_session.headers(),
+                unrouted.headers(),
+                "an unauthenticated /_terminal request must carry no header an unrouted path wouldn't"
+            );
+            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
+            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(a, b, "an unauthenticated /_terminal body leaked something an unrouted path wouldn't");
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth 6 (the carry-over obligation): a wrong-method request to
+    /// `GET /p/:id/_terminal` (mounted via `any(...)` + `MethodGate<Get>`,
+    /// never `.get(...)`) is byte-identical to a path this router never
+    /// mounts, proven against the real router — not just the generic proof
+    /// in `terminal_auth.rs`.
+    #[tokio::test]
+    async fn terminal_route_wrong_method_is_byte_identical_to_unrouted() {
+        let dir = fresh_root("terminal-wrong-method");
+        let root = fresh_root("terminal-wrong-method-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "wrong-method");
+        let app = router(st);
+
+        let posted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/p/{}/_terminal", project.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
+        assert_eq!(posted.status(), unrouted.status());
+        assert_eq!(posted.headers(), unrouted.headers());
+        let a = posted.into_body().collect().await.unwrap().to_bytes();
+        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth 6, the other half of the carry-over obligation: applied to
+    /// `POST /api/terminal-config` itself, now mounted with `any(...)` +
+    /// `MethodGate<Post>` instead of the old `.post(...)` this cell replaces.
+    #[tokio::test]
+    async fn api_terminal_config_wrong_method_is_byte_identical_to_unrouted() {
+        let dir = fresh_root("terminal-config-wrong-method");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let got = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/terminal-config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(got.status(), StatusCode::NOT_FOUND);
+        assert_eq!(got.status(), unrouted.status());
+        assert_eq!(got.headers(), unrouted.headers());
+        let a = got.into_body().collect().await.unwrap().to_bytes();
+        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A valid session against an unregistered project id gets the ordinary
+    /// `not_found` page (same shape as `bee_board`'s own unknown-project
+    /// case) — the auth wall is not the only thing standing between a
+    /// request and a real 404 for a bad id.
+    #[tokio::test]
+    async fn terminal_route_unknown_project_is_a_real_not_found_page() {
+        let dir = fresh_root("terminal-unknown-project");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(terminal_req("no-such-project", Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_string(resp).await;
+        assert!(body.contains("project not found"), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D6: the Terminal tab renders on the project home page from the
+    /// project id alone — no herdr call, no session — so its presence can
+    /// never depend on herdr's state or the viewer's auth.
+    #[tokio::test]
+    async fn terminal_tab_is_present_on_the_project_home_page() {
+        let dir = fresh_root("terminal-tab-present");
+        let root = fresh_root("terminal-tab-present-project");
+        write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
+        write(&root, ".bee/cells/a.json", &cell_json("c1", "open", &[], "w1"));
+
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "tab-present");
+        let resp = get(router(st), &format!("/p/{}/", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_terminal\"", project.id)),
+            "project home page carries no Terminal tab link: {body}"
+        );
+        assert!(body.contains(">Terminal<"), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// D6: a silent herdr socket renders the named remedy state, never a
+    /// raw error and never an empty-panes rendering that would look
+    /// identical to a project that genuinely has zero agents.
+    #[tokio::test]
+    async fn terminal_route_renders_named_remedy_when_herdr_is_silent() {
+        let dir = fresh_root("terminal-herdr-down");
+        let root = fresh_root("terminal-herdr-down-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        fake.set_available(false);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "herdr-down");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(terminal_req(&project.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("herdr is not running"),
+            "no named remedy in the down state: {body}"
+        );
+        assert!(
+            !body.contains("No agents are running under this project"),
+            "the down state must never render as an ordinary empty-panes list: {body}"
+        );
+        assert!(
+            !body.to_lowercase().contains("herdrerror"),
+            "the down state leaked a raw error type into the page: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// D2's containment boundary, all four named cases in one project: a
+    /// pane exactly at the root (included), one directory above (excluded),
+    /// one directory below (included), and one whose *raw* cwd sits inside
+    /// the root but is a symlink resolving outside it (excluded — proves the
+    /// join runs the boundary's real symlink-resolving check, never a text
+    /// prefix comparison). A fifth pane under a second, unrelated project's
+    /// root proves cross-project isolation in the same request.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_route_lists_only_panes_within_the_project_root_boundary() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminal-boundary-data");
+        let scratch = fresh_root("terminal-boundary-scratch");
+        let root_a = scratch.join("project-a");
+        let root_b = scratch.join("project-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let below = root_a.join("sub");
+        std::fs::create_dir_all(&below).unwrap();
+        let escape_target = scratch.join("outside-a");
+        std::fs::create_dir_all(&escape_target).unwrap();
+        let symlink_path = root_a.join("escape-link");
+        std::os::unix::fs::symlink(&escape_target, &symlink_path).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let at_root = fake
+            .agent_start("w1", Some(&root_a.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let above = fake
+            .agent_start(
+                "w1",
+                Some(&scratch.to_string_lossy()), // project-a's parent directory
+                &["claude".to_string()],
+            )
+            .await
+            .unwrap();
+        let below_agent = fake
+            .agent_start("w1", Some(&below.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let via_symlink = fake
+            .agent_start(
+                "w1",
+                Some(&symlink_path.to_string_lossy()), // raw cwd is under root_a, resolves outside
+                &["claude".to_string()],
+            )
+            .await
+            .unwrap();
+        let other_project = fake
+            .agent_start("w1", Some(&root_b.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project_a = register(&st, &root_a, "project-a");
+        let project_b = register(&st, &root_b, "project-b");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp_a = app
+            .clone()
+            .oneshot(terminal_req(&project_a.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(resp_a.status(), StatusCode::OK);
+        let body_a = body_string(resp_a).await;
+        assert!(body_a.contains(&at_root.name), "root pane missing: {body_a}");
+        assert!(body_a.contains(&below_agent.name), "below-root pane missing: {body_a}");
+        assert!(!body_a.contains(&above.name), "above-root pane leaked in: {body_a}");
+        assert!(
+            !body_a.contains(&via_symlink.name),
+            "symlink-escape pane leaked in: {body_a}"
+        );
+        assert!(
+            !body_a.contains(&other_project.name),
+            "project-b's pane leaked into project-a's list: {body_a}"
+        );
+
+        let resp_b = app
+            .oneshot(terminal_req(&project_b.id, Some(&cookie)))
+            .await
+            .unwrap();
+        let body_b = body_string(resp_b).await;
+        assert!(
+            body_b.contains(&other_project.name),
+            "project-b's own pane missing from its own list: {body_b}"
+        );
+        assert!(
+            !body_b.contains(&at_root.name),
+            "project-a's pane leaked into project-b's list: {body_b}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
     }
 }
