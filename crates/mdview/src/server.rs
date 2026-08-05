@@ -106,6 +106,7 @@ fn router(state: AppState) -> Router {
         .route("/p/:id/", get(project_home))
         .route("/p/:id/_search", get(search_page))
         .route("/p/:id/_jump", get(jump_search))
+        .route("/p/:id/_bee", get(bee_board))
         .route("/p/:id/*path", get(project_path))
         .with_state(state)
 }
@@ -296,14 +297,49 @@ async fn mermaid_asset() -> impl IntoResponse {
 }
 
 async fn project_home(State(st): State<AppState>, Path(id): Path<String>) -> Response {
-    match st.engine.list_files(&id) {
-        Ok(files) if !files.is_empty() => {
-            let entry = pick_entry_file(&files).unwrap_or(&files[0]);
-            Redirect::to(&format!("/p/{}/{}", id, entry.rel_path)).into_response()
+    let files = match st.engine.list_files(&id) {
+        Ok(files) => files,
+        Err(_) => return not_found("project not found"),
+    };
+
+    // D3: the bee entry point appears only when the project's root contains a
+    // `.bee/` directory — a plain presence check, not a full store read (the
+    // page it links to, `/p/:id/_bee`, does the actual reading). A project
+    // without `.bee/` falls through unchanged to the redirect/not-found
+    // behavior this route always had, so non-bee projects behave exactly as
+    // they do today.
+    if let Ok(Some(project)) = st.engine.get_project(&id) {
+        if is_bee_project(&project) {
+            let entry = pick_entry_file(&files).map(|f| f.rel_path.as_str());
+            return Html(views::project_home_page(&project, entry)).into_response();
         }
-        Ok(_) => not_found("project has no markdown files"),
-        Err(_) => not_found("project not found"),
     }
+
+    if files.is_empty() {
+        return not_found("project has no markdown files");
+    }
+    let entry = pick_entry_file(&files).unwrap_or(&files[0]);
+    Redirect::to(&format!("/p/{}/{}", id, entry.rel_path)).into_response()
+}
+
+/// D3's presence rule: a project shows the bee surface iff its `root_path`
+/// contains a `.bee/` directory.
+fn is_bee_project(project: &mdview_core::domain::Project) -> bool {
+    project.root_path.join(".bee").is_dir()
+}
+
+/// `GET /p/:id/_bee` — the read-only cell board (D4). Renders the four D7
+/// buckets over the project's live `.bee/cells/`. A project with no `.bee/`
+/// gets a clean not-found, never an empty bee page (D3).
+async fn bee_board(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("project not found");
+    };
+    let snapshot = mdview_core::bee::read_snapshot(&project.root_path);
+    if !snapshot.present {
+        return not_found("this project has no .bee/ store");
+    }
+    Html(views::bee_board_page(&project, &snapshot)).into_response()
 }
 
 /// Which file a project opens to — a fixed, predictable rule instead of
@@ -701,5 +737,307 @@ mod asset_response_tests {
         assert!(!is_loopback_host("0.0.0.0"));
         assert!(!is_loopback_host("192.168.1.10"));
         assert!(!is_loopback_host("::"));
+    }
+}
+
+/// Route-level tests for `GET /p/:id/_bee` and the D3 project-home gate
+/// (bee-cockpit-2). Every test here drives `router()` through
+/// `tower::ServiceExt::oneshot` — the harness this crate had none of before
+/// this cell — because the "not found, not an empty page" half of D3 is a
+/// routing decision no pure view-function assertion can prove.
+#[cfg(test)]
+mod bee_route_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use mdview_core::domain::Project;
+    use mdview_core::{Config, SqliteStore};
+    use std::path::{Path, PathBuf};
+    use tower::ServiceExt;
+
+    fn fresh_root(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "mdview-server-bee-{name}-{}-{}",
+            std::process::id(),
+            name.len(), // cheap per-name salt, keeps directories distinct across test fns
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    fn cell_json(id: &str, status: &str, files: &[String], worker: &str) -> String {
+        let files_json = files
+            .iter()
+            .map(|f| serde_json::to_string(f).unwrap())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{
+                "id": "{id}",
+                "feature": "demo",
+                "lane": "standard",
+                "title": "Cell {id}",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [{files_json}],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {{}},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "{status}",
+                "tier": "generation",
+                "trace": {{"worker": {worker_json}}}
+            }}"#,
+            worker_json = serde_json::to_string(worker).unwrap(),
+        )
+    }
+
+    fn build_state() -> AppState {
+        let engine = Arc::new(Engine::new(
+            SqliteStore::open_in_memory().unwrap(),
+            Config::default(),
+        ));
+        let (reload_tx, _) = broadcast::channel(4);
+        AppState {
+            engine,
+            reload_tx,
+            highlight_css: Arc::new(String::new()),
+        }
+    }
+
+    fn register(st: &AppState, root: &Path, name: &str) -> Project {
+        st.engine.register(root, Some(name)).unwrap()
+    }
+
+    async fn get(app: Router, uri: &str) -> Response {
+        app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn body_string(resp: Response) -> String {
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// (relative path, content bytes) for every file under `dir` — the D4
+    /// read-only probe's before/after snapshot.
+    fn snapshot_tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        fn walk(base: &Path, cur: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+            for entry in std::fs::read_dir(cur).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(base, &path, out);
+                } else {
+                    let rel = path.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                    let content = std::fs::read(&path).unwrap();
+                    out.push((rel, content));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out.sort();
+        out
+    }
+
+    #[tokio::test]
+    async fn happy_path_returns_200_with_bucket_counts() {
+        let root = fresh_root("happy");
+        write(&root, "README.md", "# hi");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"demo","mode":"standard"}"#,
+        );
+        write(&root, ".bee/cells/a.json", &cell_json("c-open", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/b.json",
+            &cell_json("c-claimed", "claimed", &[], "w1"),
+        );
+        write(
+            &root,
+            ".bee/cells/c.json",
+            &cell_json("c-blocked", "blocked", &[], "w1"),
+        );
+        write(
+            &root,
+            ".bee/cells/d.json",
+            &cell_json("c-capped-1", "capped", &[], "w1"),
+        );
+        write(
+            &root,
+            ".bee/cells/e.json",
+            &cell_json("c-capped-2", "capped", &[], "w1"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "happy");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("data-bucket=\"doing\" data-count=\"1\""), "{body}");
+        assert!(body.contains("data-bucket=\"waiting\" data-count=\"1\""), "{body}");
+        assert!(body.contains("data-bucket=\"stuck\" data-count=\"1\""), "{body}");
+        assert!(body.contains("data-bucket=\"done\" data-count=\"2\""), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn empty_cells_dir_yields_four_zero_buckets() {
+        let root = fresh_root("empty-cells");
+        std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
+
+        let st = build_state();
+        let project = register(&st, &root, "empty-cells");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        for key in ["doing", "waiting", "stuck", "done"] {
+            assert!(
+                body.contains(&format!("data-bucket=\"{key}\" data-count=\"0\"")),
+                "expected a zero {key} bucket: {body}"
+            );
+        }
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn no_bee_dir_is_not_found_route_and_no_home_page_entry_point() {
+        // No .bee/ and no markdown files either, so project_home renders a
+        // real body (the "no markdown files" not-found page) instead of a
+        // redirect — the exact branch that WOULD carry the bee entry point
+        // link if `.bee/` were present (see the positive control below).
+        let root = fresh_root("no-bee");
+
+        let st = build_state();
+        let project = register(&st, &root, "no-bee");
+        let app = router(st);
+
+        let bee_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(bee_resp.status(), StatusCode::NOT_FOUND);
+
+        let home_resp = get(app, &format!("/p/{}/", project.id)).await;
+        let home_body = body_string(home_resp).await;
+        assert!(
+            !home_body.contains("_bee"),
+            "no-.bee/ project home page must carry no bee entry point: {home_body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn bee_dir_present_puts_entry_point_on_project_home_page() {
+        // Positive control for the test above: same shape (no markdown
+        // files), but with `.bee/` present — proves the branch that omits
+        // the entry point when absent is the same branch that emits it when
+        // present, not two unrelated code paths.
+        let root = fresh_root("home-entry");
+        write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
+        write(&root, ".bee/cells/a.json", &cell_json("c1", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "home-entry");
+        let resp = get(router(st), &format!("/p/{}/", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee\"", project.id)),
+            "project home page must link to the bee board when .bee/ is present: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn no_absolute_path_or_fixture_root_in_response_body() {
+        let root = fresh_root("security");
+        let root_str = root.to_string_lossy().into_owned();
+        let inside_abs = root
+            .join("src/inside.rs")
+            .to_string_lossy()
+            .into_owned();
+        let outside_abs = std::env::temp_dir()
+            .join("mdview-server-bee-outside-file.rs")
+            .to_string_lossy()
+            .into_owned();
+        let worker_abs = root
+            .join("workers/reader-1")
+            .to_string_lossy()
+            .into_owned();
+
+        write(
+            &root,
+            ".bee/cells/leaky.json",
+            &cell_json(
+                "leaky",
+                "open",
+                &[inside_abs.clone(), outside_abs.clone()],
+                &worker_abs,
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "security");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            !body.contains(&root_str),
+            "response body leaked the fixture root: {body}"
+        );
+        assert!(
+            !body.contains(&outside_abs),
+            "response body leaked an absolute path outside the fixture root: {body}"
+        );
+        assert!(
+            !body.contains(&worker_abs),
+            "response body leaked the absolute worker path: {body}"
+        );
+        assert!(
+            !body.contains(&inside_abs),
+            "response body leaked the in-root absolute path verbatim (should be relativized): {body}"
+        );
+        // the in-root file must have relativized cleanly, not just been
+        // reduced to a bare filename.
+        assert!(body.contains("src/inside.rs"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn reading_never_writes_the_fixtures_bee_tree() {
+        let root = fresh_root("read-only");
+        write(&root, "README.md", "# hi");
+        write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
+        write(&root, ".bee/cells/a.json", &cell_json("a", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "read-only");
+        let before = snapshot_tree(&root);
+
+        let _ = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+
+        let after = snapshot_tree(&root);
+        assert_eq!(before, after, ".bee/ tree changed after a request");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

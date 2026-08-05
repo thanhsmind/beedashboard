@@ -1167,6 +1167,7 @@ dependencies = [
  "axum",
  "clap",
  "dirs",
+ "http-body-util",
  "if-addrs",
  "libc",
  "mdview-core",
@@ -1178,6 +1179,7 @@ dependencies = [
  "tokio",
  "toml",
  "toml_edit",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

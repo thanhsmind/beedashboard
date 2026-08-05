@@ -2,6 +2,7 @@
 //! Theme is CSS-variable driven (no-flash head script); code colors come from
 //! `/highlight.css` (syntect class-based), so themes switch without re-render.
 
+use mdview_core::bee::{BeeCell, BeeSnapshot};
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
 
@@ -69,6 +70,168 @@ pub fn project_list_page(projects: &[(Project, usize)]) -> String {
         listing = listing
     );
     layout("Projects", "", &body)
+}
+
+/// A bee project's landing page (D3): a card linking into the bee board, plus
+/// a card to open the project's docs when it has any. Rendered only when the
+/// project has a `.bee/` directory — a non-bee project keeps the old
+/// redirect-to-entry-file behavior in `server.rs::project_home` untouched.
+pub fn project_home_page(project: &Project, entry: Option<&str>) -> String {
+    let docs_card = match entry {
+        Some(rel) => format!(
+            r#"<a class="fg-card proj-card__link" href="/p/{pid}/{rel}">
+  <div class="fg-card__title">Browse docs</div>
+  <div class="fg-card__sub">{rel}</div>
+</a>"#,
+            pid = esc(&project.id),
+            rel = esc(rel),
+        ),
+        None => String::new(),
+    };
+    let body = format!(
+        r#"{topbar}
+<main class="fg-page">
+  <h2 class="fg-pagehead__title">{name}</h2>
+  <div class="proj-cards">
+    <a class="fg-card proj-card__link" href="/p/{pid}/_bee">
+      <div class="fg-card__title">Bee board</div>
+      <div class="fg-card__sub">Doing · Waiting · Stuck · Done</div>
+    </a>
+    {docs_card}
+  </div>
+</main>"#,
+        topbar = topbar(&format!(
+            "<span class=\"crumb\">{name}</span>",
+            name = esc(&project.name)
+        )),
+        name = esc(&project.name),
+        pid = esc(&project.id),
+        docs_card = docs_card,
+    );
+    layout(&project.name, "", &body)
+}
+
+/// The read-only bee cell board (D4/D7): the project's four cell buckets,
+/// each rendered by `bee_bucket_section`. Every path-shaped value on a
+/// `BeeCell` already arrives relativized by `mdview_core::bee::read_snapshot`
+/// (no absolute path crosses into `BeeSnapshot`'s public fields), so nothing
+/// further is redacted here — this view only escapes for HTML safety.
+pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
+    let b = &snapshot.buckets;
+    let phase = snapshot
+        .state
+        .as_ref()
+        .and_then(|s| s.phase.as_deref())
+        .unwrap_or("—");
+    let feature = snapshot
+        .state
+        .as_ref()
+        .and_then(|s| s.feature.as_deref())
+        .unwrap_or("—");
+
+    let body = format!(
+        r#"{topbar}
+<style>
+.bee-buckets {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); }}
+.bee-bucket--danger {{ border-color: var(--color-danger); background: var(--color-danger-tint); }}
+.bee-bucket__head {{ display: flex; align-items: center; gap: var(--space-2); margin: 0; }}
+.bee-cell {{ padding: var(--space-3); gap: var(--space-1); }}
+.bee-cell__meta {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }}
+</style>
+<main class="fg-page">
+  <div class="fg-pagehead">
+    <h2 class="fg-pagehead__title">Bee board · {name}</h2>
+    <div class="fg-pagehead__aside">
+      <span class="fg-chip fg-chip--neutral">phase: {phase}</span>
+      <span class="fg-chip fg-chip--neutral">feature: {feature}</span>
+    </div>
+  </div>
+  <div class="bee-buckets">
+    {doing}
+    {waiting}
+    {stuck}
+    {done}
+  </div>
+  {errors}
+</main>"#,
+        topbar = topbar(&format!(
+            "<span class=\"crumb\">{name} · bee</span>",
+            name = esc(&project.name)
+        )),
+        name = esc(&project.name),
+        phase = esc(phase),
+        feature = esc(feature),
+        doing = bee_bucket_section("Doing", "doing", &b.doing, "neutral"),
+        waiting = bee_bucket_section("Waiting", "waiting", &b.waiting, "neutral"),
+        stuck = bee_bucket_section("Stuck", "stuck", &b.stuck, "danger"),
+        done = bee_bucket_section("Done", "done", &b.done, "success"),
+        errors = bee_read_errors(&snapshot.read_errors),
+    );
+    layout(&format!("{} · bee", project.name), "", &body)
+}
+
+/// One D7 bucket. `key` is a stable, lowercase machine token (`data-bucket`)
+/// so a test can assert a bucket's count without depending on the visible
+/// label text; `tone` picks the chip/border color — `"danger"` gives Stuck
+/// its own red styling (D7), never folded into Waiting's neutral tone.
+fn bee_bucket_section(label: &str, key: &str, cells: &[BeeCell], tone: &str) -> String {
+    let danger_cls = if tone == "danger" {
+        " bee-bucket--danger"
+    } else {
+        ""
+    };
+    let mut rows = String::new();
+    if cells.is_empty() {
+        rows.push_str("<p class=\"fg-empty\">Nothing here.</p>");
+    } else {
+        for c in cells {
+            let files = if c.files.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<div class=\"bee-cell__meta\">{}</div>",
+                    esc(&c.files.join(", "))
+                )
+            };
+            let worker = c
+                .worker
+                .as_deref()
+                .map(|w| format!("<div class=\"bee-cell__meta\">worker: {}</div>", esc(w)))
+                .unwrap_or_default();
+            rows.push_str(&format!(
+                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{title}</div><div class="fg-card__sub">{id} · {feature} · {lane}</div>{files}{worker}</div>"#,
+                title = esc(&c.title),
+                id = esc(&c.id),
+                feature = esc(&c.feature),
+                lane = esc(&c.lane),
+                files = files,
+                worker = worker,
+            ));
+        }
+    }
+    format!(
+        r#"<section class="fg-card bee-bucket{danger_cls}" data-bucket="{key}" data-count="{count}"><h3 class="bee-bucket__head">{label} <span class="fg-chip fg-chip--{tone}">{count}</span></h3><div class="bee-bucket__body">{rows}</div></section>"#,
+        danger_cls = danger_cls,
+        key = key,
+        count = cells.len(),
+        label = label,
+        tone = tone,
+        rows = rows,
+    )
+}
+
+/// Names of `.bee/` files that could not be read, if any — every path
+/// mentioned in `read_errors` already arrives relative to the project root
+/// (see `mdview_core::bee`), so this only needs HTML escaping, not redaction.
+fn bee_read_errors(errors: &[String]) -> String {
+    if errors.is_empty() {
+        return String::new();
+    }
+    let items: String = errors.iter().map(|e| format!("<li>{}</li>", esc(e))).collect();
+    format!(
+        r#"<div class="fg-card fg-card--sunken"><div class="fg-card__title">Could not read</div><ul>{items}</ul></div>"#,
+        items = items
+    )
 }
 
 pub fn file_page(

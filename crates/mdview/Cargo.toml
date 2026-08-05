@@ -33,3 +33,13 @@ if-addrs = "0.13"
 # setsid(2) for fully detaching the auto-spawned daemon (Unix only).
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# Route-level tests drive `router()` end to end via `tower::ServiceExt::oneshot`
+# instead of asserting against view functions directly (bee-cockpit-2) — the
+# only way to prove a route decision like "not found" that a pure view
+# function never makes. Versions pinned to what axum already resolves in
+# Cargo.lock, so this adds no new dependency graph, only new features on ones
+# already present transitively.
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
