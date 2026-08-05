@@ -2654,4 +2654,323 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&root).ok();
     }
+
+    // --- bee-board-ux-4: each granted worktree, its own lifecycle record ---
+
+    /// Sibling worktree directories sit beside `fresh_root`'s temp parent —
+    /// the exact shape `mdview_core::bee::resolve_worktree` expects: `<temp
+    /// dir>/<id>/.bee/...`.
+    fn worktree_sibling_root(id: &str) -> PathBuf {
+        std::env::temp_dir().join(id)
+    }
+
+    fn make_worktree_sibling(id: &str) -> PathBuf {
+        let dir = worktree_sibling_root(id);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn grants_json(ids: &[&str]) -> String {
+        let entries: String = ids.iter().map(|id| format!("\"{id}\": true")).collect::<Vec<_>>().join(",");
+        format!("{{{entries}}}")
+    }
+
+    /// (happy) A fixture with two granted worktrees renders each with its
+    /// own feature, phase and branch.
+    #[tokio::test]
+    async fn worktree_section_shows_each_granted_worktree_with_own_feature_phase_branch() {
+        let root = fresh_root("wt-two");
+        let alpha = make_worktree_sibling("bee-board-ux-4-srv-wt-alpha");
+        let beta = make_worktree_sibling("bee-board-ux-4-srv-wt-beta");
+        write(&alpha, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-alpha","mode":"standard"}"#);
+        write(&beta, ".bee/state.json", r#"{"phase":"planning","feature":"feat-beta","mode":"small"}"#);
+
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-srv-wt-alpha", "bee-board-ux-4-srv-wt-beta"]),
+        );
+        write(
+            &root,
+            ".bee/runtime/workspaces/alpha.json",
+            &workspace_json("bee-board-ux-4-srv-wt-alpha", &alpha.to_string_lossy(), "wt/alpha", &[]),
+        );
+        write(
+            &root,
+            ".bee/runtime/workspaces/beta.json",
+            &workspace_json("bee-board-ux-4-srv-wt-beta", &beta.to_string_lossy(), "wt/beta", &[]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "wt-two");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("feature: feat-alpha"), "{body}");
+        assert!(body.contains("phase: swarming"), "{body}");
+        assert!(body.contains("branch: wt/alpha"), "{body}");
+        assert!(body.contains("feature: feat-beta"), "{body}");
+        assert!(body.contains("phase: planning"), "{body}");
+        assert!(body.contains("branch: wt/beta"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&alpha).ok();
+        std::fs::remove_dir_all(&beta).ok();
+    }
+
+    /// (happy) A worktree holding a live session is presented as live with a
+    /// relative heartbeat age and sorts ahead of one that is not.
+    #[tokio::test]
+    async fn worktree_with_live_session_sorts_before_quiet_and_shows_heartbeat_age() {
+        let root = fresh_root("wt-live-sort");
+        let live = make_worktree_sibling("bee-board-ux-4-srv-wt-live");
+        let quiet = make_worktree_sibling("bee-board-ux-4-srv-wt-quiet");
+        write(&live, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-live","mode":"standard"}"#);
+        write(&quiet, ".bee/state.json", r#"{"phase":"idle","feature":"feat-quiet","mode":"standard"}"#);
+        write(
+            &live,
+            ".bee/sessions/s1.json",
+            &session_json("s1", &rfc3339_minutes_ago(2), "/home/x/t.jsonl", "main", "startup"),
+        );
+
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            // "quiet" listed first in the source file — the sort must still
+            // put the live one ahead regardless of grant order.
+            &grants_json(&["bee-board-ux-4-srv-wt-quiet", "bee-board-ux-4-srv-wt-live"]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "wt-live-sort");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        let live_pos = body.find("feat-live").expect("live worktree must render");
+        let quiet_pos = body.find("feat-quiet").expect("quiet worktree must render");
+        assert!(live_pos < quiet_pos, "live worktree must render before the quiet one: {body}");
+        assert!(
+            body.contains("fg-chip--success\">live<"),
+            "the live worktree must carry a live chip: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&live).ok();
+        std::fs::remove_dir_all(&quiet).ok();
+    }
+
+    /// (happy) Worktree cell files present in the fixture change NEITHER the
+    /// four D7 bucket counts NOR the shipped set — the regression that
+    /// motivated this cell.
+    #[tokio::test]
+    async fn worktree_cell_files_do_not_change_buckets_or_shipped_set() {
+        let root = fresh_root("wt-no-cell-merge");
+        write(&root, ".bee/cells/a.json", &cell_json("c-open", "open", &[], "w1"));
+
+        let sibling = make_worktree_sibling("bee-board-ux-4-srv-wt-cells");
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"ghost-feature","mode":"standard"}"#);
+        // A capped cell sitting only in the worktree's own store. If this
+        // were ever merged into the main snapshot it would move into the
+        // Done bucket and appear as an extra shipped feature.
+        write(
+            &sibling,
+            ".bee/cells/ghost.json",
+            &feature_cell_json("ghost-1", "ghost-feature", "capped", Some(&rfc3339_minutes_ago(60)), Some(&rfc3339_minutes_ago(1))),
+        );
+
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-srv-wt-cells"]));
+
+        let st = build_state();
+        let project = register(&st, &root, "wt-no-cell-merge");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-bucket=\"waiting\" data-count=\"1\""), "{body}");
+        assert!(body.contains("data-bucket=\"doing\" data-count=\"0\""), "{body}");
+        assert!(
+            body.contains("data-bucket=\"done\" data-count=\"0\""),
+            "a worktree's own capped cell must never move this project's Done bucket: {body}"
+        );
+        assert!(
+            !body.contains("ghost-1"),
+            "the worktree's own cell id must never render on this project's board: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    fn feature_cell_json(
+        id: &str,
+        feature: &str,
+        status: &str,
+        claimed_at: Option<&str>,
+        capped_at: Option<&str>,
+    ) -> String {
+        let claimed_json = claimed_at.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".to_string());
+        let capped_json = capped_at.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".to_string());
+        format!(
+            r#"{{
+                "id": "{id}",
+                "feature": "{feature}",
+                "lane": "standard",
+                "title": "Cell {id}",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {{}},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "{status}",
+                "tier": "generation",
+                "trace": {{"worker": "w1", "claimed_at": {claimed_json}, "capped_at": {capped_json}}}
+            }}"#
+        )
+    }
+
+    /// (edge) A granted id whose directory does not exist is reported as
+    /// unresolved and the page still renders.
+    #[tokio::test]
+    async fn worktree_directory_missing_is_unresolved_and_page_still_renders() {
+        let root = fresh_root("wt-dir-missing");
+        std::fs::remove_dir_all(worktree_sibling_root("bee-board-ux-4-srv-wt-ghost-dir")).ok();
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-srv-wt-ghost-dir"]));
+
+        let st = build_state();
+        let project = register(&st, &root, "wt-dir-missing");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("bee-board-ux-4-srv-wt-ghost-dir"), "{body}");
+        assert!(body.contains("unresolved"), "a dangling grant must be marked unresolved: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) A granted id whose state.json is malformed is reported as
+    /// unresolved, not fatal.
+    #[tokio::test]
+    async fn worktree_state_json_malformed_is_unresolved_not_fatal() {
+        let root = fresh_root("wt-state-malformed");
+        let sibling = make_worktree_sibling("bee-board-ux-4-srv-wt-malformed");
+        write(&sibling, ".bee/state.json", "{ not valid json");
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-srv-wt-malformed"]));
+
+        let st = build_state();
+        let project = register(&st, &root, "wt-state-malformed");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("bee-board-ux-4-srv-wt-malformed"), "{body}");
+        assert!(body.contains("unresolved"), "a malformed state.json must be marked unresolved, not crash the page: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// (edge) A project with no grants file renders the quiet one-line
+    /// state, not an empty panel.
+    #[tokio::test]
+    async fn no_grants_file_renders_quiet_line_not_empty_panel() {
+        let root = fresh_root("wt-no-grants");
+        write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
+
+        let st = build_state();
+        let project = register(&st, &root, "wt-no-grants");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("No worktrees granted."), "{body}");
+        assert!(
+            !body.contains("class=\"fg-card bee-panel bee-worktrees\""),
+            "no grants must not render an empty worktrees panel: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (security) The body contains no absolute worktree root, no transcript
+    /// path and no occurrence of the fixture root — named against the
+    /// fixture's own root and `Path::is_absolute`, never the literal
+    /// `/home/` (`docs/history/learnings/20260805-toothless-security-assertions.md`).
+    #[tokio::test]
+    async fn worktree_section_leaks_no_absolute_path_or_fixture_root() {
+        let root = fresh_root("wt-security");
+        let root_str = root.to_string_lossy().into_owned();
+        let sibling = make_worktree_sibling("bee-board-ux-4-srv-wt-security");
+        let sibling_str = sibling.to_string_lossy().into_owned();
+        let transcript_abs = sibling.join(".bee/sessions/s1.json").to_string_lossy().into_owned();
+
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-sec","mode":"standard"}"#);
+        write(
+            &sibling,
+            ".bee/sessions/s1.json",
+            &session_json("s1", &rfc3339_minutes_ago(2), &transcript_abs, "main", "startup"),
+        );
+
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-srv-wt-security"]));
+        write(
+            &root,
+            ".bee/runtime/workspaces/w1.json",
+            &workspace_json("bee-board-ux-4-srv-wt-security", &sibling_str, "wt/security", &[]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "wt-security");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(!body.contains(&root_str), "response body leaked the fixture root: {body}");
+        assert!(!body.contains(&sibling_str), "response body leaked the worktree's own absolute sibling root: {body}");
+        assert!(!body.contains(&transcript_abs), "response body leaked a transcript path: {body}");
+        assert!(
+            body.contains("feat-sec") && body.contains("bee-board-ux-4-srv-wt-security"),
+            "the security assertions above must exercise the worktree section, not skip it: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// (read-only) Both the project's and the worktree's own `.bee/` tree
+    /// are byte-identical before and after the request (D4).
+    #[tokio::test]
+    async fn worktree_read_never_writes_the_project_or_sibling_bee_tree() {
+        let root = fresh_root("wt-read-only");
+        let sibling = make_worktree_sibling("bee-board-ux-4-srv-wt-read-only");
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-ro","mode":"standard"}"#);
+        write(
+            &sibling,
+            ".bee/sessions/s1.json",
+            &session_json("s1", &rfc3339_minutes_ago(2), "/home/x/t.jsonl", "main", "startup"),
+        );
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-srv-wt-read-only"]));
+
+        let st = build_state();
+        let project = register(&st, &root, "wt-read-only");
+        let before_root = snapshot_tree(&root);
+        let before_sibling = snapshot_tree(&sibling);
+
+        let _ = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+
+        let after_root = snapshot_tree(&root);
+        let after_sibling = snapshot_tree(&sibling);
+        assert_eq!(before_root, after_root, ".bee/ tree changed after a request");
+        assert_eq!(before_sibling, after_sibling, "the worktree's own .bee/ tree changed after a request");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
 }

@@ -44,6 +44,23 @@
 //!   most recent [`RECENT_DETAIL_CAP`] `decide` events — the full log is
 //!   never loaded into the snapshot.
 //!
+//! bee-board-ux-4 adds worktree liveness: `.bee/runtime/worktree-grants.json`
+//! (when present) names every currently-granted worktree. Each granted id is
+//! resolved against its own **sibling** `.bee/` — that worktree's own
+//! `state.json` for `feature`/`phase`/`mode`, and that worktree's own
+//! `.bee/sessions/*.json` for liveness on the same [`SESSION_LIVE_MINUTES`]
+//! window — then joined to the `branch`/`created_at` already read from this
+//! project's own `.bee/runtime/workspaces/` records above. This is
+//! deliberately **never** built from the worktree's own `.bee/cells/`:
+//! measured live against a 14-worktree store, every granted worktree held a
+//! stale snapshot of the very same live cell set this module already reads,
+//! and the only cell any of them disagreed about was the SAME cell, still
+//! `claimed` in their snapshot but long since `capped` in the real store.
+//! Reading worktree cells into the board would resurrect that one finished
+//! cell as in-flight once per worktree. See [`BeeWorktree`]. A dangling
+//! grant — sibling directory gone, `state.json` missing or malformed — is
+//! reported unresolved, never dropped and never fatal.
+//!
 //! Every path-shaped value that crosses into a public field is rendered
 //! relative to the project root (or reduced to a bare filename when it
 //! falls outside the root) — no absolute path may survive into a
@@ -314,6 +331,62 @@ pub struct BeeWorkspace {
     pub created_at: Option<String>,
 }
 
+/// One granted worktree (`.bee/runtime/worktree-grants.json`), resolved
+/// against its own sibling `.bee/` and joined to the branch/creation time
+/// already read from this project's own `.bee/runtime/workspaces/` records
+/// — see the module doc comment for why this is never built from the
+/// worktree's own `.bee/cells/`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeWorktree {
+    /// The grant id — already a safe name (it names the sibling directory
+    /// and the matching `.bee/runtime/workspaces/<id>.json`'s own `id`), so
+    /// this is the only identifier carried here; the sibling directory's
+    /// absolute root is read to resolve this record but never stored.
+    pub id: String,
+    /// False when the sibling directory does not exist, or its own
+    /// `.bee/state.json` is missing or malformed. A dangling grant is
+    /// reported here, never dropped and never a hard failure.
+    pub resolved: bool,
+    /// Set when `resolved` is false, naming what could not be read.
+    pub unresolved_reason: Option<String>,
+    /// The worktree's own `state.json` `feature` — read from its own
+    /// `.bee/`, not this project's.
+    pub feature: Option<String>,
+    /// The worktree's own `state.json` `phase` — the live signal a granted
+    /// worktree's cells cannot give (they are a stale snapshot).
+    pub phase: Option<String>,
+    /// The worktree's own `state.json` `mode`.
+    pub mode: Option<String>,
+    /// From this project's own `.bee/runtime/workspaces/<id>.json`, never
+    /// re-read from the worktree side.
+    pub branch: Option<String>,
+    /// From this project's own `.bee/runtime/workspaces/<id>.json`.
+    pub created_at: Option<String>,
+    /// True when at least one of the worktree's own `.bee/sessions/*.json`
+    /// is live, using the same [`SESSION_LIVE_MINUTES`] window the main
+    /// store's own sessions use.
+    pub live: bool,
+    /// The freshest live session's heartbeat age, in minutes, when `live`.
+    pub heartbeat_age_minutes: Option<f64>,
+}
+
+impl BeeWorktree {
+    fn unresolved(id: &str, reason: &str, branch: Option<String>, created_at: Option<String>) -> Self {
+        BeeWorktree {
+            id: id.to_string(),
+            resolved: false,
+            unresolved_reason: Some(reason.to_string()),
+            feature: None,
+            phase: None,
+            mode: None,
+            branch,
+            created_at,
+            live: false,
+            heartbeat_age_minutes: None,
+        }
+    }
+}
+
 /// One `decide`-type event from `.bee/decisions.jsonl`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeeDecisionSummary {
@@ -360,6 +433,12 @@ pub struct BeeSnapshot {
     pub workspaces: Vec<BeeWorkspace>,
     /// `.bee/decisions.jsonl`, bounded (Slice 2).
     pub decisions: BeeDecisions,
+    /// Every currently-granted worktree (`.bee/runtime/worktree-grants.json`),
+    /// each resolved against its own sibling `.bee/` — see [`BeeWorktree`].
+    /// Never a function of any worktree's own `.bee/cells/`; `buckets`,
+    /// `shipped` and `velocity` above stay a pure function of this project's
+    /// own live cells regardless of what this field holds.
+    pub worktrees: Vec<BeeWorktree>,
     /// Workers named in `state.json`'s `workers[]` whose session is
     /// currently live — the "running now" view. Deliberately separate from
     /// `buckets`: it never rewrites a cell's D7 bucket, it only tells a
@@ -386,6 +465,7 @@ impl BeeSnapshot {
             lanes: Vec::new(),
             workspaces: Vec::new(),
             decisions: BeeDecisions::default(),
+            worktrees: Vec::new(),
             running_workers: Vec::new(),
             read_errors: Vec::new(),
         }
@@ -469,6 +549,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     let lanes = read_lanes(&bee_dir, root, &mut read_errors);
     let workspaces = read_workspaces(&bee_dir, root, &mut read_errors);
     let decisions = read_decisions(&bee_dir, root, &mut read_errors);
+    let worktrees = read_worktrees(root, &workspaces, now, &mut read_errors);
 
     let running_workers = state
         .as_ref()
@@ -487,6 +568,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         lanes,
         workspaces,
         decisions,
+        worktrees,
         running_workers,
         read_errors,
     }
@@ -918,6 +1000,145 @@ fn parse_workspace(path: &Path, root: &Path) -> Result<BeeWorkspace, String> {
         attached_sessions,
         created_at,
     })
+}
+
+/// Read `.bee/runtime/worktree-grants.json` (D4) and resolve each granted id
+/// against its own sibling `.bee/` — see [`BeeWorktree`]. A missing file
+/// yields an empty list, not an error, matching every other optional-file
+/// precedent in this module (`.bee/lanes`, `.bee/runtime/workspaces`). A
+/// present-but-malformed grants file (not valid JSON, or not a JSON object)
+/// is a read error and also yields an empty list — that is the grants file
+/// itself failing, distinct from one granted *id* being dangling, which
+/// [`resolve_worktree`] reports per-entry instead.
+fn read_worktrees(
+    root: &Path,
+    workspaces: &[BeeWorkspace],
+    now: time::OffsetDateTime,
+    read_errors: &mut Vec<String>,
+) -> Vec<BeeWorktree> {
+    let path = root.join(".bee").join("runtime").join("worktree-grants.json");
+    if !path.is_file() {
+        return Vec::new();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            read_errors.push(format!("{}: could not read ({e})", rel_str(&path, root)));
+            return Vec::new();
+        }
+    };
+    let v: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            read_errors.push(format!("{}: could not parse ({e})", rel_str(&path, root)));
+            return Vec::new();
+        }
+    };
+    let Some(obj) = v.as_object() else {
+        read_errors.push(format!("{}: not a JSON object", rel_str(&path, root)));
+        return Vec::new();
+    };
+
+    let mut out: Vec<BeeWorktree> = obj
+        .iter()
+        .filter(|(_, granted)| granted.as_bool() == Some(true))
+        .map(|(id, _)| resolve_worktree(id, root, workspaces, now))
+        .collect();
+
+    // Live first (must-have), resolved before unresolved next, id as a
+    // stable tiebreak so the order is deterministic across reads.
+    out.sort_by(|a, b| {
+        (!a.live, !a.resolved, a.id.as_str()).cmp(&(!b.live, !b.resolved, b.id.as_str()))
+    });
+    out
+}
+
+/// Resolve one granted worktree id against its own sibling directory, which
+/// sits beside `project_root` (worktrees are siblings, per
+/// `.bee/runtime/workspaces/<id>.json`'s own `root`, which this function
+/// deliberately never reads — [`read_worktrees`] already has that project's
+/// join value from `workspaces`). The sibling's absolute path is used only
+/// to open files for reading (D4); it never survives into the returned
+/// [`BeeWorktree`] — only `id`, already a safe name, is carried.
+fn resolve_worktree(
+    id: &str,
+    project_root: &Path,
+    workspaces: &[BeeWorkspace],
+    now: time::OffsetDateTime,
+) -> BeeWorktree {
+    let workspace = workspaces.iter().find(|w| w.id == id);
+    let branch = workspace.and_then(|w| w.branch.clone());
+    let created_at = workspace.and_then(|w| w.created_at.clone());
+
+    let Some(sibling_root) = project_root.parent().map(|p| p.join(id)) else {
+        return BeeWorktree::unresolved(id, "project root has no parent directory", branch, created_at);
+    };
+    if !sibling_root.is_dir() {
+        return BeeWorktree::unresolved(id, "worktree directory not found", branch, created_at);
+    }
+
+    let state_path = sibling_root.join(".bee").join("state.json");
+    let raw = match fs::read_to_string(&state_path) {
+        Ok(raw) => raw,
+        Err(_) => {
+            return BeeWorktree::unresolved(id, "state.json missing or unreadable", branch, created_at)
+        }
+    };
+    let v: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return BeeWorktree::unresolved(id, "state.json could not be parsed", branch, created_at),
+    };
+
+    let feature = v.get("feature").and_then(Value::as_str).map(String::from);
+    let phase = v.get("phase").and_then(Value::as_str).map(String::from);
+    let mode = v.get("mode").and_then(Value::as_str).map(String::from);
+
+    let (live, heartbeat_age_minutes) = worktree_liveness(&sibling_root, now);
+
+    BeeWorktree {
+        id: id.to_string(),
+        resolved: true,
+        unresolved_reason: None,
+        feature,
+        phase,
+        mode,
+        branch,
+        created_at,
+        live,
+        heartbeat_age_minutes,
+    }
+}
+
+/// The worktree's own `.bee/sessions/*.json` liveness (D4), reusing
+/// [`parse_session`] and the same [`SESSION_LIVE_MINUTES`] window the main
+/// store's own sessions already use. An absent or empty sessions directory
+/// yields `(false, None)`, not an error — most worktrees genuinely have no
+/// session recorded locally. When more than one session is live, the
+/// freshest (smallest) heartbeat age wins.
+fn worktree_liveness(sibling_root: &Path, now: time::OffsetDateTime) -> (bool, Option<f64>) {
+    let dir = sibling_root.join(".bee").join("sessions");
+    if !dir.is_dir() {
+        return (false, None);
+    }
+    let Ok(rd) = fs::read_dir(&dir) else {
+        return (false, None);
+    };
+    let mut freshest: Option<f64> = None;
+    for entry in rd.filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        if let Ok(session) = parse_session(&p, now) {
+            if session.live {
+                freshest = Some(match freshest {
+                    Some(cur) => cur.min(session.heartbeat_age_minutes),
+                    None => session.heartbeat_age_minutes,
+                });
+            }
+        }
+    }
+    (freshest.is_some(), freshest)
 }
 
 /// Read `.bee/decisions.jsonl` (D4). A missing file is a normal, expected
@@ -2202,5 +2423,266 @@ mod tests {
         assert_eq!(snap.sessions.len(), 1);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bee-board-ux-4: each granted worktree, its own lifecycle record ---
+
+    fn worktree_sibling_root(id: &str) -> PathBuf {
+        std::env::temp_dir().join(id)
+    }
+
+    /// Create (or refresh) a sibling worktree directory beside `fresh_root`'s
+    /// temp parent — the exact shape `resolve_worktree` expects: `<parent of
+    /// project root>/<id>/.bee/...`. Cleaned up by the caller like every
+    /// other fixture in this module.
+    fn make_worktree_sibling(id: &str) -> PathBuf {
+        let dir = worktree_sibling_root(id);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn grants_json(ids: &[&str]) -> String {
+        let entries: String = ids.iter().map(|id| format!("\"{id}\": true")).collect::<Vec<_>>().join(",");
+        format!("{{{entries}}}")
+    }
+
+    fn workspace_json(id: &str, root_abs: &Path, branch: &str, created_at: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","type":"worktree","root":"{root}","branch":"{branch}","attached_sessions":[],"created_at":"{created_at}"}}"#,
+            root = root_abs.to_string_lossy().replace('\\', "\\\\"),
+        )
+    }
+
+    #[test]
+    fn each_granted_worktree_renders_own_feature_phase_branch() {
+        let root = fresh_root("worktree-two");
+        let alpha = make_worktree_sibling("bee-board-ux-4-wt-alpha");
+        let beta = make_worktree_sibling("bee-board-ux-4-wt-beta");
+        write(&alpha, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-alpha","mode":"standard"}"#);
+        write(&beta, ".bee/state.json", r#"{"phase":"planning","feature":"feat-beta","mode":"small"}"#);
+
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-wt-alpha", "bee-board-ux-4-wt-beta"]),
+        );
+        write(
+            &root,
+            ".bee/runtime/workspaces/alpha.json",
+            &workspace_json("bee-board-ux-4-wt-alpha", &alpha, "wt/alpha", "2026-08-01T00:00:00.000Z"),
+        );
+        write(
+            &root,
+            ".bee/runtime/workspaces/beta.json",
+            &workspace_json("bee-board-ux-4-wt-beta", &beta, "wt/beta", "2026-08-02T00:00:00.000Z"),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.worktrees.len(), 2, "{:?}", snap.worktrees);
+        let a = snap.worktrees.iter().find(|w| w.id == "bee-board-ux-4-wt-alpha").unwrap();
+        assert!(a.resolved);
+        assert_eq!(a.feature.as_deref(), Some("feat-alpha"));
+        assert_eq!(a.phase.as_deref(), Some("swarming"));
+        assert_eq!(a.branch.as_deref(), Some("wt/alpha"));
+        let b = snap.worktrees.iter().find(|w| w.id == "bee-board-ux-4-wt-beta").unwrap();
+        assert!(b.resolved);
+        assert_eq!(b.feature.as_deref(), Some("feat-beta"));
+        assert_eq!(b.phase.as_deref(), Some("planning"));
+        assert_eq!(b.branch.as_deref(), Some("wt/beta"));
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&alpha).ok();
+        std::fs::remove_dir_all(&beta).ok();
+    }
+
+    #[test]
+    fn live_worktree_sorts_ahead_of_quiet_one_with_relative_heartbeat_age() {
+        let root = fresh_root("worktree-liveness");
+        let live = make_worktree_sibling("bee-board-ux-4-wt-live");
+        let quiet = make_worktree_sibling("bee-board-ux-4-wt-quiet");
+        write(&live, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-live","mode":"standard"}"#);
+        write(&quiet, ".bee/state.json", r#"{"phase":"idle","feature":"feat-quiet","mode":"standard"}"#);
+        write(&live, ".bee/sessions/s1.json", &session_json_with_age("s1", 2));
+
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            // "quiet" listed first in the source file — the sort must still
+            // put the live one ahead regardless of grant order.
+            &grants_json(&["bee-board-ux-4-wt-quiet", "bee-board-ux-4-wt-live"]),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.worktrees.len(), 2, "{:?}", snap.worktrees);
+        assert_eq!(snap.worktrees[0].id, "bee-board-ux-4-wt-live", "live worktree must sort first: {:?}", snap.worktrees);
+        assert!(snap.worktrees[0].live);
+        let age = snap.worktrees[0]
+            .heartbeat_age_minutes
+            .expect("a live worktree must carry a heartbeat age");
+        assert!(age < 30.0, "age={age}");
+        assert_eq!(snap.worktrees[1].id, "bee-board-ux-4-wt-quiet");
+        assert!(!snap.worktrees[1].live);
+        assert!(snap.worktrees[1].heartbeat_age_minutes.is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&live).ok();
+        std::fs::remove_dir_all(&quiet).ok();
+    }
+
+    /// Regression: a granted worktree's own `.bee/cells/` must never be read
+    /// into this project's buckets or shipped set — see the module doc
+    /// comment. A "claimed" cell sitting only in the worktree's own store,
+    /// naming a feature this project's own store has never heard of, must
+    /// leave the Doing bucket and the shipped set exactly as the main
+    /// store's own cells computed them.
+    #[test]
+    fn worktree_cell_files_never_perturb_buckets_or_shipped_set() {
+        let root = fresh_root("worktree-no-cell-merge");
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/f-1.json",
+            &feature_cell_json(
+                "f-1",
+                "feat-a",
+                "capped",
+                Some("2026-08-01T00:00:00.000Z"),
+                Some("2026-08-01T01:00:00.000Z"),
+            ),
+        );
+
+        let sibling = make_worktree_sibling("bee-board-ux-4-wt-cells");
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"ghost-feature","mode":"standard"}"#);
+        // A "claimed" cell for a feature this project's own store has never
+        // heard of. If this ever got merged into the main snapshot it would
+        // show up in `buckets.doing` and possibly `shipped` — neither may
+        // happen.
+        write(
+            &sibling,
+            ".bee/cells/ghost.json",
+            &feature_cell_json("ghost-1", "ghost-feature", "claimed", Some("2026-08-01T00:00:00.000Z"), None),
+        );
+
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-wt-cells"]));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.buckets.waiting.len(), 1, "{:?}", snap.buckets.waiting);
+        assert_eq!(snap.buckets.doing.len(), 0, "a worktree's own claimed cell must never enter this project's Doing bucket: {:?}", snap.buckets.doing);
+        assert_eq!(snap.shipped.len(), 1);
+        assert_eq!(snap.shipped[0].feature, "feat-a");
+        assert!(
+            snap.shipped.iter().all(|f| f.feature != "ghost-feature"),
+            "a worktree-only feature must never appear in this project's shipped set: {:?}",
+            snap.shipped
+        );
+        // The worktree itself is still visible, just not cell-merged.
+        assert_eq!(snap.worktrees.len(), 1);
+        assert_eq!(snap.worktrees[0].feature.as_deref(), Some("ghost-feature"));
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    #[test]
+    fn worktree_directory_missing_is_reported_unresolved_not_dropped() {
+        let root = fresh_root("worktree-dir-missing");
+        // No sibling directory is ever created for this id.
+        std::fs::remove_dir_all(worktree_sibling_root("bee-board-ux-4-wt-ghost-dir")).ok();
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-wt-ghost-dir"]));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.worktrees.len(), 1, "a dangling grant must still be reported: {:?}", snap.worktrees);
+        let w = &snap.worktrees[0];
+        assert!(!w.resolved);
+        assert!(w.unresolved_reason.is_some(), "an unresolved worktree must name what could not be read");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn worktree_state_json_malformed_is_reported_unresolved_not_fatal() {
+        let root = fresh_root("worktree-state-malformed");
+        let sibling = make_worktree_sibling("bee-board-ux-4-wt-malformed");
+        write(&sibling, ".bee/state.json", "{ not valid json");
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-wt-malformed"]));
+
+        let snap = read_snapshot(&root);
+        assert!(snap.present, "a malformed worktree state.json must not take down the whole read");
+        assert_eq!(snap.worktrees.len(), 1);
+        let w = &snap.worktrees[0];
+        assert!(!w.resolved);
+        assert!(w.unresolved_reason.is_some());
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    #[test]
+    fn no_grants_file_yields_empty_worktrees_no_read_error() {
+        let root = fresh_root("worktree-no-grants");
+        write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
+
+        let snap = read_snapshot(&root);
+        assert!(snap.worktrees.is_empty());
+        assert!(
+            snap.read_errors.iter().all(|e| !e.contains("worktree-grants")),
+            "an absent grants file must not be a read error: {:?}",
+            snap.read_errors
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn no_absolute_worktree_root_survives_into_snapshot() {
+        let root = fresh_root("worktree-security");
+        let root_str = root.to_string_lossy().into_owned();
+        let sibling = make_worktree_sibling("bee-board-ux-4-wt-security");
+        let sibling_str = sibling.to_string_lossy().into_owned();
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-sec","mode":"standard"}"#);
+
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-wt-security"]));
+        write(
+            &root,
+            ".bee/runtime/workspaces/w1.json",
+            &workspace_json("bee-board-ux-4-wt-security", &sibling, "wt/security", "2026-08-01T00:00:00.000Z"),
+        );
+
+        let snap = read_snapshot(&root);
+        let serialized = serde_json::to_string(&snap).unwrap();
+
+        assert!(!serialized.contains(&root_str), "the fixture root leaked into the snapshot");
+        assert!(!serialized.contains(&sibling_str), "the worktree's own absolute sibling root leaked into the snapshot");
+        // BeeWorktree carries no `root` field at all - id (a safe name) is
+        // the only identifier - so this also holds by construction; assert
+        // the general shape too, not just the fixture-specific literal.
+        for w in &snap.worktrees {
+            assert!(!Path::new(&w.id).is_absolute(), "worktree id must never be an absolute path: {}", w.id);
+        }
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    #[test]
+    fn worktree_read_never_writes_the_project_or_sibling_bee_tree() {
+        let root = fresh_root("worktree-read-only");
+        let sibling = make_worktree_sibling("bee-board-ux-4-wt-read-only");
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-ro","mode":"standard"}"#);
+        write(&sibling, ".bee/sessions/s1.json", &session_json_with_age("s1", 2));
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-wt-read-only"]));
+
+        let before_root = snapshot_tree(&root);
+        let before_sibling = snapshot_tree(&sibling);
+        let _ = read_snapshot(&root);
+        let after_root = snapshot_tree(&root);
+        let after_sibling = snapshot_tree(&sibling);
+
+        assert_eq!(before_root, after_root, "reading worktrees must not write the project's own .bee/ tree");
+        assert_eq!(before_sibling, after_sibling, "reading a worktree's own .bee/ must never write to it either");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
     }
 }

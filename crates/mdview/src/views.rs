@@ -4,7 +4,7 @@
 
 use mdview_core::bee::{
     BeeBacklog, BeeBuckets, BeeCell, BeeLane, BeeRunningWorker, BeeSession, BeeShippedFeature,
-    BeeSnapshot, BeeWorkspace,
+    BeeSnapshot, BeeWorkspace, BeeWorktree,
 };
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
@@ -174,6 +174,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
     </div>
   </div>
   {running}
+  {worktrees}
   {velocity}
   <div class="bee-buckets-top">
     {doing}
@@ -192,6 +193,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         phase = esc(phase),
         feature = esc(feature),
         running = bee_running_now_section(&project.id, snapshot),
+        worktrees = bee_worktree_section(&snapshot.worktrees),
         velocity = bee_velocity_section(&project.id, snapshot),
         doing = bee_bucket_section(&project.id, "Doing", "doing", &b.doing, "neutral", false),
         waiting = bee_bucket_section(&project.id, "Waiting", "waiting", &b.waiting, "neutral", false),
@@ -282,6 +284,62 @@ fn bee_running_worker_row(project_id: &str, w: &BeeRunningWorker) -> String {
         cell_ref = cell_ref,
         age = esc(&bee_relative_minutes(w.heartbeat_age_minutes)),
         discrepancy = discrepancy,
+    )
+}
+
+/// Every granted worktree (`.bee/runtime/worktree-grants.json`), each shown
+/// by its own lifecycle record — feature, phase, branch, and whether a
+/// session there is live — never by its own `.bee/cells/`, which
+/// `mdview_core::bee::read_snapshot` deliberately never merges into this
+/// project's buckets/shipped set (see that module's doc comment). Live
+/// worktrees already sort first in `snapshot.worktrees` itself, so this view
+/// only formats what it is handed. A dangling grant (missing directory,
+/// missing or malformed `state.json`) renders plainly marked unresolved
+/// rather than being dropped. A project with no granted worktrees renders
+/// one quiet line instead of an empty bordered panel.
+fn bee_worktree_section(worktrees: &[BeeWorktree]) -> String {
+    if worktrees.is_empty() {
+        return r#"<p class="fg-empty">No worktrees granted.</p>"#.to_string();
+    }
+
+    let mut rows = String::new();
+    for w in worktrees {
+        if w.resolved {
+            let feature = w.feature.as_deref().unwrap_or("—");
+            let phase = w.phase.as_deref().unwrap_or("—");
+            let branch = w.branch.as_deref().unwrap_or("—");
+            let (tone, label) = if w.live { ("success", "live") } else { ("neutral", "not live") };
+            let age_line = match (w.live, w.heartbeat_age_minutes) {
+                (true, Some(mins)) => format!(" · {}", esc(&bee_relative_minutes(mins))),
+                _ => String::new(),
+            };
+            rows.push_str(&format!(
+                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta">feature: {feature} · phase: {phase} · branch: {branch}</div><div class="bee-cell__meta"><span class="fg-chip fg-chip--{tone}">{label}</span>{age_line}</div></div>"#,
+                id = esc(&w.id),
+                feature = esc(feature),
+                phase = esc(phase),
+                branch = esc(branch),
+                tone = tone,
+                label = label,
+                age_line = age_line,
+            ));
+        } else {
+            let reason = w.unresolved_reason.as_deref().unwrap_or("unresolved");
+            rows.push_str(&format!(
+                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta"><span class="fg-chip fg-chip--danger">unresolved</span> · {reason}</div></div>"#,
+                id = esc(&w.id),
+                reason = esc(reason),
+            ));
+        }
+    }
+
+    format!(
+        r#"<section class="fg-card bee-panel bee-worktrees">
+  <h3 class="bee-panel__head">Worktrees <span class="fg-chip fg-chip--neutral">{count}</span></h3>
+  <div class="bee-panel__list">{rows}</div>
+</section>"#,
+        count = worktrees.len(),
+        rows = rows,
     )
 }
 
