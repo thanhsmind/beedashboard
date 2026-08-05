@@ -66,12 +66,14 @@
 //! a different fallback handler, and
 //! `method_mismatch_is_byte_identical_to_an_unrouted_path` for the proof.
 //!
-//! Note for the cell that mounts the first terminal login route: the
-//! "wrong token yields an opaque 404" half of agent-terminal-3's first
+//! The "wrong token yields an opaque 404" half of agent-terminal-3's first
 //! truth is satisfied here, through `verify_and_mint`'s caller contract —
 //! `None` on a bad or missing token, `Some(session_id)` on a good one,
-//! never a status code of its own. The login route's job is only to turn
-//! that `None` into [`opaque_404`] and that `Some` into a session cookie.
+//! never a status code of its own. `login_terminal` in `server.rs`
+//! (agent-terminal-8) is that route: its whole job is to turn `None` into
+//! [`opaque_404`] and `Some` into a session cookie — and, since it is now
+//! the only caller of `verify_and_mint` anywhere in the product, also the
+//! only place a session is ever minted from a presented credential.
 //!
 //! # Permission race and failed-write truncation (closed)
 //!
@@ -240,13 +242,16 @@ impl TerminalAuth {
     }
 
     /// Mint and record a new session id without checking a token. Used only
-    /// by the settings-page rotation flow (`rotate_terminal_token` in
-    /// `server.rs`), whose caller has already reached the (unauthenticated
-    /// per P2's accepted risk) settings surface — there is no token to
-    /// verify there, so `verify_and_mint` does not apply. Never expose this
-    /// alongside a way to check a raw token from outside this module; that
-    /// pairing is exactly the rotation race `verify_and_mint` exists to
-    /// prevent.
+    /// by this module's own tests, to set up an already-live session
+    /// directly instead of round-tripping through `rotate` +
+    /// `verify_and_mint` every time. Nothing outside `#[cfg(test)]` calls
+    /// this — `verify_and_mint` (via `login_terminal` in `server.rs`) is the
+    /// **only** production path that ever turns a request into a session
+    /// (agent-terminal-8 closed the previous gap, where
+    /// `rotate_terminal_token` called this directly with no credential
+    /// check at all). Never expose this alongside a way to check a raw
+    /// token from outside this module; that pairing is exactly the rotation
+    /// race `verify_and_mint` exists to prevent.
     pub fn mint_session(&self) -> String {
         let id = new_session_id();
         self.inner.lock().unwrap().sessions.insert(id.clone());

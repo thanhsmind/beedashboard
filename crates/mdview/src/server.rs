@@ -10,7 +10,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Form, Path, Query, State,
     },
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{any, get, post},
     Json, Router,
@@ -135,6 +135,13 @@ fn router(state: AppState) -> Router {
         .route("/settings", get(settings_page_handler))
         .route("/api/config", get(api_config).post(update_config))
         .route("/settings/terminal/token", post(rotate_terminal_token))
+        // agent-terminal-8: the only route that ever turns a presented token
+        // into a session — see `login_terminal`. `any(...)` + `MethodGate<Post>`
+        // (inside the handler) for the same method-mismatch-oracle reason as
+        // every other route in this family: `.post(...)` would let an
+        // unauthenticated `GET` here answer `405 Allow: POST` instead of the
+        // same opaque 404 an unrouted path returns.
+        .route("/settings/terminal/login", any(login_terminal))
         // Carry-over from agent-terminal-4: mounted with `.post(...)` before
         // `MethodGate` existed, which let a `GET` here answer `405 Allow:
         // POST` — distinguishable from an unrouted path without a token ever
@@ -266,30 +273,74 @@ fn current_token_view(st: &AppState) -> views::TerminalTokenView {
 ///
 /// The response that performs the rotation is the one place the full token
 /// is ever rendered (P2) — every later `GET /settings` shows only its last
-/// four characters. Because the browser making this request has just
-/// demonstrated it can reach the (already-unauthenticated) settings surface,
-/// this response also mints a terminal session and sets its cookie, so the
-/// same browser can immediately reach the gated switches below without a
-/// separate login step.
-async fn rotate_terminal_token(State(st): State<AppState>) -> Response {
+/// four characters.
+///
+/// agent-terminal-8: this route no longer mints a session. It used to, on
+/// the reasoning that reaching the (already-unauthenticated) settings
+/// surface was itself sufficient proof — but that made
+/// `curl -X POST /settings/terminal/token` a complete, credential-free login
+/// bypass: a live session for the price of one POST, with `verify_and_mint`
+/// (the only real token check in the product) never in the loop. Rotation
+/// now only ever reveals the fresh token (P2); the caller logs in with it
+/// like anyone else, through `login_terminal` below — the only function in
+/// the product that ever mints a session from a presented credential.
+///
+/// Rotation itself is gated once a token exists: the very first call — no
+/// token file on disk yet — is left open, because that is the genuine
+/// first-run case setup depends on. Every later rotation requires the
+/// caller to already hold a live terminal session; without that, any LAN
+/// visitor could rotate at will and silently clear the legitimate user's
+/// session (P5's "rotation cuts live sessions" turned into a denial of
+/// service against a user who never asked to rotate). Gating on the current
+/// session also means a second device can log in with a token it already
+/// holds instead of being forced to rotate and kick the first device out —
+/// the multi-device flow D3 needs.
+async fn rotate_terminal_token(State(st): State<AppState>, headers: HeaderMap) -> Response {
+    if st.terminal_auth.is_configured() {
+        let has_session = terminal_auth::session_cookie(&headers)
+            .map(|sid| st.terminal_auth.session_valid(&sid))
+            .unwrap_or(false);
+        if !has_session {
+            return terminal_auth::opaque_404();
+        }
+    }
     match st.terminal_auth.rotate() {
         Ok(full_token) => {
-            let session_id = st.terminal_auth.mint_session();
             let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
                 st.config_data_dir.as_deref(),
             ));
-            let html = views::settings_page(
-                &cfg,
-                false,
-                views::TerminalTokenView::Full(full_token),
-            );
-            (
-                [(header::SET_COOKIE, terminal_auth::session_cookie_header(&session_id))],
-                Html(html),
-            )
-                .into_response()
+            let html = views::settings_page(&cfg, false, views::TerminalTokenView::Full(full_token));
+            Html(html).into_response()
         }
         Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct LoginForm {
+    token: String,
+}
+
+/// POST /settings/terminal/login (agent-terminal-8) — the only place in the
+/// product a raw presented token is turned into a live session. Calls
+/// `TerminalAuth::verify_and_mint`, the only function that ever compares a
+/// presented token against the configured one; `None` (missing token file,
+/// wrong value, or empty) answers the same opaque 404 every other terminal
+/// auth failure does — never a 401/403 that would confirm the route exists.
+/// `Some(session_id)` sets the session cookie and sends the caller back to
+/// `/settings`, where the gated switches below now become reachable.
+async fn login_terminal(
+    _method: terminal_auth::MethodGate<terminal_auth::Post>,
+    State(st): State<AppState>,
+    Form(form): Form<LoginForm>,
+) -> Response {
+    match st.terminal_auth.verify_and_mint(&form.token) {
+        Some(session_id) => (
+            [(header::SET_COOKIE, terminal_auth::session_cookie_header(&session_id))],
+            Redirect::to("/settings"),
+        )
+            .into_response(),
+        None => terminal_auth::opaque_404(),
     }
 }
 
@@ -305,10 +356,10 @@ struct TerminalConfigForm {
 /// route rather than a field on `SettingsForm`/`update_config`:
 /// `POST /api/config` is unauthenticated, so a supervisor switch reachable
 /// there would let any LAN visitor make mdview spawn a process. `AuthSession`
-/// requires a live terminal session (minted only by `rotate_terminal_token`
-/// above or a later login route); on any auth failure the request never
-/// reaches this handler at all — `AuthSession`'s extractor short-circuits
-/// with the opaque 404 before the switches are read, let alone changed.
+/// requires a live terminal session (minted only by `login_terminal` above);
+/// on any auth failure the request never reaches this handler at all —
+/// `AuthSession`'s extractor short-circuits with the opaque 404 before the
+/// switches are read, let alone changed.
 async fn update_terminal_config(
     _method: terminal_auth::MethodGate<terminal_auth::Post>,
     State(st): State<AppState>,
@@ -443,25 +494,29 @@ async fn project_home(State(st): State<AppState>, Path(id): Path<String>) -> Res
         Ok(files) => files,
         Err(_) => return not_found("project not found"),
     };
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("project not found");
+    };
 
-    // D3: the bee entry point appears only when the project's root contains a
-    // `.bee/` directory — a plain presence check, not a full store read (the
-    // page it links to, `/p/:id/_bee`, does the actual reading). A project
-    // without `.bee/` falls through unchanged to the redirect/not-found
-    // behavior this route always had, so non-bee projects behave exactly as
-    // they do today.
-    if let Ok(Some(project)) = st.engine.get_project(&id) {
-        if is_bee_project(&project) {
-            let entry = pick_entry_file(&files).map(|f| f.rel_path.as_str());
-            return Html(views::project_home_page(&project, entry)).into_response();
-        }
-    }
-
-    if files.is_empty() {
+    // D3: the bee entry point (the Bee board card) appears only when the
+    // project's root contains a `.bee/` directory — a plain presence check,
+    // not a full store read (the page it links to, `/p/:id/_bee`, does the
+    // actual reading).
+    //
+    // D6/agent-terminal-8: `project_home_page` is the only page carrying the
+    // Terminal tab strip, so it now renders for EVERY registered project,
+    // not only bee ones — a non-bee project used to redirect straight to its
+    // entry file (which has no tab strip at all), making the terminal
+    // invisible to anyone whose project is an ordinary docs folder. A
+    // non-bee project with zero markdown files still falls through to the
+    // ordinary not-found page, unchanged from before; a bee project renders
+    // even with zero files, exactly as it always did.
+    let bee = is_bee_project(&project);
+    if !bee && files.is_empty() {
         return not_found("project has no markdown files");
     }
-    let entry = pick_entry_file(&files).unwrap_or(&files[0]);
-    Redirect::to(&format!("/p/{}/{}", id, entry.rel_path)).into_response()
+    let entry = pick_entry_file(&files).map(|f| f.rel_path.as_str());
+    Html(views::project_home_page(&project, entry, bee)).into_response()
 }
 
 /// D3's presence rule: a project shows the bee surface iff its `root_path`
@@ -3434,8 +3489,9 @@ mod bee_route_tests {
             "a second /settings render dropped the masked token entirely: {body}"
         );
 
-        // The session minted by rotation is real and usable, proving the
-        // masking above isn't hiding a second reveal path through it either.
+        // The session obtained by logging in with the just-revealed token is
+        // real and usable, proving the masking above isn't hiding a second
+        // reveal path through it either.
         assert!(!cookie.is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
@@ -3516,7 +3572,8 @@ mod bee_route_tests {
         assert!(!cfg_after_refusals.terminal.supervisor_enabled);
         assert!(!cfg_after_refusals.terminal.notify_enabled);
 
-        // A real session, minted by generating the token, succeeds.
+        // A real session, obtained by generating the token then logging in
+        // with it, succeeds.
         let (_full_token, cookie) = rotate_token(app.clone()).await;
         let resp = app
             .clone()
@@ -3555,11 +3612,20 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// POSTs `/settings/terminal/token`, returning the full token revealed in
-    /// that one response plus the session cookie value minted alongside it —
-    /// the shared setup every gated-switch test needs to get past the gate.
+    /// POSTs `/settings/terminal/token` (a genuine first-run rotation — no
+    /// token file exists yet on a fresh scratch dir, so it needs no session),
+    /// reads the full token revealed in that one response (P2), then POSTs
+    /// `/settings/terminal/login` with it to obtain a real session cookie
+    /// through the only function that ever mints one from a presented
+    /// credential (`TerminalAuth::verify_and_mint`). Rotation itself no
+    /// longer mints a session (agent-terminal-8) — this rotate-then-login
+    /// shape is the shared setup every gated-switch test needs to get past
+    /// the gate, and it doubles as the regression guard: if any future
+    /// change makes the rotate response mint a session again, this helper
+    /// would stop needing the login POST at all rather than catching it.
     async fn rotate_token(app: Router) -> (String, String) {
-        let resp = app
+        let rotate_resp = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -3569,21 +3635,43 @@ mod bee_route_tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let set_cookie = resp
-            .headers()
-            .get(header::SET_COOKIE)
-            .expect("rotate response must set the terminal session cookie")
-            .to_str()
-            .unwrap()
-            .to_string();
-        let cookie = set_cookie.split(';').next().unwrap().to_string();
-        let body = body_string(resp).await;
+        assert_eq!(rotate_resp.status(), StatusCode::OK);
+        assert!(
+            rotate_resp.headers().get(header::SET_COOKIE).is_none(),
+            "rotation must never itself set a session cookie"
+        );
+        let body = body_string(rotate_resp).await;
         let marker = "it will not be shown again: <code>";
         let start = body.find(marker).expect("full token banner missing") + marker.len();
         let rest = &body[start..];
         let end = rest.find("</code>").expect("full token banner unterminated");
-        (rest[..end].to_string(), cookie)
+        let token = rest[..end].to_string();
+
+        let login_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/settings/terminal/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("token={token}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            login_resp.status().is_redirection(),
+            "login with the just-rotated token must succeed, got {}",
+            login_resp.status()
+        );
+        let set_cookie = login_resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("login response must set the terminal session cookie")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cookie = set_cookie.split(';').next().unwrap().to_string();
+        (token, cookie)
     }
 
     /// A GET request to `/p/{id}/_terminal`, optionally carrying the given
@@ -3632,6 +3720,13 @@ mod bee_route_tests {
     #[tokio::test]
     async fn terminal_route_without_a_session_is_byte_identical_to_an_unrouted_path() {
         let dir = fresh_root("terminal-no-session");
+        // Enable the terminal so this test isolates the session gate itself
+        // (the way its screen sibling,
+        // `terminal_screen_without_a_session_is_byte_identical_to_an_unrouted_path`,
+        // already does) — without this, the assertion would still pass on a
+        // route where `AuthSession` had been deleted entirely, since the
+        // disabled-switch check alone already answers 404.
+        enable_terminal(&dir);
         let root = fresh_root("terminal-no-session-project");
         let st = build_state_with_dir(&dir);
         let project = register(&st, &root, "no-session");
@@ -4277,6 +4372,223 @@ mod bee_route_tests {
         assert!(
             body.contains("herdr is not running"),
             "no named remedy in the screen endpoint's herdr-down answer: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// agent-terminal-8, truth: "A request presenting no token, or a wrong
+    /// token, cannot obtain a terminal session by any route" — the login
+    /// half. Neither an unconfigured token nor a wrong one against a real,
+    /// already-generated one ever sets a session cookie; the real token
+    /// still works afterward, proving the failed attempts left nothing
+    /// corrupted.
+    #[tokio::test]
+    async fn login_with_a_wrong_or_missing_token_never_mints_a_session() {
+        let dir = fresh_root("terminal-login-wrong-token");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        async fn login(app: Router, token: &str) -> Response {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/settings/terminal/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("token={token}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+
+        // No token has ever been generated yet — nothing can verify.
+        let resp = login(app.clone(), "whatever").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(resp.headers().get(header::SET_COOKIE).is_none());
+
+        // A real token now exists (first-run rotation); a wrong guess still
+        // fails.
+        let (real_token, _cookie) = rotate_token(app.clone()).await;
+        let resp = login(app.clone(), "definitely-not-it").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert!(resp.headers().get(header::SET_COOKIE).is_none());
+
+        // The real token still logs in, proving the refusals above changed
+        // nothing.
+        let resp = login(app, &real_token).await;
+        assert!(resp.status().is_redirection());
+        assert!(resp.headers().get(header::SET_COOKIE).is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// agent-terminal-8, truth: "Once a token exists, rotation requires the
+    /// current session; with no token file yet, first-run rotation is still
+    /// possible." Also proves `POST` to the rotation route never itself
+    /// returns a usable session cookie, at every stage.
+    #[tokio::test]
+    async fn rotation_needs_no_session_on_first_run_but_requires_one_after() {
+        let dir = fresh_root("terminal-rotation-auth");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        async fn rotate(app: Router, cookie: Option<&str>) -> Response {
+            let mut b = Request::builder()
+                .method("POST")
+                .uri("/settings/terminal/token");
+            if let Some(c) = cookie {
+                b = b.header(header::COOKIE, c.to_string());
+            }
+            app.oneshot(b.body(Body::empty()).unwrap()).await.unwrap()
+        }
+
+        // First-run: no token file on disk yet, so no session is required.
+        let first = rotate(app.clone(), None).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert!(
+            first.headers().get(header::SET_COOKIE).is_none(),
+            "rotation must never itself set a session cookie"
+        );
+        let body = body_string(first).await;
+        let marker = "it will not be shown again: <code>";
+        let start = body.find(marker).unwrap() + marker.len();
+        let rest = &body[start..];
+        let end = rest.find("</code>").unwrap();
+        let token = rest[..end].to_string();
+
+        // A token now exists: rotating again with no session is refused —
+        // an unauthenticated visitor can no longer clear the real user's
+        // session by re-rotating.
+        let second = rotate(app.clone(), None).await;
+        assert_eq!(
+            second.status(),
+            StatusCode::NOT_FOUND,
+            "rotating an already-configured token with no session must be refused"
+        );
+
+        // Logging in with the current token, then rotating, succeeds — and
+        // still never sets a cookie of its own.
+        let login_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/settings/terminal/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("token={token}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = login_resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+
+        let third = rotate(app, Some(&cookie)).await;
+        assert_eq!(
+            third.status(),
+            StatusCode::OK,
+            "rotating with a live session must succeed"
+        );
+        assert!(third.headers().get(header::SET_COOKIE).is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// agent-terminal-8, truth: "A second device holding the token can sign
+    /// in without disturbing the first device's session." Login (unlike
+    /// rotation) never clears the session set — only a fresh rotation does
+    /// (P5) — so two devices presenting the same still-current token both
+    /// end up with their own live, independent sessions.
+    #[tokio::test]
+    async fn a_second_device_logging_in_does_not_disturb_the_first_devices_session() {
+        let dir = fresh_root("terminal-multi-device-login");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-multi-device-login-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "multi-device");
+        let app = router(st);
+
+        let (token, cookie_a) = rotate_token(app.clone()).await;
+
+        let login_b = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/settings/terminal/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("token={token}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(login_b.status().is_redirection());
+        let cookie_b = login_b
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        assert_ne!(cookie_a, cookie_b, "each login mints its own distinct session");
+
+        let resp_a = app
+            .clone()
+            .oneshot(terminal_req(&project.id, Some(&cookie_a)))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp_a.status(),
+            StatusCode::OK,
+            "device A's session must survive device B logging in"
+        );
+
+        let resp_b = app
+            .oneshot(terminal_req(&project.id, Some(&cookie_b)))
+            .await
+            .unwrap();
+        assert_eq!(resp_b.status(), StatusCode::OK, "device B's own session must work too");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// D6/agent-terminal-8, truth: "The Terminal tab is present on a
+    /// registered project that has no .bee directory." `project_home_page`
+    /// used to render only for bee projects; a docs-only project redirected
+    /// straight to its entry file and never showed the tab strip at all.
+    #[tokio::test]
+    async fn terminal_tab_is_present_on_a_project_with_no_bee_directory() {
+        let dir = fresh_root("terminal-tab-non-bee");
+        let root = fresh_root("terminal-tab-non-bee-project");
+        write(&root, "README.md", "# Hello\n");
+
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "docs-only");
+        let resp = get(router(st), &format!("/p/{}/", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_terminal\"", project.id)),
+            "a non-bee project's home page carries no Terminal tab link: {body}"
+        );
+        assert!(body.contains(">Terminal<"), "{body}");
+        assert!(
+            !body.contains("_bee"),
+            "a non-bee project's home page must not link to the bee board: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();

@@ -75,11 +75,15 @@ pub fn project_list_page(projects: &[(Project, usize)]) -> String {
     layout("Projects", "", &body)
 }
 
-/// A bee project's landing page (D3): a card linking into the bee board, plus
-/// a card to open the project's docs when it has any. Rendered only when the
-/// project has a `.bee/` directory — a non-bee project keeps the old
-/// redirect-to-entry-file behavior in `server.rs::project_home` untouched.
-pub fn project_home_page(project: &Project, entry: Option<&str>) -> String {
+/// A registered project's landing page: a card linking into the bee board
+/// when the project has one (D3), plus a card to open the project's docs
+/// when it has any. D6/agent-terminal-8: this is the only page carrying the
+/// [`project_tabs`] strip, so it renders for **every** registered project —
+/// not only bee ones — otherwise a project with no `.bee/` directory would
+/// redirect straight to its entry file and never show the Terminal tab at
+/// all. `bee` gates only the Bee board card; the tab strip itself is
+/// unconditional.
+pub fn project_home_page(project: &Project, entry: Option<&str>, bee: bool) -> String {
     let docs_card = match entry {
         Some(rel) => format!(
             r#"<a class="fg-card proj-card__link" href="/p/{pid}/{rel}">
@@ -91,6 +95,17 @@ pub fn project_home_page(project: &Project, entry: Option<&str>) -> String {
         ),
         None => String::new(),
     };
+    let bee_card = if bee {
+        format!(
+            r#"<a class="fg-card proj-card__link" href="/p/{pid}/_bee">
+  <div class="fg-card__title">Bee board</div>
+  <div class="fg-card__sub">Doing · Waiting · Stuck · Done</div>
+</a>"#,
+            pid = esc(&project.id),
+        )
+    } else {
+        String::new()
+    };
     let body = format!(
         r#"{topbar}
 {tab_style}
@@ -98,10 +113,7 @@ pub fn project_home_page(project: &Project, entry: Option<&str>) -> String {
   <h2 class="fg-pagehead__title">{name}</h2>
   {tabs}
   <div class="proj-cards">
-    <a class="fg-card proj-card__link" href="/p/{pid}/_bee">
-      <div class="fg-card__title">Bee board</div>
-      <div class="fg-card__sub">Doing · Waiting · Stuck · Done</div>
-    </a>
+    {bee_card}
     {docs_card}
   </div>
 </main>"#,
@@ -112,7 +124,7 @@ pub fn project_home_page(project: &Project, entry: Option<&str>) -> String {
         tab_style = PROJECT_TAB_STYLE,
         name = esc(&project.name),
         tabs = project_tabs(&project.id, "overview"),
-        pid = esc(&project.id),
+        bee_card = bee_card,
         docs_card = docs_card,
     );
     layout(&project.name, "", &body)
@@ -1713,12 +1725,22 @@ pub fn settings_page(cfg: &Config, saved: bool, token_view: TerminalTokenView) -
       <button type="submit" class="fg-btn">{token_button_label}</button>
     </fieldset>
   </form>
+  <form class="fg-settings" method="post" action="/settings/terminal/login">
+    <fieldset><legend>Terminal sign-in</legend>
+      <div class="fg-field">
+        <label class="fg-field__label">Token</label>
+        <input class="fg-input" type="password" name="token" autocomplete="off" placeholder="Paste the terminal token">
+      </div>
+      <span class="fg-field__hint">Needed once per device/browser — signing in starts a session that lasts until the token is next rotated.</span>
+      <button type="submit" class="fg-btn fg-btn--primary">Sign in</button>
+    </fieldset>
+  </form>
   <form class="fg-settings" method="post" action="/api/terminal-config">
     <fieldset><legend>Terminal <span class="fg-chip fg-chip--neutral">token required</span></legend>
       <label class="fg-check"><input type="checkbox" name="enabled" {term_enabled}><span class="fg-check__text">Enable the terminal</span></label>
       <label class="fg-check"><input type="checkbox" name="supervisor_enabled" {term_supervisor}><span class="fg-check__text">Keep herdr running (supervisor)</span></label>
       <label class="fg-check"><input type="checkbox" name="notify_enabled" {term_notify}><span class="fg-check__text">Notify on agent status change</span></label>
-      <span class="fg-field__hint">Requires a valid terminal session to save — presented after generating the token above.</span>
+      <span class="fg-field__hint">Requires a valid terminal session to save — sign in above with the token first.</span>
     </fieldset>
     <button type="submit" class="fg-btn fg-btn--primary">Save terminal settings</button>
   </form>
