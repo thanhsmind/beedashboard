@@ -172,6 +172,28 @@ fn router(state: AppState) -> Router {
         // other gated terminal route, never `.post(...)`.
         .route("/p/:id/_terminal/:pane_id/input", any(terminal_input))
         .route("/p/:id/_terminal/:pane_id/keys", any(terminal_keys))
+        // agent-terminal-10 (D5): the Unassigned group — panes under no
+        // registered project's root. Deliberately mounted outside `/p/:id/`
+        // (never `/p/unassigned/...`): a registered project's own slug can
+        // legitimately be the literal string "unassigned" (`slug_from_root`
+        // has no reserved-word exclusion), so nesting this under the
+        // project path shape would make that real project's own terminal
+        // route ambiguous with this group's route. Same `any(...)` +
+        // `MethodGate` shape as every other gated terminal route, never
+        // `.get(...)` / `.post(...)`.
+        .route("/_terminal/unassigned", any(unassigned_terminal_page))
+        .route(
+            "/_terminal/unassigned/:pane_id/screen",
+            any(unassigned_terminal_screen),
+        )
+        .route(
+            "/_terminal/unassigned/:pane_id/input",
+            any(unassigned_terminal_input),
+        )
+        .route(
+            "/_terminal/unassigned/:pane_id/keys",
+            any(unassigned_terminal_keys),
+        )
         .route("/p/:id/*path", get(project_path))
         .with_state(state)
 }
@@ -186,7 +208,11 @@ async fn index_page(State(st): State<AppState>) -> Response {
                     (p, c)
                 })
                 .collect();
-            Html(views::project_list_page(&with_counts)).into_response()
+            // D5/D4: presence only, never contents — this unauthenticated
+            // route reads only the D7 switch (no herdr call, no session), so
+            // it can never learn whether any pane is actually unassigned.
+            let unassigned_visible = terminal_family_enabled(&st);
+            Html(views::project_list_page(&with_counts, unassigned_visible)).into_response()
         }
         Err(e) => internal_error(&e.to_string()),
     }
@@ -832,6 +858,179 @@ fn project_panes(
             })
         })
         .collect()
+}
+
+/// D5's partition: every herdr pane whose working directory sits under **no**
+/// registered project's D2 containment boundary. Computed as the complement
+/// of the union of each project's own `project_panes` result — the same
+/// boundary check `terminal_page` runs per project — rather than building
+/// one combined `Boundary` over every registered root at once. That matters:
+/// `Boundary::new` fails closed on an empty or invalid root set, so if any
+/// single registered project's root were unconstructible (e.g. sitting on
+/// the hard-deny list) a combined boundary would fail to construct entirely,
+/// and every pane — including ones that plainly belong to a *different*,
+/// perfectly valid project — would wrongly render here. Per-project
+/// computation keeps one broken project's boundary from ever leaking another
+/// project's panes into this group, or hiding them from their own project's
+/// page.
+///
+/// A pane's raw, unvalidated cwd is used for display here (or left empty if
+/// herdr never reported one) — never resolved through any `Boundary`, since
+/// per P6 there is no containment claim to make for a pane that belongs to
+/// no project; the boundary check above is only ever used to decide
+/// membership, never to canonicalize an unassigned pane's path.
+fn unassigned_panes(
+    snapshot: &herdr::Snapshot,
+    projects: &[mdview_core::domain::Project],
+) -> Vec<views::TerminalPaneView> {
+    let assigned: std::collections::HashSet<String> = projects
+        .iter()
+        .flat_map(|p| {
+            mdview_core::paths_boundary::Boundary::new(vec![p.root_path.clone()])
+                .map(|boundary| project_panes(snapshot, &boundary))
+                .unwrap_or_default()
+        })
+        .map(|pane| pane.pane_id)
+        .collect();
+
+    snapshot
+        .agents
+        .iter()
+        .filter(|agent| !assigned.contains(&agent.pane_id))
+        .map(|agent| {
+            let cwd = snapshot
+                .panes
+                .iter()
+                .find(|p| p.pane_id == agent.pane_id)
+                .and_then(|p| p.cwd.clone())
+                .unwrap_or_default();
+            views::TerminalPaneView {
+                pane_id: agent.pane_id.clone(),
+                kind: agent.kind.clone(),
+                name: agent.name.clone(),
+                status: agent.status.as_str().to_string(),
+                title: agent.title.clone(),
+                cwd,
+            }
+        })
+        .collect()
+}
+
+/// `GET /_terminal/unassigned` (D5/D4/D6) — the gated cross-project pane
+/// list. Guarded identically to `terminal_page`: `MethodGate<Get>` +
+/// `AuthSession` run before this body (see the route table's comment on
+/// `any(...)` vs `.get(...)`), then the D7 enabled switch — every registered
+/// project's own boundary check happens inside `unassigned_panes`, not here.
+/// A silent herdr socket renders the same D6 remedy `terminal_page` uses.
+async fn unassigned_terminal_page(
+    _method: terminal_auth::MethodGate<terminal_auth::Get>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
+    let projects = st.engine.list_projects().unwrap_or_default();
+    match st.herdr.snapshot().await {
+        Ok(snapshot) => {
+            let panes = unassigned_panes(&snapshot, &projects);
+            Html(views::unassigned_terminal_page(&panes)).into_response()
+        }
+        Err(_) => Html(views::unassigned_terminal_down_page()).into_response(),
+    }
+}
+
+/// Shared by `unassigned_terminal_screen`, `unassigned_terminal_input` and
+/// `unassigned_terminal_keys` — mirrors `project_and_verify_pane_in_boundary`
+/// but for the Unassigned group: a pane id is only ever read or acted on if
+/// it is already present in this request's own freshly computed
+/// `unassigned_panes` result, never trusted from the URL alone. A pane that
+/// is actually inside some registered project's boundary refuses here with
+/// the ordinary not-found — the two groups partition, they never overlap.
+async fn verify_pane_is_unassigned(st: &AppState, pane_id: &str) -> std::result::Result<(), Response> {
+    let projects = st.engine.list_projects().unwrap_or_default();
+    let snapshot = match st.herdr.snapshot().await {
+        Ok(s) => s,
+        Err(_) => return Err(herdr_down_response()),
+    };
+    let in_unassigned = unassigned_panes(&snapshot, &projects)
+        .iter()
+        .any(|p| p.pane_id == pane_id);
+    if !in_unassigned {
+        return Err(not_found("pane not found"));
+    }
+    Ok(())
+}
+
+/// `GET /_terminal/unassigned/:pane_id/screen` (D5/D4/D6) — one unassigned
+/// pane's current screen, the same shape `terminal_screen` returns for a
+/// project's own pane. Guarded identically: `MethodGate<Get>` +
+/// `AuthSession`, then the D7 switch, then `verify_pane_is_unassigned`.
+async fn unassigned_terminal_screen(
+    _method: terminal_auth::MethodGate<terminal_auth::Get>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+    Path(pane_id): Path<String>,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
+    if let Err(refusal) = verify_pane_is_unassigned(&st, &pane_id).await {
+        return refusal;
+    }
+    match st.herdr.read_pane(&pane_id, herdr::ReadSource::Visible, 0).await {
+        Ok(read) => Json(json!({ "text": read.text, "revision": read.revision })).into_response(),
+        Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
+        Err(_) => herdr_down_response(),
+    }
+}
+
+/// `POST /_terminal/unassigned/:pane_id/input` (D3/D5/D4) — the Unassigned
+/// group's write path from agent-terminal-9: free-text reply, same
+/// `ReplyBody { text, submit }` shape and the same send≠submit semantics as
+/// `terminal_input`. Guarded identically, via `verify_pane_is_unassigned`.
+async fn unassigned_terminal_input(
+    _method: terminal_auth::MethodGate<terminal_auth::Post>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+    Path(pane_id): Path<String>,
+    Json(body): Json<ReplyBody>,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
+    if let Err(refusal) = verify_pane_is_unassigned(&st, &pane_id).await {
+        return refusal;
+    }
+    match st.herdr.send_input(&pane_id, &body.text, body.submit).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
+        Err(_) => herdr_down_response(),
+    }
+}
+
+/// `POST /_terminal/unassigned/:pane_id/keys` (D3/D5/D4) — the Unassigned
+/// group's other write path from agent-terminal-9: named key presses, same
+/// `KeysBody { keys }` shape as `terminal_keys`. Guarded identically, via
+/// `verify_pane_is_unassigned`.
+async fn unassigned_terminal_keys(
+    _method: terminal_auth::MethodGate<terminal_auth::Post>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+    Path(pane_id): Path<String>,
+    Json(body): Json<KeysBody>,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
+    if let Err(refusal) = verify_pane_is_unassigned(&st, &pane_id).await {
+        return refusal;
+    }
+    match st.herdr.send_keys(&pane_id, &body.keys).await {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
+        Err(_) => herdr_down_response(),
+    }
 }
 
 /// `GET /p/:id/_bee/feature/:feature` — one feature's cells grouped into the
@@ -5202,5 +5401,403 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---- agent-terminal-10 (D5): the Unassigned group ----
+
+    /// A GET request to `/_terminal/unassigned`, optionally carrying the
+    /// given session cookie value — the group-wide sibling of `terminal_req`.
+    fn unassigned_req(cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().uri("/_terminal/unassigned").method("GET");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// A GET request to `/_terminal/unassigned/{pane_id}/screen`.
+    fn unassigned_screen_req(pane_id: &str, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .uri(format!("/_terminal/unassigned/{pane_id}/screen"))
+            .method("GET");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// A POST request to `/_terminal/unassigned/{pane_id}/input` carrying a
+    /// JSON `{ "text": ..., "submit": ... }` body.
+    fn unassigned_input_req(pane_id: &str, text: &str, submit: bool, cookie: Option<&str>) -> Request<Body> {
+        let body = serde_json::json!({ "text": text, "submit": submit });
+        let mut b = Request::builder()
+            .uri(format!("/_terminal/unassigned/{pane_id}/input"))
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    }
+
+    /// A POST request to `/_terminal/unassigned/{pane_id}/keys` carrying a
+    /// JSON `{ "keys": [...] }` body.
+    fn unassigned_keys_req(pane_id: &str, keys: &[&str], cookie: Option<&str>) -> Request<Body> {
+        let body = serde_json::json!({ "keys": keys });
+        let mut b = Request::builder()
+            .uri(format!("/_terminal/unassigned/{pane_id}/keys"))
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    }
+
+    /// Truth: "Without a terminal session, `/_terminal/unassigned` returns
+    /// an opaque 404, identical to an unknown route" — the group route's own
+    /// instance of the byte-identical-to-unrouted proof every other gated
+    /// terminal route already carries.
+    #[tokio::test]
+    async fn unassigned_route_without_a_session_is_byte_identical_to_an_unrouted_path() {
+        let dir = fresh_root("unassigned-no-session");
+        enable_terminal(&dir);
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
+            let with_no_session = app.clone().oneshot(unassigned_req(cookie)).await.unwrap();
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
+            assert_eq!(with_no_session.status(), unrouted.status());
+            assert_eq!(with_no_session.headers(), unrouted.headers());
+            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
+            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(a, b);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Truth (the carry-over obligation, agent-terminal-10's own instance):
+    /// a wrong-method request to `/_terminal/unassigned` (mounted via
+    /// `any(...)` + `MethodGate<Get>`, never `.get(...)`) is byte-identical
+    /// to a path this router never mounts at all.
+    #[tokio::test]
+    async fn unassigned_route_wrong_method_is_byte_identical_to_unrouted() {
+        let dir = fresh_root("unassigned-wrong-method");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let posted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/_terminal/unassigned")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
+        assert_eq!(posted.status(), unrouted.status());
+        assert_eq!(posted.headers(), unrouted.headers());
+        let a = posted.into_body().collect().await.unwrap().to_bytes();
+        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The must-have this cell shares with agent-terminal-6/8: with the D7
+    /// `terminal.enabled` switch off, `/_terminal/unassigned` answers
+    /// exactly as an unrouted path would — even with a session a valid
+    /// rotation just minted.
+    #[tokio::test]
+    async fn unassigned_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session() {
+        let dir = fresh_root("unassigned-family-disabled");
+        // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let unrouted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let disabled = app.oneshot(unassigned_req(Some(&cookie))).await.unwrap();
+
+        assert_eq!(disabled.status(), StatusCode::NOT_FOUND);
+        assert_eq!(disabled.status(), unrouted.status());
+        assert_eq!(disabled.headers(), unrouted.headers());
+        let a = disabled.into_body().collect().await.unwrap().to_bytes();
+        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The central D5 partition truth, both directions in one snapshot: a
+    /// pane whose cwd sits under a registered project's root is listed on
+    /// that project's own `/p/:id/_terminal` and never on
+    /// `/_terminal/unassigned`; a pane whose cwd sits under no registered
+    /// root is listed on `/_terminal/unassigned` and never on any project's
+    /// own page. Registering the project never happens as a side effect of
+    /// listing the unassigned pane (D5) — checked by comparing the engine's
+    /// project list before and after every request in this test.
+    #[tokio::test]
+    async fn unassigned_group_and_a_projects_own_terminal_partition_panes_without_overlap() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("unassigned-partition-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("unassigned-partition-scratch");
+        let project_root = scratch.join("owned-project");
+        let stray_root = scratch.join("stray-agent-cwd");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let owned = fake
+            .agent_start("w1", Some(&project_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let stray = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &project_root, "owned-project");
+        let engine = st.engine.clone();
+        let projects_before = engine.list_projects().unwrap();
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let unassigned_resp = app
+            .clone()
+            .oneshot(unassigned_req(Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(unassigned_resp.status(), StatusCode::OK);
+        let unassigned_body = body_string(unassigned_resp).await;
+        assert!(
+            unassigned_body.contains(&stray.name),
+            "the pane under no registered project is missing from the Unassigned group: {unassigned_body}"
+        );
+        assert!(
+            !unassigned_body.contains(&owned.name),
+            "a pane already owned by a registered project leaked into the Unassigned group: {unassigned_body}"
+        );
+
+        let project_resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, Some(&cookie)))
+            .await
+            .unwrap();
+        let project_body = body_string(project_resp).await;
+        assert!(
+            project_body.contains(&owned.name),
+            "the project's own pane is missing from its own terminal page: {project_body}"
+        );
+        assert!(
+            !project_body.contains(&stray.name),
+            "the unassigned pane leaked into a registered project's own terminal page: {project_body}"
+        );
+
+        // D5: listing the stray pane, reading its project's own page, must
+        // never register a project from the stray pane's cwd — the engine's
+        // registry is exactly what it was before any request in this test.
+        let projects_after = engine.list_projects().unwrap();
+        assert_eq!(
+            projects_before.iter().map(|p| &p.id).collect::<Vec<_>>(),
+            projects_after.iter().map(|p| &p.id).collect::<Vec<_>>(),
+            "listing an unassigned pane must never add a row to the project registry"
+        );
+        assert_eq!(
+            projects_before.len(),
+            1,
+            "sanity: exactly one project was registered before any unassigned request"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D5/D4's core resolution, on the home page itself: an unauthenticated
+    /// `GET /` must never reveal an unassigned agent's name or cwd, even
+    /// though the group's presence marker is visible once the D7 switch is
+    /// on. A second request with the switch off proves the page renders
+    /// exactly as it did before this feature (no marker, no mention of
+    /// "Unassigned" at all).
+    #[tokio::test]
+    async fn unauthenticated_home_page_shows_unassigned_presence_only_and_leaks_nothing() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-unassigned-presence");
+        let scratch = fresh_root("home-unassigned-presence-scratch");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let stray = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        // Switch off (default): the home page must carry no trace of the
+        // feature at all — not even the word "Unassigned".
+        let mut st_off = build_state_with_dir(&dir);
+        st_off.herdr = fake.clone();
+        let resp_off = get(router(st_off), "/").await;
+        assert_eq!(resp_off.status(), StatusCode::OK);
+        let body_off = body_string(resp_off).await;
+        assert!(
+            !body_off.contains("Unassigned") && !body_off.contains("unassigned"),
+            "the home page must render exactly as before when the terminal switch is off: {body_off}"
+        );
+
+        // Switch on: the presence marker appears, but the pane's own name
+        // and cwd never do — this route takes no session and makes no herdr
+        // call, so it structurally cannot leak them.
+        enable_terminal(&dir);
+        let mut st_on = build_state_with_dir(&dir);
+        st_on.herdr = fake;
+        let resp_on = get(router(st_on), "/").await;
+        assert_eq!(resp_on.status(), StatusCode::OK);
+        let body_on = body_string(resp_on).await;
+        assert!(
+            body_on.contains("Unassigned agents"),
+            "the group's presence marker is missing once the switch is on: {body_on}"
+        );
+        assert!(
+            !body_on.contains(&stray.name),
+            "an unauthenticated home page leaked an unassigned agent's name: {body_on}"
+        );
+        assert!(
+            !body_on.contains(&stray_root.to_string_lossy().to_string()),
+            "an unauthenticated home page leaked an unassigned agent's cwd: {body_on}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D3/agent-terminal-9 parity: the Unassigned group's screen read and
+    /// both write paths (free-text input, named keys) reach a pane that is
+    /// genuinely unassigned, gated the same way the project-scoped routes
+    /// are — and refuse (opaque not-found) a pane that belongs to a
+    /// registered project, proving the write paths respect the same
+    /// partition the listing page does, not just the read path.
+    #[tokio::test]
+    async fn unassigned_screen_and_write_routes_reach_only_a_genuinely_unassigned_pane() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("unassigned-write-paths");
+        enable_terminal(&dir);
+        let scratch = fresh_root("unassigned-write-paths-scratch");
+        let project_root = scratch.join("owned");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let owned = fake
+            .agent_start("w1", Some(&project_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let stray = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "owned");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        // Screen read reaches the stray pane.
+        let screen_resp = app
+            .clone()
+            .oneshot(unassigned_screen_req(&stray.pane_id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(screen_resp.status(), StatusCode::OK);
+
+        // Screen read refuses the owned pane — it belongs to a project, not
+        // to this group.
+        let owned_screen_resp = app
+            .clone()
+            .oneshot(unassigned_screen_req(&owned.pane_id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(owned_screen_resp.status(), StatusCode::NOT_FOUND);
+
+        // Free-text input reaches the stray pane and is readable back.
+        let input_resp = app
+            .clone()
+            .oneshot(unassigned_input_req(&stray.pane_id, "hello stray", true, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(input_resp.status(), StatusCode::OK);
+        let input_body = body_string(input_resp).await;
+        assert!(input_body.contains("\"ok\":true"), "{input_body}");
+
+        let after_input = app
+            .clone()
+            .oneshot(unassigned_screen_req(&stray.pane_id, Some(&cookie)))
+            .await
+            .unwrap();
+        let after_input_body = body_string(after_input).await;
+        assert!(after_input_body.contains("hello stray"), "{after_input_body}");
+
+        // Named keys reach the stray pane.
+        let keys_resp = app
+            .clone()
+            .oneshot(unassigned_keys_req(&stray.pane_id, &["enter"], Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(keys_resp.status(), StatusCode::OK);
+
+        // Input refuses the owned pane too — the write paths honor the same
+        // partition the read path and the listing page do.
+        let owned_input_resp = app
+            .oneshot(unassigned_input_req(&owned.pane_id, "should never land", true, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(owned_input_resp.status(), StatusCode::NOT_FOUND);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
     }
 }

@@ -39,7 +39,14 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
     )
 }
 
-pub fn project_list_page(projects: &[(Project, usize)]) -> String {
+/// `unassigned_visible` is D5/D4's presence marker, never contents: `true`
+/// exactly when the D7 `terminal.enabled` switch is on (checked with no
+/// herdr call and no session, so this unauthenticated page never learns
+/// whether any pane is actually unassigned) — renders a link to
+/// `/_terminal/unassigned`, whose own route is gated like every other
+/// terminal route. `false` (the default) renders this page byte-identical
+/// to how it looked before this feature existed.
+pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool) -> String {
     let listing = if projects.is_empty() {
         "<p class=\"fg-empty\">Chưa có project nào. Đăng ký: <code>mdview register &lt;dir&gt;</code> hoặc gọi MCP <code>mdview_view_file</code>.</p>".to_string()
     } else {
@@ -66,11 +73,27 @@ pub fn project_list_page(projects: &[(Project, usize)]) -> String {
         }
         format!(r#"<div class="proj-cards">{cards}</div>"#, cards = cards)
     };
+    // D5/D4: presence only — no agent name, no cwd, not even a count, ever
+    // reaches this markup. The link's own route (`/_terminal/unassigned`)
+    // carries the same session/switch/method gate as every other terminal
+    // route; this card only says the group exists.
+    let unassigned_card = if unassigned_visible {
+        r#"<div class="proj-cards">
+  <a class="fg-card proj-card__link" href="/_terminal/unassigned">
+    <div class="fg-card__title">Unassigned agents</div>
+    <div class="fg-card__sub">Agents running outside every registered project</div>
+  </a>
+</div>"#
+            .to_string()
+    } else {
+        String::new()
+    };
     let body = format!(
         r#"{topbar}
-<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{listing}</main>"#,
+<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{listing}{unassigned_card}</main>"#,
         topbar = topbar(""),
-        listing = listing
+        listing = listing,
+        unassigned_card = unassigned_card,
     );
     layout("Projects", "", &body)
 }
@@ -184,19 +207,20 @@ pub struct TerminalPaneView {
     pub cwd: String,
 }
 
-/// `GET /p/:id/_terminal` up state (D2/D6): the project-scoped pane list.
-/// Zero panes renders a named empty state, not a blank page — distinct
-/// wording from [`terminal_down_page`] so an empty list is never mistaken
-/// for herdr being unreachable, or the reverse.
-pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
-    let rows = if panes.is_empty() {
-        r#"<p class="fg-empty">No agents are running under this project right now.</p>"#
-            .to_string()
-    } else {
-        let mut out = String::new();
-        for p in panes {
-            out.push_str(&format!(
-                r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
+/// Shared by [`terminal_page`] and [`unassigned_terminal_page`]: one pane's
+/// card — screen viewport, reply form, key buttons — the exact widget set
+/// `assets/app.js`'s project-scoped poller/handlers drive. `empty_msg` is
+/// rendered instead when `panes` is empty, kept distinct per caller so an
+/// empty project and an empty Unassigned group are never confusable with
+/// each other, or with [`terminal_down_page`]'s herdr-silent wording.
+fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
+    if panes.is_empty() {
+        return format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_msg));
+    }
+    let mut out = String::new();
+    for p in panes {
+        out.push_str(&format!(
+            r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
   <div class="fg-card__title">{name} <span class="fg-chip fg-chip--neutral">{status}</span></div>
   <div class="term-pane__meta">{kind}{title_sep}{title}</div>
   <div class="term-pane__cwd">{cwd}</div>
@@ -216,17 +240,24 @@ pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
     <button type="button" data-key="tab">Tab</button>
   </div>
 </div>"#,
-                pane_id = esc(&p.pane_id),
-                name = esc(&p.name),
-                status = esc(&p.status),
-                kind = esc(&p.kind),
-                title_sep = if p.title.is_empty() { "" } else { " · " },
-                title = esc(&p.title),
-                cwd = esc(&p.cwd),
-            ));
-        }
-        out
-    };
+            pane_id = esc(&p.pane_id),
+            name = esc(&p.name),
+            status = esc(&p.status),
+            kind = esc(&p.kind),
+            title_sep = if p.title.is_empty() { "" } else { " · " },
+            title = esc(&p.title),
+            cwd = esc(&p.cwd),
+        ));
+    }
+    out
+}
+
+/// `GET /p/:id/_terminal` up state (D2/D6): the project-scoped pane list.
+/// Zero panes renders a named empty state, not a blank page — distinct
+/// wording from [`terminal_down_page`] so an empty list is never mistaken
+/// for herdr being unreachable, or the reverse.
+pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
+    let rows = pane_cards(panes, "No agents are running under this project right now.");
     // `data-project-id` lets `assets/app.js`'s screen poller build each
     // pane's `/p/:id/_terminal/:pane_id/screen` URL without threading the id
     // through every `.term-screen` element individually.
@@ -249,6 +280,149 @@ pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
         rows = rows,
     );
     layout(&format!("{} · terminal", project.name), "", &body)
+}
+
+/// Inline poller/reply/keys wiring for [`unassigned_terminal_page`], scoped
+/// to `.unassigned-panes` so it never touches a project page's own panes.
+/// `assets/app.js`'s existing terminal script is not reused here — it
+/// resolves every URL from a `data-project-id` attribute
+/// (`/p/:id/_terminal/...`), and this group belongs to no project id; that
+/// file is also not among this cell's declared files. This duplicates its
+/// shape deliberately rather than inventing a different wiring convention —
+/// flagged here for a later cell to fold both into one shared script once
+/// `assets/app.js` is in scope.
+const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
+(function () {
+  var POLL_MS = 1500;
+  var HERDR_DOWN_TEXT = "herdr is not running";
+  var lastRevision = {};
+
+  function screenUrl(paneId) {
+    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/screen";
+  }
+  function inputUrl(paneId) {
+    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/input";
+  }
+  function keysUrl(paneId) {
+    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/keys";
+  }
+
+  function pollOne(el) {
+    var paneId = el.getAttribute("data-pane-id");
+    fetch(screenUrl(paneId), { credentials: "same-origin" })
+      .then(function (res) {
+        if (!res.ok) { el.textContent = HERDR_DOWN_TEXT; return null; }
+        return res.json();
+      })
+      .then(function (body) {
+        if (!body) return;
+        if (lastRevision[paneId] === body.revision) return;
+        lastRevision[paneId] = body.revision;
+        el.textContent = body.text;
+      })
+      .catch(function () { el.textContent = HERDR_DOWN_TEXT; });
+  }
+
+  function pollAll() {
+    Array.prototype.slice
+      .call(document.querySelectorAll(".unassigned-panes .term-screen[data-pane-id]"))
+      .forEach(pollOne);
+  }
+  pollAll();
+  setInterval(pollAll, POLL_MS);
+
+  function postJson(url, body) {
+    return fetch(url, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function sendReply(paneId, text, submit, input) {
+    if (!text) return;
+    postJson(inputUrl(paneId), { text: text, submit: submit })
+      .then(function (res) { if (res.ok && input) input.value = ""; })
+      .catch(function () {});
+  }
+
+  Array.prototype.slice
+    .call(document.querySelectorAll(".unassigned-panes .term-reply[data-pane-id]"))
+    .forEach(function (form) {
+      var paneId = form.getAttribute("data-pane-id");
+      var input = form.querySelector(".term-reply__text");
+      var stageBtn = form.querySelector(".term-reply__stage");
+      form.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        sendReply(paneId, input.value, true, input);
+      });
+      if (stageBtn) {
+        stageBtn.addEventListener("click", function () {
+          sendReply(paneId, input.value, false, input);
+        });
+      }
+    });
+
+  Array.prototype.slice
+    .call(document.querySelectorAll(".unassigned-panes .term-keys[data-pane-id]"))
+    .forEach(function (group) {
+      var paneId = group.getAttribute("data-pane-id");
+      Array.prototype.slice.call(group.querySelectorAll("button[data-key]")).forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var key = btn.getAttribute("data-key");
+          if (!key) return;
+          postJson(keysUrl(paneId), { keys: [key] }).catch(function () {});
+        });
+      });
+    });
+})();
+</script>"#;
+
+/// `GET /_terminal/unassigned` up state (D5/D4/D6): every herdr pane whose
+/// cwd sits under no registered project root, gated identically to
+/// [`terminal_page`] (session, D7 switch, method) — this view renders only
+/// what the route already decided to hand it, so it carries no gate logic
+/// of its own. Zero panes renders a named empty state distinct from both
+/// [`terminal_page`]'s own empty wording and [`unassigned_terminal_down_page`].
+pub fn unassigned_terminal_page(panes: &[TerminalPaneView]) -> String {
+    let rows = pane_cards(panes, "No agents are running outside a registered project right now.");
+    let body = format!(
+        r#"{topbar}
+{tab_style}
+<main class="fg-page">
+  <h2 class="fg-pagehead__title">Unassigned agents</h2>
+  <p class="term-pane__meta">Agents running outside every registered project. Registering a project here never happens automatically (D5) — <a href="/">register it from the project list</a> if you want it to have its own Terminal tab.</p>
+  <div class="term-panes unassigned-panes">{rows}</div>
+</main>
+{script}"#,
+        topbar = topbar("<span class=\"crumb\">Unassigned agents</span>"),
+        tab_style = PROJECT_TAB_STYLE,
+        rows = rows,
+        script = UNASSIGNED_TERMINAL_SCRIPT,
+    );
+    layout("Unassigned agents", "", &body)
+}
+
+/// `GET /_terminal/unassigned` down state (D6): herdr's socket did not
+/// answer — same remedy wording [`terminal_down_page`] renders, so a poller
+/// or a reader sees an identical state whether the silence was noticed on a
+/// project page or here.
+pub fn unassigned_terminal_down_page() -> String {
+    let body = format!(
+        r#"{topbar}
+{tab_style}
+<main class="fg-page">
+  <h2 class="fg-pagehead__title">Unassigned agents</h2>
+  <div class="fg-card term-pane">
+    <div class="fg-card__title">herdr is not running</div>
+    <div class="term-pane__meta">Start herdr, then reload this page — mdview does not start it for you unless the herdr supervisor is switched on in Settings.</div>
+  </div>
+</main>"#,
+        topbar = topbar("<span class=\"crumb\">Unassigned agents</span>"),
+        tab_style = PROJECT_TAB_STYLE,
+    );
+    layout("Unassigned agents", "", &body)
 }
 
 /// `GET /p/:id/_terminal` down state (D6): herdr's socket did not answer.
