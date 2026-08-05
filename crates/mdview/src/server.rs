@@ -157,6 +157,9 @@ fn router(state: AppState) -> Router {
         // Gated (D4): `any(...)` + `MethodGate<Get>` inside the handler, not
         // `.get(...)`, for the same method-mismatch-oracle reason as above.
         .route("/p/:id/_terminal", any(terminal_page))
+        // agent-terminal-6: one pane's polled screen, same gate shape as the
+        // page above (`any(...)` + `MethodGate<Get>` inside the handler).
+        .route("/p/:id/_terminal/:pane_id/screen", any(terminal_screen))
         .route("/p/:id/*path", get(project_path))
         .with_state(state)
 }
@@ -514,12 +517,22 @@ async fn bee_cell_detail(
 /// A silent or errored herdr socket renders the D6 remedy state — never a
 /// raw error, and never an empty pane list that would look identical to a
 /// project that genuinely has zero agents running.
+///
+/// Carried over from agent-terminal-5 (recorded deviation there): the D7
+/// `terminal.enabled` switch is documented as what makes panes and screens
+/// reachable, but until this cell only the token gate enforced anything —
+/// checked here, after the method/session extractors and before the project
+/// lookup, so a disabled switch answers exactly like an unrouted path even
+/// with a valid session (see `terminal_family_enabled`).
 async fn terminal_page(
     _method: terminal_auth::MethodGate<terminal_auth::Get>,
     _session: terminal_auth::AuthSession,
     State(st): State<AppState>,
     Path(id): Path<String>,
 ) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
     };
@@ -535,6 +548,88 @@ async fn terminal_page(
         }
         Err(_) => Html(views::terminal_down_page(&project)).into_response(),
     }
+}
+
+/// Whether the D7 `terminal.enabled` switch is on, read through the same
+/// injectable config path every settings route uses (`st.config_data_dir`)
+/// so a route test never touches the real `~/.mdview`. Checked on every
+/// route in the gated terminal family — `terminal_page` above and
+/// `terminal_screen` below — never on `/settings` or
+/// `POST /api/terminal-config`/`POST /settings/terminal/token`, which must
+/// stay reachable so the switch can be turned back on (per this cell's
+/// carried-over instruction).
+fn terminal_family_enabled(st: &AppState) -> bool {
+    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+        st.config_data_dir.as_deref(),
+    ));
+    cfg.terminal.enabled
+}
+
+/// The exact wording `terminal_down_page` renders for D6 — shared so the
+/// screen endpoint's herdr-down answer and the page's own down state read
+/// identically to whatever surfaces them.
+const HERDR_DOWN_REMEDY: &str = "herdr is not running";
+
+/// `GET /p/:id/_terminal/:pane_id/screen` (D2/D3/D4/D6) — one pane's current
+/// screen, polled by the client in `assets/app.js`. Modeled on herdr-go's
+/// `ScreenBody { text, revision }` (`herdr-go/src/web/screen.rs`): the raw
+/// screen text plus a revision the client compares to skip a redundant
+/// repaint, rendered as plain text — no ANSI colour, no xterm.js, both
+/// deliberately out of scope for this slice.
+///
+/// Guarded exactly like `terminal_page`: `MethodGate<Get>` + `AuthSession`
+/// run before this body, then the D7 enabled switch, then the same D2
+/// containment boundary `terminal_page` uses — a pane id is only ever read
+/// if it is already present in this project's own boundary-filtered pane
+/// list, never trusted from the URL alone. A pane that existed when the
+/// page listed it but is gone by the time this fires (or was never in this
+/// project) gets the ordinary not-found page, distinct from herdr itself
+/// being unreachable.
+async fn terminal_screen(
+    _method: terminal_auth::MethodGate<terminal_auth::Get>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+    Path((id, pane_id)): Path<(String, String)>,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("project not found");
+    };
+    let snapshot = match st.herdr.snapshot().await {
+        Ok(s) => s,
+        Err(_) => return herdr_down_response(),
+    };
+    let in_project = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+        .map(|boundary| project_panes(&snapshot, &boundary))
+        .unwrap_or_default()
+        .iter()
+        .any(|p| p.pane_id == pane_id);
+    if !in_project {
+        return not_found("pane not found");
+    }
+    match st.herdr.read_pane(&pane_id, herdr::ReadSource::Visible, 0).await {
+        Ok(read) => Json(json!({ "text": read.text, "revision": read.revision })).into_response(),
+        Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
+        // Any other herdr failure (socket gone, protocol mismatch, a
+        // request-level error) collapses to the same D6 remedy `terminal_page`
+        // renders for a silent socket — the client shows it verbatim rather
+        // than a blank screen, and never a raw error type.
+        Err(_) => herdr_down_response(),
+    }
+}
+
+/// The JSON answer `terminal_screen` gives a poller while herdr is
+/// unreachable — a `502` (not `200` with empty text, which would be
+/// indistinguishable from a genuinely blank screen) carrying the same
+/// wording `terminal_down_page` renders.
+fn herdr_down_response() -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({ "error": HERDR_DOWN_REMEDY })),
+    )
+        .into_response()
 }
 
 /// Join each of the snapshot's agents to its own pane's working directory —
@@ -3503,6 +3598,32 @@ mod bee_route_tests {
         b.body(Body::empty()).unwrap()
     }
 
+    /// A GET request to `/p/{id}/_terminal/{pane_id}/screen`, optionally
+    /// carrying the given session cookie value — the screen sibling of
+    /// `terminal_req` above.
+    fn terminal_screen_req(id: &str, pane_id: &str, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .uri(format!("/p/{id}/_terminal/{pane_id}/screen"))
+            .method("GET");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// Writes `dir/config.toml` with the D7 `terminal.enabled` switch on —
+    /// the gate this cell (agent-terminal-6) adds in front of every route in
+    /// the terminal family. Every test below that expects `terminal_page` or
+    /// `terminal_screen` to actually run (rather than answer the same opaque
+    /// 404 a disabled switch or a missing session both produce) must call
+    /// this first; a fresh `build_state_with_dir` config resolves to
+    /// `Config::default()`, whose `terminal.enabled` is `false`.
+    fn enable_terminal(dir: &Path) {
+        let mut cfg = Config::load_from(&dir.join("config.toml"));
+        cfg.terminal.enabled = true;
+        cfg.save_to(&dir.join("config.toml")).unwrap();
+    }
+
     /// Truth 1: "Without a terminal session the route returns an opaque
     /// 404, identical to an unknown route" — both with no cookie at all and
     /// with a stale/unknown one, and both compared byte-for-byte (status,
@@ -3643,6 +3764,7 @@ mod bee_route_tests {
     #[tokio::test]
     async fn terminal_route_unknown_project_is_a_real_not_found_page() {
         let dir = fresh_root("terminal-unknown-project");
+        enable_terminal(&dir);
         let st = build_state_with_dir(&dir);
         let app = router(st);
         let (_token, cookie) = rotate_token(app.clone()).await;
@@ -3690,6 +3812,7 @@ mod bee_route_tests {
     async fn terminal_route_renders_named_remedy_when_herdr_is_silent() {
         let dir = fresh_root("terminal-herdr-down");
         let root = fresh_root("terminal-herdr-down-project");
+        enable_terminal(&dir);
         let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
         fake.set_available(false);
 
@@ -3735,6 +3858,7 @@ mod bee_route_tests {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("terminal-boundary-data");
+        enable_terminal(&dir);
         let scratch = fresh_root("terminal-boundary-scratch");
         let root_a = scratch.join("project-a");
         let root_b = scratch.join("project-b");
@@ -3819,5 +3943,343 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// agent-terminal-6, truth 2: "Without a terminal session the screen
+    /// endpoint returns an opaque 404" — the same byte-identical-to-unrouted
+    /// proof `terminal_route_without_a_session_is_byte_identical_to_an_unrouted_path`
+    /// uses for the page, applied to its screen sibling.
+    #[tokio::test]
+    async fn terminal_screen_without_a_session_is_byte_identical_to_an_unrouted_path() {
+        let dir = fresh_root("terminal-screen-no-session");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-no-session-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "screen-no-session");
+        let app = router(st);
+
+        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
+            let with_no_session = app
+                .clone()
+                .oneshot(terminal_screen_req(&project.id, "w1:p1", cookie))
+                .await
+                .unwrap();
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
+            assert_eq!(with_no_session.status(), unrouted.status());
+            assert_eq!(with_no_session.headers(), unrouted.headers());
+            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
+            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(a, b);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The screen route's own method-mismatch-oracle proof, mirroring
+    /// `terminal_route_wrong_method_is_byte_identical_to_unrouted` — mounted
+    /// with `any(...)` + `MethodGate<Get>`, never `.get(...)`.
+    #[tokio::test]
+    async fn terminal_screen_wrong_method_is_byte_identical_to_unrouted() {
+        let dir = fresh_root("terminal-screen-wrong-method");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-wrong-method-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "screen-wrong-method");
+        let app = router(st);
+
+        let posted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/p/{}/_terminal/w1:p1/screen", project.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
+        assert_eq!(posted.status(), unrouted.status());
+        assert_eq!(posted.headers(), unrouted.headers());
+        let a = posted.into_body().collect().await.unwrap().to_bytes();
+        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The must-have this cell's carried-over deviation exists to close:
+    /// with the D7 `terminal.enabled` switch off, both `terminal_page` and
+    /// `terminal_screen` answer exactly as an unrouted path would — status,
+    /// headers and body — even with a session a valid rotation just minted.
+    #[tokio::test]
+    async fn terminal_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session() {
+        let dir = fresh_root("terminal-family-disabled");
+        // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
+        let root = fresh_root("terminal-family-disabled-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "family-disabled");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let unrouted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted_status = unrouted.status();
+        let unrouted_headers = unrouted.headers().clone();
+        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
+
+        let page = app
+            .clone()
+            .oneshot(terminal_req(&project.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(page.status(), unrouted_status);
+        assert_eq!(page.headers(), &unrouted_headers);
+        let page_body = page.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            page_body, unrouted_body,
+            "the terminal page must be unreachable while the switch is off, even with a valid session"
+        );
+
+        let screen = app
+            .oneshot(terminal_screen_req(&project.id, "w1:p1", Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(screen.status(), unrouted_status);
+        assert_eq!(screen.headers(), &unrouted_headers);
+        let screen_body = screen.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            screen_body, unrouted_body,
+            "the screen endpoint must be unreachable while the switch is off, even with a valid session"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The other half of the same must-have: the settings page and the
+    /// gated `POST /api/terminal-config` switch endpoint must both stay
+    /// reachable while the switch is off — otherwise it could never be
+    /// turned back on.
+    #[tokio::test]
+    async fn settings_and_terminal_config_switch_stay_reachable_while_terminal_disabled() {
+        let dir = fresh_root("terminal-disabled-settings-reachable");
+        // The switch defaults off; nothing in this test turns it on before
+        // exercising the two routes that must stay reachable regardless.
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let settings = get(app.clone(), "/settings").await;
+        assert_eq!(settings.status(), StatusCode::OK);
+
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let switch_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/terminal-config")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::from("enabled=on"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            switch_resp.status().is_redirection(),
+            "the gated switch endpoint must stay reachable while the terminal switch is off, got {}",
+            switch_resp.status()
+        );
+
+        let saved = Config::load_from(&dir.join("config.toml"));
+        assert!(
+            saved.terminal.enabled,
+            "the switch endpoint did not actually turn the switch on"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// agent-terminal-6, truth: "A screen read for a pane outside the
+    /// project's root is refused, even with a valid session" — the D2
+    /// containment boundary applied to the screen route itself, not only the
+    /// page's pane list.
+    #[tokio::test]
+    async fn terminal_screen_refuses_a_pane_outside_the_project_root() {
+        let dir = fresh_root("terminal-screen-boundary");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminal-screen-boundary-scratch");
+        let root_a = scratch.join("project-a");
+        let outside = scratch.join("outside-a");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let outside_agent = fake
+            .agent_start("w1", Some(&outside.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project_a = register(&st, &root_a, "project-a-screen");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(terminal_screen_req(&project_a.id, &outside_agent.pane_id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "a pane outside the project root must be refused, not read"
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains("pane not found"), "{body}");
+        assert!(
+            !body.contains(&outside_agent.name),
+            "the refused pane's own screen must never be echoed back: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// A pane id that never resolves to any pane in this project's own
+    /// boundary-filtered list — never a crash, never treated as the herdr-down
+    /// state, just the ordinary not-found.
+    #[tokio::test]
+    async fn terminal_screen_unknown_pane_in_project_is_not_found() {
+        let dir = fresh_root("terminal-screen-unknown-pane");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-unknown-pane-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "screen-unknown-pane");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(terminal_screen_req(&project.id, "no-such-pane", Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_string(resp).await;
+        assert!(body.contains("pane not found"), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// agent-terminal-6, truth: "The rendered screen shows the text herdr
+    /// returned, with a UTF-8 screen containing wide CJK and emoji intact" —
+    /// proven on the JSON the client polls (`assets/app.js` renders it via
+    /// `textContent`, so nothing further escapes or mangles it after this).
+    /// Also pins the response shape against herdr-go's `ScreenBody { text,
+    /// revision }`.
+    #[tokio::test]
+    async fn terminal_screen_returns_the_panes_text_and_revision_with_utf8_intact() {
+        let dir = fresh_root("terminal-screen-utf8");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-utf8-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let screen_text = "屏幕内容 😀\n❯ ";
+        fake.seed_scroll_pane(&started.pane_id, screen_text, screen_text, None);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "screen-utf8");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["text"], serde_json::json!(screen_text), "{body}");
+        assert_eq!(json["revision"], serde_json::json!(1), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// agent-terminal-6, truth: "herdr going silent between polls surfaces
+    /// the named remedy rather than a blank screen" — the server-side half:
+    /// a silent socket never answers the poll with `2xx`, and the body
+    /// carries the same "herdr is not running" wording `terminal_down_page`
+    /// renders, so `assets/app.js` (which shows that literal text on any
+    /// non-OK response) and the page agree.
+    #[tokio::test]
+    async fn terminal_screen_reports_herdr_down_without_a_success_status() {
+        let dir = fresh_root("terminal-screen-herdr-down");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-herdr-down-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        fake.set_available(false);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "screen-herdr-down");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(terminal_screen_req(&project.id, "w1:p1", Some(&cookie)))
+            .await
+            .unwrap();
+        assert!(
+            !resp.status().is_success(),
+            "a silent herdr socket must never answer the screen poll with 2xx"
+        );
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("herdr is not running"),
+            "no named remedy in the screen endpoint's herdr-down answer: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
     }
 }

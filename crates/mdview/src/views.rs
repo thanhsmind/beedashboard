@@ -127,6 +127,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .proj-tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
 .term-pane__cwd { color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }
 .term-pane__meta { color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
+.term-screen { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
 </style>"#;
 
 /// D6: the Terminal tab is always present on a project page, whether or not
@@ -182,6 +183,7 @@ pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
   <div class="fg-card__title">{name} <span class="fg-chip fg-chip--neutral">{status}</span></div>
   <div class="term-pane__meta">{kind}{title_sep}{title}</div>
   <div class="term-pane__cwd">{cwd}</div>
+  <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
 </div>"#,
                 pane_id = esc(&p.pane_id),
                 name = esc(&p.name),
@@ -194,10 +196,13 @@ pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
         }
         out
     };
+    // `data-project-id` lets `assets/app.js`'s screen poller build each
+    // pane's `/p/:id/_terminal/:pane_id/screen` URL without threading the id
+    // through every `.term-screen` element individually.
     let body = format!(
         r#"{topbar}
 {tab_style}
-<main class="fg-page">
+<main class="fg-page" data-project-id="{pid}">
   <h2 class="fg-pagehead__title">{name}</h2>
   {tabs}
   <div class="term-panes">{rows}</div>
@@ -207,6 +212,7 @@ pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
             name = esc(&project.name)
         )),
         tab_style = PROJECT_TAB_STYLE,
+        pid = esc(&project.id),
         name = esc(&project.name),
         tabs = project_tabs(&project.id, "terminal"),
         rows = rows,

@@ -712,4 +712,61 @@
     ws.onerror = function () { try { ws.close(); } catch (e) {} };
   }
   connect();
+
+  // Terminal screen poll (agent-terminal-6): each pane's `.term-screen`
+  // viewport polls its own `/p/:id/_terminal/:pane_id/screen` endpoint on a
+  // fixed interval and shows the plain text herdr returned — no ANSI colour,
+  // no xterm.js, both deliberately out of scope until slice 3. A `revision`
+  // that hasn't changed since the last successful poll skips the repaint.
+  //
+  // On any failed poll (herdr silent, the pane gone, the network hiccups)
+  // the viewport shows the same "herdr is not running" wording the page's
+  // own down-state renders (D6) — never left blank, and never mistaken for
+  // "the pane has no output". The interval itself never changes on failure:
+  // there is no backoff and no faster retry, so a herdr outage can never
+  // turn this poller into a request storm against a socket that is already
+  // struggling to answer.
+  (function () {
+    var main = document.querySelector("main.fg-page[data-project-id]");
+    if (!main) return;
+    var projectId = main.getAttribute("data-project-id");
+    var screens = Array.prototype.slice.call(document.querySelectorAll(".term-screen[data-pane-id]"));
+    if (!projectId || !screens.length) return;
+
+    var POLL_MS = 1500;
+    var HERDR_DOWN_TEXT = "herdr is not running";
+    var lastRevision = {}; // pane id -> last-rendered revision
+
+    function screenUrl(paneId) {
+      return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/screen";
+    }
+
+    function pollOne(el) {
+      var paneId = el.getAttribute("data-pane-id");
+      fetch(screenUrl(paneId), { credentials: "same-origin" })
+        .then(function (res) {
+          if (!res.ok) {
+            el.textContent = HERDR_DOWN_TEXT;
+            return null;
+          }
+          return res.json();
+        })
+        .then(function (body) {
+          if (!body) return;
+          if (lastRevision[paneId] === body.revision) return; // unchanged, skip repaint
+          lastRevision[paneId] = body.revision;
+          el.textContent = body.text;
+        })
+        .catch(function () {
+          el.textContent = HERDR_DOWN_TEXT;
+        });
+    }
+
+    function pollAll() {
+      screens.forEach(pollOne);
+    }
+
+    pollAll();
+    setInterval(pollAll, POLL_MS);
+  })();
 })();
