@@ -2,7 +2,9 @@
 //! Theme is CSS-variable driven (no-flash head script); code colors come from
 //! `/highlight.css` (syntect class-based), so themes switch without re-render.
 
-use mdview_core::bee::{BeeCell, BeeShippedFeature, BeeSnapshot};
+use mdview_core::bee::{
+    BeeBacklog, BeeCell, BeeLane, BeeSession, BeeShippedFeature, BeeSnapshot, BeeWorkspace,
+};
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
 
@@ -147,6 +149,12 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 .bee-velocity__lists {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4); }}
 .bee-velocity__subhead {{ margin: 0 0 var(--space-2) 0; font-size: var(--type-heading-sm-size); }}
 .bee-velocity__open-list {{ margin: 0; padding-left: var(--space-4); color: var(--color-text-subtle); }}
+.bee-panels {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }}
+.bee-panel__head {{ display: flex; align-items: center; gap: var(--space-2); margin: 0; }}
+.bee-panel__subhead {{ margin: var(--space-3) 0 var(--space-2) 0; font-size: var(--type-heading-sm-size); }}
+.bee-panel__chips {{ display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); }}
+.bee-panel__list {{ display: flex; flex-direction: column; gap: var(--space-2); }}
+.bee-severity--p1 {{ font-weight: var(--weight-strong); }}
 </style>
 <main class="fg-page">
   <div class="fg-pagehead">
@@ -163,6 +171,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
     {stuck}
     {done}
   </div>
+  {panels}
   {errors}
 </main>"#,
         topbar = topbar(&format!(
@@ -177,6 +186,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         waiting = bee_bucket_section("Waiting", "waiting", &b.waiting, "neutral"),
         stuck = bee_bucket_section("Stuck", "stuck", &b.stuck, "danger"),
         done = bee_bucket_section("Done", "done", &b.done, "success"),
+        panels = bee_panels_section(snapshot),
         errors = bee_read_errors(&snapshot.read_errors),
     );
     layout(&format!("{} · bee", project.name), "", &body)
@@ -386,6 +396,235 @@ fn bee_read_errors(errors: &[String]) -> String {
     format!(
         r#"<div class="fg-card fg-card--sunken"><div class="fg-card__title">Could not read</div><ul>{items}</ul></div>"#,
         items = items
+    )
+}
+
+/// Backlog, sessions and lanes panels (bee-cockpit-6), rendered below the D7
+/// buckets on the same board page (D4/D1). Pure formatting over
+/// `BeeSnapshot::backlog`/`sessions`/`lanes`/`workspaces` — every one of
+/// those fields already arrived relativized/redacted from
+/// `mdview_core::bee::read_snapshot` in bee-cockpit-5 (`BeeSession` carries
+/// no `transcript_path`; every path on a `BeeWorkspace` is already
+/// relative), so this view only formats what it is handed, never
+/// recomputes any of that logic.
+fn bee_panels_section(snapshot: &BeeSnapshot) -> String {
+    format!(
+        r#"<div class="bee-panels">
+    {backlog}
+    {sessions}
+    {lanes}
+  </div>"#,
+        backlog = bee_backlog_panel(&snapshot.backlog),
+        sessions = bee_sessions_panel(&snapshot.sessions),
+        lanes = bee_lanes_panel(&snapshot.lanes, &snapshot.workspaces),
+    )
+}
+
+/// Backlog panel: PBI items grouped by current status (a summary, not a
+/// per-item dump, so it stays readable no matter how many PBIs a real store
+/// holds), and findings grouped by severity with the P1 count visually
+/// weighted (`bee-severity--p1`) since a P1 blocks. `findings.recent` is a
+/// bounded slice of `findings.total` (`RECENT_DETAIL_CAP` in
+/// `mdview_core::bee`) — when it is showing fewer than the true total, the
+/// panel says so instead of looking smaller than the real backlog. An empty
+/// PBI list and an empty finding set each render their own honest empty
+/// state rather than a hidden section or a bare `0`.
+fn bee_backlog_panel(backlog: &BeeBacklog) -> String {
+    let pbi_body = if backlog.pbis.is_empty() {
+        "<p class=\"fg-empty\">No backlog items yet.</p>".to_string()
+    } else {
+        let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+        for pbi in &backlog.pbis {
+            *counts.entry(pbi.status.as_str()).or_insert(0) += 1;
+        }
+        let chips: String = counts
+            .iter()
+            .map(|(status, count)| {
+                format!(
+                    r#"<span class="fg-chip fg-chip--neutral">{status}: {count}</span>"#,
+                    status = esc(status),
+                    count = count,
+                )
+            })
+            .collect();
+        let total = backlog.pbis.len();
+        format!(
+            r#"<div class="bee-panel__chips">{chips}</div><p class="bee-cell__meta">{total} backlog item{plural} total</p>"#,
+            chips = chips,
+            total = total,
+            plural = if total == 1 { "" } else { "s" },
+        )
+    };
+
+    let findings = &backlog.findings;
+    let findings_body = if findings.total == 0 {
+        "<p class=\"fg-empty\">No findings yet.</p>".to_string()
+    } else {
+        let sev = &findings.by_severity;
+        let sev_chips = format!(
+            r#"<span class="fg-chip fg-chip--danger bee-severity--p1">P1: {p1}</span><span class="fg-chip fg-chip--neutral">P2: {p2}</span><span class="fg-chip fg-chip--neutral">P3: {p3}</span>"#,
+            p1 = sev.p1,
+            p2 = sev.p2,
+            p3 = sev.p3,
+        );
+        let recent_note = if findings.recent.len() < findings.total {
+            format!(
+                r#"<p class="bee-cell__meta">Showing {shown} of {total} findings.</p>"#,
+                shown = findings.recent.len(),
+                total = findings.total,
+            )
+        } else {
+            format!(
+                r#"<p class="bee-cell__meta">{total} finding{plural} total.</p>"#,
+                total = findings.total,
+                plural = if findings.total == 1 { "" } else { "s" },
+            )
+        };
+        let mut rows = String::new();
+        for f in &findings.recent {
+            rows.push_str(&format!(
+                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{title}</div><div class="bee-cell__meta">{severity} · {feature}</div></div>"#,
+                title = esc(&f.title),
+                severity = esc(&f.severity),
+                feature = esc(&f.feature),
+            ));
+        }
+        format!(
+            r#"<div class="bee-panel__chips">{sev_chips}</div>{recent_note}<div class="bee-panel__list">{rows}</div>"#,
+            sev_chips = sev_chips,
+            recent_note = recent_note,
+            rows = rows,
+        )
+    };
+
+    format!(
+        r#"<section class="fg-card bee-panel">
+  <h3 class="bee-panel__head">Backlog</h3>
+  <h4 class="bee-panel__subhead">PBIs by status</h4>
+  {pbi_body}
+  <h4 class="bee-panel__subhead">Findings by severity</h4>
+  {findings_body}
+</section>"#,
+        pbi_body = pbi_body,
+        findings_body = findings_body,
+    )
+}
+
+/// Sessions panel: one entry per `.bee/sessions/*.json` session — its
+/// source, its workspace, whether it is live or stale, and its heartbeat
+/// age in plain relative language (`bee_fmt_heartbeat_age`), never a raw
+/// timestamp. An empty session list renders an honest empty state, not a
+/// hidden panel or a bare `0`.
+fn bee_sessions_panel(sessions: &[BeeSession]) -> String {
+    if sessions.is_empty() {
+        return r#"<section class="fg-card bee-panel">
+  <h3 class="bee-panel__head">Sessions</h3>
+  <p class="fg-empty">No sessions recorded.</p>
+</section>"#
+            .to_string();
+    }
+    let mut rows = String::new();
+    for s in sessions {
+        let (tone, label) = if s.live { ("success", "live") } else { ("neutral", "stale") };
+        let source = s.source.as_deref().unwrap_or("—");
+        let workspace = s.workspace_id.as_deref().unwrap_or("—");
+        rows.push_str(&format!(
+            r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta"><span class="fg-chip fg-chip--{tone}">{label}</span> · {source} · {workspace} · {age}</div></div>"#,
+            id = esc(&s.id),
+            tone = tone,
+            label = label,
+            source = esc(source),
+            workspace = esc(workspace),
+            age = esc(&bee_fmt_heartbeat_age(s.heartbeat_age_minutes)),
+        ));
+    }
+    format!(
+        r#"<section class="fg-card bee-panel">
+  <h3 class="bee-panel__head">Sessions <span class="fg-chip fg-chip--neutral">{count}</span></h3>
+  <div class="bee-panel__list">{rows}</div>
+</section>"#,
+        count = sessions.len(),
+        rows = rows,
+    )
+}
+
+/// A heartbeat age in minutes, rendered as plain relative language ("4
+/// minutes ago", "2 hours ago") — never the raw ISO timestamp it was
+/// derived from. A negative age (a heartbeat somehow in the future) reads
+/// as "just now" rather than a confusing negative duration; a non-finite
+/// value reads "unknown" rather than crashing the format.
+fn bee_fmt_heartbeat_age(minutes: f64) -> String {
+    if !minutes.is_finite() {
+        return "unknown".to_string();
+    }
+    let mins = minutes.max(0.0);
+    if mins < 1.0 {
+        "just now".to_string()
+    } else if mins < 60.0 {
+        let m = mins.round().max(1.0) as i64;
+        format!("{m} minute{plural} ago", plural = if m == 1 { "" } else { "s" })
+    } else if mins < 60.0 * 24.0 {
+        let h = (mins / 60.0).round().max(1.0) as i64;
+        format!("{h} hour{plural} ago", plural = if h == 1 { "" } else { "s" })
+    } else {
+        let d = (mins / (60.0 * 24.0)).round().max(1.0) as i64;
+        format!("{d} day{plural} ago", plural = if d == 1 { "" } else { "s" })
+    }
+}
+
+/// Lanes panel: `.bee/lanes/*.json` records and `.bee/runtime/workspaces/*.json`
+/// worktrees side by side, so the user can see which feature is running
+/// where — the lane names the feature/phase/mode, the workspace names the
+/// branch it runs on. Each source renders its own honest empty state when
+/// absent, independent of the other.
+fn bee_lanes_panel(lanes: &[BeeLane], workspaces: &[BeeWorkspace]) -> String {
+    let lanes_body = if lanes.is_empty() {
+        "<p class=\"fg-empty\">No lanes running.</p>".to_string()
+    } else {
+        let mut rows = String::new();
+        for l in lanes {
+            let phase = l.phase.as_deref().unwrap_or("—");
+            let mode = l.mode.as_deref().unwrap_or("—");
+            let next = l.next_action.as_deref().unwrap_or("—");
+            rows.push_str(&format!(
+                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{feature}</div><div class="bee-cell__meta">phase: {phase} · mode: {mode}</div><div class="bee-cell__meta">{next}</div></div>"#,
+                feature = esc(&l.feature),
+                phase = esc(phase),
+                mode = esc(mode),
+                next = esc(next),
+            ));
+        }
+        format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
+    };
+
+    let workspaces_body = if workspaces.is_empty() {
+        "<p class=\"fg-empty\">No worktree workspaces yet.</p>".to_string()
+    } else {
+        let mut rows = String::new();
+        for w in workspaces {
+            let branch = w.branch.as_deref().unwrap_or("—");
+            rows.push_str(&format!(
+                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{root}</div><div class="bee-cell__meta">branch: {branch} · {kind} · {attached} session{plural} attached</div></div>"#,
+                root = esc(&w.root),
+                branch = esc(branch),
+                kind = esc(&w.kind),
+                attached = w.attached_sessions,
+                plural = if w.attached_sessions == 1 { "" } else { "s" },
+            ));
+        }
+        format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
+    };
+
+    format!(
+        r#"<section class="fg-card bee-panel">
+  <h3 class="bee-panel__head">Lanes</h3>
+  <h4 class="bee-panel__subhead">Lane records</h4>
+  {lanes_body}
+  <h4 class="bee-panel__subhead">Worktree workspaces</h4>
+  {workspaces_body}
+</section>"#,
+        lanes_body = lanes_body,
+        workspaces_body = workspaces_body,
     )
 }
 
@@ -847,6 +1086,24 @@ pub const MERMAID_JS: &str = include_str!("../assets/mermaid.min.js");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeat_age_reads_as_plain_relative_language_not_a_timestamp() {
+        assert_eq!(bee_fmt_heartbeat_age(0.2), "just now");
+        assert_eq!(bee_fmt_heartbeat_age(4.0), "4 minutes ago");
+        assert_eq!(bee_fmt_heartbeat_age(1.0), "1 minute ago");
+        assert_eq!(bee_fmt_heartbeat_age(120.0), "2 hours ago");
+        assert_eq!(bee_fmt_heartbeat_age(60.0), "1 hour ago");
+        assert_eq!(bee_fmt_heartbeat_age(60.0 * 24.0 * 3.0), "3 days ago");
+        // A heartbeat somehow in the future reads as "just now", never a
+        // negative duration.
+        assert_eq!(bee_fmt_heartbeat_age(-5.0), "just now");
+        assert_eq!(bee_fmt_heartbeat_age(f64::NAN), "unknown");
+        // Never a raw ISO-8601 shape anywhere in the output.
+        for mins in [0.0, 4.0, 90.0, 60.0 * 30.0] {
+            assert!(!bee_fmt_heartbeat_age(mins).contains('T'));
+        }
+    }
 
     #[test]
     fn escape_script_breakout_neutralizes_closing_tag_in_array_json() {

@@ -1267,4 +1267,245 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&root).ok();
     }
+
+    // ── bee-cockpit-6: backlog / sessions / lanes panels ──────────────────
+
+    fn session_json(id: &str, last_heartbeat: &str, transcript_path: &str, workspace_id: &str, source: &str) -> String {
+        format!(
+            r#"{{
+                "id": "{id}",
+                "started_at": "2026-08-04T08:00:00Z",
+                "last_heartbeat": "{last_heartbeat}",
+                "transcript_path": "{transcript_path}",
+                "workspace_id": "{workspace_id}",
+                "source": "{source}"
+            }}"#,
+            transcript_path = transcript_path.replace('\\', "\\\\"),
+        )
+    }
+
+    fn lane_json(feature: &str, phase: &str, mode: &str, next_action: &str) -> String {
+        format!(
+            r#"{{"feature": "{feature}", "phase": "{phase}", "mode": "{mode}", "next_action": "{next_action}"}}"#
+        )
+    }
+
+    fn workspace_json(id: &str, root: &str, branch: &str, attached: &[&str]) -> String {
+        let attached_json = attached
+            .iter()
+            .map(|s| serde_json::to_string(s).unwrap())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{
+                "id": "{id}",
+                "type": "worktree",
+                "root": "{root}",
+                "branch": "{branch}",
+                "attached_sessions": [{attached_json}],
+                "created_at": "2026-08-04T08:00:00Z"
+            }}"#,
+            root = root.replace('\\', "\\\\"),
+        )
+    }
+
+    fn rfc3339_minutes_ago(mins: i64) -> String {
+        let now = time::OffsetDateTime::now_utc();
+        (now - time::Duration::minutes(mins))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    }
+
+    /// bee-cockpit-6 (happy): a fixture carrying backlog PBIs/findings, one
+    /// live and one stale session, and a lane + workspace. The body must
+    /// carry the PBI statuses, the severity counts, and both sessions'
+    /// liveness in plain language.
+    #[tokio::test]
+    async fn panels_render_backlog_sessions_and_lanes_with_liveness() {
+        let root = fresh_root("panels-happy");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Add search\",\"status\":\"in-flight\",\"feature\":\"demo\"}\n\
+             {\"kind\":\"pbi\",\"id\":\"PBI-2\",\"title\":\"Add filter\",\"status\":\"done\",\"feature\":\"demo\"}\n\
+             {\"ts\":\"2026-08-05T04:00:00Z\",\"type\":\"finding\",\"title\":\"Race in write path\",\"detail\":\"d\",\"severity\":\"P1\",\"layer\":\"server\",\"feature\":\"demo\"}\n\
+             {\"ts\":\"2026-08-05T03:00:00Z\",\"type\":\"finding\",\"title\":\"Slow query\",\"detail\":\"d\",\"severity\":\"P2\",\"layer\":\"db\",\"feature\":\"demo\"}\n",
+        );
+        write(
+            &root,
+            ".bee/sessions/live.json",
+            &session_json("sess-live", &rfc3339_minutes_ago(4), "/home/x/transcript-live.json", "ws-1", "claude"),
+        );
+        write(
+            &root,
+            ".bee/sessions/stale.json",
+            &session_json("sess-stale", &rfc3339_minutes_ago(120), "/home/x/transcript-stale.json", "ws-2", "codex"),
+        );
+        write(&root, ".bee/lanes/demo.json", &lane_json("demo", "swarming", "standard", "run tests"));
+        write(
+            &root,
+            ".bee/runtime/workspaces/ws-1.json",
+            &workspace_json("ws-1", "demo--wt--feature", "wt/demo", &["sess-live"]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        // PBI statuses.
+        assert!(body.contains("in-flight: 1"), "{body}");
+        assert!(body.contains("done: 1"), "{body}");
+        // Severity counts.
+        assert!(body.contains("P1: 1"), "{body}");
+        assert!(body.contains("P2: 1"), "{body}");
+        assert!(body.contains("P3: 0"), "{body}");
+        // Session liveness, plain language, no raw timestamp.
+        assert!(body.contains("live"), "{body}");
+        assert!(body.contains("stale"), "{body}");
+        assert!(body.contains("4 minutes ago"), "{body}");
+        assert!(body.contains("2 hours ago"), "{body}");
+        assert!(!body.contains("T04:"), "raw ISO timestamp leaked into a heartbeat: {body}");
+        // Lane + workspace.
+        assert!(body.contains("wt/demo"), "{body}");
+        assert!(body.contains("swarming"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// bee-cockpit-6 (happy): 25 findings exceed `RECENT_DETAIL_CAP` (20), so
+    /// the findings panel must state its true total (25) alongside the
+    /// capped count actually shown, not just the visible subset.
+    #[tokio::test]
+    async fn capped_findings_subset_states_its_true_total() {
+        let root = fresh_root("panels-capped");
+        let mut jsonl = String::new();
+        for i in 0..25 {
+            jsonl.push_str(&format!(
+                "{{\"ts\":\"2026-08-05T04:{i:02}:00Z\",\"type\":\"finding\",\"title\":\"Finding {i}\",\"detail\":\"d\",\"severity\":\"P3\",\"layer\":\"x\",\"feature\":\"demo\"}}\n"
+            ));
+        }
+        write(&root, ".bee/backlog.jsonl", &jsonl);
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-capped");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("Showing 20 of 25 findings."),
+            "capped subset must state its true total: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// bee-cockpit-6 (edge): none of backlog/sessions/lanes/workspaces exist.
+    /// The three panels must each render an honest empty state — no hidden
+    /// panel, no bare `0` standing in for missing data.
+    #[tokio::test]
+    async fn absent_backlog_sessions_and_lanes_render_honest_empty_states() {
+        let root = fresh_root("panels-empty");
+        write(&root, "README.md", "# hi");
+        // A present-but-empty `.bee/` (D3) — no `.bee/` at all would 404
+        // instead of rendering the honest-empty-state panels under test.
+        std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-empty");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("No backlog items yet."), "{body}");
+        assert!(body.contains("No findings yet."), "{body}");
+        assert!(body.contains("No sessions recorded."), "{body}");
+        assert!(body.contains("No lanes running."), "{body}");
+        assert!(body.contains("No worktree workspaces yet."), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// bee-cockpit-6 (security): a session's `transcript_path` must never
+    /// reach the body, and no absolute path — the fixture root itself, or a
+    /// workspace's absolute `root` field — may survive verbatim either.
+    /// Named against the fixture's own root and `std::env::temp_dir()`, per
+    /// `docs/history/learnings/20260805-toothless-security-assertions.md`,
+    /// never a production literal like `/home/`.
+    #[tokio::test]
+    async fn panels_leak_no_transcript_path_and_no_absolute_path() {
+        let root = fresh_root("panels-security");
+        let root_str = root.to_string_lossy().into_owned();
+        let transcript_abs = root.join(".bee/sessions/leaky-transcript.json").to_string_lossy().into_owned();
+        let outside_workspace_root = std::env::temp_dir()
+            .join("mdview-server-bee-panels-outside-workspace")
+            .to_string_lossy()
+            .into_owned();
+
+        write(
+            &root,
+            ".bee/sessions/leaky.json",
+            &session_json("sess-leaky", &rfc3339_minutes_ago(1), &transcript_abs, "ws-out", "claude"),
+        );
+        write(
+            &root,
+            ".bee/runtime/workspaces/ws-out.json",
+            &workspace_json("ws-out", &outside_workspace_root, "wt/leaky", &[]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-security");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(!body.contains(&transcript_abs), "transcript_path leaked into the body: {body}");
+        assert!(!body.contains(&root_str), "response body leaked the fixture root: {body}");
+        assert!(
+            !body.contains(&outside_workspace_root),
+            "response body leaked an absolute workspace root: {body}"
+        );
+        assert!(body.contains("sess-leaky"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// bee-cockpit-6 (read-only): the panels read the same on-disk sources
+    /// (`backlog.jsonl`, `sessions/`, `lanes/`, `runtime/workspaces/`) as
+    /// every other bee-cockpit route (D4) — the fixture tree must stay
+    /// byte-identical before and after the request.
+    #[tokio::test]
+    async fn panels_read_never_writes_the_fixtures_bee_tree() {
+        let root = fresh_root("panels-read-only");
+        write(&root, "README.md", "# hi");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"t\",\"status\":\"proposed\",\"feature\":\"demo\"}\n",
+        );
+        write(
+            &root,
+            ".bee/sessions/a.json",
+            &session_json("sess-a", &rfc3339_minutes_ago(2), "/home/x/t.json", "ws-1", "claude"),
+        );
+        write(&root, ".bee/lanes/demo.json", &lane_json("demo", "swarming", "standard", "run tests"));
+        write(
+            &root,
+            ".bee/runtime/workspaces/ws-1.json",
+            &workspace_json("ws-1", "demo--wt--feature", "wt/demo", &["sess-a"]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-read-only");
+        let before = snapshot_tree(&root);
+
+        let _ = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+
+        let after = snapshot_tree(&root);
+        assert_eq!(before, after, ".bee/ tree changed after a request");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
