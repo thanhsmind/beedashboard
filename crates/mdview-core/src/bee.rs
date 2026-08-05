@@ -15,6 +15,14 @@
 //! - **D8** — `active` is true iff at least one cell is `open` or `claimed`.
 //! - **D9** — only live `.bee/cells/*.json` is read; `.bee/cells/archive/`
 //!   and `.bee/logs/` are never opened.
+//! - **D10** — a feature is **shipped** when every one of its non-dropped
+//!   cells is `capped`. A worktree merge into main is never consulted, and a
+//!   dropped cell never blocks shipped status; a feature whose cells are
+//!   *all* dropped is neither shipped nor counted.
+//! - **D11** — a shipped feature's cycle time runs from the earliest
+//!   `trace.claimed_at` to the latest `trace.capped_at` across its
+//!   non-dropped cells. Either endpoint missing means no cycle time is
+//!   reported — never a guessed zero.
 //!
 //! Every path-shaped value that crosses into a public field is rendered
 //! relative to the project root (or reduced to a bare filename when it
@@ -73,6 +81,64 @@ pub struct BeeState {
     pub mode: Option<String>,
 }
 
+/// The claim-to-cap span of one shipped feature (D11). Both timestamps are
+/// the raw RFC 3339 strings straight from `trace`, plus the derived duration
+/// so callers never have to reparse.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeCycleSpan {
+    /// Earliest `trace.claimed_at` across the feature's non-dropped cells.
+    pub started_at: String,
+    /// Latest `trace.capped_at` across the feature's non-dropped cells.
+    pub ended_at: String,
+    /// `ended_at - started_at`, in hours.
+    pub hours: f64,
+}
+
+/// One feature that has shipped per D10: every one of its non-dropped cells
+/// is `capped`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeShippedFeature {
+    pub feature: String,
+    /// How many non-dropped cells back this feature's shipped status.
+    pub cell_count: usize,
+    /// `None` when a non-dropped cell is missing `claimed_at` or
+    /// `capped_at` (or every one of them is) — a shipped feature is still
+    /// reported here, just without a cycle time to guess at (D11).
+    pub cycle_time: Option<BeeCycleSpan>,
+}
+
+/// One calendar day's shipped-feature count, keyed on that day's last cap
+/// date (UTC).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeDayCount {
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    pub count: usize,
+}
+
+/// Ship-rate aggregates over the shipped features that report a cycle time
+/// (D11) — a shipped feature with no timestamps contributes to
+/// [`BeeSnapshot::shipped`] but not to these numbers, since none of them can
+/// be placed on a calendar day without one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeVelocity {
+    /// Shipped-feature count per calendar day, keyed on each feature's last
+    /// cap date. Sorted chronologically.
+    pub per_day: Vec<BeeDayCount>,
+    /// Distinct calendar days with at least one shipped feature.
+    pub active_days: usize,
+    /// Shipped-and-timed feature count divided by `active_days`. `None`
+    /// when there are no active days — never a division by zero.
+    pub features_per_active_day: Option<f64>,
+    /// Shipped-and-timed feature count spread over the calendar span from
+    /// the first to the last ship day, inclusive, expressed per week.
+    /// `None` when nothing shipped with a timestamp.
+    pub features_per_week: Option<f64>,
+    /// Median of every shipped-and-timed feature's cycle time, in hours.
+    /// `None` when nothing shipped with a timestamp.
+    pub median_cycle_time_hours: Option<f64>,
+}
+
 /// A typed snapshot of a project's `.bee/` store at read time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeeSnapshot {
@@ -84,6 +150,11 @@ pub struct BeeSnapshot {
     pub buckets: BeeBuckets,
     /// True when at least one cell is `open` or `claimed` (D8).
     pub active: bool,
+    /// Every feature that has shipped (D10), regardless of whether its
+    /// cycle time could be computed.
+    pub shipped: Vec<BeeShippedFeature>,
+    /// Ship-rate aggregates derived from `shipped` (D11 downstream).
+    pub velocity: BeeVelocity,
     /// Human-readable notes naming what could not be read. Every path
     /// mentioned here is relative to the project root.
     pub read_errors: Vec<String>,
@@ -97,6 +168,8 @@ impl BeeSnapshot {
             state: None,
             buckets: BeeBuckets::default(),
             active: false,
+            shipped: Vec::new(),
+            velocity: BeeVelocity::default(),
             read_errors: Vec::new(),
         }
     }
@@ -120,6 +193,10 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
 
     let mut buckets = BeeBuckets::default();
     let mut active = false;
+    // Every successfully-parsed live cell, dropped and unknown-status ones
+    // included — the feature/shipped view below needs the full set, unlike
+    // the D7 buckets which deliberately drop `dropped` cells.
+    let mut all_cells: Vec<BeeCell> = Vec::new();
 
     let cells_dir = bee_dir.join("cells");
     if cells_dir.is_dir() {
@@ -148,6 +225,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
                     if is_active {
                         active = true;
                     }
+                    all_cells.push(cell.clone());
                     match cell.status.as_str() {
                         "claimed" => buckets.doing.push(cell),
                         "open" => buckets.waiting.push(cell),
@@ -165,11 +243,16 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         }
     }
 
+    let shipped = compute_shipped_features(&all_cells);
+    let velocity = compute_velocity(&shipped);
+
     BeeSnapshot {
         present: true,
         state,
         buckets,
         active,
+        shipped,
+        velocity,
         read_errors,
     }
 }
@@ -271,6 +354,155 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
         claimed_at,
         capped_at,
     })
+}
+
+/// Group `cells` by `feature` and derive the D10/D11 shipped-feature view.
+///
+/// A feature whose live (non-dropped) set is empty — every one of its cells
+/// is `dropped` — is skipped entirely: not shipped, not counted. A feature
+/// is shipped when every remaining live cell is `capped` (D10); a worktree
+/// merge is never consulted here, matching `no_merge_lookup`.
+fn compute_shipped_features(cells: &[BeeCell]) -> Vec<BeeShippedFeature> {
+    let mut by_feature: std::collections::BTreeMap<&str, Vec<&BeeCell>> =
+        std::collections::BTreeMap::new();
+    for cell in cells {
+        by_feature.entry(cell.feature.as_str()).or_default().push(cell);
+    }
+
+    let mut shipped = Vec::new();
+    for (name, group) in by_feature {
+        let live: Vec<&BeeCell> = group.into_iter().filter(|c| c.status != "dropped").collect();
+        if live.is_empty() {
+            // All-dropped feature: not shipped, not counted.
+            continue;
+        }
+        if !live.iter().all(|c| c.status == "capped") {
+            continue;
+        }
+        shipped.push(BeeShippedFeature {
+            feature: name.to_string(),
+            cell_count: live.len(),
+            cycle_time: compute_cycle_time(&live),
+        });
+    }
+    shipped
+}
+
+/// Earliest `claimed_at` to latest `capped_at` across `live` (D11). `None`
+/// when either endpoint has no parseable timestamp — never a guessed zero.
+fn compute_cycle_time(live: &[&BeeCell]) -> Option<BeeCycleSpan> {
+    let starts: Vec<(&str, time::OffsetDateTime)> = live
+        .iter()
+        .filter_map(|c| c.claimed_at.as_deref())
+        .filter_map(|s| parse_rfc3339(s).map(|t| (s, t)))
+        .collect();
+    let ends: Vec<(&str, time::OffsetDateTime)> = live
+        .iter()
+        .filter_map(|c| c.capped_at.as_deref())
+        .filter_map(|s| parse_rfc3339(s).map(|t| (s, t)))
+        .collect();
+
+    let (start_str, start_t) = starts.iter().min_by_key(|(_, t)| t.unix_timestamp_nanos())?;
+    let (end_str, end_t) = ends.iter().max_by_key(|(_, t)| t.unix_timestamp_nanos())?;
+
+    let hours = (*end_t - *start_t).as_seconds_f64() / 3600.0;
+    Some(BeeCycleSpan {
+        started_at: (*start_str).to_string(),
+        ended_at: (*end_str).to_string(),
+        hours,
+    })
+}
+
+/// Parse an RFC 3339 timestamp (as bee's `trace` fields carry it). Anything
+/// unparseable is treated as absent rather than aborting the read.
+fn parse_rfc3339(s: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+}
+
+/// The `YYYY-MM-DD` UTC calendar day of `dt`.
+fn ymd_utc(dt: time::OffsetDateTime) -> String {
+    let utc = dt.to_offset(time::UtcOffset::UTC);
+    format!("{:04}-{:02}-{:02}", utc.year(), utc.month() as u8, utc.day())
+}
+
+/// Ship-rate aggregates over the shipped features that report a cycle time
+/// (D11). A shipped feature with no cycle time cannot be placed on a
+/// calendar day, so it contributes to `shipped` but not to any of these
+/// numbers; every division here is guarded against an empty denominator.
+fn compute_velocity(shipped: &[BeeShippedFeature]) -> BeeVelocity {
+    let timed: Vec<&BeeShippedFeature> = shipped.iter().filter(|f| f.cycle_time.is_some()).collect();
+    if timed.is_empty() {
+        return BeeVelocity::default();
+    }
+
+    let mut per_day: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut hours: Vec<f64> = Vec::new();
+    for f in &timed {
+        let span = f.cycle_time.as_ref().expect("filtered to Some above");
+        // ended_at was itself parsed successfully to build `span`, so
+        // reparsing it here for its calendar day cannot fail in practice;
+        // an unparseable string still degrades to "no day" rather than a
+        // panic, matching the module's read-degrades-gracefully stance.
+        if let Some(end_t) = parse_rfc3339(&span.ended_at) {
+            *per_day.entry(ymd_utc(end_t)).or_insert(0) += 1;
+        }
+        hours.push(span.hours);
+    }
+
+    let active_days = per_day.len();
+    let features_per_active_day = if active_days == 0 {
+        None
+    } else {
+        Some(timed.len() as f64 / active_days as f64)
+    };
+
+    let features_per_week = match (per_day.keys().next(), per_day.keys().next_back()) {
+        (Some(first), Some(last)) => {
+            let first_jd = parse_ymd(first).map(|d| d.to_julian_day());
+            let last_jd = parse_ymd(last).map(|d| d.to_julian_day());
+            match (first_jd, last_jd) {
+                (Some(first_jd), Some(last_jd)) => {
+                    let span_days = (last_jd - first_jd + 1).max(1) as f64;
+                    Some(timed.len() as f64 * 7.0 / span_days)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+
+    BeeVelocity {
+        per_day: per_day.into_iter().map(|(day, count)| BeeDayCount { day, count }).collect(),
+        active_days,
+        features_per_active_day,
+        features_per_week,
+        median_cycle_time_hours: median(hours),
+    }
+}
+
+/// Parse a `YYYY-MM-DD` string (as produced by [`ymd_utc`]) back into a
+/// [`time::Date`] for calendar-span arithmetic.
+fn parse_ymd(s: &str) -> Option<time::Date> {
+    let mut parts = s.splitn(3, '-');
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: u8 = parts.next()?.parse().ok()?;
+    let day: u8 = parts.next()?.parse().ok()?;
+    let month = time::Month::try_from(month).ok()?;
+    time::Date::from_calendar_date(year, month, day).ok()
+}
+
+/// The median of `values`. `None` for an empty slice.
+fn median(mut values: Vec<f64>) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|a, b| a.partial_cmp(b).expect("cycle-time hours are always finite"));
+    let n = values.len();
+    if n % 2 == 1 {
+        Some(values[n / 2])
+    } else {
+        Some((values[n / 2 - 1] + values[n / 2]) / 2.0)
+    }
 }
 
 /// Render `s` relative to `root` when it names a path under `root`. When `s`
@@ -592,5 +824,286 @@ mod tests {
                 "mdview-core/Cargo.toml must not depend on {forbidden}"
             );
         }
+    }
+
+    // --- bee-cockpit-3: shipped features, cycle time, velocity (D10/D11) ---
+
+    fn feature_cell_json(
+        id: &str,
+        feature: &str,
+        status: &str,
+        claimed_at: Option<&str>,
+        capped_at: Option<&str>,
+    ) -> String {
+        let claimed_json = claimed_at.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".to_string());
+        let capped_json = capped_at.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".to_string());
+        format!(
+            r#"{{
+                "id": "{id}",
+                "feature": "{feature}",
+                "lane": "standard",
+                "title": "Cell {id}",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {{}},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "{status}",
+                "tier": "generation",
+                "trace": {{"worker": "w1", "claimed_at": {claimed_json}, "capped_at": {capped_json}}}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn shipped_feature_all_capped_reports_cycle_time() {
+        let root = fresh_root("shipped-simple");
+        write(
+            &root,
+            ".bee/cells/f-1.json",
+            &feature_cell_json(
+                "f-1",
+                "feat-a",
+                "capped",
+                Some("2026-08-01T00:00:00.000Z"),
+                Some("2026-08-01T02:00:00.000Z"),
+            ),
+        );
+        write(
+            &root,
+            ".bee/cells/f-2.json",
+            &feature_cell_json(
+                "f-2",
+                "feat-a",
+                "capped",
+                Some("2026-08-01T01:00:00.000Z"),
+                Some("2026-08-01T04:00:00.000Z"),
+            ),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.shipped.len(), 1);
+        let f = &snap.shipped[0];
+        assert_eq!(f.feature, "feat-a");
+        assert_eq!(f.cell_count, 2);
+        let ct = f.cycle_time.as_ref().expect("both timestamps present, cycle time expected");
+        assert_eq!(ct.started_at, "2026-08-01T00:00:00.000Z", "must be the earliest claim");
+        assert_eq!(ct.ended_at, "2026-08-01T04:00:00.000Z", "must be the latest cap");
+        assert!((ct.hours - 4.0).abs() < 1e-9, "hours: {}", ct.hours);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn shipped_feature_with_dropped_cell_still_ships_per_d10() {
+        let root = fresh_root("shipped-dropped-mix");
+        write(
+            &root,
+            ".bee/cells/f-1.json",
+            &feature_cell_json(
+                "f-1",
+                "feat-b",
+                "capped",
+                Some("2026-08-01T00:00:00.000Z"),
+                Some("2026-08-01T01:00:00.000Z"),
+            ),
+        );
+        // A dropped cell must never block shipped status, and its own
+        // (earlier) claimed_at must not leak into the span.
+        write(
+            &root,
+            ".bee/cells/f-2.json",
+            &feature_cell_json("f-2", "feat-b", "dropped", Some("2025-01-01T00:00:00.000Z"), None),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.shipped.len(), 1, "feature with capped+dropped cells must be shipped: {:?}", snap.shipped);
+        let f = &snap.shipped[0];
+        assert_eq!(f.feature, "feat-b");
+        assert_eq!(f.cell_count, 1, "the dropped cell must not count toward cell_count");
+        let ct = f.cycle_time.as_ref().expect("cycle time expected from the one live cell");
+        assert_eq!(ct.started_at, "2026-08-01T00:00:00.000Z", "dropped cell's timestamp must not be used");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn velocity_aggregates_per_day_active_day_and_median() {
+        let root = fresh_root("velocity-aggregate");
+        // Two features ship on 2026-08-01, one on 2026-08-02.
+        write(
+            &root,
+            ".bee/cells/x1.json",
+            &feature_cell_json(
+                "x1",
+                "feat-x",
+                "capped",
+                Some("2026-08-01T00:00:00.000Z"),
+                Some("2026-08-01T01:00:00.000Z"),
+            ),
+        );
+        write(
+            &root,
+            ".bee/cells/y1.json",
+            &feature_cell_json(
+                "y1",
+                "feat-y",
+                "capped",
+                Some("2026-08-01T02:00:00.000Z"),
+                Some("2026-08-01T03:00:00.000Z"),
+            ),
+        );
+        write(
+            &root,
+            ".bee/cells/z1.json",
+            &feature_cell_json(
+                "z1",
+                "feat-z",
+                "capped",
+                Some("2026-08-02T00:00:00.000Z"),
+                Some("2026-08-02T01:00:00.000Z"),
+            ),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.shipped.len(), 3);
+
+        let vel = &snap.velocity;
+        assert_eq!(vel.per_day.len(), 2);
+        assert_eq!(vel.per_day[0].day, "2026-08-01");
+        assert_eq!(vel.per_day[0].count, 2);
+        assert_eq!(vel.per_day[1].day, "2026-08-02");
+        assert_eq!(vel.per_day[1].count, 1);
+        assert_eq!(vel.active_days, 2);
+        assert!((vel.features_per_active_day.unwrap() - 1.5).abs() < 1e-9);
+        // calendar span 2026-08-01..=2026-08-02 is 2 days -> 3 features / (2/7 weeks)
+        let expected_per_week = 3.0 * 7.0 / 2.0;
+        assert!((vel.features_per_week.unwrap() - expected_per_week).abs() < 1e-9);
+        // each feature's cycle time is exactly 1h -> median is 1h
+        assert!((vel.median_cycle_time_hours.unwrap() - 1.0).abs() < 1e-9);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn feature_with_one_open_cell_is_not_shipped() {
+        let root = fresh_root("not-shipped-open");
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json(
+                "a",
+                "feat-open",
+                "capped",
+                Some("2026-08-01T00:00:00.000Z"),
+                Some("2026-08-01T01:00:00.000Z"),
+            ),
+        );
+        write(&root, ".bee/cells/b.json", &feature_cell_json("b", "feat-open", "open", None, None));
+
+        let snap = read_snapshot(&root);
+        assert!(
+            snap.shipped.iter().all(|f| f.feature != "feat-open"),
+            "a feature with one open cell must not be shipped: {:?}",
+            snap.shipped
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn feature_with_only_dropped_cells_is_not_shipped() {
+        let root = fresh_root("all-dropped-feature");
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("a", "feat-dead", "dropped", Some("2026-08-01T00:00:00.000Z"), None),
+        );
+        write(&root, ".bee/cells/b.json", &feature_cell_json("b", "feat-dead", "dropped", None, None));
+
+        let snap = read_snapshot(&root);
+        assert!(
+            snap.shipped.is_empty(),
+            "a feature whose cells are all dropped must not be shipped: {:?}",
+            snap.shipped
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn shipped_feature_missing_a_timestamp_reports_no_cycle_time() {
+        let root = fresh_root("missing-timestamp");
+        // Both cells are capped, but neither carries a claimed_at anywhere
+        // in the feature - the start endpoint is entirely absent.
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("a", "feat-notime", "capped", None, Some("2026-08-01T01:00:00.000Z")),
+        );
+        write(
+            &root,
+            ".bee/cells/b.json",
+            &feature_cell_json("b", "feat-notime", "capped", None, Some("2026-08-01T02:00:00.000Z")),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.shipped.len(), 1);
+        assert_eq!(snap.shipped[0].feature, "feat-notime");
+        assert!(
+            snap.shipped[0].cycle_time.is_none(),
+            "missing claimed_at across the whole feature must yield no cycle time, not a zero: {:?}",
+            snap.shipped[0].cycle_time
+        );
+        // must not silently contribute a fabricated day/rate either
+        assert!(snap.velocity.per_day.is_empty());
+        assert_eq!(snap.velocity.active_days, 0);
+        assert!(snap.velocity.features_per_active_day.is_none());
+        assert!(snap.velocity.features_per_week.is_none());
+        assert!(snap.velocity.median_cycle_time_hours.is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn empty_cell_store_yields_zero_shipped_and_no_division_by_zero() {
+        let root = fresh_root("empty-store-velocity");
+        std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
+
+        let snap = read_snapshot(&root);
+        assert!(snap.shipped.is_empty());
+        assert!(snap.velocity.per_day.is_empty());
+        assert_eq!(snap.velocity.active_days, 0);
+        assert!(snap.velocity.features_per_active_day.is_none());
+        assert!(snap.velocity.features_per_week.is_none());
+        assert!(snap.velocity.median_cycle_time_hours.is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn d7_buckets_and_d8_active_unchanged_by_feature_view() {
+        // Regression: adding the feature/shipped view must not perturb the
+        // bee-cockpit-1 bucket/active behavior it builds on top of.
+        let root = fresh_root("regression-buckets");
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(&root, ".bee/cells/c-claimed.json", &cell_json("c-claimed", "claimed"));
+        write(&root, ".bee/cells/c-blocked.json", &cell_json("c-blocked", "blocked"));
+        write(&root, ".bee/cells/c-capped.json", &cell_json("c-capped", "capped"));
+        write(&root, ".bee/cells/c-dropped.json", &cell_json("c-dropped", "dropped"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.buckets.doing.len(), 1);
+        assert_eq!(snap.buckets.waiting.len(), 1);
+        assert_eq!(snap.buckets.stuck.len(), 1);
+        assert_eq!(snap.buckets.done.len(), 1);
+        assert!(snap.active, "an open and a claimed cell must still flip active (D8)");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }
