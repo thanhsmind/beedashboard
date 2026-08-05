@@ -10,4 +10,5 @@ search — it answers "where does X live" without a grep.
 | Doctor | `docs/specs/doctor.md` | `crates/mdview/src/doctor.rs`, `crates/mdview/src/cli.rs` |
 | Daemon lifecycle | `docs/specs/daemon.md` | `crates/mdview/src/runtime.rs`, `crates/mdview-core/src/daemon.rs`, `crates/mdview-core/src/process.rs`, `crates/mdview/src/server.rs`, `crates/mdview/src/cli.rs`, `crates/mdview-desktop/src/main.rs` |
 | Web interface (nav chrome) | `docs/specs/web-interface.md` | `crates/mdview/src/views.rs`, `crates/mdview/assets/app.js`, `crates/mdview/assets/app.css`, `crates/mdview/assets/atelier/components.css` |
+| Bee cockpit (read-only bee dashboard per project) | `docs/specs/bee-cockpit.md` | `crates/mdview-core/src/bee.rs`, `crates/mdview/src/server.rs`, `crates/mdview/src/views.rs` |
 | Appearance (visual style + Light/Dark scheme) | `docs/specs/appearance.md` | `crates/mdview/assets/atelier/`, `crates/mdview/assets/app.css`, `crates/mdview/src/views.rs`, `crates/mdview/assets/app.js`, `crates/mdview/src/server.rs`, `crates/mdview-desktop/ui/index.html` |
