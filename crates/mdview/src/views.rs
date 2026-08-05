@@ -138,7 +138,11 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 .bee-buckets {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); }}
 .bee-buckets-top {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-4); margin-bottom: var(--space-4); }}
 .bee-done {{ margin-bottom: var(--space-4); }}
-.bee-done-list {{ display: flex; flex-direction: column; gap: var(--space-2); }}
+.bee-done-summary {{ cursor: pointer; list-style: none; padding: var(--space-2) 0; font-weight: var(--weight-strong); color: var(--color-text); }}
+.bee-done-summary::-webkit-details-marker {{ display: none; }}
+.bee-done-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-2); padding-top: var(--space-2); }}
+.bee-done-line {{ display: block; color: var(--color-text-muted); font-size: var(--type-caption-size); text-decoration: none; padding: var(--space-1) 0; border-bottom: var(--border-width-hairline) solid var(--color-border); }}
+.bee-done-line:hover {{ color: var(--color-action); }}
 .bee-bucket--danger {{ border-color: var(--color-danger); background: var(--color-danger-tint); }}
 .bee-bucket__head {{ display: flex; align-items: center; gap: var(--space-2); margin: 0; }}
 .bee-cell {{ padding: var(--space-2); gap: var(--space-1); }}
@@ -199,12 +203,18 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 
 /// Ship-velocity section (D10/D11 downstream): the three headline numbers the
 /// user asked for — "1 ngày ship được bao nhiêu, 1 tuần ship được bao nhiêu" —
-/// in plain language, followed by the shipped-feature list (cycle time + cell
-/// count) and the list of features still open. Rendered above the four D7
-/// buckets on the same page. A project with nothing shipped yet gets an
-/// honest empty state instead of zeroed-out or NaN numbers — the headline
-/// stats are computed only over shipped-and-timed features (see
-/// `BeeVelocity`), so a `None` here means "not enough data", never "zero".
+/// in plain language, followed by the list of features still open — the
+/// short thing worth seeing here. The shipped-feature list used to render a
+/// second time in this section too (one uncapped `fg-card` per feature,
+/// stacked in a narrow column — 23 cards running off the screen on the real
+/// beehive store, the thing a user complained about). That duplicate is
+/// gone; the shipped/finished list now lives exactly once, collapsed by
+/// default, in the board's Done section (`bee_done_section`) below the D7
+/// buckets. Rendered above the four D7 buckets on the same page. A project
+/// with nothing shipped yet gets an honest empty state instead of zeroed-out
+/// or NaN numbers — the headline stats are computed only over
+/// shipped-and-timed features (see `BeeVelocity`), so a `None` here means
+/// "not enough data", never "zero".
 fn bee_velocity_section(project_id: &str, snapshot: &BeeSnapshot) -> String {
     let open_features = bee_open_feature_names(snapshot);
 
@@ -238,12 +248,10 @@ fn bee_velocity_section(project_id: &str, snapshot: &BeeSnapshot) -> String {
   <h3 class="bee-velocity__head">Ship velocity</h3>
   {stats}
   <div class="bee-velocity__lists">
-    {shipped}
     {open}
   </div>
 </section>"#,
         stats = stats,
-        shipped = bee_shipped_list(project_id, &snapshot.shipped),
         open = bee_open_features_list(project_id, &open_features),
     )
 }
@@ -280,36 +288,6 @@ fn bee_fmt_rate(v: Option<f64>) -> Option<String> {
 /// guard as `bee_fmt_rate`.
 fn bee_fmt_hours(v: Option<f64>) -> Option<String> {
     v.filter(|x| x.is_finite()).map(|x| format!("{x:.1}h"))
-}
-
-/// The shipped-feature list: each feature's name, cell count and cycle time
-/// (or an honest "not timed yet" note when D11 could find no cycle time).
-/// Only called when `shipped` is non-empty — the empty case is handled by
-/// `bee_velocity_section` itself, above. Each row links to the feature's
-/// detail page (`/p/:id/_bee/feature/:feature`) — the drill-down the board
-/// exists to reach.
-fn bee_shipped_list(project_id: &str, shipped: &[BeeShippedFeature]) -> String {
-    let mut rows = String::new();
-    for f in shipped {
-        let cycle = match &f.cycle_time {
-            Some(span) if span.hours.is_finite() => format!("{:.1}h to finish", span.hours),
-            Some(_) => "—".to_string(),
-            None => "not timed yet".to_string(),
-        };
-        rows.push_str(&format!(
-            r#"<a class="fg-card bee-cell" href="/p/{pid}/_bee/feature/{feature_href}"><div class="fg-card__title">{feature}</div><div class="bee-cell__meta">{count} cell{plural} · {cycle}</div></a>"#,
-            pid = esc(project_id),
-            feature_href = esc(&f.feature),
-            feature = esc(&f.feature),
-            count = f.cell_count,
-            plural = if f.cell_count == 1 { "" } else { "s" },
-            cycle = esc(&cycle),
-        ));
-    }
-    format!(
-        r#"<div class="bee-velocity__col"><h4 class="bee-velocity__subhead">Shipped</h4>{rows}</div>"#,
-        rows = rows,
-    )
 }
 
 /// Distinct feature names still open: any feature with at least one live
@@ -421,27 +399,26 @@ fn bee_bucket_section(
     )
 }
 
-/// Cap on the number of feature lines shown in the board's Done section
-/// (`bee_done_section`) — same bounded-list contract as
-/// `mdview_core::bee::RECENT_DETAIL_CAP`: a shown-vs-true-total note appears
-/// whenever the real feature count exceeds this, so a capped list never
-/// looks smaller than the store really is.
-const BEE_DONE_FEATURE_CAP: usize = 20;
-
-/// The board's Done bucket (D7), rendered as its own full-width section
-/// grouped by feature instead of one card per cell — a real store can carry
-/// dozens of done cells across a handful of features, and one card each
-/// buried the buckets a person is actually watching (Doing/Waiting/Stuck)
-/// under a wall of finished work. Each line names the feature, how many of
-/// its cells are done, and — when the feature has shipped with a timed
-/// cycle (D10/D11) — its time to finish, reused from `shipped` rather than
-/// recomputed here; a feature with done cells that has not (yet) fully
-/// shipped still gets a line, just without a cycle time. `data-count` on
-/// the section stays the true total number of done cells, same as every
-/// other D7 bucket, even though the body below groups them by feature. The
-/// line list itself is capped at `BEE_DONE_FEATURE_CAP`; capped or not, the
-/// section states the true feature count and the true done-cell total so
-/// neither number is ever understated.
+/// The board's Done bucket (D7), rendered as a native `<details>`/`<summary>`
+/// element that is collapsed by default — no `open` attribute, no
+/// JavaScript. This is now the *only* place finished work is listed on the
+/// board: `bee_shipped_list` used to render the same features a second time,
+/// uncapped, as a column of full `fg-card`s in the velocity section above
+/// (23 bordered cards on the real beehive store, running past a screenful —
+/// the thing a user complained about from a screenshot). Grouped by feature
+/// rather than one line per cell, same as before — a real store can carry
+/// dozens of done cells across a handful of features. The `<summary>` states
+/// the true totals (finished feature count, finished cell count) in plain
+/// language even while collapsed, so the page never understates the store
+/// just because the list is closed. Opening it reveals one compact text line
+/// per feature — name, cell count and, when the feature has shipped with a
+/// timed cycle (D10/D11), its time to finish, reused from `shipped` rather
+/// than recomputed here — laid out in a dense multi-column grid instead of
+/// one `fg-card` each. Collapsed-by-default plus the dense grid is what now
+/// keeps this small, so every finished feature is shown; none is truncated.
+/// `data-count` on the outer section stays the true total number of done
+/// cells, same as every other D7 bucket, even though the body groups them by
+/// feature.
 fn bee_done_section(project_id: &str, done: &[BeeCell], shipped: &[BeeShippedFeature]) -> String {
     let total = done.len();
     if total == 0 {
@@ -459,7 +436,7 @@ fn bee_done_section(project_id: &str, done: &[BeeCell], shipped: &[BeeShippedFea
     let feature_total = counts.len();
 
     let mut lines = String::new();
-    for (feature, count) in counts.iter().take(BEE_DONE_FEATURE_CAP) {
+    for (feature, count) in counts.iter() {
         let cycle = cycle_by_feature.get(feature).and_then(|f| match &f.cycle_time {
             Some(span) if span.hours.is_finite() => Some(format!("{:.1}h to finish", span.hours)),
             _ => None,
@@ -478,7 +455,7 @@ fn bee_done_section(project_id: &str, done: &[BeeCell], shipped: &[BeeShippedFea
             ),
         };
         lines.push_str(&format!(
-            r#"<a class="fg-card bee-cell" href="/p/{pid}/_bee/feature/{feature_href}"><div class="fg-card__title">{feature}</div><div class="bee-cell__meta">{meta}</div></a>"#,
+            r#"<a class="bee-done-line" href="/p/{pid}/_bee/feature/{feature_href}">{feature} · {meta}</a>"#,
             pid = esc(project_id),
             feature_href = esc(feature),
             feature = esc(feature),
@@ -486,28 +463,18 @@ fn bee_done_section(project_id: &str, done: &[BeeCell], shipped: &[BeeShippedFea
         ));
     }
 
-    let note = if feature_total > BEE_DONE_FEATURE_CAP {
-        format!(
-            r#"<p class="bee-cell__meta">Showing {shown} of {feature_total} features · {total} done cell{plural} total.</p>"#,
-            shown = BEE_DONE_FEATURE_CAP,
-            feature_total = feature_total,
-            total = total,
-            plural = if total == 1 { "" } else { "s" },
-        )
-    } else {
-        format!(
-            r#"<p class="bee-cell__meta">{feature_total} feature{fplural} · {total} done cell{plural} total.</p>"#,
-            feature_total = feature_total,
-            fplural = if feature_total == 1 { "" } else { "s" },
-            total = total,
-            plural = if total == 1 { "" } else { "s" },
-        )
-    };
+    let summary = format!(
+        "Shipped: {feature_total} feature{fplural} finished · {total} cell{plural} total",
+        feature_total = feature_total,
+        fplural = if feature_total == 1 { "" } else { "s" },
+        total = total,
+        plural = if total == 1 { "" } else { "s" },
+    );
 
     format!(
-        r#"<section class="fg-card bee-bucket bee-done" data-bucket="done" data-count="{total}"><h3 class="bee-bucket__head">Done <span class="fg-chip fg-chip--success">{total}</span></h3>{note}<div class="bee-done-list">{lines}</div></section>"#,
+        r#"<section class="fg-card bee-bucket bee-done" data-bucket="done" data-count="{total}"><details class="bee-done-details"><summary class="bee-done-summary">{summary}</summary><div class="bee-done-grid">{lines}</div></details></section>"#,
         total = total,
-        note = note,
+        summary = esc(&summary),
         lines = lines,
     )
 }

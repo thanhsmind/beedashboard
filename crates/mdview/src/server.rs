@@ -1392,19 +1392,21 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// bee-cockpit-4 (security): a shipped feature's cell still carries the
-    /// same path-leak risk as any other cell — this proves the velocity
-    /// section (shipped/open lists) is reached by the same fixture and still
-    /// leaks nothing. Named against the fixture's own root and
-    /// `std::env::temp_dir()`, never a production literal like `/home/`
+    /// bee-cockpit-4 / bee-board-ux-2 (security): a finished ("capped") cell
+    /// still carries the same path-leak risk as any other cell — this proves
+    /// the collapsed Done section (`bee_done_section`, the sole surviving
+    /// finished-work list since `bee_shipped_list` was removed) is reached
+    /// by the same fixture and still leaks nothing. Named against the
+    /// fixture's own root and `std::env::temp_dir()`, never a production
+    /// literal like `/home/`
     /// (per `docs/history/learnings/20260805-toothless-security-assertions.md`).
     #[tokio::test]
-    async fn shipped_feature_cell_paths_do_not_leak_into_velocity_section() {
-        let root = fresh_root("velocity-security");
+    async fn finished_feature_cell_paths_do_not_leak_into_done_section() {
+        let root = fresh_root("done-section-security");
         let root_str = root.to_string_lossy().into_owned();
         let inside_abs = root.join("src/inside.rs").to_string_lossy().into_owned();
         let outside_abs = std::env::temp_dir()
-            .join("mdview-server-bee-velocity-outside.rs")
+            .join("mdview-server-bee-done-section-outside.rs")
             .to_string_lossy()
             .into_owned();
         let worker_abs = root.join("workers/reader-1").to_string_lossy().into_owned();
@@ -1424,7 +1426,7 @@ mod bee_route_tests {
         );
 
         let st = build_state();
-        let project = register(&st, &root, "velocity-security");
+        let project = register(&st, &root, "done-section-security");
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
@@ -1960,12 +1962,13 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (edge) A fixture with more done features than `BEE_DONE_FEATURE_CAP`
-    /// still states the true feature total and the true done-cell total —
-    /// the capped list never looks smaller than the store really is.
+    /// (happy) bee-board-ux-2: the old `BEE_DONE_FEATURE_CAP` (20) is gone —
+    /// the collapsed-by-default Done section no longer truncates, so a
+    /// fixture with 25 finished features shows every one of them, none
+    /// dropped, and carries no "shown X of Y" note.
     #[tokio::test]
-    async fn board_done_section_states_true_feature_total_when_capped() {
-        let root = fresh_root("done-capped");
+    async fn board_done_section_shows_every_finished_feature_uncapped() {
+        let root = fresh_root("done-uncapped");
         for i in 0..25 {
             write(
                 &root,
@@ -1975,19 +1978,185 @@ mod bee_route_tests {
         }
 
         let st = build_state();
-        let project = register(&st, &root, "done-capped");
+        let project = register(&st, &root, "done-uncapped");
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
         assert!(body.contains("data-bucket=\"done\" data-count=\"25\""), "{body}");
         assert!(
-            body.contains("Showing 20 of 25 features"),
-            "board must state the true feature total when the done list is capped: {body}"
+            !body.contains("Showing"),
+            "the done list must no longer be truncated with a shown-vs-total note: {body}"
+        );
+        for i in 0..25 {
+            assert!(
+                body.contains(&format!(
+                    "href=\"/p/{}/_bee/feature/feature-{:02}\"",
+                    project.id, i
+                )),
+                "feature-{i:02} missing from the uncapped done list: {body}"
+            );
+        }
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) bee-board-ux-2: the Done section's `<summary>` states both
+    /// totals in plain language — the number of finished features and the
+    /// number of finished cells — so the collapsed section never
+    /// understates the store.
+    #[tokio::test]
+    async fn board_done_summary_states_feature_and_cell_totals() {
+        let root = fresh_root("done-summary-totals");
+        write(&root, ".bee/cells/a.json", &cell_json("d1", "capped", &[], "w1"));
+        write(&root, ".bee/cells/b.json", &cell_json("d2", "capped", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/c.json",
+            &timed_cell_json("d3", "second-feature", "capped", &[], "w1", "x", "y"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "done-summary-totals");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-bucket=\"done\" data-count=\"3\""), "{body}");
+        assert!(
+            body.contains("2 features finished"),
+            "summary must state the finished-feature count: {body}"
         );
         assert!(
-            body.contains("25 done cell"),
-            "board must state the true done-cell total even when the feature list is capped: {body}"
+            body.contains("3 cells total"),
+            "summary must state the finished-cell count: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) bee-board-ux-2: the Done section is a native `<details>`
+    /// element carrying no `open` attribute, so it renders collapsed —
+    /// no JavaScript involved.
+    #[tokio::test]
+    async fn board_done_details_element_has_no_open_attribute() {
+        let root = fresh_root("done-collapsed");
+        write(&root, ".bee/cells/a.json", &cell_json("d1", "capped", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "done-collapsed");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("<details class=\"bee-done-details\">"),
+            "expected the Done section as a details element with no open attribute: {body}"
+        );
+        assert!(
+            !body.contains("<details class=\"bee-done-details\" open"),
+            "the Done details element must not carry an open attribute (must load collapsed): {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) bee-board-ux-2: the board renders finished work in exactly
+    /// one place — the collapsed Done section — never twice. Before this
+    /// cell, `bee_shipped_list` rendered the same finished feature a second
+    /// time, uncapped, as its own `fg-card` column inside the velocity
+    /// section (23 bordered cards on the real beehive store — the thing a
+    /// user complained about from a screenshot).
+    #[tokio::test]
+    async fn board_renders_finished_work_in_exactly_one_place() {
+        let root = fresh_root("finished-once");
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &timed_cell_json(
+                "f1",
+                "solo-shipped-feature",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "finished-once");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        // The finished feature's name appears exactly twice — once in its
+        // line's `href`, once as the line's visible text. Before this cell,
+        // the removed `bee_shipped_list` rendered the same feature a second
+        // time (its own href + its own visible text), which would double
+        // this count to four.
+        assert_eq!(
+            body.matches("solo-shipped-feature").count(),
+            2,
+            "finished feature rendered more than once (the old duplicate shipped list survived): {body}"
+        );
+        // The velocity section's old per-feature card list heading is gone.
+        assert!(
+            !body.contains("bee-velocity__subhead\">Shipped"),
+            "velocity section must no longer emit its own shipped feature list: {body}"
+        );
+        // The one surviving list states its totals as the collapsed
+        // summary, in plain language, using the word "Shipped".
+        assert!(
+            body.contains("bee-done-summary\">Shipped"),
+            "expected the collapsed Done summary to read \"Shipped: ...\": {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) bee-board-ux-2: a finished feature's line in the Done section
+    /// still links to its feature detail page, and a live cell in one of
+    /// the other three buckets still links to its cell detail page — both
+    /// drill-downs the board exists to reach.
+    #[tokio::test]
+    async fn board_links_finished_feature_and_live_cell_to_their_detail_pages() {
+        let root = fresh_root("done-links");
+        write(
+            &root,
+            ".bee/cells/done.json",
+            &timed_cell_json(
+                "finished-cell",
+                "finished-feature",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+        write(
+            &root,
+            ".bee/cells/live.json",
+            &timed_cell_json("live-cell", "live-feature", "open", &[], "w1", "x", "y"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "done-links");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/finished-feature\"",
+                project.id
+            )),
+            "the finished feature line must link to the feature detail page: {body}"
+        );
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/cell/live-cell\"", project.id)),
+            "a live cell must still link to the cell detail page: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -2011,6 +2180,12 @@ mod bee_route_tests {
         // honest empty state: no "N done cell(s) total" note manufactured
         // from a zero.
         assert!(!body.contains("done cell"), "{body}");
+        // an honest empty state, not a collapsed empty list — no <details>
+        // wrapper when there is nothing to show.
+        assert!(
+            !body.contains("bee-done-details"),
+            "empty Done section must not render as a collapsed empty list: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
