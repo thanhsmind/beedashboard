@@ -24,3 +24,9 @@ notify.workspace = true
 notify-debouncer-full.workspace = true
 nucleo-matcher.workspace = true
 libc.workspace = true
+
+[dev-dependencies]
+# paths_boundary.rs (agent-terminal-2) tests build temp directories; this
+# crate stays async-runtime-free (no tokio/axum/hyper — see
+# `bee::tests::no_web_framework_dependency_declared`).
+tempfile = "3"

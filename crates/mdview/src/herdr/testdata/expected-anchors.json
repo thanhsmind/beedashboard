@@ -1,0 +1,59 @@
+{
+  "note": "Expected D10 anchor per workspace, derived from live-snapshot.json in this same directory. Both files are copied into the crate as tracked test data by cell new-shell-new-agent-1; keep them in step.",
+  "source_herdr": {
+    "version": "0.7.4",
+    "protocol": 16
+  },
+  "workspaces": [
+    {
+      "workspace_id": "w3",
+      "workspace_label": "fgos-dev",
+      "active_tab_id": "w3:t6",
+      "anchor_pane_id": "w3:p6",
+      "expected_cwd": "/home/dev/projects/fgos/fgos-dev",
+      "resolved_via": "foreground_cwd",
+      "is_globally_focused": false,
+      "anchor_is_plain_shell_absent_from_agents": false
+    },
+    {
+      "workspace_id": "w5",
+      "workspace_label": "forgent",
+      "active_tab_id": "w5:t9",
+      "anchor_pane_id": "w5:p11",
+      "expected_cwd": "/home/dev/projects/forgent",
+      "resolved_via": "foreground_cwd",
+      "is_globally_focused": false,
+      "anchor_is_plain_shell_absent_from_agents": false
+    },
+    {
+      "workspace_id": "w7",
+      "workspace_label": "herdr-gateway",
+      "active_tab_id": "w7:t1",
+      "anchor_pane_id": "w7:pG",
+      "expected_cwd": "/home/dev/projects/herdr-gateway",
+      "resolved_via": "foreground_cwd",
+      "is_globally_focused": false,
+      "anchor_is_plain_shell_absent_from_agents": false
+    },
+    {
+      "workspace_id": "w8",
+      "workspace_label": "design-extract",
+      "active_tab_id": "w8:t1",
+      "anchor_pane_id": "w8:p1",
+      "expected_cwd": "/home/dev/projects/design-extract",
+      "resolved_via": "foreground_cwd",
+      "is_globally_focused": false,
+      "anchor_is_plain_shell_absent_from_agents": false
+    },
+    {
+      "workspace_id": "wB",
+      "workspace_label": "forgent",
+      "active_tab_id": "wB:t1",
+      "anchor_pane_id": "wB:p1",
+      "expected_cwd": "/home/dev/projects/forgent",
+      "resolved_via": "foreground_cwd",
+      "is_globally_focused": true,
+      "anchor_is_plain_shell_absent_from_agents": true
+    }
+  ]
+}

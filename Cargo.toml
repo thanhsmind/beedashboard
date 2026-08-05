@@ -43,6 +43,9 @@ tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 clap = { version = "4", features = ["derive"] }
 minijinja = { version = "2", features = ["loader"] }
+async-trait = "0.1"
+interprocess = { version = "2.4.2", features = ["tokio"] }
+rand = "0.8"
 
 # platform
 libc = "0.2"

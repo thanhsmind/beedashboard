@@ -2,6 +2,7 @@
 
 mod cli;
 mod doctor;
+mod herdr;
 mod mcp;
 mod runtime;
 mod server;
