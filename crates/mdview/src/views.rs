@@ -3,7 +3,8 @@
 //! `/highlight.css` (syntect class-based), so themes switch without re-render.
 
 use mdview_core::bee::{
-    BeeBacklog, BeeCell, BeeLane, BeeSession, BeeShippedFeature, BeeSnapshot, BeeWorkspace,
+    BeeBacklog, BeeBuckets, BeeCell, BeeLane, BeeSession, BeeShippedFeature, BeeSnapshot,
+    BeeWorkspace,
 };
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
@@ -181,11 +182,11 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         name = esc(&project.name),
         phase = esc(phase),
         feature = esc(feature),
-        velocity = bee_velocity_section(snapshot),
-        doing = bee_bucket_section("Doing", "doing", &b.doing, "neutral"),
-        waiting = bee_bucket_section("Waiting", "waiting", &b.waiting, "neutral"),
-        stuck = bee_bucket_section("Stuck", "stuck", &b.stuck, "danger"),
-        done = bee_bucket_section("Done", "done", &b.done, "success"),
+        velocity = bee_velocity_section(&project.id, snapshot),
+        doing = bee_bucket_section(&project.id, "Doing", "doing", &b.doing, "neutral"),
+        waiting = bee_bucket_section(&project.id, "Waiting", "waiting", &b.waiting, "neutral"),
+        stuck = bee_bucket_section(&project.id, "Stuck", "stuck", &b.stuck, "danger"),
+        done = bee_bucket_section(&project.id, "Done", "done", &b.done, "success"),
         panels = bee_panels_section(snapshot),
         errors = bee_read_errors(&snapshot.read_errors),
     );
@@ -200,7 +201,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 /// honest empty state instead of zeroed-out or NaN numbers — the headline
 /// stats are computed only over shipped-and-timed features (see
 /// `BeeVelocity`), so a `None` here means "not enough data", never "zero".
-fn bee_velocity_section(snapshot: &BeeSnapshot) -> String {
+fn bee_velocity_section(project_id: &str, snapshot: &BeeSnapshot) -> String {
     let open_features = bee_open_feature_names(snapshot);
 
     if snapshot.shipped.is_empty() {
@@ -212,7 +213,7 @@ fn bee_velocity_section(snapshot: &BeeSnapshot) -> String {
     {open}
   </div>
 </section>"#,
-            open = bee_open_features_list(&open_features),
+            open = bee_open_features_list(project_id, &open_features),
         );
     }
 
@@ -238,8 +239,8 @@ fn bee_velocity_section(snapshot: &BeeSnapshot) -> String {
   </div>
 </section>"#,
         stats = stats,
-        shipped = bee_shipped_list(&snapshot.shipped),
-        open = bee_open_features_list(&open_features),
+        shipped = bee_shipped_list(project_id, &snapshot.shipped),
+        open = bee_open_features_list(project_id, &open_features),
     )
 }
 
@@ -280,8 +281,10 @@ fn bee_fmt_hours(v: Option<f64>) -> Option<String> {
 /// The shipped-feature list: each feature's name, cell count and cycle time
 /// (or an honest "not timed yet" note when D11 could find no cycle time).
 /// Only called when `shipped` is non-empty — the empty case is handled by
-/// `bee_velocity_section` itself, above.
-fn bee_shipped_list(shipped: &[BeeShippedFeature]) -> String {
+/// `bee_velocity_section` itself, above. Each row links to the feature's
+/// detail page (`/p/:id/_bee/feature/:feature`) — the drill-down the board
+/// exists to reach.
+fn bee_shipped_list(project_id: &str, shipped: &[BeeShippedFeature]) -> String {
     let mut rows = String::new();
     for f in shipped {
         let cycle = match &f.cycle_time {
@@ -290,7 +293,9 @@ fn bee_shipped_list(shipped: &[BeeShippedFeature]) -> String {
             None => "not timed yet".to_string(),
         };
         rows.push_str(&format!(
-            r#"<div class="fg-card bee-cell"><div class="fg-card__title">{feature}</div><div class="bee-cell__meta">{count} cell{plural} · {cycle}</div></div>"#,
+            r#"<a class="fg-card bee-cell" href="/p/{pid}/_bee/feature/{feature_href}"><div class="fg-card__title">{feature}</div><div class="bee-cell__meta">{count} cell{plural} · {cycle}</div></a>"#,
+            pid = esc(project_id),
+            feature_href = esc(&f.feature),
             feature = esc(&f.feature),
             count = f.cell_count,
             plural = if f.cell_count == 1 { "" } else { "s" },
@@ -322,11 +327,23 @@ fn bee_open_feature_names(snapshot: &BeeSnapshot) -> Vec<String> {
     names.into_iter().map(String::from).collect()
 }
 
-fn bee_open_features_list(names: &[String]) -> String {
+/// Each still-open feature name links to its detail page, same as the
+/// shipped list above.
+fn bee_open_features_list(project_id: &str, names: &[String]) -> String {
     let body = if names.is_empty() {
         "<p class=\"fg-empty\">Nothing open right now.</p>".to_string()
     } else {
-        let items: String = names.iter().map(|n| format!("<li>{}</li>", esc(n))).collect();
+        let items: String = names
+            .iter()
+            .map(|n| {
+                format!(
+                    r#"<li><a href="/p/{pid}/_bee/feature/{n_href}">{n}</a></li>"#,
+                    pid = esc(project_id),
+                    n_href = esc(n),
+                    n = esc(n),
+                )
+            })
+            .collect();
         format!(r#"<ul class="bee-velocity__open-list">{items}</ul>"#)
     };
     format!(
@@ -338,8 +355,16 @@ fn bee_open_features_list(names: &[String]) -> String {
 /// One D7 bucket. `key` is a stable, lowercase machine token (`data-bucket`)
 /// so a test can assert a bucket's count without depending on the visible
 /// label text; `tone` picks the chip/border color — `"danger"` gives Stuck
-/// its own red styling (D7), never folded into Waiting's neutral tone.
-fn bee_bucket_section(label: &str, key: &str, cells: &[BeeCell], tone: &str) -> String {
+/// its own red styling (D7), never folded into Waiting's neutral tone. Each
+/// cell card is a link to its detail page (`/p/:id/_bee/cell/:cell_id`) —
+/// the drill-down this board exists to reach.
+fn bee_bucket_section(
+    project_id: &str,
+    label: &str,
+    key: &str,
+    cells: &[BeeCell],
+    tone: &str,
+) -> String {
     let danger_cls = if tone == "danger" {
         " bee-bucket--danger"
     } else {
@@ -364,7 +389,9 @@ fn bee_bucket_section(label: &str, key: &str, cells: &[BeeCell], tone: &str) -> 
                 .map(|w| format!("<div class=\"bee-cell__meta\">worker: {}</div>", esc(w)))
                 .unwrap_or_default();
             rows.push_str(&format!(
-                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{title}</div><div class="fg-card__sub">{id} · {feature} · {lane}</div>{files}{worker}</div>"#,
+                r#"<a class="fg-card bee-cell" href="/p/{pid}/_bee/cell/{cid_href}"><div class="fg-card__title">{title}</div><div class="fg-card__sub">{id} · {feature} · {lane}</div>{files}{worker}</a>"#,
+                pid = esc(project_id),
+                cid_href = esc(&c.id),
                 title = esc(&c.title),
                 id = esc(&c.id),
                 feature = esc(&c.feature),
@@ -548,12 +575,14 @@ fn bee_sessions_panel(sessions: &[BeeSession]) -> String {
     )
 }
 
-/// A heartbeat age in minutes, rendered as plain relative language ("4
-/// minutes ago", "2 hours ago") — never the raw ISO timestamp it was
-/// derived from. A negative age (a heartbeat somehow in the future) reads
-/// as "just now" rather than a confusing negative duration; a non-finite
-/// value reads "unknown" rather than crashing the format.
-fn bee_fmt_heartbeat_age(minutes: f64) -> String {
+/// A signed minute count, rendered as plain relative language ("4 minutes
+/// ago", "2 hours ago") — the shared core of `bee_fmt_heartbeat_age` (a
+/// session's `last_heartbeat`) and `bee_fmt_trace_time` (a cell's
+/// `claimed_at`/`capped_at`), so both read the same way. A negative age
+/// (somehow in the future) reads as "just now" rather than a confusing
+/// negative duration; a non-finite value reads "unknown" rather than
+/// crashing the format.
+fn bee_relative_minutes(minutes: f64) -> String {
     if !minutes.is_finite() {
         return "unknown".to_string();
     }
@@ -569,6 +598,28 @@ fn bee_fmt_heartbeat_age(minutes: f64) -> String {
     } else {
         let d = (mins / (60.0 * 24.0)).round().max(1.0) as i64;
         format!("{d} day{plural} ago", plural = if d == 1 { "" } else { "s" })
+    }
+}
+
+/// A heartbeat age in minutes, rendered as plain relative language. See
+/// `bee_relative_minutes`.
+fn bee_fmt_heartbeat_age(minutes: f64) -> String {
+    bee_relative_minutes(minutes)
+}
+
+/// A cell trace timestamp (`claimed_at`/`capped_at`, an RFC 3339 string),
+/// rendered as plain relative language exactly like a session's heartbeat
+/// (`bee_fmt_heartbeat_age`) — never the raw ISO string. A value that fails
+/// to parse falls back to the raw string itself rather than hiding it: an
+/// oddly-shaped-but-present timestamp is still more useful than "unknown".
+fn bee_fmt_trace_time(iso: &str) -> String {
+    match time::OffsetDateTime::parse(iso, &time::format_description::well_known::Rfc3339) {
+        Ok(t) => {
+            let now = time::OffsetDateTime::now_utc();
+            let minutes = (now - t).as_seconds_f64() / 60.0;
+            bee_relative_minutes(minutes)
+        }
+        Err(_) => iso.to_string(),
     }
 }
 
@@ -626,6 +677,257 @@ fn bee_lanes_panel(lanes: &[BeeLane], workspaces: &[BeeWorkspace]) -> String {
         lanes_body = lanes_body,
         workspaces_body = workspaces_body,
     )
+}
+
+/// One `.bee/cells/<id>.json` cell in full — everything the board's trimmed
+/// `mdview_core::bee::BeeCell` deliberately leaves out (`action`, `verify`,
+/// `read_first`, `decisions`, `must_haves.truths`, and the rest of `trace`
+/// beyond `worker`/`claimed_at`/`capped_at`). Built by
+/// `server.rs::cell_full_from_json` straight from the raw cell JSON, with
+/// every path-shaped field already relativized against the project root
+/// before it reaches here (same contract as `mdview_core::bee::BeeCell`) —
+/// this view only escapes for HTML safety, it never redacts.
+pub struct BeeCellFull {
+    pub id: String,
+    pub feature: String,
+    pub title: String,
+    pub action: String,
+    pub verify: String,
+    pub lane: String,
+    pub status: String,
+    pub tier: Option<String>,
+    /// Relative to the project root; never absolute.
+    pub files: Vec<String>,
+    /// Relative to the project root; never absolute.
+    pub read_first: Vec<String>,
+    pub decisions: Vec<String>,
+    pub must_have_truths: Vec<String>,
+    /// `trace.worker`, relativized if it happens to be path-shaped.
+    pub worker: Option<String>,
+    pub claimed_at: Option<String>,
+    pub capped_at: Option<String>,
+    pub outcome: Option<String>,
+    pub deviations: Vec<String>,
+    /// `trace.tests` — bee's own green/red verdict for the cell's `verify`.
+    pub tests: Option<String>,
+    /// `trace.results`, relativized if it happens to be path-shaped.
+    pub results: Option<String>,
+}
+
+/// A status string's chip tone, matching the D7 bucket tones used on the
+/// board (`bee_bucket_section`) so a cell's status chip reads consistently
+/// wherever it appears.
+fn bee_status_tone(status: &str) -> &'static str {
+    match status {
+        "blocked" => "danger",
+        "capped" => "success",
+        _ => "neutral",
+    }
+}
+
+/// The read-only cell detail page (D4): everything one cell carries, plus
+/// its whole trace, reached by clicking any cell card on the board or a
+/// feature page. `cell.feature` links back to that feature's own detail
+/// page, closing the loop between the two drill-down routes.
+pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
+    let list_or_empty = |items: &[String], empty: &str| -> String {
+        if items.is_empty() {
+            format!("<p class=\"fg-empty\">{}</p>", esc(empty))
+        } else {
+            let lis: String = items.iter().map(|i| format!("<li>{}</li>", esc(i))).collect();
+            format!("<ul>{lis}</ul>")
+        }
+    };
+
+    let decisions = if cell.decisions.is_empty() {
+        "<p class=\"fg-empty\">No decisions cited.</p>".to_string()
+    } else {
+        let chips: String = cell
+            .decisions
+            .iter()
+            .map(|d| format!(r#"<span class="fg-chip fg-chip--neutral">{}</span>"#, esc(d)))
+            .collect();
+        format!(r#"<div class="bee-panel__chips">{chips}</div>"#)
+    };
+
+    let tier_chip = cell
+        .tier
+        .as_deref()
+        .map(|t| format!(r#"<span class="fg-chip fg-chip--neutral">tier: {}</span>"#, esc(t)))
+        .unwrap_or_default();
+
+    let worker = cell.worker.as_deref().unwrap_or("—");
+    let claimed = cell
+        .claimed_at
+        .as_deref()
+        .map(bee_fmt_trace_time)
+        .unwrap_or_else(|| "—".to_string());
+    let capped = cell
+        .capped_at
+        .as_deref()
+        .map(bee_fmt_trace_time)
+        .unwrap_or_else(|| "not capped yet".to_string());
+    let outcome = cell.outcome.as_deref().unwrap_or("—");
+    let tests = cell.tests.as_deref().unwrap_or("—");
+    let results = cell
+        .results
+        .as_deref()
+        .map(|r| format!("<div class=\"bee-cell__meta\">results: {}</div>", esc(r)))
+        .unwrap_or_default();
+
+    let deviations = if cell.deviations.is_empty() {
+        "<p class=\"fg-empty\">No deviations recorded.</p>".to_string()
+    } else {
+        let lis: String = cell
+            .deviations
+            .iter()
+            .map(|d| format!("<li>{}</li>", esc(d)))
+            .collect();
+        format!("<ul>{lis}</ul>")
+    };
+
+    let body = format!(
+        r#"{topbar}
+<main class="fg-page">
+  <div class="fg-pagehead">
+    <h2 class="fg-pagehead__title">{title}</h2>
+    <div class="fg-pagehead__aside">
+      <span class="fg-chip fg-chip--{tone}">{status}</span>
+      <span class="fg-chip fg-chip--neutral">lane: {lane}</span>
+      {tier_chip}
+    </div>
+  </div>
+  <p class="bee-cell__meta">{id} · feature: <a href="/p/{pid}/_bee/feature/{feature_href}">{feature}</a></p>
+
+  <section class="fg-card bee-panel">
+    <h3 class="bee-panel__head">Action</h3>
+    <p>{action}</p>
+  </section>
+
+  <section class="fg-card bee-panel">
+    <h3 class="bee-panel__head">Verify</h3>
+    <p>{verify}</p>
+  </section>
+
+  <div class="bee-panels">
+    <section class="fg-card bee-panel">
+      <h3 class="bee-panel__head">Files</h3>
+      {files}
+    </section>
+    <section class="fg-card bee-panel">
+      <h3 class="bee-panel__head">Read first</h3>
+      {read_first}
+    </section>
+    <section class="fg-card bee-panel">
+      <h3 class="bee-panel__head">Decisions cited</h3>
+      {decisions}
+    </section>
+    <section class="fg-card bee-panel">
+      <h3 class="bee-panel__head">Must-haves</h3>
+      {must_haves}
+    </section>
+  </div>
+
+  <section class="fg-card bee-panel">
+    <h3 class="bee-panel__head">Trace</h3>
+    <div class="bee-panel__list">
+      <div class="fg-card bee-cell"><div class="fg-card__title">Worker</div><div class="bee-cell__meta">{worker}</div></div>
+      <div class="fg-card bee-cell"><div class="fg-card__title">Claimed</div><div class="bee-cell__meta">{claimed}</div></div>
+      <div class="fg-card bee-cell"><div class="fg-card__title">Capped</div><div class="bee-cell__meta">{capped}</div></div>
+      <div class="fg-card bee-cell"><div class="fg-card__title">Outcome</div><div class="bee-cell__meta">{outcome}</div></div>
+      <div class="fg-card bee-cell"><div class="fg-card__title">Test result</div><div class="bee-cell__meta">{tests}</div>{results}</div>
+    </div>
+    <h4 class="bee-panel__subhead">Deviations</h4>
+    {deviations}
+  </section>
+</main>"#,
+        topbar = topbar(&format!(
+            "<span class=\"crumb\">{name} · {id}</span>",
+            name = esc(&project.name),
+            id = esc(&cell.id),
+        )),
+        title = esc(&cell.title),
+        tone = bee_status_tone(&cell.status),
+        status = esc(&cell.status),
+        lane = esc(&cell.lane),
+        tier_chip = tier_chip,
+        id = esc(&cell.id),
+        pid = esc(&project.id),
+        feature_href = esc(&cell.feature),
+        feature = esc(&cell.feature),
+        action = esc(&cell.action),
+        verify = esc(&cell.verify),
+        files = list_or_empty(&cell.files, "No files listed."),
+        read_first = list_or_empty(&cell.read_first, "Nothing to read first."),
+        decisions = decisions,
+        must_haves = list_or_empty(&cell.must_have_truths, "No must-haves recorded."),
+        worker = esc(worker),
+        claimed = esc(&claimed),
+        capped = esc(&capped),
+        outcome = esc(outcome),
+        tests = esc(tests),
+        results = results,
+        deviations = deviations,
+    );
+    layout(&format!("{} · {}", cell.id, project.name), "", &body)
+}
+
+/// The read-only feature detail page (D4): whether the feature has shipped
+/// (D10) and its cycle time (D11) when timed, followed by every one of its
+/// cells grouped into the same four D7 buckets the board uses — each cell
+/// card links to its own detail page. Reached from the board's shipped/open
+/// feature lists or from a cell page's feature link.
+pub fn bee_feature_page(
+    project: &Project,
+    feature: &str,
+    buckets: &BeeBuckets,
+    shipped: Option<&BeeShippedFeature>,
+) -> String {
+    let status_banner = match shipped {
+        Some(f) => {
+            let cycle = match &f.cycle_time {
+                Some(span) if span.hours.is_finite() => format!("{:.1}h to finish", span.hours),
+                Some(_) => "—".to_string(),
+                None => "not timed yet".to_string(),
+            };
+            format!(
+                r#"<div class="fg-banner fg-banner--success"><span class="fg-banner__dot"></span><span class="fg-banner__body">Shipped · {count} cell{plural} · {cycle}</span></div>"#,
+                count = f.cell_count,
+                plural = if f.cell_count == 1 { "" } else { "s" },
+                cycle = esc(&cycle),
+            )
+        }
+        None => {
+            r#"<div class="fg-card fg-card--sunken"><div class="fg-card__title">Not shipped yet</div></div>"#
+                .to_string()
+        }
+    };
+
+    let body = format!(
+        r#"{topbar}
+<main class="fg-page">
+  <h2 class="fg-pagehead__title">{feature}</h2>
+  {status_banner}
+  <div class="bee-buckets">
+    {doing}
+    {waiting}
+    {stuck}
+    {done}
+  </div>
+</main>"#,
+        topbar = topbar(&format!(
+            "<span class=\"crumb\">{name} · {feature}</span>",
+            name = esc(&project.name),
+            feature = esc(feature),
+        )),
+        feature = esc(feature),
+        status_banner = status_banner,
+        doing = bee_bucket_section(&project.id, "Doing", "doing", &buckets.doing, "neutral"),
+        waiting = bee_bucket_section(&project.id, "Waiting", "waiting", &buckets.waiting, "neutral"),
+        stuck = bee_bucket_section(&project.id, "Stuck", "stuck", &buckets.stuck, "danger"),
+        done = bee_bucket_section(&project.id, "Done", "done", &buckets.done, "success"),
+    );
+    layout(&format!("{} · {}", feature, project.name), "", &body)
 }
 
 pub fn file_page(

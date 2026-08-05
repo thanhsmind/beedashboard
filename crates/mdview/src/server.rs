@@ -107,6 +107,8 @@ fn router(state: AppState) -> Router {
         .route("/p/:id/_search", get(search_page))
         .route("/p/:id/_jump", get(jump_search))
         .route("/p/:id/_bee", get(bee_board))
+        .route("/p/:id/_bee/cell/:cell_id", get(bee_cell_detail))
+        .route("/p/:id/_bee/feature/:feature", get(bee_feature_detail))
         .route("/p/:id/*path", get(project_path))
         .with_state(state)
 }
@@ -340,6 +342,219 @@ async fn bee_board(State(st): State<AppState>, Path(id): Path<String>) -> Respon
         return not_found("this project has no .bee/ store");
     }
     Html(views::bee_board_page(&project, &snapshot)).into_response()
+}
+
+/// `GET /p/:id/_bee/cell/:cell_id` — one cell in full (D4): title, action,
+/// verify, lane, status, its files/read_first lists, the decisions it
+/// cites, its must_haves, and its whole trace. A missing project, an absent
+/// `.bee/`, or an unknown cell id each resolve to the same clean not-found
+/// (D3), never a blank page.
+async fn bee_cell_detail(
+    State(st): State<AppState>,
+    Path((id, cell_id)): Path<(String, String)>,
+) -> Response {
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("project not found");
+    };
+    if !is_bee_project(&project) {
+        return not_found("this project has no .bee/ store");
+    }
+    match find_cell_full(&project.root_path, &cell_id) {
+        Some(cell) => Html(views::bee_cell_page(&project, &cell)).into_response(),
+        None => not_found("cell not found"),
+    }
+}
+
+/// `GET /p/:id/_bee/feature/:feature` — one feature's cells grouped into the
+/// same four D7 buckets the board uses, plus its shipped state (D10) and
+/// cycle time (D11) when timed. An unknown feature name — none of its cells
+/// live in any bucket, and it never shipped — resolves to a clean not-found,
+/// same as an unknown cell id.
+async fn bee_feature_detail(
+    State(st): State<AppState>,
+    Path((id, feature)): Path<(String, String)>,
+) -> Response {
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("project not found");
+    };
+    let snapshot = mdview_core::bee::read_snapshot(&project.root_path);
+    if !snapshot.present {
+        return not_found("this project has no .bee/ store");
+    }
+
+    let by_feature = |cells: &[mdview_core::bee::BeeCell]| -> Vec<mdview_core::bee::BeeCell> {
+        cells.iter().filter(|c| c.feature == feature).cloned().collect()
+    };
+    let buckets = mdview_core::bee::BeeBuckets {
+        doing: by_feature(&snapshot.buckets.doing),
+        waiting: by_feature(&snapshot.buckets.waiting),
+        stuck: by_feature(&snapshot.buckets.stuck),
+        done: by_feature(&snapshot.buckets.done),
+    };
+    let shipped = snapshot.shipped.iter().find(|f| f.feature == feature);
+
+    let known_feature = shipped.is_some()
+        || !buckets.doing.is_empty()
+        || !buckets.waiting.is_empty()
+        || !buckets.stuck.is_empty()
+        || !buckets.done.is_empty();
+    if !known_feature {
+        return not_found("feature not found");
+    }
+
+    Html(views::bee_feature_page(&project, &feature, &buckets, shipped)).into_response()
+}
+
+/// Render `s` relative to `root` when it names a path under `root`; reduce
+/// to its bare filename when it is absolute but falls outside `root`. A
+/// local twin of `mdview_core::bee`'s private `relativize` — that module is
+/// out of scope for this cell, and the detail routes read the raw cell JSON
+/// directly (to reach fields the trimmed `BeeCell` doesn't carry), so they
+/// need their own copy of the same no-absolute-path contract.
+fn relativize_detail_path(s: &str, root: &std::path::Path) -> String {
+    let p = std::path::Path::new(s);
+    if !p.is_absolute() {
+        return s.to_string();
+    }
+    match p.strip_prefix(root) {
+        Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+        Err(_) => p
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "(absolute path redacted)".to_string()),
+    }
+}
+
+/// Scan the live `.bee/cells/*.json` tree (never `archive/`, per D9) for the
+/// JSON object whose own `"id"` field matches `cell_id` — filenames are not
+/// guaranteed to match a cell's id (see `bee_route_tests::cell_json`, which
+/// deliberately writes `a.json`/`b.json` carrying ids like `c-open`), so a
+/// direct `<cells_dir>/<cell_id>.json` lookup would miss real cells.
+fn find_cell_full(root: &std::path::Path, cell_id: &str) -> Option<views::BeeCellFull> {
+    let cells_dir = root.join(".bee").join("cells");
+    if !cells_dir.is_dir() {
+        return None;
+    }
+    let entries = std::fs::read_dir(&cells_dir).ok()?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        if v.get("id").and_then(serde_json::Value::as_str) != Some(cell_id) {
+            continue;
+        }
+        return Some(cell_full_from_json(&v, root));
+    }
+    None
+}
+
+/// Parse one raw `.bee/cells/<id>.json` object into a [`views::BeeCellFull`],
+/// relativizing every path-shaped value it carries (files, read_first,
+/// trace.worker, trace.results) the same way `mdview_core::bee::parse_cell`
+/// does for the trimmed board `BeeCell`.
+fn cell_full_from_json(v: &serde_json::Value, root: &std::path::Path) -> views::BeeCellFull {
+    use serde_json::Value;
+
+    let str_field = |key: &str| -> String {
+        v.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
+    };
+    let opt_str_field = |key: &str| -> Option<String> {
+        v.get(key).and_then(Value::as_str).map(String::from)
+    };
+    let str_array = |key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
+            .unwrap_or_default()
+    };
+    let path_array = |key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(|s| relativize_detail_path(s, root))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let must_have_truths = v
+        .get("must_haves")
+        .and_then(|m| m.get("truths"))
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
+        .unwrap_or_default();
+
+    let trace = v.get("trace");
+    let worker = trace
+        .and_then(|t| t.get("worker"))
+        .and_then(Value::as_str)
+        .map(|w| relativize_detail_path(w, root));
+    let claimed_at = trace
+        .and_then(|t| t.get("claimed_at"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    let capped_at = trace
+        .and_then(|t| t.get("capped_at"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    let outcome = trace
+        .and_then(|t| t.get("outcome"))
+        .and_then(Value::as_str)
+        .map(String::from);
+    // A deviation entry is either a plain string or an object carrying a
+    // "description" (see beehive's `wl-2.json`, `p2-2.json`) — both shapes
+    // are folded to a display string here, and anything else falls back to
+    // its raw JSON rather than silently dropping the entry.
+    let deviations = trace
+        .and_then(|t| t.get("deviations"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|d| {
+                    d.as_str()
+                        .map(String::from)
+                        .or_else(|| d.get("description").and_then(Value::as_str).map(String::from))
+                        .unwrap_or_else(|| d.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let tests = trace.and_then(|t| t.get("tests")).and_then(Value::as_str).map(String::from);
+    let results = trace
+        .and_then(|t| t.get("results"))
+        .and_then(Value::as_str)
+        .map(|r| relativize_detail_path(r, root));
+
+    views::BeeCellFull {
+        id: str_field("id"),
+        feature: str_field("feature"),
+        title: str_field("title"),
+        action: str_field("action"),
+        verify: str_field("verify"),
+        lane: str_field("lane"),
+        status: str_field("status"),
+        tier: opt_str_field("tier"),
+        files: path_array("files"),
+        read_first: path_array("read_first"),
+        decisions: str_array("decisions"),
+        must_have_truths,
+        worker,
+        claimed_at,
+        capped_at,
+        outcome,
+        deviations,
+        tests,
+        results,
+    }
 }
 
 /// Which file a project opens to — a fixed, predictable rule instead of
@@ -1502,6 +1717,361 @@ mod bee_route_tests {
         let before = snapshot_tree(&root);
 
         let _ = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+
+        let after = snapshot_tree(&root);
+        assert_eq!(before, after, ".bee/ tree changed after a request");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── bee-cockpit-7: cell + feature detail pages ─────────────────────────
+
+    /// A cell fixture carrying every field the detail page renders: action,
+    /// verify, read_first, decisions, must_haves.truths, and a full trace
+    /// (worker, claim/cap timestamps, outcome, deviations, tests, results) —
+    /// the fields the board's trimmed `cell_json` fixture never carries.
+    fn full_cell_json(id: &str, feature: &str, status: &str, files: &[String], read_first: &[String]) -> String {
+        let files_json = files
+            .iter()
+            .map(|f| serde_json::to_string(f).unwrap())
+            .collect::<Vec<_>>()
+            .join(",");
+        let read_first_json = read_first
+            .iter()
+            .map(|f| serde_json::to_string(f).unwrap())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{
+                "id": "{id}",
+                "feature": "{feature}",
+                "lane": "standard",
+                "title": "Cell {id}",
+                "action": "do the full thing",
+                "verify": "cargo test --workspace",
+                "files": [{files_json}],
+                "read_first": [{read_first_json}],
+                "deps": [],
+                "decisions": ["D1", "D4"],
+                "must_haves": {{"truths": ["truth one", "truth two"]}},
+                "behavior_change": true,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "{status}",
+                "tier": "standard",
+                "trace": {{
+                    "worker": "worker-1",
+                    "claimed_at": "2026-08-04T08:00:00Z",
+                    "capped_at": "2026-08-04T08:24:00Z",
+                    "outcome": "shipped the detail pages",
+                    "deviations": ["noted a small deviation"],
+                    "tests": "green",
+                    "results": ".bee/logs/test-results.json"
+                }}
+            }}"#
+        )
+    }
+
+    /// (happy) The cell page for a fixture cell returns 200 and carries its
+    /// title, action, verify, lane, status, must_haves, decisions cited, and
+    /// the full trace (worker, outcome, deviations, test result).
+    #[tokio::test]
+    async fn cell_detail_page_carries_title_status_lane_and_full_trace() {
+        let root = fresh_root("cell-detail-happy");
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &full_cell_json("bee-cockpit-7", "bee-cockpit", "capped", &[], &[]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "cell-detail-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee/cell/bee-cockpit-7", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Cell bee-cockpit-7"), "title missing: {body}");
+        assert!(body.contains("capped"), "status missing: {body}");
+        assert!(body.contains("lane: standard"), "lane missing: {body}");
+        assert!(body.contains("do the full thing"), "action missing: {body}");
+        assert!(body.contains("cargo test --workspace"), "verify missing: {body}");
+        assert!(body.contains("truth one"), "must_haves truth missing: {body}");
+        assert!(body.contains("D1"), "decision citation missing: {body}");
+        assert!(body.contains("worker-1"), "trace worker missing: {body}");
+        assert!(body.contains("shipped the detail pages"), "trace outcome missing: {body}");
+        assert!(body.contains("noted a small deviation"), "trace deviation missing: {body}");
+        assert!(body.contains("green"), "trace test result missing: {body}");
+        // A timestamp reads as relative language, not the raw ISO string
+        // it was derived from — see the D4/panels precedent in the test above.
+        assert!(
+            !body.contains("2026-08-04T08:00:00Z"),
+            "raw ISO trace timestamp leaked into the page: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) The feature page returns 200, carries the feature's cells
+    /// grouped by the four D7 buckets, and its shipped state (D10) plus
+    /// cycle time (D11).
+    #[tokio::test]
+    async fn feature_detail_page_shows_shipped_state_and_bucket_grouping() {
+        let root = fresh_root("feature-detail-happy");
+        write(
+            &root,
+            ".bee/cells/shipped-1.json",
+            &timed_cell_json(
+                "f1",
+                "detail-feature",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-detail-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/detail-feature", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Shipped"), "shipped banner missing: {body}");
+        assert!(body.contains("0.4h to finish"), "cycle time missing: {body}");
+        assert!(body.contains("data-bucket=\"done\" data-count=\"1\""), "{body}");
+        assert!(body.contains("data-bucket=\"doing\" data-count=\"0\""), "{body}");
+        assert!(body.contains("data-bucket=\"waiting\" data-count=\"0\""), "{body}");
+        assert!(body.contains("data-bucket=\"stuck\" data-count=\"0\""), "{body}");
+        assert!(body.contains("Cell f1"), "cell title missing: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A feature with a live cell in each of Doing/Waiting/Stuck and none
+    /// capped groups correctly into all four buckets and is honestly
+    /// reported as not shipped (D10 requires every non-dropped cell capped).
+    #[tokio::test]
+    async fn feature_detail_page_groups_across_all_four_buckets_when_not_shipped() {
+        let root = fresh_root("feature-detail-buckets");
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &timed_cell_json("g1", "grouped-feature", "open", &[], "w1", "x", "y"),
+        );
+        write(
+            &root,
+            ".bee/cells/b.json",
+            &timed_cell_json("g2", "grouped-feature", "claimed", &[], "w1", "x", "y"),
+        );
+        write(
+            &root,
+            ".bee/cells/c.json",
+            &timed_cell_json("g3", "grouped-feature", "blocked", &[], "w1", "x", "y"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-detail-buckets");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/grouped-feature", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Not shipped yet"), "{body}");
+        assert!(body.contains("data-bucket=\"doing\" data-count=\"1\""), "{body}");
+        assert!(body.contains("data-bucket=\"waiting\" data-count=\"1\""), "{body}");
+        assert!(body.contains("data-bucket=\"stuck\" data-count=\"1\""), "{body}");
+        assert!(body.contains("data-bucket=\"done\" data-count=\"0\""), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `reachable_links`: rendering the detail pages without linking to them
+    /// does not satisfy this cell — the board body must actually carry both
+    /// kinds of link.
+    #[tokio::test]
+    async fn board_body_links_to_cell_and_feature_detail_routes() {
+        let root = fresh_root("board-links");
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &timed_cell_json(
+                "link-cell",
+                "link-feature",
+                "open",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "board-links");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/cell/link-cell\"", project.id)),
+            "board must link cells to their detail page: {body}"
+        );
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/link-feature\"", project.id)),
+            "board must link features to their detail page: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) An unknown cell id and an unknown feature name each return a
+    /// clean not-found.
+    #[tokio::test]
+    async fn unknown_cell_id_and_unknown_feature_name_are_not_found() {
+        let root = fresh_root("detail-unknown");
+        write(&root, ".bee/cells/a.json", &cell_json("real-cell", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "detail-unknown");
+        let app = router(st);
+
+        let cell_resp = get(app.clone(), &format!("/p/{}/_bee/cell/does-not-exist", project.id)).await;
+        assert_eq!(cell_resp.status(), StatusCode::NOT_FOUND);
+
+        let feature_resp = get(app, &format!("/p/{}/_bee/feature/does-not-exist", project.id)).await;
+        assert_eq!(feature_resp.status(), StatusCode::NOT_FOUND);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) A project with no `.bee/` returns not-found from both detail
+    /// routes, matching the board (D3).
+    #[tokio::test]
+    async fn no_bee_dir_returns_not_found_from_both_detail_routes() {
+        let root = fresh_root("detail-no-bee");
+
+        let st = build_state();
+        let project = register(&st, &root, "detail-no-bee");
+        let app = router(st);
+
+        let cell_resp = get(app.clone(), &format!("/p/{}/_bee/cell/anything", project.id)).await;
+        assert_eq!(cell_resp.status(), StatusCode::NOT_FOUND);
+
+        let feature_resp = get(app, &format!("/p/{}/_bee/feature/anything", project.id)).await;
+        assert_eq!(feature_resp.status(), StatusCode::NOT_FOUND);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (security) Neither detail body contains an absolute path or the
+    /// fixture root. Named against the fixture's own root and
+    /// `std::env::temp_dir()`, per
+    /// `docs/history/learnings/20260805-toothless-security-assertions.md`,
+    /// never a production literal like `/home/`.
+    #[tokio::test]
+    async fn detail_pages_leak_no_absolute_path_or_fixture_root() {
+        let root = fresh_root("detail-security");
+        let root_str = root.to_string_lossy().into_owned();
+        let inside_abs = root.join("src/inside.rs").to_string_lossy().into_owned();
+        let outside_abs = std::env::temp_dir()
+            .join("mdview-server-bee-detail-outside.rs")
+            .to_string_lossy()
+            .into_owned();
+        let worker_abs = root.join("workers/reader-1").to_string_lossy().into_owned();
+        let results_abs = root.join(".bee/logs/test-results.json").to_string_lossy().into_owned();
+
+        let leaky_cell = format!(
+            r#"{{
+                "id": "leaky-cell",
+                "feature": "leaky-feature",
+                "lane": "standard",
+                "title": "Leaky cell",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [{inside}, {outside}],
+                "read_first": [{inside}],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {{}},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "capped",
+                "tier": "generation",
+                "trace": {{
+                    "worker": {worker},
+                    "claimed_at": "2026-08-04T08:00:00Z",
+                    "capped_at": "2026-08-04T08:24:00Z",
+                    "outcome": "ok",
+                    "deviations": [],
+                    "tests": "green",
+                    "results": {results}
+                }}
+            }}"#,
+            inside = serde_json::to_string(&inside_abs).unwrap(),
+            outside = serde_json::to_string(&outside_abs).unwrap(),
+            worker = serde_json::to_string(&worker_abs).unwrap(),
+            results = serde_json::to_string(&results_abs).unwrap(),
+        );
+        write(&root, ".bee/cells/leaky.json", &leaky_cell);
+
+        let st = build_state();
+        let project = register(&st, &root, "detail-security");
+        let app = router(st);
+
+        let cell_resp = get(app.clone(), &format!("/p/{}/_bee/cell/leaky-cell", project.id)).await;
+        assert_eq!(cell_resp.status(), StatusCode::OK);
+        let cell_body = body_string(cell_resp).await;
+
+        assert!(!cell_body.contains(&root_str), "cell page leaked the fixture root: {cell_body}");
+        assert!(
+            !cell_body.contains(&outside_abs),
+            "cell page leaked an absolute path outside the fixture root: {cell_body}"
+        );
+        assert!(!cell_body.contains(&worker_abs), "cell page leaked the absolute worker path: {cell_body}");
+        assert!(
+            !cell_body.contains(&inside_abs),
+            "cell page leaked the in-root absolute path verbatim: {cell_body}"
+        );
+        assert!(!cell_body.contains(&results_abs), "cell page leaked the absolute results path: {cell_body}");
+        assert!(cell_body.contains("src/inside.rs"), "{cell_body}");
+
+        let feature_resp = get(app, &format!("/p/{}/_bee/feature/leaky-feature", project.id)).await;
+        assert_eq!(feature_resp.status(), StatusCode::OK);
+        let feature_body = body_string(feature_resp).await;
+
+        assert!(!feature_body.contains(&root_str), "feature page leaked the fixture root: {feature_body}");
+        assert!(
+            !feature_body.contains(&outside_abs),
+            "feature page leaked an absolute path outside the fixture root: {feature_body}"
+        );
+        assert!(
+            !feature_body.contains(&worker_abs),
+            "feature page leaked the absolute worker path: {feature_body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (read-only) The detail routes read the same live `.bee/cells/*.json`
+    /// tree as the board (D4) — the fixture tree must stay byte-identical
+    /// before and after both requests.
+    #[tokio::test]
+    async fn detail_routes_never_write_the_fixtures_bee_tree() {
+        let root = fresh_root("detail-read-only");
+        write(&root, "README.md", "# hi");
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &full_cell_json("ro-cell", "ro-feature", "capped", &[], &[]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "detail-read-only");
+        let before = snapshot_tree(&root);
+
+        let app = router(st);
+        let _ = get(app.clone(), &format!("/p/{}/_bee/cell/ro-cell", project.id)).await;
+        let _ = get(app, &format!("/p/{}/_bee/feature/ro-feature", project.id)).await;
 
         let after = snapshot_tree(&root);
         assert_eq!(before, after, ".bee/ tree changed after a request");
