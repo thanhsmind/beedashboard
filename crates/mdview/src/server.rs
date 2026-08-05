@@ -18,6 +18,7 @@ use mdview_core::render::theme_css;
 use mdview_core::Engine;
 use serde_json::json;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -26,6 +27,11 @@ pub struct AppState {
     pub engine: Arc<Engine>,
     pub reload_tx: broadcast::Sender<String>,
     pub highlight_css: Arc<String>,
+    /// Overrides `mdview_core::config::data_dir()` for the settings routes
+    /// (`/settings`, `/api/config`) so a route-level test can point config I/O
+    /// at a temp dir instead of the developer's real `~/.mdview`. `None` in
+    /// production — those routes then resolve exactly where they always did.
+    pub config_data_dir: Option<PathBuf>,
 }
 
 /// Start the daemon: watcher + HTTP server. Blocks until shutdown.
@@ -38,6 +44,7 @@ pub async fn serve() -> Result<()> {
         engine: engine.clone(),
         reload_tx: reload_tx.clone(),
         highlight_css,
+        config_data_dir: None,
     };
 
     // Filesystem watcher (kept alive for the process lifetime).
@@ -171,7 +178,14 @@ fn project_summary_json(id: &str, name: &str, file_count: usize) -> serde_json::
 }
 
 async fn api_config(State(st): State<AppState>) -> impl IntoResponse {
-    Json(json!(st.engine.config))
+    // Read through the same injectable path settings_page_handler and
+    // update_config use, rather than the engine's startup-cached config, so
+    // all three agree with each other and a route test never touches the
+    // real ~/.mdview.
+    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+        st.config_data_dir.as_deref(),
+    ));
+    Json(json!(cfg))
 }
 
 #[derive(serde::Deserialize)]
@@ -179,10 +193,12 @@ struct SavedFlag {
     saved: Option<String>,
 }
 
-async fn settings_page_handler(Query(flag): Query<SavedFlag>) -> Response {
+async fn settings_page_handler(State(st): State<AppState>, Query(flag): Query<SavedFlag>) -> Response {
     // Read fresh from disk so the form reflects the last save (the running daemon
     // still uses its startup config until restarted — noted in the UI).
-    let cfg = mdview_core::Config::load();
+    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+        st.config_data_dir.as_deref(),
+    ));
     Html(views::settings_page(&cfg, flag.saved.is_some())).into_response()
 }
 
@@ -201,8 +217,10 @@ struct SettingsForm {
     mcp_transport: Option<String>,
 }
 
-async fn update_config(Form(form): Form<SettingsForm>) -> Response {
-    let mut cfg = mdview_core::Config::load();
+async fn update_config(State(st): State<AppState>, Form(form): Form<SettingsForm>) -> Response {
+    let config_path =
+        mdview_core::config::config_path_override(st.config_data_dir.as_deref());
+    let mut cfg = mdview_core::Config::load_from(&config_path);
     if let Some(p) = form.port {
         if p >= 1 {
             cfg.server.port = p;
@@ -248,7 +266,7 @@ async fn update_config(Form(form): Form<SettingsForm>) -> Response {
             cfg.mcp.transport = tr;
         }
     }
-    let _ = cfg.save();
+    let _ = cfg.save_to(&config_path);
     Redirect::to("/settings?saved=1").into_response()
 }
 
@@ -1028,6 +1046,7 @@ mod bee_route_tests {
             engine,
             reload_tx,
             highlight_css: Arc::new(String::new()),
+            config_data_dir: None,
         }
     }
 
@@ -2972,5 +2991,88 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// The seam this cell exists to add: `/settings` and `/api/config` must
+    /// read through `AppState::config_data_dir` instead of the process-global
+    /// `~/.mdview`, so a route-level test can point at a temp dir and never
+    /// touch the developer's real config file (agent-terminal-1, E0/S1).
+    #[tokio::test]
+    async fn settings_routes_read_through_the_injected_data_dir_not_real_home() {
+        let dir = fresh_root("settings-override-read");
+        // A distinctive value that only exists in the override dir's config,
+        // never written to the real ~/.mdview by this test.
+        let mut cfg = Config::default();
+        cfg.server.port = 47201;
+        cfg.save_to(&dir.join("config.toml")).unwrap();
+
+        let real_config_path = mdview_core::config::config_path();
+        let real_before = std::fs::read(&real_config_path).ok();
+
+        let mut st = build_state();
+        st.config_data_dir = Some(dir.clone());
+
+        let resp = get(router(st.clone()), "/settings").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("47201"),
+            "settings page did not reflect the overridden data dir's config"
+        );
+
+        let resp = get(router(st), "/api/config").await;
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("47201"),
+            "/api/config did not reflect the overridden data dir's config"
+        );
+
+        let real_after = std::fs::read(&real_config_path).ok();
+        assert_eq!(
+            real_before, real_after,
+            "the real ~/.mdview/config.toml was read or written by a route test"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `update_config` must save through the same injected path — a POST from
+    /// a route test must never land in the real `~/.mdview/config.toml`.
+    #[tokio::test]
+    async fn update_config_writes_only_to_the_injected_data_dir() {
+        let dir = fresh_root("settings-override-write");
+
+        let real_config_path = mdview_core::config::config_path();
+        let real_before = std::fs::read(&real_config_path).ok();
+
+        let mut st = build_state();
+        st.config_data_dir = Some(dir.clone());
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("port=58311"))
+            .unwrap();
+        let resp = router(st).oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_redirection(),
+            "update_config should redirect back to /settings, got {}",
+            resp.status()
+        );
+
+        let saved = Config::load_from(&dir.join("config.toml"));
+        assert_eq!(
+            saved.server.port, 58311,
+            "update_config did not write the overridden data dir's config file"
+        );
+
+        let real_after = std::fs::read(&real_config_path).ok();
+        assert_eq!(
+            real_before, real_after,
+            "the real ~/.mdview/config.toml was written by update_config through a route test"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

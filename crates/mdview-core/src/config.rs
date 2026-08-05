@@ -117,8 +117,22 @@ pub fn data_dir() -> PathBuf {
         .join(".mdview")
 }
 
+/// `data_dir()`, or `override_dir` when given. Callers that must be testable
+/// without touching the developer's real `~/.mdview` (route handlers exercised
+/// through a test harness) resolve the data directory through this instead of
+/// calling `data_dir()` directly. With `override_dir` unset this returns
+/// exactly what `data_dir()` returns.
+pub fn resolve_data_dir(override_dir: Option<&Path>) -> PathBuf {
+    override_dir.map(Path::to_path_buf).unwrap_or_else(data_dir)
+}
+
 pub fn config_path() -> PathBuf {
     data_dir().join("config.toml")
+}
+
+/// `config_path()`, or `override_dir/config.toml` when given.
+pub fn config_path_override(override_dir: Option<&Path>) -> PathBuf {
+    resolve_data_dir(override_dir).join("config.toml")
 }
 
 pub fn registry_db_path() -> PathBuf {
@@ -199,6 +213,22 @@ mod tests {
         let loaded = Config::load_from(&p);
         assert_eq!(loaded.server.port, 9999);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_data_dir_uses_override_when_set() {
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-override-{}", std::process::id()));
+        assert_eq!(resolve_data_dir(Some(&dir)), dir);
+        assert_eq!(
+            config_path_override(Some(&dir)),
+            dir.join("config.toml")
+        );
+    }
+
+    #[test]
+    fn resolve_data_dir_falls_back_to_data_dir_when_unset() {
+        assert_eq!(resolve_data_dir(None), data_dir());
+        assert_eq!(config_path_override(None), config_path());
     }
 
     #[test]
