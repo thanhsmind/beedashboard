@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR\"/.bee/bin/hooks/bee-session-init.mjs"
+            "command": "for b in \"$CLAUDE_PROJECT_DIR/.bee/bin/bee\" \"$CLAUDE_PROJECT_DIR/.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook session-init; done; g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\"; [ -n \"$g\" ] && for b in \"$g/../.bee/bin/bee\" \"$g/../.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook session-init; done; echo \"bee: hook binary missing (.bee/bin/bee)\" >&2; exit 0"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR\"/.bee/bin/hooks/bee-prompt-context.mjs"
+            "command": "for b in \"$CLAUDE_PROJECT_DIR/.bee/bin/bee\" \"$CLAUDE_PROJECT_DIR/.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook prompt-context; done; g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\"; [ -n \"$g\" ] && for b in \"$g/../.bee/bin/bee\" \"$g/../.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook prompt-context; done; echo \"bee: hook binary missing (.bee/bin/bee)\" >&2; exit 0"
           }
         ]
       }
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR\"/.bee/bin/hooks/bee-write-guard.mjs"
+            "command": "for b in \"$CLAUDE_PROJECT_DIR/.bee/bin/bee\" \"$CLAUDE_PROJECT_DIR/.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook write-guard; done; g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\"; [ -n \"$g\" ] && for b in \"$g/../.bee/bin/bee\" \"$g/../.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook write-guard; done; echo \"bee: hook binary missing (.bee/bin/bee)\" >&2; exit 0"
           }
         ]
       },
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR\"/.bee/bin/hooks/bee-model-guard.mjs"
+            "command": "for b in \"$CLAUDE_PROJECT_DIR/.bee/bin/bee\" \"$CLAUDE_PROJECT_DIR/.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook model-guard; done; g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\"; [ -n \"$g\" ] && for b in \"$g/../.bee/bin/bee\" \"$g/../.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook model-guard; done; echo \"bee: hook binary missing (.bee/bin/bee)\" >&2; exit 0"
           }
         ]
       }
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR\"/.bee/bin/hooks/bee-state-sync.mjs"
+            "command": "for b in \"$CLAUDE_PROJECT_DIR/.bee/bin/bee\" \"$CLAUDE_PROJECT_DIR/.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook state-sync; done; g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\"; [ -n \"$g\" ] && for b in \"$g/../.bee/bin/bee\" \"$g/../.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook state-sync; done; echo \"bee: hook binary missing (.bee/bin/bee)\" >&2; exit 0"
           }
         ]
       },
@@ -55,7 +55,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR\"/.bee/bin/hooks/bee-tools-logger.mjs"
+            "command": "for b in \"$CLAUDE_PROJECT_DIR/.bee/bin/bee\" \"$CLAUDE_PROJECT_DIR/.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook tools-logger; done; g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\"; [ -n \"$g\" ] && for b in \"$g/../.bee/bin/bee\" \"$g/../.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook tools-logger; done; echo \"bee: hook binary missing (.bee/bin/bee)\" >&2; exit 0"
           }
         ]
       }
@@ -65,11 +65,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR\"/.bee/bin/hooks/bee-state-sync.mjs"
+            "command": "for b in \"$CLAUDE_PROJECT_DIR/.bee/bin/bee\" \"$CLAUDE_PROJECT_DIR/.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook state-sync; done; g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\"; [ -n \"$g\" ] && for b in \"$g/../.bee/bin/bee\" \"$g/../.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook state-sync; done; echo \"bee: hook binary missing (.bee/bin/bee)\" >&2; exit 0"
           },
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR\"/.bee/bin/hooks/bee-chain-nudge.mjs"
+            "command": "for b in \"$CLAUDE_PROJECT_DIR/.bee/bin/bee\" \"$CLAUDE_PROJECT_DIR/.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook chain-nudge; done; g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\"; [ -n \"$g\" ] && for b in \"$g/../.bee/bin/bee\" \"$g/../.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook chain-nudge; done; echo \"bee: hook binary missing (.bee/bin/bee)\" >&2; exit 0"
           }
         ]
       }
@@ -79,7 +79,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR\"/.bee/bin/hooks/bee-session-close.mjs"
+            "command": "for b in \"$CLAUDE_PROJECT_DIR/.bee/bin/bee\" \"$CLAUDE_PROJECT_DIR/.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook session-close; done; g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\"; [ -n \"$g\" ] && for b in \"$g/../.bee/bin/bee\" \"$g/../.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook session-close; done; echo \"bee: hook binary missing (.bee/bin/bee)\" >&2; exit 0"
           }
         ]
       }
@@ -89,11 +89,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR\"/.bee/bin/hooks/bee-state-sync.mjs"
+            "command": "for b in \"$CLAUDE_PROJECT_DIR/.bee/bin/bee\" \"$CLAUDE_PROJECT_DIR/.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook state-sync; done; g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\"; [ -n \"$g\" ] && for b in \"$g/../.bee/bin/bee\" \"$g/../.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook state-sync; done; echo \"bee: hook binary missing (.bee/bin/bee)\" >&2; exit 0"
           },
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR\"/.bee/bin/hooks/bee-session-close.mjs"
+            "command": "for b in \"$CLAUDE_PROJECT_DIR/.bee/bin/bee\" \"$CLAUDE_PROJECT_DIR/.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook session-close; done; g=\"$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)\"; [ -n \"$g\" ] && for b in \"$g/../.bee/bin/bee\" \"$g/../.bee/bin/bee.exe\"; do [ -x \"$b\" ] && exec \"$b\" hook session-close; done; echo \"bee: hook binary missing (.bee/bin/bee)\" >&2; exit 0"
           }
         ]
       }
