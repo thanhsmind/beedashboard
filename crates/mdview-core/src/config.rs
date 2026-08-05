@@ -13,6 +13,7 @@ pub struct Config {
     pub indexing: IndexingConfig,
     pub renderer: RendererConfig,
     pub search: SearchConfig,
+    pub terminal: TerminalConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +56,27 @@ pub struct RendererConfig {
 pub struct SearchConfig {
     pub enable_fts: bool,
     pub enable_semantic: bool,
+}
+
+/// The D7 opt-in switches for the agent terminal surface, all off until the
+/// user turns them on from the settings page. The terminal token itself is
+/// deliberately **not** a field here (P1, `mdview/src/terminal_auth.rs`):
+/// `Config` is serialized whole and unauthenticated by `GET /api/config`, so
+/// anything stored inside it is one request away regardless of what the
+/// settings HTML masks. `#[derive(Default)]` gives every switch `false`,
+/// matching a config that has never seen this section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// The terminal surface itself (D2/D3) — panes and screens are reachable
+    /// only once this is on.
+    pub enabled: bool,
+    /// D7: keep the herdr supervisor process alive. mdview spawns nothing
+    /// while this is off.
+    pub supervisor_enabled: bool,
+    /// D7: Telegram notification on agent status change. mdview makes no
+    /// outbound call while this is off.
+    pub notify_enabled: bool,
 }
 
 impl Default for ServerConfig {
@@ -235,6 +257,30 @@ mod tests {
     fn default_host_binds_all_interfaces() {
         // Fresh installs must default to the LAN-reachable wildcard bind.
         assert_eq!(ServerConfig::default().host, "0.0.0.0");
+    }
+
+    #[test]
+    fn terminal_switches_default_off_and_carry_no_token_field() {
+        // A config that has never seen the terminal section — the shape a
+        // pre-existing install's config.toml has today — must still resolve
+        // every switch to off, never on by an absent-field accident.
+        let c = Config::default();
+        assert!(!c.terminal.enabled);
+        assert!(!c.terminal.supervisor_enabled);
+        assert!(!c.terminal.notify_enabled);
+
+        // Round-trips through TOML with no token anywhere in the section.
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-terminal-{}", std::process::id()));
+        let p = dir.join("config.toml");
+        c.save_to(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("[terminal]"));
+        assert!(!text.to_lowercase().contains("token"));
+        let loaded = Config::load_from(&p);
+        assert!(!loaded.terminal.enabled);
+        assert!(!loaded.terminal.supervisor_enabled);
+        assert!(!loaded.terminal.notify_enabled);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

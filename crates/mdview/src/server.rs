@@ -1,6 +1,7 @@
 //! Axum daemon: routes, live-reload WebSocket, filesystem watcher.
 
 use crate::runtime::{self, DaemonInfo};
+use crate::terminal_auth::{self, HasTerminalAuth, TerminalAuth};
 use crate::views;
 use anyhow::Result;
 use axum::{
@@ -32,6 +33,19 @@ pub struct AppState {
     /// at a temp dir instead of the developer's real `~/.mdview`. `None` in
     /// production — those routes then resolve exactly where they always did.
     pub config_data_dir: Option<PathBuf>,
+    /// The terminal auth mechanism (agent-terminal-3): token file + live
+    /// session set. Constructed once per `AppState` so the in-memory session
+    /// set survives across requests; a route test that overrides
+    /// `config_data_dir` must construct this with the same directory
+    /// (`TerminalAuth::new(Some(dir))`), or it will resolve the token at the
+    /// real `~/.mdview` instead of the test's scratch dir.
+    pub terminal_auth: TerminalAuth,
+}
+
+impl HasTerminalAuth for AppState {
+    fn terminal_auth(&self) -> &TerminalAuth {
+        &self.terminal_auth
+    }
 }
 
 /// Start the daemon: watcher + HTTP server. Blocks until shutdown.
@@ -45,6 +59,7 @@ pub async fn serve() -> Result<()> {
         reload_tx: reload_tx.clone(),
         highlight_css,
         config_data_dir: None,
+        terminal_auth: TerminalAuth::new(None),
     };
 
     // Filesystem watcher (kept alive for the process lifetime).
@@ -104,6 +119,8 @@ fn router(state: AppState) -> Router {
         .route("/api/projects", get(api_projects))
         .route("/settings", get(settings_page_handler))
         .route("/api/config", get(api_config).post(update_config))
+        .route("/settings/terminal/token", post(rotate_terminal_token))
+        .route("/api/terminal-config", post(update_terminal_config))
         .route("/api/projects/:id/unregister", post(unregister_project))
         .route("/static/app.css", get(css_asset))
         .route("/static/app.js", get(js_asset))
@@ -199,7 +216,84 @@ async fn settings_page_handler(State(st): State<AppState>, Query(flag): Query<Sa
     let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ));
-    Html(views::settings_page(&cfg, flag.saved.is_some())).into_response()
+    let token_view = current_token_view(&st);
+    Html(views::settings_page(&cfg, flag.saved.is_some(), token_view)).into_response()
+}
+
+/// The token state `settings_page` renders on every ordinary render — masked
+/// to the last four characters, or "never generated". This is the *only*
+/// path GET /settings uses; the full value is rendered exclusively from the
+/// direct response of `rotate_terminal_token`, never reconstructed here (P2).
+fn current_token_view(st: &AppState) -> views::TerminalTokenView {
+    match st.terminal_auth.masked() {
+        Some(masked) => views::TerminalTokenView::Masked(masked),
+        None => views::TerminalTokenView::NotGenerated,
+    }
+}
+
+/// POST /settings/terminal/token — generate (or rotate) the terminal token,
+/// per D10. Deliberately part of the ungated settings surface, not the
+/// terminal_auth-gated switch endpoint below: D4 gates the terminal routes,
+/// not settings, and CONTEXT.md's Known Risk is discharged by P2 (reveal
+/// once, mask forever after) rather than by adding a second auth layer here.
+///
+/// The response that performs the rotation is the one place the full token
+/// is ever rendered (P2) — every later `GET /settings` shows only its last
+/// four characters. Because the browser making this request has just
+/// demonstrated it can reach the (already-unauthenticated) settings surface,
+/// this response also mints a terminal session and sets its cookie, so the
+/// same browser can immediately reach the gated switches below without a
+/// separate login step.
+async fn rotate_terminal_token(State(st): State<AppState>) -> Response {
+    match st.terminal_auth.rotate() {
+        Ok(full_token) => {
+            let session_id = st.terminal_auth.mint_session();
+            let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+                st.config_data_dir.as_deref(),
+            ));
+            let html = views::settings_page(
+                &cfg,
+                false,
+                views::TerminalTokenView::Full(full_token),
+            );
+            (
+                [(header::SET_COOKIE, terminal_auth::session_cookie_header(&session_id))],
+                Html(html),
+            )
+                .into_response()
+        }
+        Err(e) => internal_error(&e.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TerminalConfigForm {
+    enabled: Option<String>,
+    supervisor_enabled: Option<String>,
+    notify_enabled: Option<String>,
+}
+
+/// POST /api/terminal-config — the D7 switches (terminal enable, herdr
+/// supervisor, Telegram notification). Per P3 this is deliberately its own
+/// route rather than a field on `SettingsForm`/`update_config`:
+/// `POST /api/config` is unauthenticated, so a supervisor switch reachable
+/// there would let any LAN visitor make mdview spawn a process. `AuthSession`
+/// requires a live terminal session (minted only by `rotate_terminal_token`
+/// above or a later login route); on any auth failure the request never
+/// reaches this handler at all — `AuthSession`'s extractor short-circuits
+/// with the opaque 404 before the switches are read, let alone changed.
+async fn update_terminal_config(
+    State(st): State<AppState>,
+    _session: terminal_auth::AuthSession,
+    Form(form): Form<TerminalConfigForm>,
+) -> Response {
+    let config_path = mdview_core::config::config_path_override(st.config_data_dir.as_deref());
+    let mut cfg = mdview_core::Config::load_from(&config_path);
+    cfg.terminal.enabled = form.enabled.is_some();
+    cfg.terminal.supervisor_enabled = form.supervisor_enabled.is_some();
+    cfg.terminal.notify_enabled = form.notify_enabled.is_some();
+    let _ = cfg.save_to(&config_path);
+    Redirect::to("/settings?saved=1").into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -1047,7 +1141,20 @@ mod bee_route_tests {
             reload_tx,
             highlight_css: Arc::new(String::new()),
             config_data_dir: None,
+            terminal_auth: TerminalAuth::new(None),
         }
+    }
+
+    /// `build_state()` plus both `config_data_dir` and `terminal_auth`
+    /// pointed at the same scratch `dir` — the token file lives beside
+    /// `config.toml` (see `terminal_auth::token_path_override`), so a test
+    /// that only overrides one of the two silently reads/writes the token at
+    /// the real `~/.mdview` instead of its scratch dir.
+    fn build_state_with_dir(dir: &Path) -> AppState {
+        let mut st = build_state();
+        st.config_data_dir = Some(dir.to_path_buf());
+        st.terminal_auth = TerminalAuth::new(Some(dir.to_path_buf()));
+        st
     }
 
     fn register(st: &AppState, root: &Path, name: &str) -> Project {
@@ -3074,5 +3181,213 @@ mod bee_route_tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D10/P1: the token is generated on the settings page but never lives in
+    /// `Config`, so `GET /api/config` must never carry it — before or after
+    /// generation (agent-terminal-4, E2).
+    #[tokio::test]
+    async fn api_config_never_contains_the_token_value_before_or_after_generation() {
+        let dir = fresh_root("terminal-token-not-in-api-config");
+        let st = build_state_with_dir(&dir);
+
+        let resp = get(router(st.clone()), "/api/config").await;
+        let body_before = body_string(resp).await;
+        assert!(
+            !body_before.to_lowercase().contains("token"),
+            "GET /api/config mentioned a token before one was ever generated: {body_before}"
+        );
+
+        let (full_token, _cookie) = rotate_token(router(st.clone())).await;
+
+        let resp = get(router(st), "/api/config").await;
+        let body_after = body_string(resp).await;
+        assert!(
+            !body_after.contains(&full_token),
+            "GET /api/config leaked the generated token value: {body_after}"
+        );
+        assert!(
+            !body_after.to_lowercase().contains("token"),
+            "GET /api/config gained a token-shaped field after generation: {body_after}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P2: the settings page shows the token in full only in the response
+    /// that generated or rotated it; every later render shows only its last
+    /// four characters.
+    #[tokio::test]
+    async fn settings_page_reveals_the_token_in_full_once_then_masks_it() {
+        let dir = fresh_root("terminal-token-reveal-once");
+        let st = build_state_with_dir(&dir);
+
+        let (full_token, cookie) = rotate_token(router(st.clone())).await;
+        assert_eq!(full_token.len(), 64, "unexpected token shape: {full_token}");
+        let last_four = &full_token[full_token.len() - 4..];
+
+        // A second settings render (any request, session or not) must never
+        // carry the full value again — only its last four characters.
+        let resp = get(router(st.clone()), "/settings").await;
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&full_token),
+            "a second /settings render leaked the full token: {body}"
+        );
+        assert!(
+            body.contains(last_four),
+            "a second /settings render dropped the masked token entirely: {body}"
+        );
+
+        // The session minted by rotation is real and usable, proving the
+        // masking above isn't hiding a second reveal path through it either.
+        assert!(!cookie.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P3: `POST /api/config` is unauthenticated (D4 leaves it that way), so
+    /// it must never be able to move a D7 switch — a supervisor field there
+    /// would let any LAN visitor make mdview spawn a process.
+    #[tokio::test]
+    async fn post_api_config_with_terminal_fields_leaves_every_switch_unchanged() {
+        let dir = fresh_root("terminal-switches-not-via-api-config");
+        let st = build_state_with_dir(&dir);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(
+                "port=58312&enabled=on&supervisor_enabled=on&notify_enabled=on",
+            ))
+            .unwrap();
+        let resp = router(st).oneshot(req).await.unwrap();
+        assert!(resp.status().is_redirection());
+
+        let saved = Config::load_from(&dir.join("config.toml"));
+        assert_eq!(saved.server.port, 58312, "the legitimate field was not saved");
+        assert!(
+            !saved.terminal.enabled,
+            "POST /api/config flipped the terminal enable switch"
+        );
+        assert!(
+            !saved.terminal.supervisor_enabled,
+            "POST /api/config flipped the supervisor switch"
+        );
+        assert!(
+            !saved.terminal.notify_enabled,
+            "POST /api/config flipped the notify switch"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P3: the switches can be changed only by a request carrying a valid
+    /// terminal session — no session, and a stale/unknown session, both
+    /// leave every switch untouched; a session minted by rotation succeeds.
+    #[tokio::test]
+    async fn terminal_switches_require_a_valid_terminal_session() {
+        let dir = fresh_root("terminal-switches-gated");
+        let st = build_state_with_dir(&dir);
+        let app = router(st.clone());
+
+        let switches_req = |cookie: Option<&str>| {
+            let mut b = Request::builder()
+                .method("POST")
+                .uri("/api/terminal-config")
+                .header("content-type", "application/x-www-form-urlencoded");
+            if let Some(c) = cookie {
+                b = b.header(header::COOKIE, c.to_string());
+            }
+            b.body(Body::from("enabled=on&supervisor_enabled=on&notify_enabled=on"))
+                .unwrap()
+        };
+
+        // No session at all.
+        let resp = app.clone().oneshot(switches_req(None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // An unknown/stale session cookie.
+        let resp = app
+            .clone()
+            .oneshot(switches_req(Some("mdview_terminal_session=not-a-real-session")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let cfg_after_refusals = Config::load_from(&dir.join("config.toml"));
+        assert!(!cfg_after_refusals.terminal.enabled);
+        assert!(!cfg_after_refusals.terminal.supervisor_enabled);
+        assert!(!cfg_after_refusals.terminal.notify_enabled);
+
+        // A real session, minted by generating the token, succeeds.
+        let (_full_token, cookie) = rotate_token(app.clone()).await;
+        let resp = app
+            .clone()
+            .oneshot(switches_req(Some(&cookie)))
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_redirection(),
+            "a valid terminal session could not save the switches, got {}",
+            resp.status()
+        );
+
+        let saved = Config::load_from(&dir.join("config.toml"));
+        assert!(saved.terminal.enabled);
+        assert!(saved.terminal.supervisor_enabled);
+        assert!(saved.terminal.notify_enabled);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A config that has never seen the terminal section at all — the exact
+    /// shape of every install predating this cell — must resolve every
+    /// switch to off, proven through the same route a browser hits.
+    #[tokio::test]
+    async fn api_config_shows_every_terminal_switch_off_by_default() {
+        let dir = fresh_root("terminal-switches-default-off");
+        let st = build_state_with_dir(&dir);
+
+        let resp = get(router(st), "/api/config").await;
+        let body = body_string(resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["terminal"]["enabled"], serde_json::json!(false));
+        assert_eq!(json["terminal"]["supervisor_enabled"], serde_json::json!(false));
+        assert_eq!(json["terminal"]["notify_enabled"], serde_json::json!(false));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// POSTs `/settings/terminal/token`, returning the full token revealed in
+    /// that one response plus the session cookie value minted alongside it —
+    /// the shared setup every gated-switch test needs to get past the gate.
+    async fn rotate_token(app: Router) -> (String, String) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/settings/terminal/token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let set_cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .expect("rotate response must set the terminal session cookie")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let cookie = set_cookie.split(';').next().unwrap().to_string();
+        let body = body_string(resp).await;
+        let marker = "it will not be shown again: <code>";
+        let start = body.find(marker).expect("full token banner missing") + marker.len();
+        let rest = &body[start..];
+        let end = rest.find("</code>").expect("full token banner unterminated");
+        (rest[..end].to_string(), cookie)
     }
 }
