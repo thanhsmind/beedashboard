@@ -6,6 +6,7 @@ mod herdr;
 mod mcp;
 mod runtime;
 mod server;
+mod terminal_auth;
 mod views;
 mod watch;
 
