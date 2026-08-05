@@ -1040,4 +1040,231 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&root).ok();
     }
+
+    /// Like `cell_json`, plus `trace.claimed_at`/`trace.capped_at` — the two
+    /// timestamps D11's cycle-time math needs. Used only by the velocity
+    /// tests below (bee-cockpit-4); the plain `cell_json` above stays
+    /// untouched so every bee-cockpit-2 test keeps its exact fixture shape.
+    fn timed_cell_json(
+        id: &str,
+        feature: &str,
+        status: &str,
+        files: &[String],
+        worker: &str,
+        claimed_at: &str,
+        capped_at: &str,
+    ) -> String {
+        let files_json = files
+            .iter()
+            .map(|f| serde_json::to_string(f).unwrap())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{
+                "id": "{id}",
+                "feature": "{feature}",
+                "lane": "standard",
+                "title": "Cell {id}",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [{files_json}],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {{}},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "{status}",
+                "tier": "generation",
+                "trace": {{"worker": {worker_json}, "claimed_at": "{claimed_at}", "capped_at": "{capped_at}"}}
+            }}"#,
+            worker_json = serde_json::to_string(worker).unwrap(),
+        )
+    }
+
+    /// bee-cockpit-4 (happy): a fixture with one fully-capped, timed feature
+    /// (24 minutes claim-to-cap → 0.4h, matching the ground-truth beehive
+    /// numbers) plus one still-open feature. The body must carry all three
+    /// headline numbers in plain language and both feature lists.
+    #[tokio::test]
+    async fn velocity_headline_numbers_and_feature_lists_render_for_shipped_work() {
+        let root = fresh_root("velocity-happy");
+        write(
+            &root,
+            ".bee/cells/shipped.json",
+            &timed_cell_json(
+                "s1",
+                "demo",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+        // `cell_json`'s fixed "demo" feature would collide with the shipped
+        // one above and hide the "still open" case, so this uses
+        // `timed_cell_json` with a distinct feature instead (its timestamps
+        // are unused while the cell stays "open").
+        write(
+            &root,
+            ".bee/cells/open.json",
+            &timed_cell_json(
+                "o1",
+                "still-cooking",
+                "open",
+                &[],
+                "w1",
+                "2026-08-04T09:00:00Z",
+                "2026-08-04T09:00:00Z",
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "velocity-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Shipped per working day"), "{body}");
+        assert!(body.contains("Shipped per week"), "{body}");
+        assert!(body.contains("Typical time to finish"), "{body}");
+        assert!(body.contains("0.4h"), "median cycle time missing: {body}");
+        assert!(body.contains("demo"), "shipped feature name missing: {body}");
+        assert!(
+            body.contains("still-cooking"),
+            "open feature name missing: {body}"
+        );
+        assert!(!body.contains("NaN"), "{body}");
+        assert!(!body.contains("Infinity"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// bee-cockpit-4 (edge): nothing has shipped. The section must render an
+    /// honest empty state — no zeroed-out numbers, no NaN, no Infinity, no
+    /// division artifact anywhere in the body.
+    #[tokio::test]
+    async fn no_shipped_features_renders_honest_empty_state_not_zeros() {
+        let root = fresh_root("velocity-empty");
+        write(&root, ".bee/cells/a.json", &cell_json("a", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/b.json",
+            &cell_json("b", "blocked", &[], "w1"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "velocity-empty");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("No features have shipped yet"),
+            "expected an honest empty state: {body}"
+        );
+        assert!(!body.contains("NaN"), "{body}");
+        assert!(!body.contains("Infinity"), "{body}");
+        assert!(!body.contains("0.0"), "a zero stat leaked in: {body}");
+        assert!(!body.contains("0/0"), "a division artifact leaked in: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// bee-cockpit-4 (security): a shipped feature's cell still carries the
+    /// same path-leak risk as any other cell — this proves the velocity
+    /// section (shipped/open lists) is reached by the same fixture and still
+    /// leaks nothing. Named against the fixture's own root and
+    /// `std::env::temp_dir()`, never a production literal like `/home/`
+    /// (per `docs/history/learnings/20260805-toothless-security-assertions.md`).
+    #[tokio::test]
+    async fn shipped_feature_cell_paths_do_not_leak_into_velocity_section() {
+        let root = fresh_root("velocity-security");
+        let root_str = root.to_string_lossy().into_owned();
+        let inside_abs = root.join("src/inside.rs").to_string_lossy().into_owned();
+        let outside_abs = std::env::temp_dir()
+            .join("mdview-server-bee-velocity-outside.rs")
+            .to_string_lossy()
+            .into_owned();
+        let worker_abs = root.join("workers/reader-1").to_string_lossy().into_owned();
+
+        write(
+            &root,
+            ".bee/cells/leaky.json",
+            &timed_cell_json(
+                "leaky",
+                "leaky-feature",
+                "capped",
+                &[inside_abs.clone(), outside_abs.clone()],
+                &worker_abs,
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "velocity-security");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            !body.contains(&root_str),
+            "response body leaked the fixture root: {body}"
+        );
+        assert!(
+            !body.contains(&outside_abs),
+            "response body leaked an absolute path outside the fixture root: {body}"
+        );
+        assert!(
+            !body.contains(&worker_abs),
+            "response body leaked the absolute worker path: {body}"
+        );
+        assert!(
+            !body.contains(&inside_abs),
+            "response body leaked the in-root absolute path verbatim: {body}"
+        );
+        assert!(body.contains("leaky-feature"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// bee-cockpit-4 (read-only): the velocity section reads the same
+    /// `.bee/cells/*.json` files as the buckets, over a fixture that has a
+    /// shipped feature (so D10/D11's grouping and cycle-time math actually
+    /// run). D4 must hold end to end: the tree is byte-identical before and
+    /// after the request.
+    #[tokio::test]
+    async fn velocity_read_never_writes_the_fixtures_bee_tree() {
+        let root = fresh_root("velocity-read-only");
+        write(&root, "README.md", "# hi");
+        write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
+        write(
+            &root,
+            ".bee/cells/shipped.json",
+            &timed_cell_json(
+                "s1",
+                "demo",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+        write(&root, ".bee/cells/open.json", &cell_json("a", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "velocity-read-only");
+        let before = snapshot_tree(&root);
+
+        let _ = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+
+        let after = snapshot_tree(&root);
+        assert_eq!(before, after, ".bee/ tree changed after a request");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

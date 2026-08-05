@@ -2,7 +2,7 @@
 //! Theme is CSS-variable driven (no-flash head script); code colors come from
 //! `/highlight.css` (syntect class-based), so themes switch without re-render.
 
-use mdview_core::bee::{BeeCell, BeeSnapshot};
+use mdview_core::bee::{BeeCell, BeeShippedFeature, BeeSnapshot};
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
 
@@ -137,6 +137,16 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 .bee-bucket__head {{ display: flex; align-items: center; gap: var(--space-2); margin: 0; }}
 .bee-cell {{ padding: var(--space-3); gap: var(--space-1); }}
 .bee-cell__meta {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }}
+.bee-velocity {{ margin-bottom: var(--space-4); }}
+.bee-velocity__head {{ margin: 0 0 var(--space-3) 0; }}
+.bee-stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); margin-bottom: var(--space-4); }}
+.bee-stat {{ padding: var(--space-3); align-items: flex-start; gap: var(--space-1); }}
+.bee-stat__value {{ font-family: var(--type-heading-font); font-size: var(--type-figure-lg-size); line-height: var(--type-figure-lg-leading); }}
+.bee-stat--empty .bee-stat__value {{ color: var(--color-text-subtle); }}
+.bee-stat__label {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); }}
+.bee-velocity__lists {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4); }}
+.bee-velocity__subhead {{ margin: 0 0 var(--space-2) 0; font-size: var(--type-heading-sm-size); }}
+.bee-velocity__open-list {{ margin: 0; padding-left: var(--space-4); color: var(--color-text-subtle); }}
 </style>
 <main class="fg-page">
   <div class="fg-pagehead">
@@ -146,6 +156,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
       <span class="fg-chip fg-chip--neutral">feature: {feature}</span>
     </div>
   </div>
+  {velocity}
   <div class="bee-buckets">
     {doing}
     {waiting}
@@ -161,6 +172,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         name = esc(&project.name),
         phase = esc(phase),
         feature = esc(feature),
+        velocity = bee_velocity_section(snapshot),
         doing = bee_bucket_section("Doing", "doing", &b.doing, "neutral"),
         waiting = bee_bucket_section("Waiting", "waiting", &b.waiting, "neutral"),
         stuck = bee_bucket_section("Stuck", "stuck", &b.stuck, "danger"),
@@ -168,6 +180,149 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         errors = bee_read_errors(&snapshot.read_errors),
     );
     layout(&format!("{} · bee", project.name), "", &body)
+}
+
+/// Ship-velocity section (D10/D11 downstream): the three headline numbers the
+/// user asked for — "1 ngày ship được bao nhiêu, 1 tuần ship được bao nhiêu" —
+/// in plain language, followed by the shipped-feature list (cycle time + cell
+/// count) and the list of features still open. Rendered above the four D7
+/// buckets on the same page. A project with nothing shipped yet gets an
+/// honest empty state instead of zeroed-out or NaN numbers — the headline
+/// stats are computed only over shipped-and-timed features (see
+/// `BeeVelocity`), so a `None` here means "not enough data", never "zero".
+fn bee_velocity_section(snapshot: &BeeSnapshot) -> String {
+    let open_features = bee_open_feature_names(snapshot);
+
+    if snapshot.shipped.is_empty() {
+        return format!(
+            r#"<section class="fg-card bee-velocity">
+  <h3 class="bee-velocity__head">Ship velocity</h3>
+  <p class="fg-empty">No features have shipped yet — nothing to measure.</p>
+  <div class="bee-velocity__lists">
+    {open}
+  </div>
+</section>"#,
+            open = bee_open_features_list(&open_features),
+        );
+    }
+
+    let v = &snapshot.velocity;
+    let stats = format!(
+        r#"<div class="bee-stats">
+    {rate_day}
+    {rate_week}
+    {cycle}
+  </div>"#,
+        rate_day = bee_stat_card("Shipped per working day", bee_fmt_rate(v.features_per_active_day)),
+        rate_week = bee_stat_card("Shipped per week", bee_fmt_rate(v.features_per_week)),
+        cycle = bee_stat_card("Typical time to finish", bee_fmt_hours(v.median_cycle_time_hours)),
+    );
+
+    format!(
+        r#"<section class="fg-card bee-velocity">
+  <h3 class="bee-velocity__head">Ship velocity</h3>
+  {stats}
+  <div class="bee-velocity__lists">
+    {shipped}
+    {open}
+  </div>
+</section>"#,
+        stats = stats,
+        shipped = bee_shipped_list(&snapshot.shipped),
+        open = bee_open_features_list(&open_features),
+    )
+}
+
+/// One headline stat card. `value` is already formatted for display;
+/// `None` renders an honest "—" (not enough data yet), never a `0` or a
+/// division artifact — the caller (`bee_fmt_rate`/`bee_fmt_hours`) is the
+/// only place a `None` is manufactured, and only from a `None`/non-finite
+/// upstream value.
+fn bee_stat_card(label: &str, value: Option<String>) -> String {
+    match value {
+        Some(v) => format!(
+            r#"<div class="fg-card bee-stat"><div class="bee-stat__value">{v}</div><div class="bee-stat__label">{label}</div></div>"#,
+            v = esc(&v),
+            label = esc(label),
+        ),
+        None => format!(
+            r#"<div class="fg-card bee-stat bee-stat--empty"><div class="bee-stat__value">—</div><div class="bee-stat__label">{label}</div></div>"#,
+            label = esc(label),
+        ),
+    }
+}
+
+/// A rate (features per day/week), one decimal place. `None` for a missing
+/// or non-finite value — defensive against surfacing a NaN/Infinity even if
+/// an upstream invariant ever slipped (division-by-zero is already guarded
+/// in `mdview_core::bee::compute_velocity`, but the view never trusts that
+/// alone).
+fn bee_fmt_rate(v: Option<f64>) -> Option<String> {
+    v.filter(|x| x.is_finite()).map(|x| format!("{x:.1}"))
+}
+
+/// An hours duration, one decimal place, suffixed `h`. Same finiteness
+/// guard as `bee_fmt_rate`.
+fn bee_fmt_hours(v: Option<f64>) -> Option<String> {
+    v.filter(|x| x.is_finite()).map(|x| format!("{x:.1}h"))
+}
+
+/// The shipped-feature list: each feature's name, cell count and cycle time
+/// (or an honest "not timed yet" note when D11 could find no cycle time).
+/// Only called when `shipped` is non-empty — the empty case is handled by
+/// `bee_velocity_section` itself, above.
+fn bee_shipped_list(shipped: &[BeeShippedFeature]) -> String {
+    let mut rows = String::new();
+    for f in shipped {
+        let cycle = match &f.cycle_time {
+            Some(span) if span.hours.is_finite() => format!("{:.1}h to finish", span.hours),
+            Some(_) => "—".to_string(),
+            None => "not timed yet".to_string(),
+        };
+        rows.push_str(&format!(
+            r#"<div class="fg-card bee-cell"><div class="fg-card__title">{feature}</div><div class="bee-cell__meta">{count} cell{plural} · {cycle}</div></div>"#,
+            feature = esc(&f.feature),
+            count = f.cell_count,
+            plural = if f.cell_count == 1 { "" } else { "s" },
+            cycle = esc(&cycle),
+        ));
+    }
+    format!(
+        r#"<div class="bee-velocity__col"><h4 class="bee-velocity__subhead">Shipped</h4>{rows}</div>"#,
+        rows = rows,
+    )
+}
+
+/// Distinct feature names still open: any feature with at least one live
+/// (non-dropped) cell in Doing, Waiting or Stuck that has not shipped (D10).
+/// A feature that has shipped never appears here even if it also happens to
+/// have a stray cell in one of those buckets — shipped status wins.
+fn bee_open_feature_names(snapshot: &BeeSnapshot) -> Vec<String> {
+    let shipped: std::collections::BTreeSet<&str> =
+        snapshot.shipped.iter().map(|f| f.feature.as_str()).collect();
+    let names: std::collections::BTreeSet<&str> = snapshot
+        .buckets
+        .doing
+        .iter()
+        .chain(snapshot.buckets.waiting.iter())
+        .chain(snapshot.buckets.stuck.iter())
+        .map(|c| c.feature.as_str())
+        .filter(|f| !shipped.contains(f))
+        .collect();
+    names.into_iter().map(String::from).collect()
+}
+
+fn bee_open_features_list(names: &[String]) -> String {
+    let body = if names.is_empty() {
+        "<p class=\"fg-empty\">Nothing open right now.</p>".to_string()
+    } else {
+        let items: String = names.iter().map(|n| format!("<li>{}</li>", esc(n))).collect();
+        format!(r#"<ul class="bee-velocity__open-list">{items}</ul>"#)
+    };
+    format!(
+        r#"<div class="bee-velocity__col"><h4 class="bee-velocity__subhead">Still open</h4>{body}</div>"#,
+        body = body,
+    )
 }
 
 /// One D7 bucket. `key` is a stable, lowercase machine token (`data-bucket`)
