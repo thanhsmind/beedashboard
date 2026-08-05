@@ -136,9 +136,13 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         r#"{topbar}
 <style>
 .bee-buckets {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); }}
+.bee-buckets-top {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-4); margin-bottom: var(--space-4); }}
+.bee-done {{ margin-bottom: var(--space-4); }}
+.bee-done-list {{ display: flex; flex-direction: column; gap: var(--space-2); }}
 .bee-bucket--danger {{ border-color: var(--color-danger); background: var(--color-danger-tint); }}
 .bee-bucket__head {{ display: flex; align-items: center; gap: var(--space-2); margin: 0; }}
-.bee-cell {{ padding: var(--space-3); gap: var(--space-1); }}
+.bee-cell {{ padding: var(--space-2); gap: var(--space-1); }}
+.bee-cell .fg-card__title {{ font-size: var(--type-body-sm-size); }}
 .bee-cell__meta {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }}
 .bee-velocity {{ margin-bottom: var(--space-4); }}
 .bee-velocity__head {{ margin: 0 0 var(--space-3) 0; }}
@@ -166,12 +170,12 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
     </div>
   </div>
   {velocity}
-  <div class="bee-buckets">
+  <div class="bee-buckets-top">
     {doing}
     {waiting}
     {stuck}
-    {done}
   </div>
+  {done}
   {panels}
   {errors}
 </main>"#,
@@ -183,10 +187,10 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         phase = esc(phase),
         feature = esc(feature),
         velocity = bee_velocity_section(&project.id, snapshot),
-        doing = bee_bucket_section(&project.id, "Doing", "doing", &b.doing, "neutral"),
-        waiting = bee_bucket_section(&project.id, "Waiting", "waiting", &b.waiting, "neutral"),
-        stuck = bee_bucket_section(&project.id, "Stuck", "stuck", &b.stuck, "danger"),
-        done = bee_bucket_section(&project.id, "Done", "done", &b.done, "success"),
+        doing = bee_bucket_section(&project.id, "Doing", "doing", &b.doing, "neutral", false),
+        waiting = bee_bucket_section(&project.id, "Waiting", "waiting", &b.waiting, "neutral", false),
+        stuck = bee_bucket_section(&project.id, "Stuck", "stuck", &b.stuck, "danger", false),
+        done = bee_done_section(&project.id, &b.done, &snapshot.shipped),
         panels = bee_panels_section(snapshot),
         errors = bee_read_errors(&snapshot.read_errors),
     );
@@ -357,13 +361,18 @@ fn bee_open_features_list(project_id: &str, names: &[String]) -> String {
 /// label text; `tone` picks the chip/border color — `"danger"` gives Stuck
 /// its own red styling (D7), never folded into Waiting's neutral tone. Each
 /// cell card is a link to its detail page (`/p/:id/_bee/cell/:cell_id`) —
-/// the drill-down this board exists to reach.
+/// the drill-down this board exists to reach. `show_files` controls the
+/// per-cell file-list meta line: the board (`bee_board_page`) passes `false`
+/// — that detail crowded out the buckets a person is actually watching and
+/// now lives only on the cell detail page — while the feature detail page
+/// (`bee_feature_page`) keeps it, unchanged, at `true`.
 fn bee_bucket_section(
     project_id: &str,
     label: &str,
     key: &str,
     cells: &[BeeCell],
     tone: &str,
+    show_files: bool,
 ) -> String {
     let danger_cls = if tone == "danger" {
         " bee-bucket--danger"
@@ -375,7 +384,7 @@ fn bee_bucket_section(
         rows.push_str("<p class=\"fg-empty\">Nothing here.</p>");
     } else {
         for c in cells {
-            let files = if c.files.is_empty() {
+            let files = if !show_files || c.files.is_empty() {
                 String::new()
             } else {
                 format!(
@@ -409,6 +418,97 @@ fn bee_bucket_section(
         label = label,
         tone = tone,
         rows = rows,
+    )
+}
+
+/// Cap on the number of feature lines shown in the board's Done section
+/// (`bee_done_section`) — same bounded-list contract as
+/// `mdview_core::bee::RECENT_DETAIL_CAP`: a shown-vs-true-total note appears
+/// whenever the real feature count exceeds this, so a capped list never
+/// looks smaller than the store really is.
+const BEE_DONE_FEATURE_CAP: usize = 20;
+
+/// The board's Done bucket (D7), rendered as its own full-width section
+/// grouped by feature instead of one card per cell — a real store can carry
+/// dozens of done cells across a handful of features, and one card each
+/// buried the buckets a person is actually watching (Doing/Waiting/Stuck)
+/// under a wall of finished work. Each line names the feature, how many of
+/// its cells are done, and — when the feature has shipped with a timed
+/// cycle (D10/D11) — its time to finish, reused from `shipped` rather than
+/// recomputed here; a feature with done cells that has not (yet) fully
+/// shipped still gets a line, just without a cycle time. `data-count` on
+/// the section stays the true total number of done cells, same as every
+/// other D7 bucket, even though the body below groups them by feature. The
+/// line list itself is capped at `BEE_DONE_FEATURE_CAP`; capped or not, the
+/// section states the true feature count and the true done-cell total so
+/// neither number is ever understated.
+fn bee_done_section(project_id: &str, done: &[BeeCell], shipped: &[BeeShippedFeature]) -> String {
+    let total = done.len();
+    if total == 0 {
+        return r#"<section class="fg-card bee-bucket bee-done" data-bucket="done" data-count="0"><h3 class="bee-bucket__head">Done <span class="fg-chip fg-chip--success">0</span></h3><p class="fg-empty">Nothing done yet.</p></section>"#
+            .to_string();
+    }
+
+    let cycle_by_feature: std::collections::BTreeMap<&str, &BeeShippedFeature> =
+        shipped.iter().map(|f| (f.feature.as_str(), f)).collect();
+
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for c in done {
+        *counts.entry(c.feature.as_str()).or_insert(0) += 1;
+    }
+    let feature_total = counts.len();
+
+    let mut lines = String::new();
+    for (feature, count) in counts.iter().take(BEE_DONE_FEATURE_CAP) {
+        let cycle = cycle_by_feature.get(feature).and_then(|f| match &f.cycle_time {
+            Some(span) if span.hours.is_finite() => Some(format!("{:.1}h to finish", span.hours)),
+            _ => None,
+        });
+        let meta = match cycle {
+            Some(c) => format!(
+                "{count} cell{plural} · {c}",
+                count = count,
+                plural = if *count == 1 { "" } else { "s" },
+                c = c,
+            ),
+            None => format!(
+                "{count} cell{plural}",
+                count = count,
+                plural = if *count == 1 { "" } else { "s" },
+            ),
+        };
+        lines.push_str(&format!(
+            r#"<a class="fg-card bee-cell" href="/p/{pid}/_bee/feature/{feature_href}"><div class="fg-card__title">{feature}</div><div class="bee-cell__meta">{meta}</div></a>"#,
+            pid = esc(project_id),
+            feature_href = esc(feature),
+            feature = esc(feature),
+            meta = esc(&meta),
+        ));
+    }
+
+    let note = if feature_total > BEE_DONE_FEATURE_CAP {
+        format!(
+            r#"<p class="bee-cell__meta">Showing {shown} of {feature_total} features · {total} done cell{plural} total.</p>"#,
+            shown = BEE_DONE_FEATURE_CAP,
+            feature_total = feature_total,
+            total = total,
+            plural = if total == 1 { "" } else { "s" },
+        )
+    } else {
+        format!(
+            r#"<p class="bee-cell__meta">{feature_total} feature{fplural} · {total} done cell{plural} total.</p>"#,
+            feature_total = feature_total,
+            fplural = if feature_total == 1 { "" } else { "s" },
+            total = total,
+            plural = if total == 1 { "" } else { "s" },
+        )
+    };
+
+    format!(
+        r#"<section class="fg-card bee-bucket bee-done" data-bucket="done" data-count="{total}"><h3 class="bee-bucket__head">Done <span class="fg-chip fg-chip--success">{total}</span></h3>{note}<div class="bee-done-list">{lines}</div></section>"#,
+        total = total,
+        note = note,
+        lines = lines,
     )
 }
 
@@ -922,10 +1022,10 @@ pub fn bee_feature_page(
         )),
         feature = esc(feature),
         status_banner = status_banner,
-        doing = bee_bucket_section(&project.id, "Doing", "doing", &buckets.doing, "neutral"),
-        waiting = bee_bucket_section(&project.id, "Waiting", "waiting", &buckets.waiting, "neutral"),
-        stuck = bee_bucket_section(&project.id, "Stuck", "stuck", &buckets.stuck, "danger"),
-        done = bee_bucket_section(&project.id, "Done", "done", &buckets.done, "success"),
+        doing = bee_bucket_section(&project.id, "Doing", "doing", &buckets.doing, "neutral", true),
+        waiting = bee_bucket_section(&project.id, "Waiting", "waiting", &buckets.waiting, "neutral", true),
+        stuck = bee_bucket_section(&project.id, "Stuck", "stuck", &buckets.stuck, "danger", true),
+        done = bee_bucket_section(&project.id, "Done", "done", &buckets.done, "success", true),
     );
     layout(&format!("{} · {}", feature, project.name), "", &body)
 }

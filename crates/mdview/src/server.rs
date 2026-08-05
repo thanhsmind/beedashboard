@@ -1230,9 +1230,13 @@ mod bee_route_tests {
             !body.contains(&inside_abs),
             "response body leaked the in-root absolute path verbatim (should be relativized): {body}"
         );
-        // the in-root file must have relativized cleanly, not just been
-        // reduced to a bare filename.
-        assert!(body.contains("src/inside.rs"), "{body}");
+        // The board no longer prints a cell's file list at all (that detail
+        // moved to the cell detail page) — so the in-root file must not
+        // appear even in its clean, relativized form here.
+        assert!(
+            !body.contains("src/inside.rs"),
+            "board card leaked a cell's file path — file lists belong on the cell detail page only: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -1918,6 +1922,127 @@ mod bee_route_tests {
         assert!(
             body.contains(&format!("href=\"/p/{}/_bee/feature/link-feature\"", project.id)),
             "board must link features to their detail page: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) The board's Done section groups done cells by feature — one
+    /// compact line per feature, not one card per cell — and states the
+    /// true total number of done cells, matching `data-count`.
+    #[tokio::test]
+    async fn board_done_section_groups_by_feature_and_states_true_total() {
+        let root = fresh_root("done-grouped");
+        write(&root, ".bee/cells/a.json", &cell_json("d1", "capped", &[], "w1"));
+        write(&root, ".bee/cells/b.json", &cell_json("d2", "capped", &[], "w1"));
+        write(&root, ".bee/cells/c.json", &cell_json("d3", "capped", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "done-grouped");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-bucket=\"done\" data-count=\"3\""), "{body}");
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/demo\"", project.id)),
+            "the done feature line must link to the feature detail page: {body}"
+        );
+        assert!(
+            body.contains("3 cells"),
+            "board must state the true done-cell total for the feature: {body}"
+        );
+        // one compact line for the feature, not one card per done cell.
+        assert!(!body.contains("Cell d1"), "{body}");
+        assert!(!body.contains("Cell d2"), "{body}");
+        assert!(!body.contains("Cell d3"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) A fixture with more done features than `BEE_DONE_FEATURE_CAP`
+    /// still states the true feature total and the true done-cell total —
+    /// the capped list never looks smaller than the store really is.
+    #[tokio::test]
+    async fn board_done_section_states_true_feature_total_when_capped() {
+        let root = fresh_root("done-capped");
+        for i in 0..25 {
+            write(
+                &root,
+                &format!(".bee/cells/f{i}.json"),
+                &timed_cell_json(&format!("d{i}"), &format!("feature-{i:02}"), "capped", &[], "w1", "x", "y"),
+            );
+        }
+
+        let st = build_state();
+        let project = register(&st, &root, "done-capped");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-bucket=\"done\" data-count=\"25\""), "{body}");
+        assert!(
+            body.contains("Showing 20 of 25 features"),
+            "board must state the true feature total when the done list is capped: {body}"
+        );
+        assert!(
+            body.contains("25 done cell"),
+            "board must state the true done-cell total even when the feature list is capped: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) A fixture with nothing done renders an honest empty Done
+    /// section — not a zero presented as a real measurement.
+    #[tokio::test]
+    async fn board_done_section_renders_honest_empty_state_when_nothing_done() {
+        let root = fresh_root("done-empty");
+        write(&root, ".bee/cells/a.json", &cell_json("open-only", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "done-empty");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-bucket=\"done\" data-count=\"0\""), "{body}");
+        assert!(body.contains("Nothing done yet."), "{body}");
+        // honest empty state: no "N done cell(s) total" note manufactured
+        // from a zero.
+        assert!(!body.contains("done cell"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (regression) A card on the board no longer prints a cell's file
+    /// list — that detail moved to the cell detail page, which still shows
+    /// it.
+    #[tokio::test]
+    async fn board_card_drops_file_list_but_cell_detail_page_keeps_it() {
+        let root = fresh_root("board-no-files");
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("has-files", "open", &["src/keep.rs".to_string()], "w1"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "board-no-files");
+        let app = router(st);
+
+        let board_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        let board_body = body_string(board_resp).await;
+        assert!(
+            !board_body.contains("src/keep.rs"),
+            "board card must not print a cell's file list: {board_body}"
+        );
+
+        let cell_resp = get(app, &format!("/p/{}/_bee/cell/has-files", project.id)).await;
+        let cell_body = body_string(cell_resp).await;
+        assert!(
+            cell_body.contains("src/keep.rs"),
+            "cell detail page must still show the file list: {cell_body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
