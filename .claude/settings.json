@@ -1,4 +1,10 @@
 {
+  "enabledPlugins": {
+    "compound-engineering@compound-engineering-plugin": false
+  },
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
   "hooks": {
     "SessionStart": [
       {
