@@ -31,6 +31,8 @@ a silent edit.
 | D7 | Cells display in **four** buckets, not three: **Doing** (`claimed`), **Waiting** (`open`), **Stuck** (`blocked`, rendered red as its own bucket), **Done** (`capped`). `dropped` cells are hidden from the default view. | Stuck work is what the user most needs to see at a glance, so it must never hide inside Waiting. A dropped cell never shipped, so counting it as Done would inflate the numbers. |
 | D8 | A project counts as **active** when it has at least one cell in `open` or `claimed` status — unfinished work, not session liveness. | Session heartbeat measures recent attention, not outstanding work, and `state.json.phase` goes stale when a session dies mid-run. |
 | D9 | Statistics read only live cells under `.bee/cells/*.json`. The `.bee/cells/archive/` tree is not read in phase 1. | Measured across all five registered projects at shaping time: 200 live cells versus 5 archived, because `bee close` is barely used. Reading archives would add cost for 2.4% more data. Revisit if `bee close` becomes routine. |
+| D10 | **Supersedes the merge clause of D5.** A feature is **shipped** when every one of its **non-dropped** cells is `capped`. A worktree merge into main is **not** required, and a dropped cell never blocks shipped status. | Measured on beehive: 8 of 25 features are release or docs-lane work that AGENTS.md permits to land in the main checkout with no worktree at all. Requiring a merge commit marked them never-shipped and undercounted velocity by about a third. It also resolves the D5×D7 contradiction — `dispatch-worktree` is capped-plus-dropped and now counts as shipped, matching what the board already shows. |
+| D11 | Cycle time for a shipped feature runs from its **first cell's `trace.claimed_at`** to its **last non-dropped cell's `trace.capped_at`**. | Follows necessarily from D10: with merge no longer the completion milestone, there is no merge commit to anchor the end, so the last cap is the only timestamp that marks the feature done. |
 
 ### Agent's Discretion
 
@@ -135,10 +137,11 @@ contain `.bee/`.
 
 None. All three product questions raised during shaping are resolved as D7, D8, D9.
 
-### Resolve Before Slice 2 (raised by the plan's review wave — do not block Slice 1)
+### Resolve Before Slice 2 — RESOLVED 2026-08-05 by D10 and D11
 
-Both are consequences of D5 that only surfaced once the plan was measured against real
-repository history. Neither is planning's to narrow.
+Both questions below are answered. The user's call: a feature with no worktree but all
+cells capped **is** shipped, and a dropped cell does **not** block shipped status. That
+is D10; D11 follows for cycle time. The original questions are kept for the record.
 
 - [ ] **D5 marks main-lane work as never shipped.** Measured on beehive: of the 25
   features present in its live cells, 8 have no `wt/<slug>` merge commit —
