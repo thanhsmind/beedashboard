@@ -24,6 +24,26 @@
 //!   non-dropped cells. Either endpoint missing means no cycle time is
 //!   reported — never a guessed zero.
 //!
+//! Slice 2 (bee-cockpit-5) extends the snapshot with the rest of the store —
+//! backlog, sessions, lanes and workspaces — always **summarized**, never
+//! dumped:
+//! - `.bee/backlog.jsonl` mixes two row shapes. `kind == "pbi"` rows are
+//!   event-sourced and folded by `id` to the LAST occurrence's status; every
+//!   other row is a finding, grouped by `severity` (`P1`/`P2`/`P3`) with a
+//!   bounded [`RECENT_DETAIL_CAP`]-sized "recent" slice alongside the true
+//!   total.
+//! - `.bee/sessions/*.json` sessions are `live` when `last_heartbeat` is
+//!   within [`SESSION_LIVE_MINUTES`] of the read, `stale` otherwise, with the
+//!   heartbeat age exposed in minutes. `transcript_path` is never read into a
+//!   public field — it is an absolute path into the user's home.
+//! - `.bee/lanes/*.json` (when present) surface per-feature lane state
+//!   alongside the default pipeline's `.bee/state.json`.
+//! - `.bee/runtime/workspaces/*.json` surface worktree/workspace records;
+//!   `root` is relativized like every other path-shaped field.
+//! - `.bee/decisions.jsonl` reports its true total event count plus only the
+//!   most recent [`RECENT_DETAIL_CAP`] `decide` events — the full log is
+//!   never loaded into the snapshot.
+//!
 //! Every path-shaped value that crosses into a public field is rendered
 //! relative to the project root (or reduced to a bare filename when it
 //! falls outside the root) — no absolute path may survive into a
@@ -139,6 +159,133 @@ pub struct BeeVelocity {
     pub median_cycle_time_hours: Option<f64>,
 }
 
+/// Recent-detail cap shared by every bounded panel added in Slice 2 —
+/// backlog findings and decision events. Deliberately small: this snapshot
+/// is rebuilt on every page request, and a store the size of the real
+/// beehive one (659 backlog rows, 1831 decision events) must never be
+/// returned whole.
+const RECENT_DETAIL_CAP: usize = 20;
+
+/// A session's heartbeat is considered live within this many minutes of the
+/// read; older is stale.
+const SESSION_LIVE_MINUTES: f64 = 30.0;
+
+/// One folded PBI (product backlog item) from `.bee/backlog.jsonl`, current
+/// state only — the event history that produced it is not kept.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeePbi {
+    pub id: String,
+    pub title: String,
+    /// `proposed`, `in-flight`, `parked`, `done`, `declined`, or anything
+    /// else a future bee version introduces — folded from the LAST event
+    /// carrying this `id`, never the first.
+    pub status: String,
+    pub feature: String,
+}
+
+/// Per-severity finding counts (`P1`/`P2`/`P3`) over the *whole* backlog,
+/// independent of how many are exposed in [`BeeFindings::recent`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeSeverityCounts {
+    pub p1: usize,
+    pub p2: usize,
+    pub p3: usize,
+}
+
+/// One non-PBI row from `.bee/backlog.jsonl`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeFinding {
+    pub ts: String,
+    /// The row's own `type` field (e.g. `"finding"`, `"proposal"`).
+    pub kind: String,
+    pub title: String,
+    pub detail: String,
+    /// `P1`, `P2`, `P3`, or empty when the row carries none.
+    pub severity: String,
+    pub layer: String,
+    pub feature: String,
+}
+
+/// Findings from `.bee/backlog.jsonl`, grouped by severity, bounded.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeFindings {
+    /// True count of every finding row, independent of the cap below.
+    pub total: usize,
+    pub by_severity: BeeSeverityCounts,
+    /// The most recent findings by `ts`, capped at [`RECENT_DETAIL_CAP`].
+    pub recent: Vec<BeeFinding>,
+}
+
+/// The `.bee/backlog.jsonl` view: folded PBIs plus grouped, bounded
+/// findings. Never a raw dump of the 659-row (or larger) event log.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeBacklog {
+    /// Every distinct PBI, folded to its current status.
+    pub pbis: Vec<BeePbi>,
+    pub findings: BeeFindings,
+}
+
+/// One `.bee/sessions/<uuid>.json` session, trimmed to what the cockpit may
+/// show. `transcript_path` is deliberately never carried here — it is an
+/// absolute path into the user's home.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeSession {
+    pub id: String,
+    pub started_at: Option<String>,
+    /// Minutes between `last_heartbeat` and the read; negative if the
+    /// heartbeat is somehow in the future.
+    pub heartbeat_age_minutes: f64,
+    /// True when `heartbeat_age_minutes <= `[`SESSION_LIVE_MINUTES`].
+    pub live: bool,
+    pub workspace_id: Option<String>,
+    pub source: Option<String>,
+}
+
+/// One `.bee/lanes/<feature>.json` per-feature lane record, mirroring the
+/// subset of `.bee/state.json` the cockpit already shows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeLane {
+    pub feature: String,
+    pub phase: Option<String>,
+    pub mode: Option<String>,
+    pub next_action: Option<String>,
+}
+
+/// One `.bee/runtime/workspaces/<id>.json` worktree/workspace record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeWorkspace {
+    pub id: String,
+    /// The row's own `type` field (e.g. `"worktree"`).
+    pub kind: String,
+    /// Relativized against the project root, or reduced to a bare directory
+    /// name when it falls outside the root (workspaces typically live in
+    /// sibling directories) — never absolute.
+    pub root: String,
+    pub branch: Option<String>,
+    pub attached_sessions: usize,
+    pub created_at: Option<String>,
+}
+
+/// One `decide`-type event from `.bee/decisions.jsonl`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeDecisionSummary {
+    pub id: String,
+    pub date: String,
+    pub decision: String,
+    pub scope: Option<String>,
+}
+
+/// The `.bee/decisions.jsonl` view: the true event count plus only the most
+/// recent `decide` events. The full 1831-event log (or larger) is never
+/// loaded into the snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeDecisions {
+    /// Every event row (`decide`, `tag`, `redact`, `supersede`, `stub`).
+    pub total: usize,
+    /// The most recent `decide` events, capped at [`RECENT_DETAIL_CAP`].
+    pub recent: Vec<BeeDecisionSummary>,
+}
+
 /// A typed snapshot of a project's `.bee/` store at read time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeeSnapshot {
@@ -155,6 +302,16 @@ pub struct BeeSnapshot {
     pub shipped: Vec<BeeShippedFeature>,
     /// Ship-rate aggregates derived from `shipped` (D11 downstream).
     pub velocity: BeeVelocity,
+    /// `.bee/backlog.jsonl`, summarized (Slice 2).
+    pub backlog: BeeBacklog,
+    /// `.bee/sessions/*.json`, one entry per session (Slice 2).
+    pub sessions: Vec<BeeSession>,
+    /// `.bee/lanes/*.json`, empty when the directory is absent (Slice 2).
+    pub lanes: Vec<BeeLane>,
+    /// `.bee/runtime/workspaces/*.json` (Slice 2).
+    pub workspaces: Vec<BeeWorkspace>,
+    /// `.bee/decisions.jsonl`, bounded (Slice 2).
+    pub decisions: BeeDecisions,
     /// Human-readable notes naming what could not be read. Every path
     /// mentioned here is relative to the project root.
     pub read_errors: Vec<String>,
@@ -170,6 +327,11 @@ impl BeeSnapshot {
             active: false,
             shipped: Vec::new(),
             velocity: BeeVelocity::default(),
+            backlog: BeeBacklog::default(),
+            sessions: Vec::new(),
+            lanes: Vec::new(),
+            workspaces: Vec::new(),
+            decisions: BeeDecisions::default(),
             read_errors: Vec::new(),
         }
     }
@@ -246,6 +408,13 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     let shipped = compute_shipped_features(&all_cells);
     let velocity = compute_velocity(&shipped);
 
+    let backlog = read_backlog(&bee_dir, root, &mut read_errors);
+    let now = time::OffsetDateTime::now_utc();
+    let sessions = read_sessions(&bee_dir, root, now, &mut read_errors);
+    let lanes = read_lanes(&bee_dir, root, &mut read_errors);
+    let workspaces = read_workspaces(&bee_dir, root, &mut read_errors);
+    let decisions = read_decisions(&bee_dir, root, &mut read_errors);
+
     BeeSnapshot {
         present: true,
         state,
@@ -253,6 +422,11 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         active,
         shipped,
         velocity,
+        backlog,
+        sessions,
+        lanes,
+        workspaces,
+        decisions,
         read_errors,
     }
 }
@@ -354,6 +528,332 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
         claimed_at,
         capped_at,
     })
+}
+
+/// Read and summarize `.bee/backlog.jsonl` (D4, D9-adjacent — this file is
+/// live store, not archive). A missing file is a normal, expected shape
+/// (silent, matching `read_state`); a malformed line degrades to a
+/// `read_errors` note naming its line number, and the read continues with
+/// whatever else could be parsed.
+fn read_backlog(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> BeeBacklog {
+    let path = bee_dir.join("backlog.jsonl");
+    if !path.is_file() {
+        return BeeBacklog::default();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            read_errors.push(format!("{}: could not read ({e})", rel_str(&path, root)));
+            return BeeBacklog::default();
+        }
+    };
+
+    // Event-sourced: later occurrences of the same id overwrite earlier
+    // ones, so iterating top-to-bottom and inserting into a map naturally
+    // folds to the LAST status.
+    let mut pbis: std::collections::BTreeMap<String, BeePbi> = std::collections::BTreeMap::new();
+    let mut findings: Vec<BeeFinding> = Vec::new();
+    let mut by_severity = BeeSeverityCounts::default();
+    let mut finding_total = 0usize;
+
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                read_errors.push(format!(
+                    "{}: line {} could not parse ({e})",
+                    rel_str(&path, root),
+                    i + 1
+                ));
+                continue;
+            }
+        };
+
+        if v.get("kind").and_then(Value::as_str) == Some("pbi") {
+            let id = match v.get("id").and_then(Value::as_str) {
+                Some(id) => id.to_string(),
+                None => {
+                    read_errors.push(format!(
+                        "{}: line {} pbi row missing \"id\"",
+                        rel_str(&path, root),
+                        i + 1
+                    ));
+                    continue;
+                }
+            };
+            let title = v.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
+            let status = v.get("status").and_then(Value::as_str).unwrap_or_default().to_string();
+            let feature = v.get("feature").and_then(Value::as_str).unwrap_or_default().to_string();
+            pbis.insert(id.clone(), BeePbi { id, title, status, feature });
+        } else {
+            finding_total += 1;
+            let severity = v.get("severity").and_then(Value::as_str).unwrap_or_default().to_string();
+            match severity.as_str() {
+                "P1" => by_severity.p1 += 1,
+                "P2" => by_severity.p2 += 1,
+                "P3" => by_severity.p3 += 1,
+                _ => {}
+            }
+            findings.push(BeeFinding {
+                ts: v.get("ts").and_then(Value::as_str).unwrap_or_default().to_string(),
+                kind: v.get("type").and_then(Value::as_str).unwrap_or_default().to_string(),
+                title: v.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
+                detail: v.get("detail").and_then(Value::as_str).unwrap_or_default().to_string(),
+                severity,
+                layer: v.get("layer").and_then(Value::as_str).unwrap_or_default().to_string(),
+                feature: v.get("feature").and_then(Value::as_str).unwrap_or_default().to_string(),
+            });
+        }
+    }
+
+    // Most recent first. `ts` is RFC 3339 with a fixed-width, zero-padded,
+    // `Z`-suffixed shape throughout this store, so a plain string compare
+    // sorts chronologically without needing to parse every row.
+    findings.sort_by(|a, b| b.ts.cmp(&a.ts));
+    findings.truncate(RECENT_DETAIL_CAP);
+
+    BeeBacklog {
+        pbis: pbis.into_values().collect(),
+        findings: BeeFindings {
+            total: finding_total,
+            by_severity,
+            recent: findings,
+        },
+    }
+}
+
+/// Read `.bee/sessions/*.json` (D4). A missing directory yields an empty
+/// list, not an error, matching the `.bee/cells` precedent.
+fn read_sessions(
+    bee_dir: &Path,
+    root: &Path,
+    now: time::OffsetDateTime,
+    read_errors: &mut Vec<String>,
+) -> Vec<BeeSession> {
+    let dir = bee_dir.join("sessions");
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let mut entries: Vec<PathBuf> = match fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect(),
+        Err(e) => {
+            read_errors.push(format!(".bee/sessions: could not list ({e})"));
+            Vec::new()
+        }
+    };
+    entries.sort();
+
+    let mut sessions = Vec::new();
+    for path in entries {
+        match parse_session(&path, now) {
+            Ok(s) => sessions.push(s),
+            Err(e) => read_errors.push(format!("{}: {e}", rel_str(&path, root))),
+        }
+    }
+    sessions
+}
+
+/// Parse one `.bee/sessions/<uuid>.json` file. `transcript_path` is read
+/// from the source JSON only to be discarded — it never reaches
+/// [`BeeSession`], which has no field for it.
+fn parse_session(path: &Path, now: time::OffsetDateTime) -> Result<BeeSession, String> {
+    let raw = fs::read_to_string(path).map_err(|e| format!("could not read ({e})"))?;
+    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("could not parse ({e})"))?;
+
+    let id = v.get("id").and_then(Value::as_str).ok_or("missing \"id\"")?.to_string();
+    let heartbeat_str = v
+        .get("last_heartbeat")
+        .and_then(Value::as_str)
+        .ok_or("missing \"last_heartbeat\"")?;
+    let heartbeat = parse_rfc3339(heartbeat_str).ok_or("unparseable \"last_heartbeat\"")?;
+
+    let started_at = v.get("started_at").and_then(Value::as_str).map(String::from);
+    let workspace_id = v.get("workspace_id").and_then(Value::as_str).map(String::from);
+    let source = v.get("source").and_then(Value::as_str).map(String::from);
+
+    let heartbeat_age_minutes = (now - heartbeat).as_seconds_f64() / 60.0;
+    let live = heartbeat_age_minutes <= SESSION_LIVE_MINUTES;
+
+    Ok(BeeSession {
+        id,
+        started_at,
+        heartbeat_age_minutes,
+        live,
+        workspace_id,
+        source,
+    })
+}
+
+/// Read `.bee/lanes/*.json` (D4). Absent (most projects never create it)
+/// yields an empty list, not an error.
+fn read_lanes(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Vec<BeeLane> {
+    let dir = bee_dir.join("lanes");
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let mut entries: Vec<PathBuf> = match fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect(),
+        Err(e) => {
+            read_errors.push(format!(".bee/lanes: could not list ({e})"));
+            Vec::new()
+        }
+    };
+    entries.sort();
+
+    let mut lanes = Vec::new();
+    for path in entries {
+        match parse_lane(&path) {
+            Ok(l) => lanes.push(l),
+            Err(e) => read_errors.push(format!("{}: {e}", rel_str(&path, root))),
+        }
+    }
+    lanes
+}
+
+fn parse_lane(path: &Path) -> Result<BeeLane, String> {
+    let raw = fs::read_to_string(path).map_err(|e| format!("could not read ({e})"))?;
+    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("could not parse ({e})"))?;
+
+    let feature = v
+        .get("feature")
+        .and_then(Value::as_str)
+        .ok_or("missing \"feature\"")?
+        .to_string();
+    let phase = v.get("phase").and_then(Value::as_str).map(String::from);
+    let mode = v.get("mode").and_then(Value::as_str).map(String::from);
+    let next_action = v.get("next_action").and_then(Value::as_str).map(String::from);
+
+    Ok(BeeLane { feature, phase, mode, next_action })
+}
+
+/// Read `.bee/runtime/workspaces/*.json` (D4). Absent yields an empty list.
+fn read_workspaces(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Vec<BeeWorkspace> {
+    let dir = bee_dir.join("runtime").join("workspaces");
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let mut entries: Vec<PathBuf> = match fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect(),
+        Err(e) => {
+            read_errors.push(format!(".bee/runtime/workspaces: could not list ({e})"));
+            Vec::new()
+        }
+    };
+    entries.sort();
+
+    let mut workspaces = Vec::new();
+    for path in entries {
+        match parse_workspace(&path, root) {
+            Ok(w) => workspaces.push(w),
+            Err(e) => read_errors.push(format!("{}: {e}", rel_str(&path, root))),
+        }
+    }
+    workspaces
+}
+
+fn parse_workspace(path: &Path, root: &Path) -> Result<BeeWorkspace, String> {
+    let raw = fs::read_to_string(path).map_err(|e| format!("could not read ({e})"))?;
+    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("could not parse ({e})"))?;
+
+    let id = v.get("id").and_then(Value::as_str).ok_or("missing \"id\"")?.to_string();
+    let kind = v.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+    let root_field = v
+        .get("root")
+        .and_then(Value::as_str)
+        .map(|s| relativize(s, root))
+        .unwrap_or_default();
+    let branch = v.get("branch").and_then(Value::as_str).map(String::from);
+    let attached_sessions = v
+        .get("attached_sessions")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let created_at = v.get("created_at").and_then(Value::as_str).map(String::from);
+
+    Ok(BeeWorkspace {
+        id,
+        kind,
+        root: root_field,
+        branch,
+        attached_sessions,
+        created_at,
+    })
+}
+
+/// Read `.bee/decisions.jsonl` (D4). A missing file is a normal, expected
+/// shape (silent, no error). The full event log is never held past this
+/// function's local counting — only `total` and a bounded `recent` slice of
+/// `decide` events survive into the returned [`BeeDecisions`].
+fn read_decisions(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> BeeDecisions {
+    let path = bee_dir.join("decisions.jsonl");
+    if !path.is_file() {
+        return BeeDecisions::default();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            read_errors.push(format!("{}: could not read ({e})", rel_str(&path, root)));
+            return BeeDecisions::default();
+        }
+    };
+
+    let mut total = 0usize;
+    let mut recent_decides: Vec<BeeDecisionSummary> = Vec::new();
+
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                read_errors.push(format!(
+                    "{}: line {} could not parse ({e})",
+                    rel_str(&path, root),
+                    i + 1
+                ));
+                continue;
+            }
+        };
+        total += 1;
+        if v.get("type").and_then(Value::as_str) == Some("decide") {
+            recent_decides.push(BeeDecisionSummary {
+                id: v.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
+                date: v.get("date").and_then(Value::as_str).unwrap_or_default().to_string(),
+                decision: v.get("decision").and_then(Value::as_str).unwrap_or_default().to_string(),
+                scope: v.get("scope").and_then(Value::as_str).map(String::from),
+            });
+            // The file is append-ordered, so the tail is always the most
+            // recent; trimming the head as we go keeps memory bounded even
+            // against a log the size of the real 1831-event store instead
+            // of accumulating every decide event before truncating once.
+            if recent_decides.len() > RECENT_DETAIL_CAP {
+                recent_decides.remove(0);
+            }
+        }
+    }
+
+    BeeDecisions { total, recent: recent_decides }
 }
 
 /// Group `cells` by `feature` and derive the D10/D11 shipped-feature view.
@@ -1103,6 +1603,356 @@ mod tests {
         assert_eq!(snap.buckets.stuck.len(), 1);
         assert_eq!(snap.buckets.done.len(), 1);
         assert!(snap.active, "an open and a claimed cell must still flip active (D8)");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bee-cockpit-5: backlog, sessions, lanes, workspaces, decisions ---
+
+    #[test]
+    fn pbi_folds_to_last_status_not_first() {
+        let root = fresh_root("pbi-fold");
+        let lines = [
+            r#"{"kind":"pbi","id":"P1","title":"Widget","status":"proposed","feature":"demo"}"#,
+            r#"{"kind":"pbi","id":"P1","title":"Widget","status":"in-flight","feature":"demo"}"#,
+            r#"{"kind":"pbi","id":"P1","title":"Widget","status":"done","feature":"demo"}"#,
+        ];
+        write(&root, ".bee/backlog.jsonl", &lines.join("\n"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(
+            snap.backlog.pbis.len(),
+            1,
+            "repeated events for one id must fold to a single PBI: {:?}",
+            snap.backlog.pbis
+        );
+        assert_eq!(snap.backlog.pbis[0].status, "done", "must fold to the LAST status, not the first");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn findings_grouped_by_severity_with_correct_counts() {
+        let root = fresh_root("findings-severity");
+        let lines = [
+            r#"{"ts":"2026-08-01T00:00:00.000Z","type":"finding","title":"a","detail":"d","severity":"P1","layer":"l","feature":"f"}"#,
+            r#"{"ts":"2026-08-01T00:00:01.000Z","type":"finding","title":"b","detail":"d","severity":"P2","layer":"l","feature":"f"}"#,
+            r#"{"ts":"2026-08-01T00:00:02.000Z","type":"finding","title":"c","detail":"d","severity":"P2","layer":"l","feature":"f"}"#,
+            r#"{"ts":"2026-08-01T00:00:03.000Z","type":"finding","title":"e","detail":"d","severity":"P3","layer":"l","feature":"f"}"#,
+        ];
+        write(&root, ".bee/backlog.jsonl", &lines.join("\n"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.backlog.findings.total, 4);
+        assert_eq!(snap.backlog.findings.by_severity.p1, 1);
+        assert_eq!(snap.backlog.findings.by_severity.p2, 2);
+        assert_eq!(snap.backlog.findings.by_severity.p3, 1);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn session_heartbeat_recent_is_live_hour_old_is_stale() {
+        let root = fresh_root("session-liveness");
+        let now = time::OffsetDateTime::now_utc();
+        let fmt = &time::format_description::well_known::Rfc3339;
+        let recent = (now - time::Duration::minutes(5)).format(fmt).unwrap();
+        let old = (now - time::Duration::hours(1)).format(fmt).unwrap();
+
+        write(
+            &root,
+            ".bee/sessions/live.json",
+            &format!(
+                r#"{{"id":"live","started_at":"{recent}","last_heartbeat":"{recent}","transcript_path":"/home/someone/.claude/x.jsonl","workspace_id":"main","source":"startup"}}"#
+            ),
+        );
+        write(
+            &root,
+            ".bee/sessions/stale.json",
+            &format!(
+                r#"{{"id":"stale","started_at":"{old}","last_heartbeat":"{old}","transcript_path":"/home/someone/.claude/y.jsonl","workspace_id":"main","source":"clear"}}"#
+            ),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.sessions.len(), 2);
+        let live = snap.sessions.iter().find(|s| s.id == "live").unwrap();
+        let stale = snap.sessions.iter().find(|s| s.id == "stale").unwrap();
+        assert!(live.live, "a 5-minute-old heartbeat must be live: age={}", live.heartbeat_age_minutes);
+        assert!(live.heartbeat_age_minutes < 30.0);
+        assert!(!stale.live, "a 1-hour-old heartbeat must be stale: age={}", stale.heartbeat_age_minutes);
+        assert!(stale.heartbeat_age_minutes > 30.0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn backlog_absent_is_empty_not_error() {
+        let root = fresh_root("backlog-absent");
+        let snap = read_snapshot(&root);
+        assert!(snap.backlog.pbis.is_empty());
+        assert_eq!(snap.backlog.findings.total, 0);
+        assert!(snap.read_errors.is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn backlog_empty_file_is_empty_not_error() {
+        let root = fresh_root("backlog-empty");
+        write(&root, ".bee/backlog.jsonl", "");
+        let snap = read_snapshot(&root);
+        assert!(snap.backlog.pbis.is_empty());
+        assert_eq!(snap.backlog.findings.total, 0);
+        assert!(snap.read_errors.is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn backlog_one_malformed_line_degrades_without_losing_good_rows() {
+        let root = fresh_root("backlog-malformed");
+        let lines = [
+            r#"{"kind":"pbi","id":"P1","title":"Good one","status":"in-flight","feature":"demo"}"#.to_string(),
+            "{ this is not valid json".to_string(),
+            r#"{"ts":"2026-08-01T00:00:00.000Z","type":"finding","title":"Also good","detail":"d","severity":"P1","layer":"l","feature":"demo"}"#
+                .to_string(),
+        ];
+        write(&root, ".bee/backlog.jsonl", &lines.join("\n"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.backlog.pbis.len(), 1, "the good pbi row must survive: {:?}", snap.backlog.pbis);
+        assert_eq!(snap.backlog.findings.total, 1, "the good finding row must survive");
+        assert!(
+            snap.read_errors.iter().any(|e| e.contains("backlog.jsonl")),
+            "the malformed line must be noted: {:?}",
+            snap.read_errors
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn backlog_findings_recent_capped_but_total_reports_all() {
+        let root = fresh_root("backlog-cap");
+        let n = RECENT_DETAIL_CAP + 7;
+        let lines: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    r#"{{"ts":"2026-08-01T{:02}:00:{:02}.000Z","type":"finding","title":"f{i}","detail":"d","severity":"P2","layer":"l","feature":"demo"}}"#,
+                    (i / 60) % 24,
+                    i % 60
+                )
+            })
+            .collect();
+        write(&root, ".bee/backlog.jsonl", &lines.join("\n"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.backlog.findings.total, n, "the true total must be reported: {}", snap.backlog.findings.total);
+        assert_eq!(snap.backlog.findings.recent.len(), RECENT_DETAIL_CAP, "recent findings must be capped");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn decisions_recent_capped_but_total_reports_all_events() {
+        let root = fresh_root("decisions-cap");
+        let n = RECENT_DETAIL_CAP + 5;
+        let mut lines: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    r#"{{"id":"d{i}","type":"decide","date":"2026-08-01T00:{:02}:00.000Z","decision":"Decision {i}","rationale":null,"alternatives":null,"scope":"repo","source":"user","confidence":0}}"#,
+                    i % 60
+                )
+            })
+            .collect();
+        // A non-decide event must still count toward the true total.
+        lines.push(r#"{"id":"tag-1","type":"tag","date":"2026-08-01T00:01:00.000Z"}"#.to_string());
+        write(&root, ".bee/decisions.jsonl", &lines.join("\n"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.decisions.total, n + 1, "the true total (every event type) must be reported");
+        assert_eq!(snap.decisions.recent.len(), RECENT_DETAIL_CAP, "recent decide events must be capped");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn lanes_dir_absent_yields_empty_list_not_error() {
+        let root = fresh_root("lanes-absent");
+        write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
+        let snap = read_snapshot(&root);
+        assert!(snap.present);
+        assert!(snap.lanes.is_empty());
+        assert!(
+            snap.read_errors.iter().all(|e| !e.contains("lanes")),
+            "an absent .bee/lanes/ must not be a read error: {:?}",
+            snap.read_errors
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn lane_record_is_read_when_present() {
+        let root = fresh_root("lanes-present");
+        write(
+            &root,
+            ".bee/lanes/demo.json",
+            r#"{"schema_version":"1.0","feature":"demo","mode":"standard","phase":"swarming","next_action":"Execute c-1."}"#,
+        );
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.lanes.len(), 1);
+        assert_eq!(snap.lanes[0].feature, "demo");
+        assert_eq!(snap.lanes[0].phase.as_deref(), Some("swarming"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn workspace_root_is_relativized_or_reduced_never_absolute() {
+        let root = fresh_root("workspace-abs");
+        let sibling = std::env::temp_dir()
+            .join("mdview-bee-workspace-outside-root")
+            .to_string_lossy()
+            .into_owned();
+        write(
+            &root,
+            ".bee/runtime/workspaces/demo.json",
+            &format!(
+                r#"{{"id":"demo--wt--demo","type":"worktree","root":"{}","branch":"wt/demo","base_sha":"abc","write_owner_session":null,"fence_epoch":0,"attached_sessions":["s1","s2"],"created_at":"2026-08-01T00:00:00.000Z"}}"#,
+                sibling.replace('\\', "\\\\")
+            ),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.workspaces.len(), 1);
+        let w = &snap.workspaces[0];
+        assert!(!Path::new(&w.root).is_absolute(), "workspace root leaked absolute: {}", w.root);
+        assert!(
+            !w.root.contains(&root.to_string_lossy().into_owned()),
+            "workspace root leaked the fixture root: {}",
+            w.root
+        );
+        assert_eq!(w.attached_sessions, 2);
+        assert_eq!(w.branch.as_deref(), Some("wt/demo"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn no_transcript_path_and_no_absolute_workspace_root_survive_into_snapshot() {
+        let root = fresh_root("security-slice2");
+        let root_str = root.to_string_lossy().into_owned();
+        let transcript = root.join("transcripts/should-not-leak.jsonl").to_string_lossy().into_owned();
+        write(
+            &root,
+            ".bee/sessions/s1.json",
+            &format!(
+                r#"{{"id":"s1","started_at":"2026-08-01T00:00:00.000Z","last_heartbeat":"2026-08-01T00:00:00.000Z","transcript_path":"{}","workspace_id":"main","source":"startup"}}"#,
+                transcript.replace('\\', "\\\\")
+            ),
+        );
+        let outside_abs = std::env::temp_dir()
+            .join("mdview-bee-slice2-outside-workspace")
+            .to_string_lossy()
+            .into_owned();
+        write(
+            &root,
+            ".bee/runtime/workspaces/w1.json",
+            &format!(
+                r#"{{"id":"w1","type":"worktree","root":"{}","branch":"wt/x","attached_sessions":[],"created_at":"2026-08-01T00:00:00.000Z"}}"#,
+                outside_abs.replace('\\', "\\\\")
+            ),
+        );
+
+        let snap = read_snapshot(&root);
+        let serialized = serde_json::to_string(&snap).unwrap();
+
+        assert!(!serialized.contains(&transcript), "the session's own transcript_path leaked into the snapshot");
+        assert!(
+            !serialized.contains("transcript_path"),
+            "the field name itself must not appear - BeeSession never carries it"
+        );
+        assert!(!serialized.contains(&root_str), "the fixture root leaked into the snapshot");
+        assert!(
+            !serialized.contains(&outside_abs),
+            "the outside-root absolute workspace path leaked into the snapshot"
+        );
+        for w in &snap.workspaces {
+            assert!(!Path::new(&w.root).is_absolute(), "workspace.root must never be absolute: {}", w.root);
+        }
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn reading_never_writes_the_slice2_files() {
+        let root = fresh_root("read-only-slice2");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            r#"{"kind":"pbi","id":"P1","title":"t","status":"open","feature":"demo"}"#,
+        );
+        write(
+            &root,
+            ".bee/decisions.jsonl",
+            r#"{"id":"d1","type":"decide","date":"2026-08-01T00:00:00.000Z","decision":"x","scope":"repo"}"#,
+        );
+        write(
+            &root,
+            ".bee/sessions/s1.json",
+            r#"{"id":"s1","started_at":"2026-08-01T00:00:00.000Z","last_heartbeat":"2026-08-01T00:00:00.000Z","transcript_path":"/x","workspace_id":"main","source":"startup"}"#,
+        );
+        write(&root, ".bee/lanes/demo.json", r#"{"feature":"demo","phase":"swarming"}"#);
+        write(
+            &root,
+            ".bee/runtime/workspaces/w1.json",
+            r#"{"id":"w1","type":"worktree","root":"/x","attached_sessions":[]}"#,
+        );
+
+        let before = snapshot_tree(&root);
+        let _ = read_snapshot(&root);
+        let after = snapshot_tree(&root);
+
+        assert_eq!(before, after, ".bee/ tree changed after reading the Slice 2 files");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn slice2_data_does_not_perturb_buckets_shipped_or_velocity() {
+        // Regression: cells 1/3 behavior (buckets, shipped, velocity) must
+        // be unaffected by backlog/session/lane/workspace data coexisting
+        // in the same store.
+        let root = fresh_root("regression-slice2-mix");
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/f-1.json",
+            &feature_cell_json(
+                "f-1",
+                "feat-a",
+                "capped",
+                Some("2026-08-01T00:00:00.000Z"),
+                Some("2026-08-01T01:00:00.000Z"),
+            ),
+        );
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            r#"{"kind":"pbi","id":"P1","title":"t","status":"open","feature":"feat-a"}"#,
+        );
+        write(
+            &root,
+            ".bee/sessions/s1.json",
+            r#"{"id":"s1","started_at":"2026-08-01T00:00:00.000Z","last_heartbeat":"2026-08-01T00:00:00.000Z","transcript_path":"/x","workspace_id":"main","source":"startup"}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.buckets.waiting.len(), 1);
+        assert_eq!(snap.shipped.len(), 1);
+        assert_eq!(snap.shipped[0].feature, "feat-a");
+        assert_eq!(snap.velocity.per_day.len(), 1);
+        // and the new data is present too, proving both coexist.
+        assert_eq!(snap.backlog.pbis.len(), 1);
+        assert_eq!(snap.sessions.len(), 1);
 
         std::fs::remove_dir_all(&root).ok();
     }
