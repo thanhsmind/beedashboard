@@ -47,6 +47,14 @@ pub struct AppState {
     /// type. Every terminal route reaches herdr only through this handle,
     /// never by constructing its own client.
     pub herdr: Arc<dyn Herdr>,
+    /// Overrides `mdview_core::transcript`'s default Claude Code projects
+    /// root (`terminal_transcript`) so a route-level test can point
+    /// transcript I/O at a scratch dir instead of the developer's real
+    /// `~/.claude/projects` — the same seam `config_data_dir` gives the
+    /// settings routes over `~/.mdview`. `None` in production: the
+    /// transcript reader then resolves the root exactly where Claude Code
+    /// itself writes it.
+    pub transcript_root: Option<PathBuf>,
 }
 
 impl HasTerminalAuth for AppState {
@@ -75,6 +83,7 @@ pub async fn serve() -> Result<()> {
         config_data_dir: None,
         terminal_auth: TerminalAuth::new(None),
         herdr: Arc::new(herdr::socket::SocketHerdr::new(herdr_socket_path)),
+        transcript_root: None,
     };
 
     // Filesystem watcher (kept alive for the process lifetime).
@@ -169,9 +178,19 @@ fn router(state: AppState) -> Router {
         // Gated (D4): `any(...)` + `MethodGate<Get>` inside the handler, not
         // `.get(...)`, for the same method-mismatch-oracle reason as above.
         .route("/p/:id/_terminal", any(terminal_page))
+        // agent-terminal-16 (D9): the Transcript tab — a second tab beside
+        // Terminal, not a toggle inside its frame. Same gate shape as the
+        // page above (`any(...)` + `MethodGate<Get>` inside the handler).
+        .route("/p/:id/_transcript", any(transcript_page))
         // agent-terminal-6: one pane's polled screen, same gate shape as the
         // page above (`any(...)` + `MethodGate<Get>` inside the handler).
         .route("/p/:id/_terminal/:pane_id/screen", any(terminal_screen))
+        // agent-terminal-16 (D9): the gap-free activity channel beside the
+        // screen above — same gate shape, same D2 containment boundary,
+        // applied via `project_pane_cwd_in_boundary` rather than
+        // `project_and_verify_pane_in_boundary` since this route needs the
+        // pane's own cwd value, not just a membership check.
+        .route("/p/:id/_terminal/:pane_id/transcript", any(terminal_transcript))
         // agent-terminal-9 (D3): the write side — free text and named keys
         // into a pane. Same `any(...)` + `MethodGate<Post>` shape as every
         // other gated terminal route, never `.post(...)`.
@@ -655,6 +674,41 @@ async fn terminal_page(
     }
 }
 
+/// `GET /p/:id/_transcript` (D2/D4/D6/D9) — the Transcript tab: the same
+/// project-scoped, D2 boundary-filtered pane list `terminal_page` builds,
+/// rendered with a transcript viewport per pane instead of a screen.
+/// `assets/app.js`'s transcript poller fills each one in from
+/// `terminal_transcript` below. Guarded and constructed identically to
+/// `terminal_page` — same `MethodGate<Get>` + `AuthSession` + D7 switch,
+/// same herdr snapshot + D2 boundary, same D6 herdr-down page — because
+/// listing *which* panes belong to this project still requires reaching
+/// herdr, even though the transcript content itself never does (D9: the
+/// transcript is the agent's own on-disk log, read directly, not through
+/// herdr). No creation controls here (D8 stays on the Terminal tab only);
+/// this tab is read-only.
+async fn transcript_page(
+    _method: terminal_auth::MethodGate<terminal_auth::Get>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("project not found");
+    };
+    match st.herdr.snapshot().await {
+        Ok(snapshot) => {
+            let panes = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+                .map(|boundary| project_panes(&snapshot, &boundary))
+                .unwrap_or_default();
+            Html(views::transcript_page(&project, &panes)).into_response()
+        }
+        Err(_) => Html(views::terminal_down_page(&project)).into_response(),
+    }
+}
+
 /// The configured D8 preset **labels** only — read the same injectable
 /// config path every terminal route uses (`terminal_family_enabled`), so a
 /// route test never touches the real `~/.mdview`. `terminal_create_agent`
@@ -790,6 +844,131 @@ async fn project_and_verify_pane_in_boundary(
         return Err(not_found("pane not found"));
     }
     Ok(project)
+}
+
+/// `project_and_verify_pane_in_boundary`'s sibling for routes that need the
+/// pane's own cwd *value*, not just a membership check — the transcript
+/// reader is keyed on cwd, not pane id (agent-terminal-16). Same D2
+/// containment boundary, same refusal shapes (project-not-found,
+/// herdr-down, pane-not-found): a pane id is only ever resolved to a cwd if
+/// it is already present in this project's own boundary-filtered pane list,
+/// never trusted from the URL alone.
+async fn project_pane_cwd_in_boundary(
+    st: &AppState,
+    id: &str,
+    pane_id: &str,
+) -> std::result::Result<String, Response> {
+    let Ok(Some(project)) = st.engine.get_project(id) else {
+        return Err(not_found("project not found"));
+    };
+    let snapshot = match st.herdr.snapshot().await {
+        Ok(s) => s,
+        Err(_) => return Err(herdr_down_response()),
+    };
+    let panes = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+        .map(|boundary| project_panes(&snapshot, &boundary))
+        .unwrap_or_default();
+    panes
+        .iter()
+        .find(|p| p.pane_id == pane_id)
+        .map(|p| p.cwd.clone())
+        .ok_or_else(|| not_found("pane not found"))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct TranscriptQuery {
+    /// The opaque cursor `terminal_transcript` last handed back, held
+    /// client-side only (nothing about the transcript is persisted
+    /// server-side). Absent on the first poll for a pane, which backfills
+    /// the tail the same way `mdview_core::transcript::read_activity`'s
+    /// `None` case does.
+    cursor: Option<String>,
+}
+
+/// `GET /p/:id/_terminal/:pane_id/transcript?cursor=...` (D2/D4/D6/D9) — the
+/// gap-free activity channel beside `terminal_screen`'s polled screen.
+/// Guarded identically: `MethodGate<Get>` + `AuthSession` run before this
+/// body, then the D7 enabled switch, then the same D2 containment boundary
+/// as every other pane-scoped route — via `project_pane_cwd_in_boundary`
+/// rather than `project_and_verify_pane_in_boundary`, since this route needs
+/// the pane's resolved cwd itself (this cell's own truth: a session viewing
+/// project A must never read an agent's transcript in project B).
+///
+/// `mdview_core::transcript`'s `parse_cursor` (agent-terminal-15) carries
+/// its own guard against a cursor escaping the per-cwd project directory —
+/// that is a second line, not a substitute for the D2 check above.
+///
+/// Nothing is persisted server-side: `chunk.cursor` is the client's to hold
+/// and hand back (`assets/app.js`'s transcript poller). `st.transcript_root`
+/// only overrides the *default* Claude Code projects root, for a
+/// route-level test — the same seam `st.config_data_dir` gives the settings
+/// routes over `~/.mdview`; `None` in production resolves exactly where
+/// Claude Code itself writes.
+///
+/// Each returned line is routed through `mdview_core::ansi::to_html`, the
+/// same translator `terminal_screen` uses. `transcript.rs`'s own `clip()`
+/// already strips any raw ANSI from a rendered record before it ever
+/// reaches this handler, so today this call only HTML-escapes — but it
+/// keeps every string this route (and the client's `innerHTML` assignment
+/// in `assets/app.js`) ever emits on one server-side escaping path, the way
+/// the screen route already does, rather than trusting a record to already
+/// be safe. A record is never emitted raw.
+///
+/// D6: a pane with no transcript file yet (a fresh agent that has written
+/// nothing) answers `200` with `available: false` — a named, successful
+/// state, never the herdr-down error shape `terminal_screen` uses for an
+/// unreachable socket, and never an indistinguishable `lines: []`, which
+/// would read the same as "caught up, nothing new since the last poll".
+async fn terminal_transcript(
+    _method: terminal_auth::MethodGate<terminal_auth::Get>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+    Path((id, pane_id)): Path<(String, String)>,
+    Query(q): Query<TranscriptQuery>,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
+    let cwd = match project_pane_cwd_in_boundary(&st, &id, &pane_id).await {
+        Ok(cwd) => cwd,
+        Err(refusal) => return refusal,
+    };
+    let result = match st.transcript_root.as_deref() {
+        Some(root) => mdview_core::transcript::read_activity_at(root, &cwd, q.cursor.as_deref()),
+        None => mdview_core::transcript::read_activity(&cwd, q.cursor.as_deref()),
+    };
+    match result {
+        Ok(chunk) => {
+            let lines: Vec<String> = chunk
+                .lines
+                .iter()
+                .map(|l| mdview_core::ansi::to_html(l))
+                .collect();
+            Json(json!({ "available": true, "lines": lines, "cursor": chunk.cursor })).into_response()
+        }
+        Err(mdview_core::transcript::TranscriptError::NotAvailable) => {
+            Json(json!({ "available": false })).into_response()
+        }
+        Err(mdview_core::transcript::TranscriptError::BadCursor) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "bad activity cursor" })),
+        )
+            .into_response(),
+        Err(mdview_core::transcript::TranscriptError::Io(_)) => transcript_read_failed_response(),
+    }
+}
+
+/// The JSON answer `terminal_transcript` gives when the transcript file
+/// itself fails to read — a genuine IO error, never the same thing as
+/// `TranscriptError::NotAvailable` (D6's ordinary "no transcript yet" state,
+/// answered `200`, not this). The raw `std::io::Error` — which can carry a
+/// filesystem path fragment — is dropped rather than ever reaching the page.
+fn transcript_read_failed_response() -> Response {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({ "error": "transcript read failed" })),
+    )
+        .into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -2007,6 +2186,10 @@ mod bee_route_tests {
             // with their own `FakeHerdr` (see the `terminal_route_*` tests
             // below in this module).
             herdr: Arc::new(crate::herdr::fake::FakeHerdr::new()),
+            // No route test reads the real `~/.claude/projects` by default —
+            // transcript tests set this explicitly (see
+            // `transcript_root_dir` below).
+            transcript_root: None,
         }
     }
 
@@ -5038,6 +5221,597 @@ mod bee_route_tests {
             body.contains("herdr is not running"),
             "no named remedy in the screen endpoint's herdr-down answer: {body}"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -----------------------------------------------------------------
+    // agent-terminal-16 (D9): the Transcript tab and its data endpoint.
+    // -----------------------------------------------------------------
+
+    /// A GET request to `/p/{id}/_transcript`, the Transcript tab's page
+    /// route — the transcript sibling of `terminal_req`.
+    fn transcript_page_req(id: &str, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .uri(format!("/p/{id}/_transcript"))
+            .method("GET");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// A GET request to `/p/{id}/_terminal/{pane_id}/transcript`, optionally
+    /// carrying a `cursor` query param and a session cookie — the transcript
+    /// sibling of `terminal_screen_req`.
+    fn terminal_transcript_req(
+        id: &str,
+        pane_id: &str,
+        cursor: Option<&str>,
+        cookie: Option<&str>,
+    ) -> Request<Body> {
+        let mut uri = format!("/p/{id}/_terminal/{pane_id}/transcript");
+        if let Some(c) = cursor {
+            uri.push_str("?cursor=");
+            uri.push_str(&urlencoding_lite(c));
+        }
+        let mut b = Request::builder().uri(uri).method("GET");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// Minimal query-string escaping for the handful of characters
+    /// `cursor_never_escapes_the_project_dir`-style test fixtures actually
+    /// carry (`:`, `/`, `.`, spaces) — this test module has no HTTP client
+    /// crate with a real URL encoder, and `cursor`'s own alphabet
+    /// (`<file>.jsonl:<offset>`) needs only these escaped to survive as one
+    /// query value.
+    fn urlencoding_lite(s: &str) -> String {
+        s.chars()
+            .map(|c| match c {
+                ':' => "%3A".to_string(),
+                '/' => "%2F".to_string(),
+                ' ' => "%20".to_string(),
+                other => other.to_string(),
+            })
+            .collect()
+    }
+
+    /// Writes one raw JSONL transcript line for `cwd`'s Claude Code project
+    /// directory under a fresh `transcript_root` — the fixture every
+    /// transcript route test builds on. `session` is the file stem (e.g.
+    /// `"s1"`); the caller passes complete `{"type": ...}\n`-shaped lines in
+    /// `body`.
+    fn write_transcript(transcript_root: &Path, cwd: &str, session: &str, body: &str) {
+        let dir = transcript_root.join(mdview_core::transcript::encode_project_dir(cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{session}.jsonl")), body).unwrap();
+    }
+
+    /// A pane's cwd as `terminal_transcript` itself resolves it: the same
+    /// `std::fs::canonicalize` call `mdview_core::paths_boundary::Boundary::
+    /// validate_existing` makes — so a fixture built from this value always
+    /// lands in the directory the route under test actually reads, even in
+    /// an environment where `std::env::temp_dir()` itself is a symlink.
+    fn canonical_cwd(root: &Path) -> String {
+        std::fs::canonicalize(root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// Truth: "Without a session, with a wrong method, and with the terminal
+    /// switch off, the transcript endpoint answers byte-identically to an
+    /// unrouted path" — the no-session third, proven the same
+    /// byte-identical-to-unrouted way `terminal_screen`'s own sibling test
+    /// does. Verified by temporarily deleting the `_session:
+    /// terminal_auth::AuthSession` extractor from `terminal_transcript` and
+    /// re-running this test: it went red (200, not 404) before the guard was
+    /// restored.
+    #[tokio::test]
+    async fn terminal_transcript_without_a_session_is_byte_identical_to_an_unrouted_path() {
+        let dir = fresh_root("transcript-no-session");
+        enable_terminal(&dir);
+        let root = fresh_root("transcript-no-session-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "transcript-no-session");
+        let app = router(st);
+
+        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
+            let with_no_session = app
+                .clone()
+                .oneshot(terminal_transcript_req(&project.id, "w1:p1", None, cookie))
+                .await
+                .unwrap();
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
+            assert_eq!(with_no_session.status(), unrouted.status());
+            assert_eq!(with_no_session.headers(), unrouted.headers());
+            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
+            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(a, b);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The transcript endpoint's own method-mismatch-oracle proof, mirroring
+    /// `terminal_screen_wrong_method_is_byte_identical_to_unrouted` — mounted
+    /// with `any(...)` + `MethodGate<Get>`, never `.get(...)`. Carries no
+    /// session and no enabled switch, so on its own this does **not**
+    /// isolate `MethodGate`: `AuthSession`'s own rejection already answers
+    /// the same opaque 404 even with `MethodGate` deleted entirely — see
+    /// `terminal_transcript_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal`
+    /// below for the test that actually goes red on that guard alone
+    /// (the toothless-assertion shape this repo's own review found
+    /// elsewhere in this feature, `docs/history/learnings/
+    /// 20260805-toothless-security-assertions.md`).
+    #[tokio::test]
+    async fn terminal_transcript_wrong_method_is_byte_identical_to_unrouted() {
+        let dir = fresh_root("transcript-wrong-method");
+        let root = fresh_root("transcript-wrong-method-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "transcript-wrong-method");
+        let app = router(st);
+
+        let posted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/p/{}/_terminal/w1:p1/transcript", project.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
+        assert_eq!(posted.status(), unrouted.status());
+        assert_eq!(posted.headers(), unrouted.headers());
+        let a = posted.into_body().collect().await.unwrap().to_bytes();
+        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth (the carried-over method-mismatch-oracle obligation, isolated,
+    /// mirroring `terminal_route_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal`):
+    /// at least one wrong-method test must fail if `MethodGate` were removed
+    /// while a valid session and an enabled terminal are already in place.
+    /// The test above carries no session and the switch off, so it would
+    /// still pass unchanged even with `MethodGate` deleted entirely —
+    /// `AuthSession`'s own rejection answers the same opaque 404 first,
+    /// without `MethodGate` ever mattering (confirmed: deleting only
+    /// `_method: MethodGate<Get>` there left it green). This test instead
+    /// posts against a *known, in-boundary* pane (`started.pane_id`) with a
+    /// freshly rotated session and the switch on — every other guard
+    /// satisfied — so `MethodGate` alone stands between the POST and the
+    /// handler body. Verified by temporarily deleting `_method:
+    /// MethodGate<Get>` from `terminal_transcript` and re-running this test:
+    /// it went red (`200`, the transcript's ordinary `available: false`
+    /// JSON, not `404`) before the guard was restored.
+    #[tokio::test]
+    async fn terminal_transcript_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal()
+    {
+        let dir = fresh_root("transcript-wrong-method-isolated");
+        enable_terminal(&dir);
+        let root = fresh_root("transcript-wrong-method-isolated-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "wrong-method-isolated");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let posted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/p/{}/_terminal/{}/transcript", project.id, started.pane_id))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
+        assert_eq!(posted.status(), unrouted.status());
+        assert_eq!(posted.headers(), unrouted.headers());
+        let a = posted.into_body().collect().await.unwrap().to_bytes();
+        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The must-have's third leg: with the D7 `terminal.enabled` switch off,
+    /// both the Transcript tab's page and its data endpoint answer exactly
+    /// as an unrouted path would, even with a session a valid rotation just
+    /// minted — mirroring
+    /// `terminal_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session`.
+    /// Verified by temporarily deleting the `if !terminal_family_enabled(&st)`
+    /// check from `terminal_transcript` and re-running: it went red (200
+    /// `available: false`, not 404) before the guard was restored.
+    #[tokio::test]
+    async fn transcript_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session() {
+        let dir = fresh_root("transcript-family-disabled");
+        // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
+        let root = fresh_root("transcript-family-disabled-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "transcript-family-disabled");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let unrouted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted_status = unrouted.status();
+        let unrouted_headers = unrouted.headers().clone();
+        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
+
+        let page = app
+            .clone()
+            .oneshot(transcript_page_req(&project.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(page.status(), unrouted_status);
+        assert_eq!(page.headers(), &unrouted_headers);
+        let page_body = page.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            page_body, unrouted_body,
+            "the Transcript tab must be unreachable while the switch is off, even with a valid session"
+        );
+
+        let data = app
+            .oneshot(terminal_transcript_req(&project.id, "w1:p1", None, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(data.status(), unrouted_status);
+        assert_eq!(data.headers(), &unrouted_headers);
+        let data_body = data.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            data_body, unrouted_body,
+            "the transcript endpoint must be unreachable while the switch is off, even with a valid session"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth: "Reading a transcript for a pane outside the project's root is
+    /// refused, even with a valid session" — the D2 containment boundary
+    /// applied to the transcript route itself, mirroring
+    /// `terminal_screen_refuses_a_pane_outside_the_project_root`. Verified by
+    /// temporarily replacing `project_pane_cwd_in_boundary`'s boundary
+    /// construction with an always-true membership check and re-running:
+    /// it went red (200, not 404) before the guard was restored.
+    #[tokio::test]
+    async fn terminal_transcript_refuses_a_pane_outside_the_project_root() {
+        let dir = fresh_root("transcript-boundary");
+        enable_terminal(&dir);
+        let scratch = fresh_root("transcript-boundary-scratch");
+        let root_a = scratch.join("project-a");
+        let outside = scratch.join("outside-a");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let outside_agent = fake
+            .agent_start("w1", Some(&outside.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project_a = register(&st, &root_a, "project-a-transcript");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(terminal_transcript_req(
+                &project_a.id,
+                &outside_agent.pane_id,
+                None,
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "a pane outside the project root must be refused, not read"
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains("pane not found"), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Truth: "A pane whose agent has written no transcript yet shows a
+    /// named state, not an empty frame" — the route-level half: no
+    /// `~/.claude/projects/<encoded-cwd>` directory for this pane's cwd
+    /// answers `200` with `available: false`, never the herdr-down error
+    /// shape and never a bare empty `lines: []`.
+    #[tokio::test]
+    async fn terminal_transcript_reports_not_available_when_no_transcript_file_exists() {
+        let dir = fresh_root("transcript-not-available");
+        enable_terminal(&dir);
+        let root = fresh_root("transcript-not-available-project");
+        let transcript_root = fresh_root("transcript-not-available-claude");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        st.transcript_root = Some(transcript_root.clone());
+        let project = register(&st, &root, "transcript-not-available");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(terminal_transcript_req(&project.id, &started.pane_id, None, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["available"], serde_json::json!(false), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&transcript_root).ok();
+    }
+
+    /// Truth: "Successive reads with the returned cursor produce no
+    /// duplicated and no skipped records" — proven at the HTTP layer: an
+    /// opening read (no cursor) backfills one record, a second read with the
+    /// returned cursor sees only what was appended after it (no duplicate of
+    /// the first record), and a third read with *that* cursor is empty (no
+    /// record silently skipped by re-reading past it).
+    #[tokio::test]
+    async fn terminal_transcript_cursor_reads_produce_no_duplication_or_skip() {
+        let dir = fresh_root("transcript-cursor");
+        enable_terminal(&dir);
+        let root = fresh_root("transcript-cursor-project");
+        let transcript_root = fresh_root("transcript-cursor-claude");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let cwd = canonical_cwd(&root);
+        write_transcript(
+            &transcript_root,
+            &cwd,
+            "s1",
+            "{\"type\":\"user\",\"message\":{\"content\":\"first prompt\"}}\n",
+        );
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        st.transcript_root = Some(transcript_root.clone());
+        let project = register(&st, &root, "transcript-cursor");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        // Opening read: backfills the tail.
+        let open_resp = app
+            .clone()
+            .oneshot(terminal_transcript_req(&project.id, &started.pane_id, None, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(open_resp.status(), StatusCode::OK);
+        let open_body = body_string(open_resp).await;
+        let open_json: serde_json::Value = serde_json::from_str(&open_body).unwrap();
+        assert_eq!(open_json["available"], serde_json::json!(true), "{open_body}");
+        let open_lines: Vec<String> = open_json["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(open_lines, vec!["» first prompt".to_string()], "{open_body}");
+        let cursor1 = open_json["cursor"].as_str().unwrap().to_string();
+
+        // Append a second record after the cursor was minted.
+        let claude_dir = transcript_root.join(mdview_core::transcript::encode_project_dir(&cwd));
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(claude_dir.join("s1.jsonl"))
+            .unwrap();
+        use std::io::Write as _;
+        writeln!(f, "{{\"type\":\"user\",\"message\":{{\"content\":\"second prompt\"}}}}").unwrap();
+        drop(f);
+
+        // Poll with the first cursor: only the new record, never the first
+        // one again.
+        let mid_resp = app
+            .clone()
+            .oneshot(terminal_transcript_req(
+                &project.id,
+                &started.pane_id,
+                Some(&cursor1),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(mid_resp.status(), StatusCode::OK);
+        let mid_body = body_string(mid_resp).await;
+        let mid_json: serde_json::Value = serde_json::from_str(&mid_body).unwrap();
+        let mid_lines: Vec<String> = mid_json["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            mid_lines,
+            vec!["» second prompt".to_string()],
+            "the first record must never be re-delivered: {mid_body}"
+        );
+        let cursor2 = mid_json["cursor"].as_str().unwrap().to_string();
+        assert_ne!(cursor1, cursor2, "the cursor must advance past the newly read record");
+
+        // Poll again with the latest cursor: nothing new, nothing skipped.
+        let after_resp = app
+            .oneshot(terminal_transcript_req(
+                &project.id,
+                &started.pane_id,
+                Some(&cursor2),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(after_resp.status(), StatusCode::OK);
+        let after_body = body_string(after_resp).await;
+        let after_json: serde_json::Value = serde_json::from_str(&after_body).unwrap();
+        assert_eq!(
+            after_json["lines"].as_array().unwrap().len(),
+            0,
+            "a fully-caught-up poll must return no records: {after_body}"
+        );
+        assert_eq!(after_json["cursor"].as_str().unwrap(), cursor2);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&transcript_root).ok();
+    }
+
+    /// A malformed `cursor` (rejected by `mdview_core::transcript`'s own
+    /// `parse_cursor` guard, agent-terminal-15) is answered `400`, not a
+    /// crash and not silently treated as "no cursor" — this is the second
+    /// line the cell's action names, never a substitute for the D2 boundary
+    /// check above it.
+    #[tokio::test]
+    async fn terminal_transcript_bad_cursor_is_a_bad_request() {
+        let dir = fresh_root("transcript-bad-cursor");
+        enable_terminal(&dir);
+        let root = fresh_root("transcript-bad-cursor-project");
+        let transcript_root = fresh_root("transcript-bad-cursor-claude");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let cwd = canonical_cwd(&root);
+        write_transcript(&transcript_root, &cwd, "s1", "");
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        st.transcript_root = Some(transcript_root.clone());
+        let project = register(&st, &root, "transcript-bad-cursor");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(terminal_transcript_req(
+                &project.id,
+                &started.pane_id,
+                Some("../../etc/passwd.jsonl:0"),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&transcript_root).ok();
+    }
+
+    /// Truth: "The Transcript tab is a separate tab from Terminal on a
+    /// project page" — the page route renders the nav link and one
+    /// `.term-transcript` viewport per pane, distinct from `.term-screen`.
+    #[tokio::test]
+    async fn transcript_page_renders_the_tab_and_a_viewport_per_pane() {
+        let dir = fresh_root("transcript-page-render");
+        enable_terminal(&dir);
+        let root = fresh_root("transcript-page-render-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "transcript-page-render");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(transcript_page_req(&project.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_transcript\"", project.id)),
+            "no Transcript tab link: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "class=\"term-transcript\" data-pane-id=\"{}\"",
+                started.pane_id
+            )),
+            "no transcript viewport for the pane: {body}"
+        );
+        assert!(!body.contains("class=\"term-screen\""), "the Transcript tab must not render a screen viewport: {body}");
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();

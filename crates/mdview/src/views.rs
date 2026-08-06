@@ -168,13 +168,16 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; }
 .term-keys { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
 .term-keys button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
+.term-transcript { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
+.term-transcript__line { white-space: pre-wrap; word-break: break-word; }
 </style>"#;
 
 /// D6: the Terminal tab is always present on a project page, whether or not
 /// herdr is running or the terminal has ever been reached — this renders
 /// from the project id alone, with no herdr call and no auth check, so its
-/// presence never depends on either. `active` is `"overview"` or
-/// `"terminal"`.
+/// presence never depends on either. `active` is `"overview"`, `"terminal"`
+/// or `"transcript"` (agent-terminal-16, D9: the Transcript tab sits beside
+/// Terminal, not inside its frame).
 fn project_tabs(project_id: &str, active: &str) -> String {
     let id = esc(project_id);
     let cls = |key: &str| {
@@ -188,9 +191,11 @@ fn project_tabs(project_id: &str, active: &str) -> String {
         r#"<nav class="proj-tabs" aria-label="Project sections">
   <a class="{overview_cls}" href="/p/{id}/">Overview</a>
   <a class="{terminal_cls}" href="/p/{id}/_terminal">Terminal</a>
+  <a class="{transcript_cls}" href="/p/{id}/_transcript">Transcript</a>
 </nav>"#,
         overview_cls = cls("overview"),
         terminal_cls = cls("terminal"),
+        transcript_cls = cls("transcript"),
         id = id,
     )
 }
@@ -383,6 +388,73 @@ pub fn terminal_page(project: &Project, panes: &[TerminalPaneView], presets: &[S
         rows = rows,
     );
     layout(&format!("{} · terminal", project.name), "", &body)
+}
+
+/// One pane's transcript card (agent-terminal-16, D9): the same
+/// identity/meta header [`pane_cards`] renders for the screen, with a
+/// `.term-transcript` viewport in place of `.term-screen`, `.term-reply` and
+/// `.term-keys` — this tab is read-only. `assets/app.js`'s transcript poller
+/// fills the viewport in, appending each newly returned record rather than
+/// replacing the viewport's contents, so nothing already shown is lost
+/// between polls.
+fn transcript_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
+    if panes.is_empty() {
+        return format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_msg));
+    }
+    let mut out = String::new();
+    for p in panes {
+        out.push_str(&format!(
+            r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
+  <div class="fg-card__title">{name} <span class="fg-chip fg-chip--neutral">{status}</span></div>
+  <div class="term-pane__meta">{kind}{title_sep}{title}</div>
+  <div class="term-pane__cwd">{cwd}</div>
+  <div class="term-transcript" data-pane-id="{pane_id}" aria-live="polite">Loading activity…</div>
+</div>"#,
+            pane_id = esc(&p.pane_id),
+            name = esc(&p.name),
+            status = esc(&p.status),
+            kind = esc(&p.kind),
+            title_sep = if p.title.is_empty() { "" } else { " · " },
+            title = esc(&p.title),
+            cwd = esc(&p.cwd),
+        ));
+    }
+    out
+}
+
+/// `GET /p/:id/_transcript` up state (D9): the Transcript tab beside
+/// Terminal, not a toggle inside its frame — the same project-scoped,
+/// D2-boundary-filtered pane list `terminal_page` builds, rendered with a
+/// transcript viewport per pane instead of a screen. Zero panes renders the
+/// same wording `terminal_page` uses for the same reason (never mistaken for
+/// herdr being unreachable, see [`terminal_down_page`], which this tab's
+/// down state also reuses — listing which panes belong to this project
+/// still needs a herdr snapshot even though transcript content itself
+/// doesn't).
+pub fn transcript_page(project: &Project, panes: &[TerminalPaneView]) -> String {
+    let rows = transcript_cards(panes, "No agents are running under this project right now.");
+    // `data-project-id` lets `assets/app.js`'s transcript poller build each
+    // pane's `/p/:id/_terminal/:pane_id/transcript` URL, mirroring the
+    // screen poller's own `data-project-id` use on `terminal_page`.
+    let body = format!(
+        r#"{topbar}
+{tab_style}
+<main class="fg-page" data-project-id="{pid}">
+  <h2 class="fg-pagehead__title">{name}</h2>
+  {tabs}
+  <div class="term-panes">{rows}</div>
+</main>"#,
+        topbar = topbar(&format!(
+            "<span class=\"crumb\">{name} · transcript</span>",
+            name = esc(&project.name)
+        )),
+        tab_style = PROJECT_TAB_STYLE,
+        pid = esc(&project.id),
+        name = esc(&project.name),
+        tabs = project_tabs(&project.id, "transcript"),
+        rows = rows,
+    );
+    layout(&format!("{} · transcript", project.name), "", &body)
 }
 
 /// Inline poller/reply/keys wiring for [`unassigned_terminal_page`], scoped

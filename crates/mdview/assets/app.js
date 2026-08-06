@@ -775,6 +775,82 @@
     setInterval(pollAll, POLL_MS);
   })();
 
+  // Transcript poll (agent-terminal-16, D9): each pane's `.term-transcript`
+  // viewport, on the separate Transcript tab, polls its own
+  // `/p/:id/_terminal/:pane_id/transcript` endpoint on the same fixed
+  // interval as the screen poller above. The cursor the endpoint returns is
+  // held here, client-side, per pane — nothing about the transcript is ever
+  // stored server-side (`mdview-core`'s transcript module doc) — and every
+  // poll *appends* the newly returned records rather than replacing the
+  // viewport's contents, so nothing already shown is ever lost between
+  // polls, unlike the screen poller's full-repaint `innerHTML` above.
+  //
+  // `body.lines` already carries safe, pre-escaped HTML from mdview-core's
+  // ansi translator — the same one the screen poller uses — so each line is
+  // assigned via `innerHTML`, never `textContent`, matching that precedent.
+  //
+  // D6: `body.available === false` means this pane's agent has written no
+  // transcript yet — a named state is shown once and left alone, never
+  // repainted back to "Loading…" and never left blank as if broken.
+  (function () {
+    var main = document.querySelector("main.fg-page[data-project-id]");
+    if (!main) return;
+    var projectId = main.getAttribute("data-project-id");
+    var viewports = Array.prototype.slice.call(document.querySelectorAll(".term-transcript[data-pane-id]"));
+    if (!projectId || !viewports.length) return;
+
+    var POLL_MS = 1500;
+    var NO_TRANSCRIPT_TEXT = "No transcript yet for this pane.";
+    var cursors = {}; // pane id -> cursor to resume from on the next poll
+    var started = {}; // pane id -> the viewport's placeholder has been cleared
+
+    function transcriptUrl(paneId, cursor) {
+      var url = "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/transcript";
+      return cursor ? url + "?cursor=" + encodeURIComponent(cursor) : url;
+    }
+
+    function appendLines(el, lines) {
+      lines.forEach(function (html) {
+        var line = document.createElement("div");
+        line.className = "term-transcript__line";
+        // `html` is safe, pre-escaped markup — see the doc comment above
+        // this IIFE.
+        line.innerHTML = html;
+        el.appendChild(line);
+      });
+      if (lines.length) el.scrollTop = el.scrollHeight;
+    }
+
+    function pollOne(el) {
+      var paneId = el.getAttribute("data-pane-id");
+      fetch(transcriptUrl(paneId, cursors[paneId]), { credentials: "same-origin" })
+        .then(function (res) {
+          return res.ok ? res.json() : null;
+        })
+        .then(function (body) {
+          if (!body) return;
+          if (body.available === false) {
+            if (!started[paneId]) el.textContent = NO_TRANSCRIPT_TEXT;
+            return;
+          }
+          if (!started[paneId]) {
+            el.textContent = "";
+            started[paneId] = true;
+          }
+          cursors[paneId] = body.cursor;
+          appendLines(el, body.lines || []);
+        })
+        .catch(function () {});
+    }
+
+    function pollAll() {
+      viewports.forEach(pollOne);
+    }
+
+    pollAll();
+    setInterval(pollAll, POLL_MS);
+  })();
+
   // Terminal reply + keys (agent-terminal-9, D3): posts free text and named
   // keys back to a pane. Send≠submit stays two distinct actions here too —
   // "Send" posts with `submit: true` (herdr presses Enter as its own,
