@@ -191,6 +191,26 @@ pub struct BeeRoute {
     pub updated_at: Option<String>,
 }
 
+/// `.bee/HANDOFF.json` — the note a session writes when it stops and hands
+/// the work back to a human, `{written_at, next_action, kind}`. Presence
+/// alone means work is parked; the store carries no consumed-marker, so a
+/// note whose work has since finished still sits here — the board dates it
+/// rather than judging whether it is stale (bbp-8, D6). A `kind` of
+/// `"pause"`, or the key absent entirely, reads as a pause (the same
+/// "a kindless record reads as pause" convention bee's own workflow docs
+/// state for this exact file); `"planned-next"` is a different thing
+/// entirely — a clean stop with the next claim already owned — and must
+/// never be reported as a pause (see [`compute_attention_items`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeHandoff {
+    pub written_at: Option<String>,
+    /// Free text, not a path field — scrubbed of any embedded absolute path
+    /// before it reaches this struct; see [`scrub_paths`]. This repo's own
+    /// handoff is a five-sentence paragraph naming filesystem paths.
+    pub next_action: Option<String>,
+    pub kind: Option<String>,
+}
+
 /// One raw entry from `.bee/state.json`'s `workers[]`. `cell`, `tier` and
 /// `status` are each commonly `null` in practice (bee updates this array
 /// best-effort, not transactionally with the cell it names), so every field
@@ -560,6 +580,9 @@ pub struct BeeSnapshot {
     /// [`compute_attention_items`]. Heaviest severity first, empty when
     /// nothing this slice's rules cover is wrong.
     pub attention: Vec<BeeAttentionItem>,
+    /// `.bee/HANDOFF.json`, when present — see [`BeeHandoff`]. `None` is the
+    /// normal, expected shape for most stores; it is never a read error.
+    pub handoff: Option<BeeHandoff>,
     /// Human-readable notes naming what could not be read. Every path
     /// mentioned here is relative to the project root.
     pub read_errors: Vec<String>,
@@ -583,6 +606,7 @@ impl BeeSnapshot {
             worktrees: Vec::new(),
             running_workers: Vec::new(),
             attention: Vec::new(),
+            handoff: None,
             read_errors: Vec::new(),
         }
     }
@@ -672,7 +696,9 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         .map(|s| compute_running_workers(&s.workers, &all_cells, &sessions))
         .unwrap_or_default();
 
-    let attention = compute_attention_items(&buckets.stuck, &read_errors);
+    let handoff = read_handoff(&bee_dir, root, &mut read_errors);
+
+    let attention = compute_attention_items(&buckets.stuck, &read_errors, handoff.as_ref());
 
     BeeSnapshot {
         present: true,
@@ -689,6 +715,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         worktrees,
         running_workers,
         attention,
+        handoff,
         read_errors,
     }
 }
@@ -754,9 +781,21 @@ fn compute_running_workers(
 ///   so every other number on the page should be read as provisional
 ///   until it is fixed).
 ///
+/// bbp-8 adds a third, independent rule: `handoff` present and its `kind`
+/// reads as a pause (source spec A1, 🔴 critical: "{feature} is paused" —
+/// this board has no per-note feature name to name, so the title stays
+/// generic). It fires on the note's own text and its own `written_at`,
+/// never on a judgement of whether the note is still relevant (D6) — a
+/// `"planned-next"` handoff is a different thing (a clean stop with the
+/// next claim already owned) and never fires this rule.
+///
 /// Adding a rule later means adding another `if` below and letting it fall
-/// into the sort — the two here are never touched to make room for it.
-fn compute_attention_items(blocked_cells: &[BeeCell], read_errors: &[String]) -> Vec<BeeAttentionItem> {
+/// into the sort — the ones here are never touched to make room for it.
+fn compute_attention_items(
+    blocked_cells: &[BeeCell],
+    read_errors: &[String],
+    handoff: Option<&BeeHandoff>,
+) -> Vec<BeeAttentionItem> {
     let mut items = Vec::new();
 
     if !blocked_cells.is_empty() {
@@ -784,6 +823,22 @@ fn compute_attention_items(blocked_cells: &[BeeCell], read_errors: &[String]) ->
             detail: read_errors.join("; "),
             suggested_action: "Repair or regenerate the file(s) named above — until they parse, every other number on this page may be incomplete.".to_string(),
         });
+    }
+
+    if let Some(h) = handoff {
+        // A kindless record and an explicit "pause" both read as a pause;
+        // "planned-next" (a clean stop, next claim already owned) is not.
+        let is_pause = !matches!(h.kind.as_deref(), Some("planned-next"));
+        if is_pause {
+            let when = h.written_at.as_deref().unwrap_or("an unknown time");
+            let note = h.next_action.as_deref().unwrap_or("(no note text was recorded)");
+            items.push(BeeAttentionItem {
+                severity: BeeAttentionSeverity::Critical,
+                title: "Work is parked, waiting on a person".to_string(),
+                detail: format!("Written {when}: {note}"),
+                suggested_action: "Read the handoff note and decide whether to resume the work or set it aside — the store never marks a note as consumed, so date it yourself.".to_string(),
+            });
+        }
     }
 
     items.sort_by(|a, b| b.severity.cmp(&a.severity));
@@ -839,6 +894,37 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
                 updated_at: r.get("updated_at").and_then(Value::as_str).map(String::from),
             }),
             next_action: v.get("next_action").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
+        }),
+        Err(e) => {
+            read_errors.push(format!("{}: could not parse ({e})", rel_str(&path, root)));
+            None
+        }
+    }
+}
+
+/// Read `.bee/HANDOFF.json` (bbp-8), following [`read_state`]'s convention
+/// exactly: a missing file is silent and normal (most stores have none),
+/// while a read or parse error pushes one line onto `read_errors` and the
+/// rest of the snapshot still reads.
+fn read_handoff(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Option<BeeHandoff> {
+    let path = bee_dir.join("HANDOFF.json");
+    if !path.is_file() {
+        // No HANDOFF.json is the normal, expected shape — silent, not a
+        // read error.
+        return None;
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            read_errors.push(format!("{}: could not read ({e})", rel_str(&path, root)));
+            return None;
+        }
+    };
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(v) => Some(BeeHandoff {
+            written_at: v.get("written_at").and_then(Value::as_str).map(String::from),
+            next_action: v.get("next_action").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
+            kind: v.get("kind").and_then(Value::as_str).map(String::from),
         }),
         Err(e) => {
             read_errors.push(format!("{}: could not parse ({e})", rel_str(&path, root)));
@@ -3475,6 +3561,107 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // --- bbp-8: the HANDOFF.json reader (D6/D9) ---
+
+    #[test]
+    fn full_handoff_json_is_carried_onto_the_snapshot_with_all_three_fields() {
+        let root = fresh_root("handoff-full");
+        write(
+            &root,
+            ".bee/HANDOFF.json",
+            r#"{
+                "written_at": "2026-08-06T12:45:21.418Z",
+                "next_action": "Resume the next slice.",
+                "kind": "pause"
+            }"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        let handoff = snap.handoff.as_ref().expect("handoff should have been read");
+        assert_eq!(handoff.written_at.as_deref(), Some("2026-08-06T12:45:21.418Z"));
+        assert_eq!(handoff.next_action.as_deref(), Some("Resume the next slice."));
+        assert_eq!(handoff.kind.as_deref(), Some("pause"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn no_handoff_json_at_all_is_silent_no_read_error() {
+        let root = fresh_root("handoff-absent");
+        // No .bee/HANDOFF.json written — most stores have none.
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+
+        let snap = read_snapshot(&root);
+        assert!(snap.handoff.is_none(), "no handoff file should mean no handoff on the snapshot");
+        assert!(snap.read_errors.is_empty(), "an absent handoff must never be a read error: {:?}", snap.read_errors);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn malformed_handoff_json_pushes_exactly_one_read_error_rest_still_reads() {
+        let root = fresh_root("handoff-malformed");
+        write(&root, ".bee/HANDOFF.json", "{ this is not valid json");
+        write(&root, ".bee/cells/good.json", &cell_json("good", "open"));
+
+        let snap = read_snapshot(&root);
+        assert!(snap.present);
+        assert!(snap.handoff.is_none());
+        assert_eq!(snap.buckets.waiting.len(), 1, "the well-formed cell must still parse");
+        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
+        assert!(snap.read_errors.iter().any(|e| e.contains("HANDOFF.json")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn handoff_with_no_kind_key_is_still_carried_with_kind_none() {
+        let root = fresh_root("handoff-no-kind");
+        write(
+            &root,
+            ".bee/HANDOFF.json",
+            r#"{"written_at": "2026-08-06T00:00:00.000Z", "next_action": "Do the thing."}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert!(snap.read_errors.is_empty(), "a missing key is not a parse error: {:?}", snap.read_errors);
+        let handoff = snap.handoff.as_ref().expect("handoff should have been read");
+        assert!(handoff.kind.is_none());
+        assert_eq!(handoff.next_action.as_deref(), Some("Do the thing."));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn handoff_absolute_path_embedded_mid_sentence_and_backtick_wrapped_does_not_survive() {
+        let root = fresh_root("handoff-security-scrub");
+        let bare = root.join("src").join("bee.rs").to_string_lossy().into_owned();
+        let wrapped = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let body = format!(
+            r#"{{
+                "written_at": "2026-08-06T00:00:00.000Z",
+                "next_action": "See {bare_path} then `{wrapped_path}` before resuming.",
+                "kind": "pause"
+            }}"#,
+            bare_path = bare.replace('\\', "\\\\"),
+            wrapped_path = wrapped.replace('\\', "\\\\"),
+        );
+        write(&root, ".bee/HANDOFF.json", &body);
+
+        let snap = read_snapshot(&root);
+        let serialized = serde_json::to_string(&snap).unwrap();
+        assert!(!serialized.contains(&bare), "a bare absolute path embedded mid-sentence leaked onto the snapshot");
+        assert!(!serialized.contains(&wrapped), "a backtick-wrapped absolute path leaked onto the snapshot");
+
+        let handoff = snap.handoff.as_ref().expect("handoff should have been read");
+        let note = handoff.next_action.as_deref().unwrap_or_default();
+        assert!(note.contains("src/bee.rs"), "bare path should still carry its reduced relative form: {note}");
+        assert!(note.contains("`crates/bee.rs`"), "backtick wrap should survive around the reduced path: {note}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     // --- bbp-4: the attention list (D6) ---
 
     #[test]
@@ -3576,8 +3763,8 @@ mod tests {
         // called twice over that same input, standing in for two
         // independent requests against unchanged data.
         let snap = read_snapshot(&root);
-        let first = compute_attention_items(&snap.buckets.stuck, &snap.read_errors);
-        let second = compute_attention_items(&snap.buckets.stuck, &snap.read_errors);
+        let first = compute_attention_items(&snap.buckets.stuck, &snap.read_errors, snap.handoff.as_ref());
+        let second = compute_attention_items(&snap.buckets.stuck, &snap.read_errors, snap.handoff.as_ref());
 
         assert_eq!(first.len(), 2);
         assert_eq!(first, second, "repeated calls over unchanged data must return the same order");
@@ -3610,6 +3797,104 @@ mod tests {
             snap.read_errors.iter().any(|e| e.contains("bad.json")),
             "the original read error should still be present: {:?}",
             snap.read_errors
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bbp-8: a pause handoff is one attention item (D6) ---
+
+    #[test]
+    fn pause_handoff_yields_exactly_one_item_carrying_the_note_text_and_written_at() {
+        let root = fresh_root("attention-handoff-pause");
+        write(
+            &root,
+            ".bee/HANDOFF.json",
+            r#"{
+                "written_at": "2026-08-06T12:45:21.418Z",
+                "next_action": "Resume the next slice.",
+                "kind": "pause"
+            }"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+
+        let item = &snap.attention[0];
+        assert_eq!(item.severity, BeeAttentionSeverity::Critical);
+        assert!(item.detail.contains("Resume the next slice."), "detail should carry the note's own text: {}", item.detail);
+        assert!(
+            item.detail.contains("2026-08-06T12:45:21.418Z"),
+            "detail should carry the note's written_at: {}",
+            item.detail
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn planned_next_handoff_yields_no_pause_item() {
+        let root = fresh_root("attention-handoff-planned-next");
+        write(
+            &root,
+            ".bee/HANDOFF.json",
+            r#"{
+                "written_at": "2026-08-06T12:45:21.418Z",
+                "next_action": "Cell bbp-9 is already claimed by this session.",
+                "kind": "planned-next"
+            }"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert!(
+            snap.attention.is_empty(),
+            "a planned-next handoff is not a pause and must not be reported as one: {:?}",
+            snap.attention
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn no_handoff_yields_no_pause_item() {
+        let root = fresh_root("attention-handoff-absent");
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+
+        let snap = read_snapshot(&root);
+        assert!(snap.attention.is_empty(), "no handoff, nothing to report: {:?}", snap.attention);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn handoff_alongside_blocked_cells_yields_both_ordered_heaviest_first() {
+        let root = fresh_root("attention-handoff-and-blocked");
+        write(&root, ".bee/cells/c-blocked.json", &cell_json("c-blocked", "blocked"));
+        write(
+            &root,
+            ".bee/HANDOFF.json",
+            r#"{
+                "written_at": "2026-08-06T12:45:21.418Z",
+                "next_action": "Resume the next slice.",
+                "kind": "pause"
+            }"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.attention.len(), 2, "both rules should fire: {:?}", snap.attention);
+        // Both rules in this slice carry Critical severity — a stable sort
+        // keeps the fixed rule-registration order, blocked cells first.
+        assert_eq!(snap.attention[0].severity, BeeAttentionSeverity::Critical);
+        assert_eq!(snap.attention[1].severity, BeeAttentionSeverity::Critical);
+        assert!(
+            snap.attention.iter().any(|i| i.title.contains("blocked")),
+            "blocked-cells item missing: {:?}",
+            snap.attention
+        );
+        assert!(
+            snap.attention.iter().any(|i| i.title.contains("parked")),
+            "handoff item missing: {:?}",
+            snap.attention
         );
 
         std::fs::remove_dir_all(&root).ok();

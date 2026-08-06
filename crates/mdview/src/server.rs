@@ -3975,6 +3975,49 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (read-only, bbp-8) The fixture `.bee/` tree is byte-identical after a
+    /// board request whose fixture CONTAINS a populated `HANDOFF.json` — the
+    /// six pre-existing read-only tests each use a fixture with no handoff
+    /// file, so they would pass green without the handoff reader ever
+    /// running. This one exercises it: the reader must open the file, parse
+    /// it and scrub it without ever writing back to it.
+    #[tokio::test]
+    async fn board_reading_is_read_only_with_a_populated_handoff_present() {
+        let root = fresh_root("handoff-read-only");
+        write(
+            &root,
+            ".bee/HANDOFF.json",
+            r#"{
+                "written_at": "2026-08-06T12:45:21.418Z",
+                "next_action": "Resume the next slice of bee-board-pm.",
+                "kind": "pause"
+            }"#,
+        );
+        write(
+            &root,
+            ".bee/cells/blocked.json",
+            &timed_cell_json("b1", "handoff-read-only", "blocked", &[], "w1", "x", "y"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "handoff-read-only");
+        let before = snapshot_tree(&root);
+
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_string(resp).await;
+        assert!(body.contains("parked"), "the pause handoff should surface as an attention item: body missing expected text");
+
+        let after = snapshot_tree(&root);
+        assert_eq!(
+            before, after,
+            ".bee/ tree changed after a request whose fixture carries a populated HANDOFF.json"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (happy) bee-board-ux-2: a finished feature's line in the Done section
     /// still links to its feature detail page, and a live cell in one of
     /// the other three buckets still links to its cell detail page — both
