@@ -4839,15 +4839,17 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (read-only, bbp-15) The fixture `.bee/` tree is byte-identical after
-    /// a board request whose fixture CONTAINS a populated
+    /// (read-only, bbp-15/bbp-16) The fixture `.bee/` tree is byte-identical
+    /// after a board request whose fixture CONTAINS a populated
     /// `.bee/reservations.json` — the pre-existing read-only tests each use
     /// a fixture with no reservations file, so they would pass green
     /// without the reservations reader ever running. This one exercises
     /// it: the reader must open the file and parse its array without ever
-    /// writing back to it. No board markup reads `reservations` yet (that
-    /// lands with the process-health panel), so this proves only D4's
-    /// read-only guarantee over the new reader, not any rendering of it.
+    /// writing back to it. bbp-16 adds the process-health panel that
+    /// renders `reservations` (see `process_health_panel_renders_lock_contention_tier_mix_and_gate_bypass`
+    /// for the fuller happy-path assertions); this test now also proves the
+    /// unreleased lock actually surfaces here, not only that reading it is
+    /// safe.
     #[tokio::test]
     async fn board_reading_is_read_only_with_a_populated_reservations_file_present() {
         let root = fresh_root("reservations-read-only");
@@ -4870,11 +4872,88 @@ mod bee_route_tests {
 
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("src/lib.rs"),
+            "the process-health panel must render the unreleased reservation: {body}"
+        );
 
         let after = snapshot_tree(&root);
         assert_eq!(
             before, after,
             ".bee/ tree changed after a request whose fixture carries a populated reservations.json"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy, bbp-16) Process health renders all three of bbp-15's
+    /// derivations at once: an unreleased reservation as file-lock
+    /// contention, the tier-mix chips, and the recorded `gate_bypass`
+    /// setting worded exactly as `compute_attention_items`' own gate-bypass
+    /// rule words it (`mdview_core::bee`) — `Gate bypass recorded as
+    /// "{level}"` — so the panel and the attention item never drift into
+    /// disagreeing phrasing for the same fact.
+    #[tokio::test]
+    async fn process_health_panel_renders_lock_contention_tier_mix_and_gate_bypass() {
+        let root = fresh_root("process-health-happy");
+        write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
+        write(
+            &root,
+            ".bee/reservations.json",
+            r#"{"reservations": [
+                {"agent": "lastband", "cell": "kf-1", "path": "src/lib.rs", "kind": "lease", "session": "s1", "reserved_at": "2026-08-06T00:00:00.000Z", "released_at": null},
+                {"agent": "other", "cell": "kf-2", "path": "src/old.rs", "kind": "lease", "session": "s2", "reserved_at": "2026-08-05T00:00:00.000Z", "released_at": "2026-08-05T01:00:00.000Z"}
+            ]}"#,
+        );
+        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "process-health-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Process health"), "{body}");
+        assert!(
+            body.contains("src/lib.rs") && body.contains("lastband"),
+            "the still-locked reservation must render: {body}"
+        );
+        assert!(
+            !body.contains("src/old.rs"),
+            "a released reservation is not contention and must not render: {body}"
+        );
+        assert!(body.contains("generation: 1"), "the tier-mix chip must render: {body}");
+        assert!(
+            body.contains("Gate bypass recorded as \"total\""),
+            "the recorded bypass level must be worded exactly as the attention rule words it: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge, bbp-16) A store with `read_errors` (a malformed
+    /// `.bee/lanes/*.json` file here) shows them on the page — a partly-
+    /// unreadable store must be visible, never silently thinner. Both the
+    /// attention panel's own summary line and the process-health panel's
+    /// own detailed list carry this, since `bee_read_errors` (`views.rs`)
+    /// now renders inside the process-health panel.
+    #[tokio::test]
+    async fn process_health_panel_shows_read_errors_from_a_malformed_store_file() {
+        let root = fresh_root("process-health-read-errors");
+        write(&root, ".bee/lanes/broken.json", "{ not valid json");
+        write(&root, ".bee/cells/a.json", &cell_json("a", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "process-health-read-errors");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Could not read"), "{body}");
+        assert!(
+            body.contains(".bee/lanes/broken.json"),
+            "the specific unreadable file must be named: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -5205,7 +5284,11 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    // ── bee-board-ux-3: "running now" section ──────────────────────────
+    // ── bee-board-ux-3: "running now" — bbp-16 folds this into the
+    // "Working on now" card's own "Running now" subsection
+    // (`bee_running_workers_section`, `views.rs`); the assertions below are
+    // otherwise unchanged, since that row-level markup itself did not
+    // change, only its home. ──────────────────────────
 
     fn state_json_with_workers(workers_json: &str) -> String {
         format!(r#"{{"phase":"exploring","feature":"demo","mode":"standard","workers":[{workers_json}]}}"#)
@@ -5340,7 +5423,7 @@ mod bee_route_tests {
         assert!(body.contains("Nothing running right now."), "{body}");
         assert!(
             !body.contains("class=\"fg-card bee-panel bee-running\""),
-            "the quiet empty state must not render an empty running panel: {body}"
+            "bbp-16 retired the standalone running-now section entirely — this class must never render again, from any state",
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -5406,10 +5489,12 @@ mod bee_route_tests {
             body.contains("Nothing running right now."),
             "a worker backed only by a stale session must not be presented as running: {body}"
         );
-        // The existing Sessions panel legitimately still lists a stale
-        // session (unrelated pre-existing behavior); what must be absent is
-        // any *running-section* worker card for it — the running-panel
-        // markup itself must not appear at all here.
+        // The Sessions panel legitimately still lists a stale session
+        // (unrelated pre-existing behavior, now folded into
+        // `bee_sessions_panel`); what must be absent is any worker card for
+        // it in the working-now card's own "Running now" subsection — and,
+        // per bbp-16, the standalone running-now section's class must never
+        // render again at all.
         assert!(
             !body.contains("class=\"fg-card bee-panel bee-running\""),
             "a stale-session worker must not produce a running panel: {body}"
@@ -5486,7 +5571,10 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    // --- bee-board-ux-4: each granted worktree, its own lifecycle record ---
+    // --- bee-board-ux-4: each granted worktree, its own lifecycle record —
+    // bbp-16 folds this section into `bee_sessions_panel`'s own "Worktrees"
+    // subhead (`bee_worktrees_body`, `views.rs`); the row-level markup these
+    // assertions check is otherwise unchanged, only its wrapper moved. ---
 
     /// Sibling worktree directories sit beside `fresh_root`'s temp parent —
     /// the exact shape `mdview_core::bee::resolve_worktree` expects: `<temp
@@ -5736,7 +5824,7 @@ mod bee_route_tests {
         assert!(body.contains("No worktrees granted."), "{body}");
         assert!(
             !body.contains("class=\"fg-card bee-panel bee-worktrees\""),
-            "no grants must not render an empty worktrees panel: {body}"
+            "bbp-16 retired the standalone worktrees section — this class must never render again, from any state",
         );
 
         std::fs::remove_dir_all(&root).ok();

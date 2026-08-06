@@ -3,9 +3,9 @@
 //! `/highlight.css` (syntect class-based), so themes switch without re-render.
 
 use mdview_core::bee::{
-    BeeAttentionItem, BeeAttentionSeverity, BeeBacklog, BeeBuckets, BeeCell, BeeFeaturePhase,
-    BeeReview, BeeReviewStatus, BeeRunningWorker, BeeSession, BeeShippedFeature, BeeSnapshot,
-    BeeState, BeeWorktree,
+    BeeAttentionItem, BeeAttentionSeverity, BeeBacklog, BeeBuckets, BeeCell, BeeConfig,
+    BeeFeaturePhase, BeeReservation, BeeReview, BeeReviewStatus, BeeRunningWorker,
+    BeeShippedFeature, BeeSnapshot, BeeState, BeeTierMix, BeeWorkspace, BeeWorktree,
 };
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
@@ -651,6 +651,21 @@ pub fn terminal_down_page(project: &Project) -> String {
 /// `mdview_core::bee::read_snapshot` (no absolute path crosses into
 /// `BeeSnapshot`'s public fields), so nothing further is redacted here —
 /// this view only escapes for HTML safety.
+///
+/// bbp-16 closes D2's "nothing lost" promise and retires the last piece of
+/// pre-redesign markup. The standalone `{running}` and `{worktrees}` slots
+/// this format used to carry are gone: a live worker's cell link, its
+/// store-disagreement note, and an unknown/stale-session worker's handling
+/// now live inside [`bee_working_now_card`] (see its own doc comment) —
+/// rendering the same worker twice, once in its own section and once in the
+/// working-now card, is exactly the duplication the board's standing rule
+/// forbids. Worktrees, and `.bee/runtime/workspaces/*.json` alongside them,
+/// now fold into [`bee_sessions_panel`] within `{panels}`. Delivery speed
+/// (`{velocity}`) keeps its own block, unmoved. Process health — file-lock
+/// contention, the model-tier spread and the recorded gate-bypass setting —
+/// is new in `{panels}` too ([`bee_process_health_panel`]), and now also
+/// carries `read_errors`: a store that failed to read one of its own files
+/// is a process-health signal in its own right, not a separate footer.
 pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
     let body = format!(
         r#"{topbar}
@@ -704,26 +719,20 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 </style>
 <main class="fg-page">
   {top}
-  {running}
-  {worktrees}
   {velocity}
   {phase_board}
   {finished}
   {panels}
-  {errors}
 </main>"#,
         topbar = topbar(&format!(
             "<span class=\"crumb\">{name} · bee</span>",
             name = esc(&project.name)
         )),
         top = bee_board_top(project, snapshot),
-        running = bee_running_now_section(&project.id, snapshot),
-        worktrees = bee_worktree_section(&snapshot.worktrees),
         velocity = bee_velocity_section(&project.id, snapshot),
         phase_board = bee_phase_board_section(&project.id, &snapshot.phase_board, &snapshot.shipped),
         finished = bee_finished_section(&project.id, &snapshot.shipped),
         panels = bee_panels_section(snapshot),
-        errors = bee_read_errors(&snapshot.read_errors),
     );
     layout(&format!("{} · bee", project.name), "", &body)
 }
@@ -914,14 +923,35 @@ fn bee_headline_kpis(snapshot: &BeeSnapshot) -> String {
 /// recorded next action. No active feature, no route, no live cells or no
 /// next action each render their own honest line rather than a fabricated
 /// zero or a hidden section.
+///
+/// bbp-16 retires the standalone "Running now" section
+/// (`bee_running_now_section`, bee-board-ux-3) into this card's own
+/// `Running now` subsection, via [`bee_running_workers_section`] — the
+/// live-worker half of what that section carried (a live worker's own cell
+/// link, an explicit store/worker disagreement, a worker naming an unknown
+/// cell flagged rather than dropped, and a worker on a stale session never
+/// presented as running: `compute_running_workers`,
+/// `mdview_core::bee`, already filters that last case out of
+/// `snapshot.running_workers` entirely). The live-session half of the old
+/// section is not carried here — every session, live or stale, already has
+/// a home in the Sessions panel (`bee_sessions_panel`) below. This
+/// subsection renders unconditionally, active feature or not: "what is
+/// running" is a cluster-wide question, independent of which single
+/// feature (if any) is currently active.
 fn bee_working_now_card(project_id: &str, snapshot: &BeeSnapshot) -> String {
+    let running_html = bee_running_workers_section(project_id, &snapshot.running_workers);
+
     let feature = snapshot.state.as_ref().and_then(|s| s.feature.as_deref());
     let Some(feature) = feature else {
-        return r#"<section class="fg-card bee-panel bee-working-now">
+        return format!(
+            r#"<section class="fg-card bee-panel bee-working-now">
   <h3 class="bee-panel__head">Working on now</h3>
   <p class="fg-empty">No feature is currently active.</p>
-</section>"#
-            .to_string();
+  <h4 class="bee-panel__subhead">Running now</h4>
+  {running_html}
+</section>"#,
+            running_html = running_html,
+        );
     };
 
     let rationale = snapshot
@@ -973,6 +1003,8 @@ fn bee_working_now_card(project_id: &str, snapshot: &BeeSnapshot) -> String {
   {rationale_html}
   {progress_html}
   {next_action_html}
+  <h4 class="bee-panel__subhead">Running now</h4>
+  {running_html}
 </section>"#,
         pid = esc(project_id),
         feature_href = esc(feature),
@@ -980,7 +1012,27 @@ fn bee_working_now_card(project_id: &str, snapshot: &BeeSnapshot) -> String {
         rationale_html = rationale_html,
         progress_html = progress_html,
         next_action_html = next_action_html,
+        running_html = running_html,
     )
+}
+
+/// The working-now card's "Running now" subsection body (bbp-16) — every
+/// worker `state.json` names whose own session is currently live
+/// (`snapshot.running_workers`, already joined and session-verified by
+/// `mdview_core::bee::read_snapshot`), each linking to the cell it names.
+/// Formerly `bee_running_now_section`'s worker half, unchanged in content:
+/// only its home moved. Empty renders one quiet line, matching every other
+/// honest-empty-state convention on this board, never an empty bordered
+/// list.
+fn bee_running_workers_section(project_id: &str, workers: &[BeeRunningWorker]) -> String {
+    if workers.is_empty() {
+        return r#"<p class="fg-empty">Nothing running right now.</p>"#.to_string();
+    }
+    let mut rows = String::new();
+    for w in workers {
+        rows.push_str(&bee_running_worker_row(project_id, w));
+    }
+    format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
 }
 
 /// A `BeeAttentionSeverity`'s chip tone — reuses the same `fg-chip--*`
@@ -1049,56 +1101,13 @@ fn bee_attention_panel(items: &[BeeAttentionItem]) -> String {
     )
 }
 
-/// "Running now" — what is actually in flight this instant, above the
-/// velocity numbers: every live session (`.bee/sessions/*.json` reporting
-/// within the last 30 minutes) with its heartbeat age in plain relative
-/// language, plus every worker `state.json` names whose session is live
-/// (`snapshot.running_workers`, already joined and session-verified by
-/// `mdview_core::bee::read_snapshot`), each linking to the cell it names.
-/// This is deliberately a *separate* surface from the D7 buckets below it:
-/// bee's own docs call `state.json`'s `workers[]` hand-maintained and not
-/// fully trusted, so a worker naming a cell the store still calls
-/// open/waiting never moves that cell into Doing — it only earns an
-/// explicit discrepancy note here, right where a person is already looking
-/// for "what's running". When nothing is live at all, this renders one
-/// quiet empty-state line instead of an empty bordered panel, so it never
-/// costs space on a quiet board.
-fn bee_running_now_section(project_id: &str, snapshot: &BeeSnapshot) -> String {
-    let live_sessions: Vec<&BeeSession> = snapshot.sessions.iter().filter(|s| s.live).collect();
-    let workers = &snapshot.running_workers;
-
-    if live_sessions.is_empty() && workers.is_empty() {
-        return r#"<p class="fg-empty">Nothing running right now.</p>"#.to_string();
-    }
-
-    let mut rows = String::new();
-    for s in &live_sessions {
-        let source = s.source.as_deref().unwrap_or("session");
-        rows.push_str(&format!(
-            r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta">{source} · {age}</div></div>"#,
-            id = esc(&s.id),
-            source = esc(source),
-            age = esc(&bee_relative_minutes(s.heartbeat_age_minutes)),
-        ));
-    }
-    for w in workers.iter() {
-        rows.push_str(&bee_running_worker_row(project_id, w));
-    }
-
-    format!(
-        r#"<section class="fg-card bee-panel bee-running">
-  <h3 class="bee-panel__head">Running now</h3>
-  <div class="bee-panel__list">{rows}</div>
-</section>"#,
-        rows = rows,
-    )
-}
-
-/// One `bee_running_now_section` worker row: the cell it names (linked to
-/// that cell's detail page when the cell was actually found; plain text
+/// One [`bee_running_workers_section`] worker row: the cell it names (linked
+/// to that cell's detail page when the cell was actually found; plain text
 /// when it names a cell that does not exist, per must-have "flagged, not
 /// dropped") plus, when the store disagrees with the running process
 /// (`w.discrepancy`), an explicit note naming what the store still says.
+/// bbp-16: this row's own markup is unchanged from the retired
+/// `bee_running_now_section` — only its caller moved.
 fn bee_running_worker_row(project_id: &str, w: &BeeRunningWorker) -> String {
     let cell_ref = match (&w.cell, w.cell_found) {
         (Some(cid), true) => format!(
@@ -1141,7 +1150,12 @@ fn bee_running_worker_row(project_id: &str, w: &BeeRunningWorker) -> String {
 /// missing or malformed `state.json`) renders plainly marked unresolved
 /// rather than being dropped. A project with no granted worktrees renders
 /// one quiet line instead of an empty bordered panel.
-fn bee_worktree_section(worktrees: &[BeeWorktree]) -> String {
+///
+/// bbp-16: this used to be its own top-level board section
+/// (`bee_worktree_section`, `<section class="... bee-worktrees">`); D2
+/// folds it into [`bee_sessions_panel`] as one of that panel's subheads, so
+/// this is now a body fragment only — row markup is unchanged.
+fn bee_worktrees_body(worktrees: &[BeeWorktree]) -> String {
     if worktrees.is_empty() {
         return r#"<p class="fg-empty">No worktrees granted.</p>"#.to_string();
     }
@@ -1177,14 +1191,47 @@ fn bee_worktree_section(worktrees: &[BeeWorktree]) -> String {
         }
     }
 
-    format!(
-        r#"<section class="fg-card bee-panel bee-worktrees">
-  <h3 class="bee-panel__head">Worktrees <span class="fg-chip fg-chip--neutral">{count}</span></h3>
-  <div class="bee-panel__list">{rows}</div>
-</section>"#,
-        count = worktrees.len(),
-        rows = rows,
-    )
+    format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
+}
+
+/// Every `.bee/runtime/workspaces/*.json` record (bbp-16, D2) — the raw
+/// workspace half of the pre-redesign lanes panel that had no home from
+/// bbp-11 onward (see the module note above [`bee_sessions_panel`]). This is
+/// a different signal from [`bee_worktrees_body`]'s `snapshot.worktrees`,
+/// which is built only from *granted* worktrees resolved against their own
+/// sibling `.bee/`: `snapshot.workspaces` carries every workspace record
+/// this project's own store knows, including the `"main"` checkout itself
+/// (never a granted worktree, so it never appears in `worktrees`), and each
+/// record's own `attached_sessions` count, which `worktrees` does not
+/// carry. `w.root` already arrives relativized (or reduced to a bare
+/// directory name when it falls outside the project root) from
+/// `mdview_core::bee::read_snapshot`, so this view only escapes for HTML
+/// safety. An empty list renders one quiet line, not an empty bordered
+/// panel.
+fn bee_workspaces_body(workspaces: &[BeeWorkspace]) -> String {
+    if workspaces.is_empty() {
+        return r#"<p class="fg-empty">No workspaces recorded.</p>"#.to_string();
+    }
+    let mut rows = String::new();
+    for w in workspaces {
+        let branch = w.branch.as_deref().unwrap_or("—");
+        // `w.root` is empty for the "main" workspace when its own root IS
+        // the project root — `relativize` returns "" for a path relative to
+        // itself. An empty trailing segment (`branch: — · `) is exactly the
+        // sort of visual defect a rendered page catches that a green suite
+        // does not, so it falls back to a plain label instead.
+        let root = if w.root.is_empty() { "this checkout" } else { &w.root };
+        rows.push_str(&format!(
+            r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta">{kind} · branch: {branch} · {root}</div><div class="bee-cell__meta">{attached} session{plural} attached</div></div>"#,
+            id = esc(&w.id),
+            kind = esc(&w.kind),
+            branch = esc(branch),
+            root = esc(root),
+            attached = w.attached_sessions,
+            plural = if w.attached_sessions == 1 { "" } else { "s" },
+        ));
+    }
+    format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
 }
 
 /// Ship-velocity section (D10/D11 downstream): the three headline numbers the
@@ -1586,27 +1633,29 @@ fn bee_read_errors(errors: &[String]) -> String {
     )
 }
 
-/// Backlog and sessions panels (bee-cockpit-6), rendered below the by-phase
-/// board on the same page (D4/D1). Pure formatting over
-/// `BeeSnapshot::backlog`/`sessions` — both fields already arrived
-/// relativized/redacted from `mdview_core::bee::read_snapshot` in
-/// bee-cockpit-5 (`BeeSession` carries no `transcript_path`), so this view
-/// only formats what it is handed, never recomputes any of that logic. This
+/// Backlog, sessions and process-health panels (bee-cockpit-6, bbp-16),
+/// rendered below the by-phase board on the same page (D4/D1). Pure
+/// formatting over `BeeSnapshot` — every field already arrived
+/// relativized/redacted from `mdview_core::bee::read_snapshot`
+/// (`BeeSession` carries no `transcript_path`), so this view only formats
+/// what it is handed, never recomputes any of that logic. The sessions
 /// panel used to carry a third, `bee_lanes_panel` (`.bee/lanes/*.json` and
-/// `.bee/runtime/workspaces/*.json` side by side) — bbp-11 retires it: the
+/// `.bee/runtime/workspaces/*.json` side by side) — bbp-11 retired it: the
 /// lane half rendered the same features `bee_phase_board_section` now
-/// places, a second time. The workspace half has no home in this cell; the
-/// plan (`docs/history/bee-board-pm/plan.md`, slice S4) folds worktrees and
-/// workspaces into this Sessions panel deliberately, as its own slice, so
-/// that fold is not anticipated here.
+/// places, a second time. The workspace half had no home from bbp-11 to
+/// bbp-15; bbp-16 folds it, and the standalone worktree section, into
+/// [`bee_sessions_panel`] (D2), and adds [`bee_process_health_panel`] as a
+/// third card.
 fn bee_panels_section(snapshot: &BeeSnapshot) -> String {
     format!(
         r#"<div class="bee-panels">
     {backlog}
     {sessions}
+    {process_health}
   </div>"#,
         backlog = bee_backlog_panel(&snapshot.backlog, &snapshot.review),
-        sessions = bee_sessions_panel(&snapshot.sessions),
+        sessions = bee_sessions_panel(snapshot),
+        process_health = bee_process_health_panel(snapshot),
     )
 }
 
@@ -1802,42 +1851,178 @@ fn bee_review_queue_body(review: &BeeReview) -> String {
     )
 }
 
-/// Sessions panel: one entry per `.bee/sessions/*.json` session — its
-/// source, its workspace, whether it is live or stale, and its heartbeat
-/// age in plain relative language (`bee_fmt_heartbeat_age`), never a raw
-/// timestamp. An empty session list renders an honest empty state, not a
-/// hidden panel or a bare `0`.
-fn bee_sessions_panel(sessions: &[BeeSession]) -> String {
-    if sessions.is_empty() {
-        return r#"<section class="fg-card bee-panel">
-  <h3 class="bee-panel__head">Sessions</h3>
-  <p class="fg-empty">No sessions recorded.</p>
-</section>"#
-            .to_string();
+/// The Sessions panel (bbp-16, D2): "where work is happening and whether it
+/// is alive", in one card with three subheads — a session's own liveness
+/// (`.bee/sessions/*.json`, unchanged from the original Sessions panel: its
+/// source, its workspace, live-or-stale, and its heartbeat age in plain
+/// relative language, never a raw timestamp), a granted worktree's own
+/// feature/phase/branch/liveness ([`bee_worktrees_body`], folded in from the
+/// retired standalone worktree section), and every raw workspace record
+/// this project's own store knows ([`bee_workspaces_body`], the workspace
+/// half of the pre-bbp-11 lanes panel that had no home since). Each
+/// subhead's body renders its own honest empty state independently — a
+/// quiet project with sessions but no worktrees still shows both, one
+/// populated and one honestly empty, never a hidden subhead.
+fn bee_sessions_panel(snapshot: &BeeSnapshot) -> String {
+    let sessions_body = if snapshot.sessions.is_empty() {
+        r#"<p class="fg-empty">No sessions recorded.</p>"#.to_string()
+    } else {
+        let mut rows = String::new();
+        for s in &snapshot.sessions {
+            let (tone, label) = if s.live { ("success", "live") } else { ("neutral", "stale") };
+            let source = s.source.as_deref().unwrap_or("—");
+            let workspace = s.workspace_id.as_deref().unwrap_or("—");
+            rows.push_str(&format!(
+                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta"><span class="fg-chip fg-chip--{tone}">{label}</span> · {source} · {workspace} · {age}</div></div>"#,
+                id = esc(&s.id),
+                tone = tone,
+                label = label,
+                source = esc(source),
+                workspace = esc(workspace),
+                age = esc(&bee_fmt_heartbeat_age(s.heartbeat_age_minutes)),
+            ));
+        }
+        format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
+    };
+
+    format!(
+        r#"<section class="fg-card bee-panel bee-sessions">
+  <h3 class="bee-panel__head">Where work is happening</h3>
+  <h4 class="bee-panel__subhead">Sessions</h4>
+  {sessions_body}
+  <h4 class="bee-panel__subhead">Worktrees</h4>
+  {worktrees_body}
+  <h4 class="bee-panel__subhead">Workspaces</h4>
+  {workspaces_body}
+</section>"#,
+        sessions_body = sessions_body,
+        worktrees_body = bee_worktrees_body(&snapshot.worktrees),
+        workspaces_body = bee_workspaces_body(&snapshot.workspaces),
+    )
+}
+
+/// Process health (bbp-16, D5): the panel over what bbp-15 already put on
+/// the snapshot — `snapshot.reservations` (file-lock contention),
+/// `snapshot.tier_mix` (the model-tier spread), `snapshot.config`'s recorded
+/// `gate_bypass` — plus `snapshot.read_errors` (a partly-unreadable store is
+/// itself a process-health signal, not a separate footer). This view only
+/// renders those already-computed values; it never re-derives them (see
+/// `mdview_core::bee::compute_tier_mix` and the reservations reader for the
+/// actual computation).
+fn bee_process_health_panel(snapshot: &BeeSnapshot) -> String {
+    format!(
+        r#"<section class="fg-card bee-panel bee-process-health">
+  <h3 class="bee-panel__head">Process health</h3>
+  <h4 class="bee-panel__subhead">File-lock contention</h4>
+  {contention}
+  <h4 class="bee-panel__subhead">Model tier mix</h4>
+  {tiers}
+  <h4 class="bee-panel__subhead">Gate bypass</h4>
+  {bypass}
+  {errors}
+</section>"#,
+        contention = bee_lock_contention_body(&snapshot.reservations),
+        tiers = bee_tier_mix_body(snapshot.tier_mix.as_ref()),
+        bypass = bee_gate_bypass_body(snapshot.config.as_ref()),
+        errors = bee_read_errors(&snapshot.read_errors),
+    )
+}
+
+/// File-lock contention: `.bee/reservations.json`'s own `reservations[]`
+/// (`snapshot.reservations`, already read and parsed by
+/// `mdview_core::bee::read_snapshot`), filtered to the entries still
+/// unreleased (`released_at` is `None`) — that filter is the only thing
+/// this view does; it never re-derives which agent holds which path. A
+/// released reservation is history, not contention, so it is left out here
+/// rather than inflating a "locked right now" count with locks nobody still
+/// holds. An empty result renders one honest line, matching every other
+/// empty-state convention on this board — neither live store this reader
+/// was verified against holds an active lock, so this is the common case.
+fn bee_lock_contention_body(reservations: &[BeeReservation]) -> String {
+    let active: Vec<&BeeReservation> =
+        reservations.iter().filter(|r| r.released_at.is_none()).collect();
+    if active.is_empty() {
+        return r#"<p class="fg-empty">No files are currently locked.</p>"#.to_string();
     }
     let mut rows = String::new();
-    for s in sessions {
-        let (tone, label) = if s.live { ("success", "live") } else { ("neutral", "stale") };
-        let source = s.source.as_deref().unwrap_or("—");
-        let workspace = s.workspace_id.as_deref().unwrap_or("—");
+    for r in active {
+        let path = r.path.as_deref().unwrap_or("—");
+        let agent = r.agent.as_deref().unwrap_or("—");
+        let cell = r.cell.as_deref().unwrap_or("—");
         rows.push_str(&format!(
-            r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta"><span class="fg-chip fg-chip--{tone}">{label}</span> · {source} · {workspace} · {age}</div></div>"#,
-            id = esc(&s.id),
-            tone = tone,
-            label = label,
-            source = esc(source),
-            workspace = esc(workspace),
-            age = esc(&bee_fmt_heartbeat_age(s.heartbeat_age_minutes)),
+            r#"<div class="fg-card bee-cell"><div class="fg-card__title">{path}</div><div class="bee-cell__meta">{agent} · {cell}</div></div>"#,
+            path = esc(path),
+            agent = esc(agent),
+            cell = esc(cell),
         ));
     }
+    format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
+}
+
+/// The model-tier spread: `snapshot.tier_mix`
+/// (`mdview_core::bee::compute_tier_mix`), rendered verbatim — one chip per
+/// tier value the store actually used (never limited to the three named
+/// tiers bee's own rubric defines, so an unrecognized value still shows
+/// rather than vanishing), plus an `untiered` chip when at least one cell
+/// carries no tier. `None` (no cells at all to measure) and a zero-tiered
+/// store (every cell untiered, so there is no tiered share to take)  each
+/// render their own honest line rather than a fabricated `0%`.
+fn bee_tier_mix_body(tier_mix: Option<&BeeTierMix>) -> String {
+    let Some(mix) = tier_mix else {
+        return r#"<p class="fg-empty">No cells to measure yet.</p>"#.to_string();
+    };
+    let mut chips = String::new();
+    for (tier, count) in &mix.counts {
+        chips.push_str(&format!(
+            r#"<span class="fg-chip fg-chip--neutral">{tier}: {count}</span>"#,
+            tier = esc(tier),
+            count = count,
+        ));
+    }
+    if mix.untiered > 0 {
+        chips.push_str(&format!(
+            r#"<span class="fg-chip fg-chip--neutral">untiered: {n}</span>"#,
+            n = mix.untiered,
+        ));
+    }
+    let share_line = match mix.expensive_tier_share {
+        Some(share) => format!(
+            r#"<p class="bee-cell__meta">{pct:.0}% of tiered cells are on the ceiling tier.</p>"#,
+            pct = share * 100.0,
+        ),
+        None => r#"<p class="fg-empty">No tiered cells to measure a ceiling-tier share from.</p>"#
+            .to_string(),
+    };
     format!(
-        r#"<section class="fg-card bee-panel">
-  <h3 class="bee-panel__head">Sessions <span class="fg-chip fg-chip--neutral">{count}</span></h3>
-  <div class="bee-panel__list">{rows}</div>
-</section>"#,
-        count = sessions.len(),
-        rows = rows,
+        r#"<div class="bee-panel__chips">{chips}</div>{share_line}"#,
+        chips = chips,
+        share_line = share_line,
     )
+}
+
+/// The recorded `gate_bypass` setting: `snapshot.config`
+/// (`.bee/config.json`, `mdview_core::bee::read_config`/
+/// `normalize_gate_bypass`). The non-off case is worded **exactly** as
+/// `compute_attention_items`' own gate-bypass rule words it
+/// (`mdview_core::bee`) — `Gate bypass recorded as "{level}"` — so the two
+/// surfaces never drift into disagreeing phrasing for the same fact.
+/// `config` itself being `None` (no `.bee/config.json`, or it failed to
+/// parse) is a distinct, honest "unknown" state, never presented as "off":
+/// off is something the file positively recorded.
+fn bee_gate_bypass_body(config: Option<&BeeConfig>) -> String {
+    match config {
+        None => {
+            r#"<p class="fg-empty">No <code>.bee/config.json</code> is recorded — bypass setting unknown.</p>"#
+                .to_string()
+        }
+        Some(c) => match c.gate_bypass.as_deref() {
+            None => r#"<p class="bee-cell__meta">Gate bypass recorded as off.</p>"#.to_string(),
+            Some(level) => format!(
+                r#"<p class="bee-cell__meta"><span class="fg-chip fg-chip--warning">Gate bypass recorded as "{level}"</span></p>"#,
+                level = esc(level),
+            ),
+        },
+    }
 }
 
 /// A signed minute count, rendered as plain relative language ("4 minutes
