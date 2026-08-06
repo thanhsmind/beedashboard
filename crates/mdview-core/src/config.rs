@@ -77,6 +77,29 @@ pub struct TerminalConfig {
     /// D7: Telegram notification on agent status change. mdview makes no
     /// outbound call while this is off.
     pub notify_enabled: bool,
+    /// D8/P4: operator-authored agent-create presets, keyed by label — the
+    /// terminal page's creation controls
+    /// (`crates/mdview/src/views.rs::terminal_create_controls`) offer
+    /// exactly these labels and nothing else, and
+    /// `crates/mdview/src/server.rs::terminal_create_agent` is the only
+    /// place a label is ever turned into the argv it keys into. No HTTP
+    /// request ever supplies or reads an `argv` — this config field is the
+    /// only source. Defaults to empty: a fresh install refuses every
+    /// preset-create request until the operator configures at least one.
+    #[serde(default)]
+    pub agent_presets: Vec<AgentPreset>,
+}
+
+/// One D8 agent-create preset: a label the terminal page's creation
+/// controls offer, keyed to the argv that is started when a client picks it
+/// by name. Operator-authored config only — never populated from, or
+/// exposed raw to, an HTTP request body (`crates/mdview/src/server.rs`'s
+/// create routes deserialize only a `preset` label, never `argv`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AgentPreset {
+    pub label: String,
+    pub argv: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -280,6 +303,32 @@ mod tests {
         assert!(!loaded.terminal.enabled);
         assert!(!loaded.terminal.supervisor_enabled);
         assert!(!loaded.terminal.notify_enabled);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn agent_presets_default_to_empty_and_roundtrip() {
+        // A fresh config (or one that has never seen D8's preset list) must
+        // start empty — the terminal page's creation controls and the
+        // preset-create route both fail closed on an empty list.
+        let c = Config::default();
+        assert!(c.terminal.agent_presets.is_empty());
+
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-presets-{}", std::process::id()));
+        let p = dir.join("config.toml");
+        let mut c = Config::default();
+        c.terminal.agent_presets = vec![AgentPreset {
+            label: "Claude".into(),
+            argv: vec!["claude".into()],
+        }];
+        c.save_to(&p).unwrap();
+        let loaded = Config::load_from(&p);
+        assert_eq!(loaded.terminal.agent_presets.len(), 1);
+        assert_eq!(loaded.terminal.agent_presets[0].label, "Claude");
+        assert_eq!(
+            loaded.terminal.agent_presets[0].argv,
+            vec!["claude".to_string()]
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

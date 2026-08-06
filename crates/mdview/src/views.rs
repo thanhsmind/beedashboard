@@ -252,11 +252,112 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     out
 }
 
+/// Inline wiring for [`terminal_create_controls`]'s "New shell"/preset
+/// buttons — POSTs to `create/pane` or `create/agent` and reloads the page
+/// on success so the freshly created pane joins `assets/app.js`'s own
+/// poller on the next render.
+///
+/// agent-terminal-13: not folded into `assets/app.js` — that file is not
+/// among this cell's declared files (`crates/mdview/src/server.rs`,
+/// `crates/mdview/src/views.rs`, `crates/mdview-core/src/config.rs`), so the
+/// creation controls' own click wiring lives here instead, the same
+/// deliberate duplication `UNASSIGNED_TERMINAL_SCRIPT` already documents for
+/// the same reason ("a later cell to fold both into one shared script once
+/// `assets/app.js` is in scope").
+const TERMINAL_CREATE_SCRIPT: &str = r#"<script>
+(function () {
+  function postJson(url, body) {
+    return fetch(url, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+  function afterCreate(promise, failMsg) {
+    promise
+      .then(function (res) {
+        if (res.ok) {
+          location.reload();
+          return;
+        }
+        return res.json().then(function (b) {
+          alert((b && b.error) || failMsg);
+        });
+      })
+      .catch(function () {
+        alert(failMsg);
+      });
+  }
+  Array.prototype.slice
+    .call(document.querySelectorAll(".term-create[data-project-id]"))
+    .forEach(function (box) {
+      var pid = box.getAttribute("data-project-id");
+      var paneBtn = box.querySelector(".term-create__pane");
+      if (paneBtn) {
+        paneBtn.addEventListener("click", function () {
+          afterCreate(
+            postJson("/p/" + encodeURIComponent(pid) + "/_terminal/create/pane", {}),
+            "could not start a shell"
+          );
+        });
+      }
+      Array.prototype.slice
+        .call(box.querySelectorAll(".term-create__agent[data-preset]"))
+        .forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            afterCreate(
+              postJson("/p/" + encodeURIComponent(pid) + "/_terminal/create/agent", {
+                preset: btn.getAttribute("data-preset"),
+              }),
+              "could not start an agent"
+            );
+          });
+        });
+    });
+})();
+</script>"#;
+
+/// D8's creation controls (agent-terminal-13): a "New shell" button is
+/// always offered — plain-shell creation needs no preset — plus one button
+/// per operator-configured preset **label**, never argv (P4): the argv
+/// itself never crosses into this view, only the label the server's
+/// `terminal_create_agent` keys it by. Zero configured presets renders zero
+/// preset buttons, proving the must-have "with no presets configured, the
+/// creation control offers nothing [for agents]" at the render layer — the
+/// route-level half of that same truth is `terminal_create_agent`'s own
+/// refusal when `body.preset` matches nothing.
+fn terminal_create_controls(project_id: &str, presets: &[String]) -> String {
+    let preset_buttons: String = presets
+        .iter()
+        .map(|label| {
+            format!(
+                r#"<button type="button" class="term-create__agent" data-preset="{attr}">{label}</button>"#,
+                attr = esc(label),
+                label = esc(label),
+            )
+        })
+        .collect();
+    format!(
+        r#"<div class="term-create" data-project-id="{pid}">
+  <button type="button" class="term-create__pane">New shell</button>
+  {preset_buttons}
+</div>
+{script}"#,
+        pid = esc(project_id),
+        preset_buttons = preset_buttons,
+        script = TERMINAL_CREATE_SCRIPT,
+    )
+}
+
 /// `GET /p/:id/_terminal` up state (D2/D6): the project-scoped pane list.
 /// Zero panes renders a named empty state, not a blank page — distinct
 /// wording from [`terminal_down_page`] so an empty list is never mistaken
-/// for herdr being unreachable, or the reverse.
-pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
+/// for herdr being unreachable, or the reverse. `presets` is the exact
+/// configured D8 preset label list (`mdview_core::config::AgentPreset`'s
+/// labels, in `Config.terminal.agent_presets` order) — this view never sees
+/// argv.
+pub fn terminal_page(project: &Project, panes: &[TerminalPaneView], presets: &[String]) -> String {
     let rows = pane_cards(panes, "No agents are running under this project right now.");
     // `data-project-id` lets `assets/app.js`'s screen poller build each
     // pane's `/p/:id/_terminal/:pane_id/screen` URL without threading the id
@@ -267,6 +368,7 @@ pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
 <main class="fg-page" data-project-id="{pid}">
   <h2 class="fg-pagehead__title">{name}</h2>
   {tabs}
+  {create}
   <div class="term-panes">{rows}</div>
 </main>"#,
         topbar = topbar(&format!(
@@ -277,6 +379,7 @@ pub fn terminal_page(project: &Project, panes: &[TerminalPaneView]) -> String {
         pid = esc(&project.id),
         name = esc(&project.name),
         tabs = project_tabs(&project.id, "terminal"),
+        create = terminal_create_controls(&project.id, presets),
         rows = rows,
     );
     layout(&format!("{} · terminal", project.name), "", &body)
@@ -2053,5 +2156,59 @@ mod tests {
         let round_tripped: String =
             serde_json::from_str(&escaped).expect("escaped blob must still be valid JSON");
         assert_eq!(round_tripped, source);
+    }
+
+    fn sample_project() -> Project {
+        Project {
+            id: "proj-1".into(),
+            name: "Proj One".into(),
+            root_path: std::path::PathBuf::from("/tmp/proj-1"),
+            created_at: "2026-08-05T00:00:00Z".into(),
+            last_seen_at: "2026-08-05T00:00:00Z".into(),
+        }
+    }
+
+    /// agent-terminal-13, must-have: "the terminal page gains the creation
+    /// controls, offering only the configured preset labels" — every
+    /// configured label renders as its own button, carrying the label as
+    /// `data-preset` (what `terminal_create_agent`'s body actually reads),
+    /// and an unconfigured label never appears.
+    #[test]
+    fn terminal_page_lists_only_configured_preset_labels() {
+        let project = sample_project();
+        let presets = vec!["Claude".to_string(), "Codex".to_string()];
+        let html = terminal_page(&project, &[], &presets);
+        assert!(html.contains(r#"data-preset="Claude">Claude</button>"#), "{html}");
+        assert!(html.contains(r#"data-preset="Codex">Codex</button>"#), "{html}");
+        assert!(!html.contains("data-preset=\"Aider\""), "an unconfigured label must never render: {html}");
+        // The plain-shell control is unconditional — it needs no preset.
+        assert!(html.contains(r#"<button type="button" class="term-create__pane">New shell</button>"#));
+    }
+
+    /// agent-terminal-13, must-have: "with no presets configured, the
+    /// creation control offers nothing" — zero preset buttons render, while
+    /// the plain-shell button (which needs no preset) still does.
+    #[test]
+    fn terminal_page_renders_no_preset_controls_when_none_configured() {
+        let project = sample_project();
+        let html = terminal_page(&project, &[], &[]);
+        // Checked as rendered HTML attribute shapes, not bare substrings:
+        // `TERMINAL_CREATE_SCRIPT` itself contains the literal selector
+        // `.term-create__agent[data-preset]` and `getAttribute("data-preset")`
+        // on every render regardless of preset count, so a plain
+        // `.contains("term-create__agent")` would false-negative here.
+        assert!(!html.contains("class=\"term-create__agent\""), "{html}");
+        assert!(!html.contains("data-preset=\""), "{html}");
+        assert!(html.contains("class=\"term-create__pane\""), "{html}");
+    }
+
+    /// A preset label carrying HTML metacharacters must render escaped, the
+    /// same discipline every other operator/user-controlled string in this
+    /// module follows.
+    #[test]
+    fn terminal_create_controls_escapes_preset_labels() {
+        let html = terminal_create_controls("proj-1", &["<script>alert(1)</script>".to_string()]);
+        assert!(!html.contains("<script>alert(1)</script>"), "{html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
     }
 }

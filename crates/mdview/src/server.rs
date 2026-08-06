@@ -177,6 +177,15 @@ fn router(state: AppState) -> Router {
         // other gated terminal route, never `.post(...)`.
         .route("/p/:id/_terminal/:pane_id/input", any(terminal_input))
         .route("/p/:id/_terminal/:pane_id/keys", any(terminal_keys))
+        // agent-terminal-13 (D8/P4): start a new pane or agent in this
+        // project. Same `any(...)` + `MethodGate<Post>` shape as every
+        // other gated terminal route, never `.post(...)` — and the same D2
+        // containment boundary the routes above use, applied to the
+        // destination workspace's own anchor rather than an already-listed
+        // pane id, so a session can never start a process in a project it
+        // is not looking at.
+        .route("/p/:id/_terminal/create/pane", any(terminal_create_pane))
+        .route("/p/:id/_terminal/create/agent", any(terminal_create_agent))
         // agent-terminal-10 (D5): the Unassigned group — panes under no
         // registered project's root. Deliberately mounted outside `/p/:id/`
         // (never `/p/unassigned/...`): a registered project's own slug can
@@ -631,6 +640,7 @@ async fn terminal_page(
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
     };
+    let presets = configured_preset_labels(&st);
     match st.herdr.snapshot().await {
         Ok(snapshot) => {
             // A boundary that fails to construct (e.g. a project registered
@@ -639,10 +649,27 @@ async fn terminal_page(
             let panes = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
                 .map(|boundary| project_panes(&snapshot, &boundary))
                 .unwrap_or_default();
-            Html(views::terminal_page(&project, &panes)).into_response()
+            Html(views::terminal_page(&project, &panes, &presets)).into_response()
         }
         Err(_) => Html(views::terminal_down_page(&project)).into_response(),
     }
+}
+
+/// The configured D8 preset **labels** only — read the same injectable
+/// config path every terminal route uses (`terminal_family_enabled`), so a
+/// route test never touches the real `~/.mdview`. `terminal_create_agent`
+/// reads the full `AgentPreset` list (label + argv) the same way; this is
+/// the labels-only view `terminal_page` renders, since the page never needs
+/// argv at all.
+fn configured_preset_labels(st: &AppState) -> Vec<String> {
+    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+        st.config_data_dir.as_deref(),
+    ));
+    cfg.terminal
+        .agent_presets
+        .into_iter()
+        .map(|p| p.label)
+        .collect()
 }
 
 /// Whether the D7 `terminal.enabled` switch is on, read through the same
@@ -863,6 +890,202 @@ async fn terminal_keys(
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
         Err(_) => herdr_down_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CreatePaneBody {}
+
+/// `POST /p/:id/_terminal/create/agent` body. The agent is named by an
+/// operator-configured preset **label**, never by `argv` directly (D8/P4):
+/// the argv is operator-authored config (`mdview_core::config::AgentPreset`)
+/// the label keys into, and the request cannot influence it — no
+/// `argv`/`env`/`cwd` field is declared here at all, so serde has nowhere to
+/// put one even if a client sends it.
+#[derive(serde::Deserialize)]
+struct CreateAgentBody {
+    preset: String,
+}
+
+/// Resolve the herdr workspace `terminal_create_pane`/`terminal_create_agent`
+/// target: the first workspace in the snapshot whose D2 anchor
+/// (`Snapshot::anchor_cwd_for_workspace`) validates against this project's
+/// own containment boundary — the same `Boundary` `project_panes` uses
+/// above, just applied to a workspace's own anchor rather than an
+/// individual pane's cwd. `None` when no such workspace exists: callers
+/// refuse with 409 rather than ever falling back to another directory (this
+/// cell's action) — in particular, `Herdr::agent_start`'s own documented
+/// `cwd: None` fallback (herdr's own process directory) is never reached,
+/// because neither caller below ever invokes `tab_create`/`agent_start`
+/// without first resolving a concrete `cwd` here.
+fn project_creation_destination(
+    snapshot: &herdr::Snapshot,
+    boundary: &mdview_core::paths_boundary::Boundary,
+) -> Option<(String, String)> {
+    snapshot.workspaces.iter().find_map(|w| {
+        let anchor = snapshot.anchor_cwd_for_workspace(&w.workspace_id)?;
+        let resolved = boundary
+            .validate_existing(std::path::Path::new(&anchor))
+            .ok()?;
+        Some((w.workspace_id.clone(), resolved.to_string_lossy().into_owned()))
+    })
+}
+
+/// The `409` `terminal_create_pane`/`terminal_create_agent` give when this
+/// project has no herdr workspace whose anchor resolves under its own root
+/// — never a silent fallback to any other directory (this cell's action).
+fn destination_unresolved_response(project_id: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": format!(
+                "project {project_id} has no herdr workspace with a resolved working \
+                 directory under its own root; refusing to start a process in an \
+                 arbitrary directory"
+            ),
+        })),
+    )
+        .into_response()
+}
+
+/// The `400` `terminal_create_agent` gives a preset label the operator never
+/// configured — checked before herdr is ever called, mirroring herdr-go's
+/// own rule (`herdr-go/src/web/create.rs`).
+fn unknown_preset_response(label: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": format!("unknown agent preset: {label}") })),
+    )
+        .into_response()
+}
+
+/// Map a herdr port error onto the create routes' HTTP surface, mirroring
+/// herdr-go's own `herdr_error_response` (`herdr-go/src/web/create.rs`)
+/// exactly: a destination that no longer exists by the time herdr is
+/// actually called is `409` — never `404`, which stays reserved for the
+/// opaque unauthenticated answer `terminal_auth::opaque_404` gives — and
+/// everything else collapses to `502` carrying the message, the same
+/// "named remedy, never a raw error" rule `herdr_down_response` already
+/// applies elsewhere in this file.
+fn create_error_response(err: herdr::HerdrError) -> Response {
+    let conflict = matches!(err, herdr::HerdrError::WorkspaceNotFound { .. })
+        || matches!(
+            &err,
+            herdr::HerdrError::Remote { code, .. }
+                if code == "agent_placement_not_found" || code == "agent_placement_conflict"
+        );
+    let status = if conflict {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::BAD_GATEWAY
+    };
+    (status, Json(json!({ "error": err.to_string() }))).into_response()
+}
+
+/// `POST /p/:id/_terminal/create/pane` (D8/P4) — open a plain shell in this
+/// project. Modeled on herdr-go's `POST /api/panes`
+/// (`herdr-go/src/web/create.rs`), adapted to mdview's project-scoped model
+/// (D2 — "the project is the frame"): herdr-go's request body names the
+/// destination `workspace_id` itself; here the URL's project id is the only
+/// destination input, and the workspace is resolved server-side by
+/// `project_creation_destination` against this project's own D2 containment
+/// boundary, so a session can never aim a creation at a workspace outside
+/// the project it is looking at. The body is deliberately empty: a shell
+/// takes no command, and no `cwd`/`argv`/`env` field is declared to receive
+/// anything a client might try to send.
+///
+/// Guarded exactly like every other gated terminal route: `MethodGate<Post>`
+/// + `AuthSession` run before this body, then the D7 enabled switch, then
+/// the project lookup.
+async fn terminal_create_pane(
+    _method: terminal_auth::MethodGate<terminal_auth::Post>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(_body): Json<CreatePaneBody>,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("project not found");
+    };
+    let snapshot = match st.herdr.snapshot().await {
+        Ok(s) => s,
+        Err(_) => return herdr_down_response(),
+    };
+    let Ok(boundary) = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+    else {
+        return destination_unresolved_response(&project.id);
+    };
+    let Some((workspace_id, cwd)) = project_creation_destination(&snapshot, &boundary) else {
+        return destination_unresolved_response(&project.id);
+    };
+    match st.herdr.tab_create(&workspace_id, Some(&cwd)).await {
+        Ok(created) => (
+            StatusCode::OK,
+            Json(json!({ "tab_id": created.tab_id, "pane_id": created.pane_id })),
+        )
+            .into_response(),
+        Err(e) => create_error_response(e),
+    }
+}
+
+/// `POST /p/:id/_terminal/create/agent` (D8/P4) — start an agent in this
+/// project, named by an operator-configured preset **label**, never by
+/// `argv` directly: the argv is operator-authored config
+/// (`mdview_core::config::AgentPreset`) the label keys into, and no
+/// `argv`/`env`/`cwd` field is deserialized from the request at all — there
+/// is no field present to receive any of the three (see `CreateAgentBody`).
+/// An unknown label is refused with `400` before herdr is ever called.
+/// Destination resolution mirrors `terminal_create_pane` exactly (same
+/// `project_creation_destination` call, same D2 containment boundary) — and,
+/// critically, `cwd` is always passed as `Some(resolved)`, never `None`:
+/// `Herdr::agent_start`'s own documented `None` fallback is herdr's own
+/// process directory, an arbitrary folder this route must never let a
+/// request reach.
+async fn terminal_create_agent(
+    _method: terminal_auth::MethodGate<terminal_auth::Post>,
+    _session: terminal_auth::AuthSession,
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<CreateAgentBody>,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_auth::opaque_404();
+    }
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("project not found");
+    };
+    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+        st.config_data_dir.as_deref(),
+    ));
+    let Some(preset) = cfg.terminal.agent_presets.iter().find(|p| p.label == body.preset) else {
+        return unknown_preset_response(&body.preset);
+    };
+    let argv = preset.argv.clone();
+    let snapshot = match st.herdr.snapshot().await {
+        Ok(s) => s,
+        Err(_) => return herdr_down_response(),
+    };
+    let Ok(boundary) = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+    else {
+        return destination_unresolved_response(&project.id);
+    };
+    let Some((workspace_id, cwd)) = project_creation_destination(&snapshot, &boundary) else {
+        return destination_unresolved_response(&project.id);
+    };
+    match st.herdr.agent_start(&workspace_id, Some(&cwd), &argv).await {
+        Ok(started) => (
+            StatusCode::OK,
+            Json(json!({
+                "tab_id": started.tab_id,
+                "pane_id": started.pane_id,
+                "name": started.name,
+            })),
+        )
+            .into_response(),
+        Err(e) => create_error_response(e),
     }
 }
 
@@ -6486,5 +6709,638 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    // --- agent-terminal-13: the create routes -------------------------------
+
+    /// A minimal `Herdr` double for the create routes' resolution tests: its
+    /// `snapshot()` always answers the fixed snapshot it was built with, and
+    /// `tab_create`/`agent_start` record what they were actually called with
+    /// and answer a synthesized success — enough to prove what the routes
+    /// decided to send, without reimplementing `FakeHerdr`'s own pane
+    /// bookkeeping (`FakeHerdr`'s seeded workspaces never move their own
+    /// anchor: `agent_start`/`tab_create` only add sibling panes to the
+    /// existing tab). Every other `Herdr` method is unreachable — the create
+    /// routes never call them. Mirrors herdr-go's own `RecordingHerdr`
+    /// (`herdr-go/src/web/create.rs`).
+    struct RecordingHerdr {
+        snap: herdr::Snapshot,
+        tab_calls: std::sync::Mutex<Vec<(String, Option<String>)>>,
+        agent_calls: std::sync::Mutex<Vec<(String, Option<String>, Vec<String>)>>,
+    }
+
+    impl RecordingHerdr {
+        fn new(snap: herdr::Snapshot) -> Self {
+            RecordingHerdr {
+                snap,
+                tab_calls: std::sync::Mutex::new(Vec::new()),
+                agent_calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl herdr::Herdr for RecordingHerdr {
+        async fn snapshot(&self) -> herdr::Result<herdr::Snapshot> {
+            Ok(self.snap.clone())
+        }
+        async fn ping(&self) -> herdr::Result<herdr::ProtocolInfo> {
+            unreachable!("create routes never ping")
+        }
+        async fn read_pane(
+            &self,
+            _pane_id: &str,
+            _source: herdr::ReadSource,
+            _lines: usize,
+        ) -> herdr::Result<herdr::ScreenRead> {
+            unreachable!("create routes never read")
+        }
+        async fn send_input(&self, _pane_id: &str, _text: &str, _submit: bool) -> herdr::Result<()> {
+            unreachable!("create routes never send input")
+        }
+        async fn send_text(&self, _pane_id: &str, _bytes: &str) -> herdr::Result<()> {
+            unreachable!("create routes never send text")
+        }
+        async fn send_keys(&self, _pane_id: &str, _keys: &[String]) -> herdr::Result<()> {
+            unreachable!("create routes never send keys")
+        }
+        async fn tab_create(
+            &self,
+            workspace_id: &str,
+            cwd: Option<&str>,
+        ) -> herdr::Result<herdr::TabCreated> {
+            self.tab_calls
+                .lock()
+                .unwrap()
+                .push((workspace_id.to_string(), cwd.map(str::to_string)));
+            Ok(herdr::TabCreated {
+                tab_id: format!("{workspace_id}:created-tab"),
+                pane_id: format!("{workspace_id}:created-pane"),
+            })
+        }
+        async fn agent_start(
+            &self,
+            workspace_id: &str,
+            cwd: Option<&str>,
+            argv: &[String],
+        ) -> herdr::Result<herdr::AgentStarted> {
+            self.agent_calls
+                .lock()
+                .unwrap()
+                .push((workspace_id.to_string(), cwd.map(str::to_string), argv.to_vec()));
+            Ok(herdr::AgentStarted {
+                tab_id: format!("{workspace_id}:created-agent-tab"),
+                pane_id: format!("{workspace_id}:created-agent-pane"),
+                name: "recorded-agent".into(),
+            })
+        }
+    }
+
+    /// A `herdr::Snapshot` with exactly one workspace ("w") whose D2 anchor
+    /// resolves at `path` — a workspace, its own active tab, a layout entry
+    /// naming a focused pane, and that pane's own `cwd`/`foreground_cwd`,
+    /// reproducing the real join `Snapshot::anchor_for_workspace` performs.
+    fn resolvable_snapshot(path: &Path) -> herdr::Snapshot {
+        let p = path.to_string_lossy().into_owned();
+        herdr::Snapshot {
+            workspaces: vec![herdr::wire::Workspace {
+                workspace_id: "w".into(),
+                label: "w".into(),
+                agent_status: herdr::AgentStatus::Idle,
+                active_tab_id: Some("w:t".into()),
+            }],
+            tabs: vec![herdr::wire::Tab {
+                tab_id: "w:t".into(),
+                label: "main".into(),
+            }],
+            layouts: vec![herdr::wire::PaneLayout {
+                workspace_id: "w".into(),
+                tab_id: "w:t".into(),
+                focused_pane_id: Some("w:p".into()),
+            }],
+            panes: vec![herdr::wire::Pane {
+                pane_id: "w:p".into(),
+                workspace_id: "w".into(),
+                tab_id: "w:t".into(),
+                cwd: Some(p.clone()),
+                foreground_cwd: Some(p),
+            }],
+            ..herdr::Snapshot::default()
+        }
+    }
+
+    /// Writes one D8 preset into `dir/config.toml`, preserving whatever is
+    /// already there (mirrors `enable_terminal`'s load-mutate-save shape).
+    fn configure_preset(dir: &Path, label: &str, argv: &[&str]) {
+        let mut cfg = Config::load_from(&dir.join("config.toml"));
+        cfg.terminal.agent_presets.push(mdview_core::config::AgentPreset {
+            label: label.to_string(),
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+        });
+        cfg.save_to(&dir.join("config.toml")).unwrap();
+    }
+
+    fn create_pane_req(id: &str, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .uri(format!("/p/{id}/_terminal/create/pane"))
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::from("{}")).unwrap()
+    }
+
+    fn create_agent_req(id: &str, body: &serde_json::Value, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .uri(format!("/p/{id}/_terminal/create/agent"))
+            .method("POST")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::from(body.to_string())).unwrap()
+    }
+
+    /// Truth: without a terminal session both create routes answer exactly
+    /// as an unrouted path would — mirroring
+    /// `terminal_write_routes_without_a_session_are_byte_identical_to_an_unrouted_path`.
+    #[tokio::test]
+    async fn terminal_create_routes_without_a_session_are_byte_identical_to_an_unrouted_path() {
+        let dir = fresh_root("terminal-create-no-session");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-create-no-session-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "create-no-session");
+        let app = router(st);
+
+        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let unrouted_status = unrouted.status();
+            let unrouted_headers = unrouted.headers().clone();
+            let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
+
+            let pane = app
+                .clone()
+                .oneshot(create_pane_req(&project.id, cookie))
+                .await
+                .unwrap();
+            assert_eq!(pane.status(), unrouted_status);
+            assert_eq!(pane.headers(), &unrouted_headers);
+            let pane_body = pane.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(pane_body, unrouted_body);
+
+            let agent = app
+                .clone()
+                .oneshot(create_agent_req(
+                    &project.id,
+                    &serde_json::json!({ "preset": "Claude" }),
+                    cookie,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(agent.status(), unrouted_status);
+            assert_eq!(agent.headers(), &unrouted_headers);
+            let agent_body = agent.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(agent_body, unrouted_body);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth: a wrong-method request to either create route is
+    /// byte-identical to an unrouted path — mounted with `any(...)` +
+    /// `MethodGate<Post>`, never `.post(...)`.
+    #[tokio::test]
+    async fn terminal_create_routes_wrong_method_are_byte_identical_to_unrouted() {
+        let dir = fresh_root("terminal-create-wrong-method");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-create-wrong-method-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "create-wrong-method");
+        let app = router(st);
+
+        for path_suffix in ["create/pane", "create/agent"] {
+            let got = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/p/{}/_terminal/{path_suffix}", project.id))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(got.status(), StatusCode::NOT_FOUND);
+            assert_eq!(got.status(), unrouted.status());
+            assert_eq!(got.headers(), unrouted.headers());
+            let a = got.into_body().collect().await.unwrap().to_bytes();
+            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(a, b);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth: with a valid session but the D7 switch off, both create
+    /// routes still answer exactly as an unrouted path would.
+    #[tokio::test]
+    async fn terminal_create_routes_disabled_are_byte_identical_to_unrouted_even_with_a_valid_session()
+    {
+        let dir = fresh_root("terminal-create-disabled");
+        // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
+        let root = fresh_root("terminal-create-disabled-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "create-disabled");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let unrouted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted_status = unrouted.status();
+        let unrouted_headers = unrouted.headers().clone();
+        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
+
+        let pane = app
+            .clone()
+            .oneshot(create_pane_req(&project.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(pane.status(), unrouted_status);
+        assert_eq!(pane.headers(), &unrouted_headers);
+        let pane_body = pane.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            pane_body, unrouted_body,
+            "the pane-create endpoint must be unreachable while the switch is off, even with a valid session"
+        );
+
+        let agent = app
+            .oneshot(create_agent_req(
+                &project.id,
+                &serde_json::json!({ "preset": "Claude" }),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(agent.status(), unrouted_status);
+        assert_eq!(agent.headers(), &unrouted_headers);
+        let agent_body = agent.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            agent_body, unrouted_body,
+            "the agent-create endpoint must be unreachable while the switch is off, even with a valid session"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth: an unconfigured preset label is refused with 400 and never
+    /// reaches herdr — proven both when zero presets are configured at all
+    /// (the must-have's literal wording: "with no presets configured, the
+    /// preset route starts nothing") and when other presets exist but the
+    /// requested label is not among them.
+    #[tokio::test]
+    async fn terminal_create_agent_unknown_preset_is_400_and_reaches_no_port() {
+        let dir = fresh_root("terminal-create-unknown-preset");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-create-unknown-preset-project");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let herdr = std::sync::Arc::new(RecordingHerdr::new(resolvable_snapshot(&root)));
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = herdr.clone();
+        let project = register(&st, &root, "create-unknown-preset");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        // No presets configured at all.
+        let resp = app
+            .clone()
+            .oneshot(create_agent_req(
+                &project.id,
+                &serde_json::json!({ "preset": "Claude" }),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // One preset configured, but a different label requested.
+        configure_preset(&dir, "Claude", &["claude"]);
+        let resp = app
+            .oneshot(create_agent_req(
+                &project.id,
+                &serde_json::json!({ "preset": "Codex" }),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        assert!(
+            herdr.agent_calls.lock().unwrap().is_empty(),
+            "an unconfigured preset label must never reach agent_start"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth: a project with no herdr workspace whose anchor resolves under
+    /// its own root refuses creation with 409 — never a silent fallback to
+    /// any other directory. `FakeHerdr`'s default seed anchors point at
+    /// fixture paths that do not exist on this filesystem at all, so none
+    /// of them can ever validate against any real project root.
+    #[tokio::test]
+    async fn terminal_create_routes_destination_unresolved_is_409() {
+        let dir = fresh_root("terminal-create-unresolved");
+        enable_terminal(&dir);
+        configure_preset(&dir, "Claude", &["claude"]);
+        let root = fresh_root("terminal-create-unresolved-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "create-unresolved");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let pane = app
+            .clone()
+            .oneshot(create_pane_req(&project.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(pane.status(), StatusCode::CONFLICT);
+
+        let agent = app
+            .oneshot(create_agent_req(
+                &project.id,
+                &serde_json::json!({ "preset": "Claude" }),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(agent.status(), StatusCode::CONFLICT);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth: a workspace that exists and resolves, but *outside* this
+    /// project's own root, is never picked as a destination — 409, not a
+    /// process started under a project the session is not looking at.
+    #[tokio::test]
+    async fn terminal_create_routes_refuse_a_destination_outside_the_project_root() {
+        let dir = fresh_root("terminal-create-boundary");
+        enable_terminal(&dir);
+        configure_preset(&dir, "Claude", &["claude"]);
+        let scratch = fresh_root("terminal-create-boundary-scratch");
+        let root_a = scratch.join("project-a");
+        let outside = scratch.join("outside-a");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let herdr = std::sync::Arc::new(RecordingHerdr::new(resolvable_snapshot(&outside)));
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = herdr.clone();
+        let project_a = register(&st, &root_a, "create-boundary-a");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let pane = app
+            .clone()
+            .oneshot(create_pane_req(&project_a.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(pane.status(), StatusCode::CONFLICT);
+
+        let agent = app
+            .oneshot(create_agent_req(
+                &project_a.id,
+                &serde_json::json!({ "preset": "Claude" }),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(agent.status(), StatusCode::CONFLICT);
+
+        assert!(
+            herdr.tab_calls.lock().unwrap().is_empty(),
+            "a destination outside the project root must never reach tab_create"
+        );
+        assert!(
+            herdr.agent_calls.lock().unwrap().is_empty(),
+            "a destination outside the project root must never reach agent_start"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Truth: a herdr port failure maps to 502 on both routes.
+    #[tokio::test]
+    async fn terminal_create_routes_herdr_down_is_502() {
+        let dir = fresh_root("terminal-create-herdr-down");
+        enable_terminal(&dir);
+        configure_preset(&dir, "Claude", &["claude"]);
+        let root = fresh_root("terminal-create-herdr-down-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        fake.set_available(false);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "create-herdr-down");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let pane = app
+            .clone()
+            .oneshot(create_pane_req(&project.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(pane.status(), StatusCode::BAD_GATEWAY);
+
+        let agent = app
+            .oneshot(create_agent_req(
+                &project.id,
+                &serde_json::json!({ "preset": "Claude" }),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(agent.status(), StatusCode::BAD_GATEWAY);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth: a resolved destination creates a plain shell and returns its
+    /// ids, seeding herdr's own call with this project's resolved root as
+    /// `cwd` (never `None`).
+    #[tokio::test]
+    async fn terminal_create_pane_creates_shell_and_returns_ids() {
+        let dir = fresh_root("terminal-create-pane-ok");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-create-pane-ok-project");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let herdr = std::sync::Arc::new(RecordingHerdr::new(resolvable_snapshot(&root)));
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = herdr.clone();
+        let project = register(&st, &root, "create-pane-ok");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(create_pane_req(&project.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(json["tab_id"].as_str().unwrap().starts_with("w:"), "{body}");
+        assert!(json["pane_id"].as_str().unwrap().starts_with("w:"), "{body}");
+
+        let calls = herdr.tab_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "w");
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(calls[0].1.as_deref(), Some(canonical_root.to_str().unwrap()));
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth: a resolved destination starts an agent using the configured
+    /// preset's own argv, returning ids and the herdr-assigned name.
+    #[tokio::test]
+    async fn terminal_create_agent_creates_and_returns_ids_and_name_using_configured_argv() {
+        let dir = fresh_root("terminal-create-agent-ok");
+        enable_terminal(&dir);
+        configure_preset(&dir, "Claude", &["claude"]);
+        let root = fresh_root("terminal-create-agent-ok-project");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let herdr = std::sync::Arc::new(RecordingHerdr::new(resolvable_snapshot(&root)));
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = herdr.clone();
+        let project = register(&st, &root, "create-agent-ok");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(create_agent_req(
+                &project.id,
+                &serde_json::json!({ "preset": "Claude" }),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(json["tab_id"].is_string(), "{body}");
+        assert!(json["pane_id"].is_string(), "{body}");
+        assert_eq!(json["name"], serde_json::json!("recorded-agent"));
+
+        let calls = herdr.agent_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "w");
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(calls[0].1.as_deref(), Some(canonical_root.to_str().unwrap()));
+        assert_eq!(calls[0].2, vec!["claude".to_string()]);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The must-have this test exists to prove: "no argv, env or cwd
+    /// supplied by the request can influence what is started, because no
+    /// such field is deserialized." An extra `argv` key riding alongside a
+    /// valid `preset` in the JSON body is silently dropped by serde
+    /// (`CreateAgentBody` declares only `preset`) — the agent that actually
+    /// starts carries the *configured* preset's argv, never the body's.
+    #[tokio::test]
+    async fn terminal_create_agent_extra_argv_key_in_body_is_ignored() {
+        let dir = fresh_root("terminal-create-agent-extra-argv");
+        enable_terminal(&dir);
+        configure_preset(&dir, "Claude", &["claude"]);
+        let root = fresh_root("terminal-create-agent-extra-argv-project");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let herdr = std::sync::Arc::new(RecordingHerdr::new(resolvable_snapshot(&root)));
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = herdr.clone();
+        let project = register(&st, &root, "create-agent-extra-argv");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(create_agent_req(
+                &project.id,
+                &serde_json::json!({
+                    "preset": "Claude",
+                    "argv": ["rm", "-rf", "/"],
+                    "env": { "EVIL": "1" },
+                    "cwd": "/etc",
+                }),
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "an extra argv/env/cwd key must be ignored, not rejected: {}",
+            body_string(resp).await
+        );
+
+        let calls = herdr.agent_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].2,
+            vec!["claude".to_string()],
+            "the started argv must be the configured preset's own, never anything from the request body"
+        );
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            calls[0].1.as_deref(),
+            Some(canonical_root.to_str().unwrap()),
+            "the request's own bogus \"cwd\" must never reach herdr"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
     }
 }
