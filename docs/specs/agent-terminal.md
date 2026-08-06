@@ -47,12 +47,12 @@ implementation. Code entry points are listed in `reading-map.md`.
 | 1 | Agent | One coding agent herdr is running, addressed by its own id | id, working directory (via its pane), status, current screen |
 | 2 | Pane | The addressable session an agent runs inside; every listed agent has exactly one, but a pane can exist with no agent record attached (a plain shell) — see Open Gaps for what that means today | id, working directory |
 | 3 | Screen | The agent's current visible terminal contents, rendered with colour | a snapshot redrawn on each poll, not a live feed |
-| 4 | Transcript | The agent's own activity log, read directly rather than through herdr | a gap-free running record of the agent's activity, independent of the screen poll; a fresh agent with nothing written yet reports that plainly rather than showing an empty log |
+| 4 | Transcript | The agent's own activity log, read directly rather than through herdr | a gap-free running record of the agent's activity, independent of the screen poll; a fresh agent with nothing written yet reports that plainly rather than showing an empty log; if the record is found truncated or rewritten under the reader, the next read shows a visible divider rather than jumping silently; a single poll returns only a bounded number of lines, and when a poll has more than that bound, its oldest lines are marked as lost rather than silently dropped |
 | 5 | Access token | The one credential that unlocks the terminal, transcript, and agent-creation family | generated/rotated on the settings page; shown in full exactly once, at the moment it is generated or rotated — every later view of the settings page shows only its last few characters |
 | 6 | Unassigned agents | Agents whose working directory is outside every registered project's root | listed on their own page, gated the same as any project's agents |
 | 7 | Keep herdr running | Opt-in duty: mdview keeps the herdr process alive on the operator's behalf | on / off, off by default |
 | 8 | Notify on status change | Opt-in duty: mdview sends a notification message when a watched agent's status changes | on / off, off by default; needs a destination and a credential configured separately |
-| 9 | Notify credential | The secret used to send that notification message | write-only: once saved, it is never shown again in full — only a masked hint — and it never appears in any viewed or exported configuration |
+| 9 | Notify credential | The secret used to send that notification message | write-only: once saved, it is never shown again in full — only a masked hint — and it never appears in any viewed or exported configuration; if a save fails, the operator is told it failed — it is never reported as saved |
 
 ## Behaviors & Operations
 
@@ -141,6 +141,12 @@ implementation. Code entry points are listed in `reading-map.md`.
   accepts a submission) gets that identical answer too; nothing distinguishes
   a wrong or missing token, a wrong kind of request, and a page that was
   never there.
+- **Protecting the stored token:** the token file is written owner-only and
+  atomically — a temporary file is created and swapped into place in one
+  step, so no reader ever sees a partially written file. On Windows, where
+  owner-only file protection cannot be applied, that unprotected state is
+  surfaced as something the operator can query, rather than failing
+  silently.
 - **Afterwards:** rotating the token immediately ends every session that was
   signed in under the previous one.
 
@@ -157,7 +163,9 @@ implementation. Code entry points are listed in `reading-map.md`.
 
 - **Keep herdr running:** when switched on, mdview keeps the herdr process
   alive on the operator's behalf. Off by default; mdview spawns no process of
-  its own until this is turned on.
+  its own until this is turned on. If herdr keeps dying, restarts do not
+  hammer it: each retry waits progressively longer than the last, up to a
+  cap, and every backoff step is logged rather than only the first.
 - **Notify on status change:** when switched on, mdview sends a notification
   message when a watched agent's status changes (this also needs a
   destination and a credential configured separately; the credential is

@@ -204,3 +204,20 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   passing tests while leaving the original race open, because both were written
   against the description of the bug rather than the mechanism.
   (2026-08-06, `20260806-a-guard-test-must-fail-when-its-guard-is-removed.md`)
+- **A route that must be invisible to the wrong caller cannot be made
+  invisible by a router fallback — the method oracle is closed by an
+  extractor.** An opaque-404 route family leaks its own existence through
+  method mismatch: ask for the right path with the wrong verb and axum
+  answers 405 with an `Allow` header naming the registered methods, so an
+  unauthenticated prober learns the route is there. `MethodRouter::fallback`
+  does not close this (verified against axum 0.7.9,
+  `routing/method_routing.rs`): axum still attaches `Allow` derived from the
+  registered methods even through a custom fallback handler. The working
+  shape is to register the route with `axum::routing::any(handler)` and make
+  `MethodGate<Get>` / `MethodGate<Post>` the handler's **first** extractor, so
+  the method check happens inside the handler and returns the same opaque 404
+  as every other refusal. Any future route family in this repo whose whole
+  point is deniability needs this shape, and needs a method-mismatch test that
+  sends no credentials — otherwise a session guard refuses first and the
+  method test proves nothing. (2026-08-06, `agent-terminal` cells 7 and 11,
+  `docs/knowledge/work/agent-terminal/delivery.md`)

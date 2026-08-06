@@ -1,7 +1,7 @@
 ---
 area: web-interface
-updated: 2026-07-16
-sources: [file-nav-ux, ui-polish-settings-sidebar]
+updated: 2026-08-06
+sources: [file-nav-ux, ui-polish-settings-sidebar, agent-terminal]
 decisions: [12d62831, 99e8df73, 184c77b0]
 coverage: partial
 ---
@@ -43,6 +43,7 @@ content itself.
 | 9 | Reading breadcrumb (file pages) | Orientation trail above the article, distinct from the chapter sidebar's zoom breadcrumb | project name → each path segment of the file, in order; segments are not independently clickable (orientation only) |
 | 10 | "On this page" (TOC) | Right-hand list of the current file's headings (levels 1-4) | one entry per heading, indented by level, linking to that heading |
 | 11 | "Linked from" (backlinks) | Right-hand list of other files that link to the one being viewed | empty when nothing links here; hidden entirely when both this and the TOC are empty |
+| 12 | Project tab strip (a project's own page) | Section switcher on a registered project's landing page | Overview · Terminal · Transcript — Terminal and Transcript render unconditionally, whether or not the agent terminal family has ever been switched on (opening either is separately gated behind a terminal session — see the Agent terminal spec) |
 
 ## Behaviors & Operations
 
@@ -54,6 +55,14 @@ content itself.
   and shows its name, file count, and last-seen time — never the filesystem
   path (per R5). Each card carries a delete control (top-right) that
   unregisters the project.
+- **Unassigned agents card:** when the agent terminal family has been
+  switched on (see the Agent terminal spec), one extra card, "Unassigned
+  agents," sits alongside the project cards and opens a page listing coding
+  agents that fall outside every registered project's root. The card itself
+  is a bare presence marker — it carries no agent name and no working
+  directory — and is visible the same as the rest of this page, before the
+  viewer has signed in to the terminal family; only the page it links to,
+  and the agent details on it, require a session.
 - **Delete / unregister:** activating a card's delete control asks the operator
   to confirm, then removes the project from the registry and returns to the
   list. This removes only the registry entry and its index — **the files on
