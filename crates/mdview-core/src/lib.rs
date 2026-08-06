@@ -18,6 +18,7 @@ pub mod paths_boundary;
 pub mod process;
 pub mod render;
 pub mod repository;
+pub mod transcript;
 
 pub use config::Config;
 pub use engine::Engine;
