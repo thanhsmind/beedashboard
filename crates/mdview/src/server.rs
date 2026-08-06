@@ -3534,6 +3534,330 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // --- bbp-5: the rebuilt top of the board (D5/D6/D7/D8/D9) ---
+
+    /// (happy) The board names the active feature, the lifecycle stepper's
+    /// state (a done step, a current step, and a pending step all present),
+    /// and the recorded next action.
+    #[tokio::test]
+    async fn board_names_active_feature_stepper_state_and_next_action() {
+        let root = fresh_root("top-happy");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "phase": "shaping",
+                "feature": "pm-view-feature",
+                "mode": "standard",
+                "approved_gates": {"context": true, "shape": false, "execution": false, "review": false},
+                "next_action": "Invoke bee-shaping to lock the shape gate."
+            }"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "top-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("pm-view-feature"), "active feature name missing: {body}");
+        assert!(
+            body.contains("Invoke bee-shaping to lock the shape gate."),
+            "next action missing: {body}"
+        );
+        assert!(
+            body.contains("class=\"bee-step bee-step--done\""),
+            "expected at least one done step: {body}"
+        );
+        assert!(
+            body.contains("class=\"bee-step bee-step--current\""),
+            "expected a current step: {body}"
+        );
+        assert!(
+            body.contains("class=\"bee-step bee-step--pending\""),
+            "expected at least one pending step: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) A feature with three of four gates approved renders exactly
+    /// three done steps, and the review step — never approved here — reads
+    /// as something the human invokes, never as pending automatic work
+    /// (D7).
+    #[tokio::test]
+    async fn board_three_of_four_gates_done_review_rendered_as_user_invoked() {
+        let root = fresh_root("top-three-gates");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "feature": "three-gates-feature",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": false}
+            }"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "top-three-gates");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert_eq!(
+            body.matches("class=\"bee-step bee-step--done\"").count(),
+            3,
+            "expected exactly three done steps: {body}"
+        );
+        assert!(
+            !body.contains("class=\"bee-step bee-step--done\" data-step=\"review\""),
+            "review must never render as done here: {body}"
+        );
+        assert!(
+            body.contains("Runs only when you invoke it — never automatic."),
+            "the review step must read as user-invoked, never pending automatic work: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) A gate approved and then revoked does not render as approved
+    /// — the stepper consults `gate_revoked_at` alongside `approved_gates`.
+    #[tokio::test]
+    async fn board_revoked_execution_gate_does_not_render_as_approved() {
+        let root = fresh_root("top-revoked-gate");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "feature": "revoked-gate-feature",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": false},
+                "gate_revoked_at": {"execution": "2026-08-05T09:51:47.038Z"}
+            }"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "top-revoked-gate");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            !body.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
+            "a revoked execution gate must not render as an approved (done) step: {body}"
+        );
+        assert!(
+            body.contains("Approved, then revoked."),
+            "the revoked note must be stated: {body}"
+        );
+        assert_eq!(
+            body.matches("class=\"bee-step bee-step--done\"").count(),
+            2,
+            "only context and shape are still cleanly approved: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) A feature whose cells are all `dropped` renders an honest
+    /// progress state — no division artifact, per D8 (dropped cells count
+    /// toward neither the numerator nor the denominator).
+    #[tokio::test]
+    async fn board_feature_with_all_dropped_cells_renders_honest_progress_no_division_artifact() {
+        let root = fresh_root("top-all-dropped");
+        write(&root, ".bee/state.json", r#"{"feature": "all-dropped-feature"}"#);
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &timed_cell_json("d1", "all-dropped-feature", "dropped", &[], "w1", "x", "y"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "top-all-dropped");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("all-dropped-feature"), "{body}");
+        assert!(
+            body.contains("No live cells recorded for this feature yet."),
+            "expected an honest progress state: {body}"
+        );
+        assert!(!body.contains("0/0"), "a division artifact leaked in: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) An empty attention list renders one honest line, never an
+    /// empty bordered panel.
+    #[tokio::test]
+    async fn board_empty_attention_list_renders_one_honest_line() {
+        let root = fresh_root("top-attention-empty");
+        write(&root, ".bee/cells/a.json", &cell_json("a", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "top-attention-empty");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("Nothing needs attention right now."),
+            "expected the honest empty-attention line: {body}"
+        );
+        assert!(
+            !body.contains("bee-cell bee-attention__item"),
+            "no attention items should render when the list is empty: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (untrusted) A cell title (rendered inside the attention panel's
+    /// "blocked" item, via `compute_attention_items`) and a `next_action`
+    /// (rendered inside the "working on now" card) each containing
+    /// `< > & "` render as text and never break the surrounding markup.
+    #[tokio::test]
+    async fn board_untrusted_cell_title_and_next_action_render_as_text() {
+        let root = fresh_root("top-untrusted");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature": "untrusted-feature", "next_action": "Fix <script>alert(1)</script> & \"quote\" it."}"#,
+        );
+        let untrusted_title = "<b>bold</b> & \"quoted\" title";
+        let untrusted_cell = format!(
+            r#"{{
+                "id": "untrusted-cell",
+                "feature": "untrusted-feature",
+                "lane": "standard",
+                "title": {title},
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {{}},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "blocked",
+                "tier": "generation",
+                "trace": {{"worker": "w1"}}
+            }}"#,
+            title = serde_json::to_string(untrusted_title).unwrap(),
+        );
+        write(&root, ".bee/cells/a.json", &untrusted_cell);
+
+        let st = build_state();
+        let project = register(&st, &root, "top-untrusted");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("&lt;b&gt;bold&lt;/b&gt; &amp; &quot;quoted&quot; title"),
+            "untrusted cell title must render escaped, as text: {body}"
+        );
+        assert!(!body.contains("<b>bold</b>"), "the raw title tag must not survive: {body}");
+        assert!(
+            body.contains("Fix &lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;quote&quot; it."),
+            "untrusted next_action must render escaped, as text: {body}"
+        );
+        assert!(
+            !body.contains("<script>alert(1)</script>"),
+            "the raw next_action script tag must not survive: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (security) An absolute path embedded mid-sentence in `route.rationale`
+    /// and in `next_action` — the two new free-text fields this cell renders
+    /// — must not leak into the board body. The existing leak tests only
+    /// cover wholly-path fields; this closes the gap the plan named.
+    #[tokio::test]
+    async fn board_embedded_absolute_path_in_rationale_and_next_action_does_not_leak() {
+        let root = fresh_root("top-security-scrub");
+        let secret = root.join("src").join("secret.rs").to_string_lossy().into_owned();
+        let secret_escaped = secret.replace('\\', "\\\\");
+        let state = format!(
+            r#"{{
+                "feature": "security-feature",
+                "route": {{
+                    "class": "feature",
+                    "lane": "standard",
+                    "flags": [],
+                    "product_files": 1,
+                    "rationale": "See {rationale_path} before merging.",
+                    "updated_at": "2026-08-01T00:00:00.000Z"
+                }},
+                "next_action": "Read {next_action_path} then continue."
+            }}"#,
+            rationale_path = secret_escaped,
+            next_action_path = secret_escaped,
+        );
+        write(&root, ".bee/state.json", &state);
+
+        let st = build_state();
+        let project = register(&st, &root, "top-security-scrub");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(!body.contains(&secret), "the board leaked an absolute path embedded in free text: {body}");
+        assert!(body.contains("src/secret.rs"), "the reduced relative path should still read: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (read-only) The fixture `.bee/` tree is byte-identical after a
+    /// request that exercises gates, revocation, route, next_action and a
+    /// populated attention panel all at once — the fuller shape the new top
+    /// section reads, beyond `reading_never_writes_the_fixtures_bee_tree`'s
+    /// minimal fixture.
+    #[tokio::test]
+    async fn board_top_of_page_reading_is_read_only_with_gates_route_and_attention_populated() {
+        let root = fresh_root("top-read-only");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "feature": "read-only-feature",
+                "approved_gates": {"context": true, "shape": true, "execution": false, "review": false},
+                "route": {
+                    "class": "feature",
+                    "lane": "standard",
+                    "flags": [],
+                    "product_files": 2,
+                    "rationale": "Small, well-scoped change.",
+                    "updated_at": "2026-08-01T00:00:00.000Z"
+                },
+                "next_action": "Invoke bee-swarming."
+            }"#,
+        );
+        write(
+            &root,
+            ".bee/cells/blocked.json",
+            &timed_cell_json("b1", "read-only-feature", "blocked", &[], "w1", "x", "y"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "top-read-only");
+        let before = snapshot_tree(&root);
+
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let after = snapshot_tree(&root);
+        assert_eq!(
+            before, after,
+            ".bee/ tree changed after a request exercising gates, route, next_action and attention"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (happy) bee-board-ux-2: a finished feature's line in the Done section
     /// still links to its feature detail page, and a live cell in one of
     /// the other three buckets still links to its cell detail page — both

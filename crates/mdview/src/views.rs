@@ -3,8 +3,9 @@
 //! `/highlight.css` (syntect class-based), so themes switch without re-render.
 
 use mdview_core::bee::{
-    BeeBacklog, BeeBuckets, BeeCell, BeeLane, BeeRunningWorker, BeeSession, BeeShippedFeature,
-    BeeSnapshot, BeeWorkspace, BeeWorktree,
+    BeeAttentionItem, BeeAttentionSeverity, BeeBacklog, BeeBuckets, BeeCell, BeeLane,
+    BeeRunningWorker, BeeSession, BeeShippedFeature, BeeSnapshot, BeeState, BeeWorkspace,
+    BeeWorktree,
 };
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
@@ -638,16 +639,6 @@ pub fn terminal_down_page(project: &Project) -> String {
 /// further is redacted here — this view only escapes for HTML safety.
 pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
     let b = &snapshot.buckets;
-    let phase = snapshot
-        .state
-        .as_ref()
-        .and_then(|s| s.phase.as_deref())
-        .unwrap_or("—");
-    let feature = snapshot
-        .state
-        .as_ref()
-        .and_then(|s| s.feature.as_deref())
-        .unwrap_or("—");
 
     let body = format!(
         r#"{topbar}
@@ -681,15 +672,26 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 .bee-panel__chips {{ display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); }}
 .bee-panel__list {{ display: flex; flex-direction: column; gap: var(--space-2); }}
 .bee-severity--p1 {{ font-weight: var(--weight-strong); }}
+.bee-asof {{ color: var(--color-text-subtle); font-size: var(--type-body-sm-size); }}
+.bee-stepper {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); list-style: none; margin: 0 0 var(--space-4) 0; padding: 0; }}
+.bee-step {{ display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-3); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--card-radius); background: var(--color-surface); }}
+.bee-step__mark {{ display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: var(--radius-pill); font-size: var(--type-caption-size); font-weight: var(--weight-strong); background: var(--color-surface-sunken); color: var(--color-text-subtle); }}
+.bee-step__label {{ font-weight: var(--weight-strong); color: var(--color-text); }}
+.bee-step__note {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); }}
+.bee-step--done .bee-step__mark {{ background: var(--color-success-tint); color: var(--color-success); }}
+.bee-step--current {{ border-color: var(--color-action); }}
+.bee-step--current .bee-step__mark {{ background: var(--color-info-tint); color: var(--color-info); }}
+.bee-now-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-4); margin-bottom: var(--space-4); }}
+.bee-working-now {{ display: flex; flex-direction: column; gap: var(--space-2); }}
+.bee-progress {{ height: 8px; border-radius: var(--radius-pill); background: var(--color-surface-sunken); overflow: hidden; }}
+.bee-progress__bar {{ height: 100%; background: var(--color-success); }}
+.bee-next-action {{ padding: var(--space-2) var(--space-3); }}
+.bee-attention__item--danger {{ border-color: var(--color-danger); background: var(--color-danger-tint); }}
+.bee-attention__item--warning {{ border-color: var(--color-warning); background: var(--color-warning-tint); }}
+.bee-attention__action {{ font-style: italic; }}
 </style>
 <main class="fg-page">
-  <div class="fg-pagehead">
-    <h2 class="fg-pagehead__title">Bee board · {name}</h2>
-    <div class="fg-pagehead__aside">
-      <span class="fg-chip fg-chip--neutral">phase: {phase}</span>
-      <span class="fg-chip fg-chip--neutral">feature: {feature}</span>
-    </div>
-  </div>
+  {top}
   {running}
   {worktrees}
   {velocity}
@@ -706,9 +708,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
             "<span class=\"crumb\">{name} · bee</span>",
             name = esc(&project.name)
         )),
-        name = esc(&project.name),
-        phase = esc(phase),
-        feature = esc(feature),
+        top = bee_board_top(project, snapshot),
         running = bee_running_now_section(&project.id, snapshot),
         worktrees = bee_worktree_section(&snapshot.worktrees),
         velocity = bee_velocity_section(&project.id, snapshot),
@@ -720,6 +720,319 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         errors = bee_read_errors(&snapshot.read_errors),
     );
     layout(&format!("{} · bee", project.name), "", &body)
+}
+
+/// D5's fixed top-of-board order, rebuilt in this cell (bbp-5): a header
+/// line naming the project and when this snapshot was read, then the
+/// lifecycle stepper, the headline numbers, and finally "working on now"
+/// beside "needs attention". Everything below this — `{running}` onward in
+/// [`bee_board_page`] — is untouched, existing markup; this function only
+/// replaces the old two-chip pagehead.
+fn bee_board_top(project: &Project, snapshot: &BeeSnapshot) -> String {
+    format!(
+        r#"<div class="fg-pagehead">
+    <h2 class="fg-pagehead__title">{name}</h2>
+    <div class="fg-pagehead__aside"><span class="bee-asof">Read {asof}</span></div>
+  </div>
+  {stepper}
+  {kpis}
+  <div class="bee-now-grid">
+    {working_now}
+    {attention}
+  </div>"#,
+        name = esc(&project.name),
+        asof = esc(&bee_board_asof()),
+        stepper = bee_lifecycle_stepper(snapshot.state.as_ref()),
+        kpis = bee_headline_kpis(snapshot),
+        working_now = bee_working_now_card(&project.id, snapshot),
+        attention = bee_attention_panel(&snapshot.attention),
+    )
+}
+
+/// "Read <UTC timestamp>" for the header line. This is this view's own
+/// clock, taken at render time — the board is rendered fresh from disk on
+/// every request (D4), never cached, so "when the data was read" and "now"
+/// are the same instant. Formatted the same plain way `ymd_utc`
+/// (`mdview_core::bee`) builds a date, just with the time appended.
+fn bee_board_asof() -> String {
+    let now = time::OffsetDateTime::now_utc();
+    format!(
+        "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC",
+        year = now.year(),
+        month = now.month() as u8,
+        day = now.day(),
+        hour = now.hour(),
+        minute = now.minute(),
+    )
+}
+
+/// The lifecycle stepper (D5/D7): the four gates `.bee/state.json` actually
+/// tracks — context, shape, execution, review — each rendered as one step.
+/// A step is `done` only when its gate is `approved_gates.<gate> ==
+/// Some(true)` **and** it carries no `gate_revoked_at.<gate>` entry (a gate
+/// approved and then revoked is not done); `current` is the first step not
+/// done, in gate order. The review step's undone note is always the D7
+/// wording — independent review is something a human invokes, never
+/// automatic pending work — regardless of whether it was never approved or
+/// was approved and then revoked. No `state.json` at all renders one honest
+/// line rather than four steps all reading "not yet approved", which would
+/// misstate "we have no record" as "record says no".
+fn bee_lifecycle_stepper(state: Option<&BeeState>) -> String {
+    let Some(state) = state else {
+        return r#"<p class="fg-empty">No lifecycle data recorded yet.</p>"#.to_string();
+    };
+
+    const GATES: [(&str, &str); 4] = [
+        ("context", "Explore"),
+        ("shape", "Shape"),
+        ("execution", "Execute"),
+        ("review", "Independent review"),
+    ];
+
+    let approved_flag = |key: &str| -> bool {
+        state
+            .approved_gates
+            .as_ref()
+            .and_then(|g| match key {
+                "context" => g.context,
+                "shape" => g.shape,
+                "execution" => g.execution,
+                "review" => g.review,
+                _ => None,
+            })
+            .unwrap_or(false)
+    };
+    let revoked_flag = |key: &str| -> bool {
+        state
+            .gate_revoked_at
+            .as_ref()
+            .and_then(|g| match key {
+                "context" => g.context.as_deref(),
+                "shape" => g.shape.as_deref(),
+                "execution" => g.execution.as_deref(),
+                "review" => g.review.as_deref(),
+                _ => None,
+            })
+            .is_some()
+    };
+
+    let done: Vec<bool> = GATES
+        .iter()
+        .map(|(key, _)| approved_flag(key) && !revoked_flag(key))
+        .collect();
+    let current_idx = done.iter().position(|&d| !d);
+
+    let mut items = String::new();
+    for (i, (key, label)) in GATES.iter().enumerate() {
+        let is_done = done[i];
+        let is_current = current_idx == Some(i);
+        let is_review = *key == "review";
+        let was_revoked = approved_flag(key) && revoked_flag(key);
+
+        let state_cls = if is_done {
+            "bee-step--done"
+        } else if is_current {
+            "bee-step--current"
+        } else {
+            "bee-step--pending"
+        };
+        let mark = if is_done {
+            "\u{2713}".to_string()
+        } else if is_current {
+            "\u{25b6}".to_string()
+        } else {
+            (i + 1).to_string()
+        };
+        let note = if is_done {
+            "Approved".to_string()
+        } else if is_review {
+            "Runs only when you invoke it — never automatic.".to_string()
+        } else if was_revoked {
+            "Approved, then revoked.".to_string()
+        } else {
+            "Not yet approved.".to_string()
+        };
+
+        items.push_str(&format!(
+            r#"<li class="bee-step {state_cls}" data-step="{key}"><span class="bee-step__mark">{mark}</span><span class="bee-step__label">{label}</span><span class="bee-step__note">{note}</span></li>"#,
+            state_cls = state_cls,
+            key = key,
+            mark = esc(&mark),
+            label = esc(label),
+            note = esc(&note),
+        ));
+    }
+
+    format!(r#"<ol class="bee-stepper">{items}</ol>"#, items = items)
+}
+
+/// The headline numbers row (D5): the four D7 bucket counts plus how many
+/// features have shipped, reusing [`bee_stat_card`] so every tile matches
+/// the ship-velocity stats below it. Each is a real count, never a "nothing
+/// to measure" absence — a bucket genuinely holding zero cells is honest
+/// data, not the missing-data case `bee_stat_card`'s `None` branch exists
+/// for.
+fn bee_headline_kpis(snapshot: &BeeSnapshot) -> String {
+    let b = &snapshot.buckets;
+    format!(
+        r#"<div class="bee-stats">
+    {doing}
+    {waiting}
+    {stuck}
+    {done}
+    {shipped}
+  </div>"#,
+        doing = bee_stat_card("Doing", Some(b.doing.len().to_string())),
+        waiting = bee_stat_card("Waiting", Some(b.waiting.len().to_string())),
+        stuck = bee_stat_card("Stuck", Some(b.stuck.len().to_string())),
+        done = bee_stat_card("Done", Some(b.done.len().to_string())),
+        shipped = bee_stat_card("Shipped features", Some(snapshot.shipped.len().to_string())),
+    )
+}
+
+/// "Working on now" (D5): the active feature named by `state.feature` only
+/// — never derived from cell data, which would risk naming the same
+/// feature a second time next to the Done section below (see
+/// `board_renders_finished_work_in_exactly_one_place`). Carries the route's
+/// rationale, progress over this feature's own live (non-dropped) cells
+/// with the numerator and denominator both drawn from the D7 buckets —
+/// which already exclude `dropped` and unrecognized statuses (D8) — and the
+/// recorded next action. No active feature, no route, no live cells or no
+/// next action each render their own honest line rather than a fabricated
+/// zero or a hidden section.
+fn bee_working_now_card(project_id: &str, snapshot: &BeeSnapshot) -> String {
+    let feature = snapshot.state.as_ref().and_then(|s| s.feature.as_deref());
+    let Some(feature) = feature else {
+        return r#"<section class="fg-card bee-panel bee-working-now">
+  <h3 class="bee-panel__head">Working on now</h3>
+  <p class="fg-empty">No feature is currently active.</p>
+</section>"#
+            .to_string();
+    };
+
+    let rationale = snapshot
+        .state
+        .as_ref()
+        .and_then(|s| s.route.as_ref())
+        .and_then(|r| r.rationale.as_deref())
+        .filter(|r| !r.is_empty());
+    let rationale_html = match rationale {
+        Some(r) => format!(r#"<p class="bee-cell__meta">{}</p>"#, esc(r)),
+        None => r#"<p class="fg-empty">No route rationale recorded.</p>"#.to_string(),
+    };
+
+    let doing = snapshot.buckets.doing.iter().filter(|c| c.feature == feature).count();
+    let waiting = snapshot.buckets.waiting.iter().filter(|c| c.feature == feature).count();
+    let stuck = snapshot.buckets.stuck.iter().filter(|c| c.feature == feature).count();
+    let done = snapshot.buckets.done.iter().filter(|c| c.feature == feature).count();
+    let total = doing + waiting + stuck + done;
+
+    let progress_html = if total == 0 {
+        r#"<p class="fg-empty">No live cells recorded for this feature yet.</p>"#.to_string()
+    } else {
+        let percent = (done * 100) / total;
+        format!(
+            r#"<div class="bee-progress"><div class="bee-progress__bar" style="width: {percent}%"></div></div><p class="bee-cell__meta">{done}/{total} cell{plural} done</p>"#,
+            percent = percent,
+            done = done,
+            total = total,
+            plural = if total == 1 { "" } else { "s" },
+        )
+    };
+
+    let next_action = snapshot
+        .state
+        .as_ref()
+        .and_then(|s| s.next_action.as_deref())
+        .filter(|n| !n.is_empty());
+    let next_action_html = match next_action {
+        Some(n) => format!(
+            r#"<div class="fg-card fg-card--sunken bee-next-action"><div class="fg-card__title">Next action</div><p>{}</p></div>"#,
+            esc(n)
+        ),
+        None => r#"<p class="fg-empty">No next action recorded.</p>"#.to_string(),
+    };
+
+    format!(
+        r#"<section class="fg-card bee-panel bee-working-now">
+  <h3 class="bee-panel__head">Working on now · <a href="/p/{pid}/_bee/feature/{feature_href}">{feature}</a></h3>
+  {rationale_html}
+  {progress_html}
+  {next_action_html}
+</section>"#,
+        pid = esc(project_id),
+        feature_href = esc(feature),
+        feature = esc(feature),
+        rationale_html = rationale_html,
+        progress_html = progress_html,
+        next_action_html = next_action_html,
+    )
+}
+
+/// A `BeeAttentionSeverity`'s chip tone — reuses the same `fg-chip--*`
+/// tones the rest of the board already uses (`fg-chip--warning`,
+/// `fg-chip--danger`), never inventing a new palette. `Serious` and
+/// `Critical` share the `danger` tone; `Critical` additionally carries
+/// `bee-severity--p1`'s bold weight (already used for P1 backlog findings)
+/// so the heaviest items are visually heavier, not just first in order.
+fn bee_attention_tone(sev: BeeAttentionSeverity) -> &'static str {
+    match sev {
+        BeeAttentionSeverity::Warning => "warning",
+        BeeAttentionSeverity::Serious => "danger",
+        BeeAttentionSeverity::Critical => "danger",
+    }
+}
+
+/// The plain-English label for a `BeeAttentionSeverity`, shown inside its
+/// chip (D1 — English labels throughout).
+fn bee_attention_severity_label(sev: BeeAttentionSeverity) -> &'static str {
+    match sev {
+        BeeAttentionSeverity::Warning => "warning",
+        BeeAttentionSeverity::Serious => "serious",
+        BeeAttentionSeverity::Critical => "critical",
+    }
+}
+
+/// D6's "needs attention" panel: `snapshot.attention` rendered verbatim, in
+/// the order `compute_attention_items` (`mdview_core::bee`) already sorted
+/// it — this view never recomputes or reorders the list, only formats it.
+/// An empty list renders one honest line, never an empty bordered panel.
+fn bee_attention_panel(items: &[BeeAttentionItem]) -> String {
+    if items.is_empty() {
+        return r#"<section class="fg-card bee-panel bee-attention">
+  <h3 class="bee-panel__head">Needs attention</h3>
+  <p class="fg-empty">Nothing needs attention right now.</p>
+</section>"#
+            .to_string();
+    }
+
+    let mut rows = String::new();
+    for item in items {
+        let tone = bee_attention_tone(item.severity);
+        let title_cls = if item.severity == BeeAttentionSeverity::Critical {
+            " bee-severity--p1"
+        } else {
+            ""
+        };
+        rows.push_str(&format!(
+            r#"<div class="fg-card bee-cell bee-attention__item bee-attention__item--{tone}"><div class="fg-card__title{title_cls}"><span class="fg-chip fg-chip--{tone}">{sev_label}</span> {title}</div><div class="bee-cell__meta">{detail}</div><div class="bee-cell__meta bee-attention__action">{action}</div></div>"#,
+            tone = tone,
+            title_cls = title_cls,
+            sev_label = bee_attention_severity_label(item.severity),
+            title = esc(&item.title),
+            detail = esc(&item.detail),
+            action = esc(&item.suggested_action),
+        ));
+    }
+
+    format!(
+        r#"<section class="fg-card bee-panel bee-attention">
+  <h3 class="bee-panel__head">Needs attention <span class="fg-chip fg-chip--neutral">{count}</span></h3>
+  <div class="bee-panel__list">{rows}</div>
+</section>"#,
+        count = items.len(),
+        rows = rows,
+    )
 }
 
 /// "Running now" — what is actually in flight this instant, above the
