@@ -26,7 +26,23 @@
 //! screen clears, OSC title-setting, DEC private modes, character-set
 //! selection, anything else — is discarded **in full**: its ESC byte, every
 //! parameter/intermediate byte, and its final byte. Nothing unrecognised is
-//! ever emitted into the page, raw or otherwise.
+//! ever emitted into the page, raw or otherwise. This includes the four
+//! string escapes whose body is arbitrary until a terminator — DCS
+//! (`ESC P`), APC (`ESC _`), PM (`ESC ^`) and SOS (`ESC X`) — which share
+//! [`consume_string_escape`] with OSC (`ESC ]`): all five are consumed
+//! introducer-through-terminator and dropped whole, never just their
+//! introducer, so a passthrough protocol payload never lands on the page as
+//! visible text.
+//!
+//! A **malformed** CSI sequence (a byte that is not valid CSI parameter,
+//! intermediate, or final-byte syntax, appearing before any terminator) is a
+//! separate case from an *unmodelled* one: everything read so far — the ESC,
+//! the `[`, and every byte already consumed — is dropped as malformed, but
+//! the byte that aborted the sequence was never part of it. That byte is
+//! ordinary text and is always re-emitted, never silently eaten — see
+//! [`EscapeOutcome::AbortedWithText`]. This is what stops a lone `ESC [` at
+//! a line end (a program killed mid-write) from swallowing the newline that
+//! follows it.
 //!
 //! ## Colour model
 //!
@@ -75,10 +91,17 @@ pub fn to_html(raw: &str) -> String {
 
     while let Some(c) = chars.next() {
         if c == '\u{1b}' {
-            if let Some(params) = consume_escape(&mut chars) {
-                flush_run(&mut out, &run, &style);
-                run.clear();
-                apply_sgr(&mut style, &params);
+            match consume_escape(&mut chars) {
+                EscapeOutcome::Sgr(params) => {
+                    flush_run(&mut out, &run, &style);
+                    run.clear();
+                    apply_sgr(&mut style, &params);
+                }
+                EscapeOutcome::Dropped => {}
+                // The byte that aborted a malformed CSI sequence was never
+                // part of it — treat it exactly like any other text byte
+                // rather than losing it (see `EscapeOutcome::AbortedWithText`).
+                EscapeOutcome::AbortedWithText(recovered) => run.push(recovered),
             }
             continue;
         }
@@ -227,46 +250,76 @@ impl Style {
     }
 }
 
+/// Outcome of consuming one escape sequence immediately after an
+/// already-consumed ESC (`\u{1b}`) byte.
+enum EscapeOutcome {
+    /// A recognised SGR run (`CSI … m`) with its numeric parameters parsed.
+    Sgr(Vec<u32>),
+    /// Every byte belonging to the sequence was consumed and dropped; none
+    /// of it must ever reach the output.
+    Dropped,
+    /// A CSI sequence hit a byte that is not valid CSI parameter,
+    /// intermediate, or final-byte syntax before finding its own
+    /// terminator. Everything read so far (the ESC, the `[`, and every
+    /// byte already consumed) is dropped as malformed — but the byte that
+    /// caused the abort was never part of the escape sequence at all; it
+    /// is ordinary text and must be re-emitted, never silently dropped.
+    AbortedWithText(char),
+}
+
 /// Consumes one escape sequence immediately after an already-consumed ESC
-/// (`\u{1b}`) byte. Returns `Some(params)` only for a recognised SGR run
-/// (`CSI … m`) with its numeric parameters parsed; every other sequence —
-/// or a malformed/truncated one — is consumed in full (as far as it can be,
-/// up to end of input) and `None` is returned, so its bytes are dropped
-/// rather than ever reaching the output.
-fn consume_escape(chars: &mut Peekable<Chars>) -> Option<Vec<u32>> {
+/// (`\u{1b}`) byte. Returns [`EscapeOutcome::Sgr`] only for a recognised SGR
+/// run (`CSI … m`) with its numeric parameters parsed; every other
+/// sequence — or a malformed/truncated one — is consumed in full (as far as
+/// it can be, up to end of input) and [`EscapeOutcome::Dropped`] is
+/// returned, so its bytes never reach the output. A malformed CSI sequence
+/// instead returns [`EscapeOutcome::AbortedWithText`] carrying the one byte
+/// that was never actually part of the escape — see that variant's doc.
+fn consume_escape(chars: &mut Peekable<Chars>) -> EscapeOutcome {
     match chars.peek().copied() {
         Some('[') => {
             chars.next();
             consume_csi(chars)
         }
-        Some(']') => {
+        Some(']') | Some('P') | Some('_') | Some('^') | Some('X') => {
+            // OSC (`]`), DCS (`P`), APC (`_`), PM (`^`) and SOS (`X`) are
+            // all string escapes: an arbitrary body running until an ST
+            // (`ESC \`) terminator (OSC also accepts BEL). All five share
+            // `consume_string_escape` so the body — not just the
+            // introducer — is always dropped whole; leaving DCS/APC/PM/SOS
+            // on the old single-byte-suffix path below would let their
+            // body fall through and render as visible text.
             chars.next();
-            consume_osc(chars);
-            None
+            consume_string_escape(chars);
+            EscapeOutcome::Dropped
         }
         Some('(') | Some(')') | Some('#') | Some('%') => {
             // Two-byte-suffix escapes (VT100 character-set designation and
             // friends): ESC + intermediate + one designator char.
             chars.next();
             chars.next();
-            None
+            EscapeOutcome::Dropped
         }
         Some(_) => {
             // A single-byte-suffix escape (ESC 7, ESC 8, ESC =, ESC >, …).
             chars.next();
-            None
+            EscapeOutcome::Dropped
         }
-        None => None, // truncated: lone ESC at end of input, drop it
+        None => EscapeOutcome::Dropped, // truncated: lone ESC at end of input, drop it
     }
 }
 
 /// Consumes a CSI sequence's parameter bytes, any intermediate bytes, and
-/// its final byte. Returns the parsed SGR parameters only when the final
-/// byte is `'m'` and every parameter byte was a digit or `;` (a private
-/// marker like `?` — used only with DEC modes, never SGR — is treated as
-/// "not SGR" and dropped like any other CSI sequence). A final byte is
-/// never found (truncated input) drops everything read so far.
-fn consume_csi(chars: &mut Peekable<Chars>) -> Option<Vec<u32>> {
+/// its final byte. Returns [`EscapeOutcome::Sgr`] only when the final byte
+/// is `'m'` and every parameter byte was a digit or `;` (a private marker
+/// like `?` — used only with DEC modes, never SGR — is treated as "not SGR"
+/// and dropped like any other CSI sequence). A final byte never found
+/// (truncated input) drops everything read so far. A byte that is not
+/// valid CSI parameter/intermediate/final syntax aborts the sequence and is
+/// returned via [`EscapeOutcome::AbortedWithText`] rather than being
+/// consumed and lost — this is what keeps e.g. a lone `ESC [` immediately
+/// before a newline from swallowing that newline.
+fn consume_csi(chars: &mut Peekable<Chars>) -> EscapeOutcome {
     let mut params_buf = String::new();
     let mut plain_params = true;
     loop {
@@ -282,27 +335,37 @@ fn consume_csi(chars: &mut Peekable<Chars>) -> Option<Vec<u32>> {
                 plain_params = false;
             }
             Some('m') => {
-                return if plain_params { Some(parse_sgr_params(&params_buf)) } else { None };
+                return if plain_params {
+                    EscapeOutcome::Sgr(parse_sgr_params(&params_buf))
+                } else {
+                    EscapeOutcome::Dropped
+                };
             }
             Some(c) if ('\u{40}'..='\u{7e}').contains(&c) => {
-                return None; // a real final byte, just not 'm'
+                return EscapeOutcome::Dropped; // a real final byte, just not 'm'
             }
-            Some(_) => {
+            Some(c) => {
                 // Any other byte inside a CSI sequence is not valid CSI
-                // syntax; stop treating this as CSI at all rather than
-                // looping forever.
-                return None;
+                // syntax — abort the sequence, but this byte itself was
+                // never part of it: hand it back as text rather than
+                // dropping it (see `EscapeOutcome::AbortedWithText`).
+                return EscapeOutcome::AbortedWithText(c);
             }
-            None => return None, // truncated: nothing left to read
+            None => return EscapeOutcome::Dropped, // truncated: nothing left to read
         }
     }
 }
 
-/// Consumes an OSC (Operating System Command) sequence's body, terminated
-/// by BEL (`\u{07}`) or ST (`ESC \`). Used e.g. for pane-title-setting
-/// sequences, which carry no visual information for a screen snapshot.
-/// Runs to end of input harmlessly if no terminator is ever found.
-fn consume_osc(chars: &mut Peekable<Chars>) {
+/// Consumes a string escape's body — OSC (Operating System Command), DCS
+/// (Device Control String), APC (Application Program Command), PM (Privacy
+/// Message) or SOS (Start of String) — terminated by BEL (`\u{07}`) or ST
+/// (`ESC \`). Used e.g. for pane-title-setting (OSC) and any passthrough
+/// protocol payload a program under a multiplexer might emit (DCS/APC/PM/
+/// SOS): none of the five carry visual information for a screen snapshot,
+/// and their body must never reach the output even when it is not ANSI at
+/// all (see the module doc's security note). Runs to end of input
+/// harmlessly if no terminator is ever found.
+fn consume_string_escape(chars: &mut Peekable<Chars>) {
     loop {
         match chars.next() {
             Some('\u{07}') | None => return,
@@ -311,9 +374,10 @@ fn consume_osc(chars: &mut Peekable<Chars>) {
                     chars.next();
                     return;
                 }
-                // A bare ESC inside an OSC body that isn't `ESC \` — not
-                // spec-compliant, but treat it as the OSC's own end rather
-                // than risk swallowing an unrelated following escape.
+                // A bare ESC inside the body that isn't `ESC \` — not
+                // spec-compliant, but treat it as this string escape's own
+                // end rather than risk swallowing an unrelated following
+                // escape.
                 return;
             }
             Some(_) => {}
@@ -556,6 +620,40 @@ mod tests {
         assert_eq!(to_html("a\u{1b}]0;window title\u{1b}\\b"), "ab");
     }
 
+    // --- DCS/APC/PM/SOS string escapes: whole body dropped, same as OSC ---
+    //
+    // Before this fix only the two-byte introducer (`ESC P`/`ESC _`/
+    // `ESC ^`/`ESC X`) was ever consumed — the body ran to the next
+    // terminator as ordinary text and reached the page. This is exactly
+    // the tmux/screen-passthrough leak the module doc's security note
+    // warns about, so each body below carries `<`/`>` the way a script tag
+    // would, to prove it never survives as visible (even escaped) text.
+
+    #[test]
+    fn dcs_sequence_and_its_entire_body_are_dropped_never_reaching_the_page() {
+        assert_eq!(to_html("a\u{1b}Ptmux;1000p<payload>\u{1b}\\b"), "ab");
+    }
+
+    #[test]
+    fn dcs_sequence_terminated_by_bel_is_also_dropped_entirely() {
+        assert_eq!(to_html("a\u{1b}Ptmux;<payload>\u{7}b"), "ab");
+    }
+
+    #[test]
+    fn apc_sequence_and_its_entire_body_are_dropped_never_reaching_the_page() {
+        assert_eq!(to_html("a\u{1b}_application <payload> data\u{1b}\\b"), "ab");
+    }
+
+    #[test]
+    fn pm_sequence_and_its_entire_body_are_dropped_never_reaching_the_page() {
+        assert_eq!(to_html("a\u{1b}^a private <message> body\u{1b}\\b"), "ab");
+    }
+
+    #[test]
+    fn sos_sequence_and_its_entire_body_are_dropped_never_reaching_the_page() {
+        assert_eq!(to_html("a\u{1b}Xstart-of-string <body>\u{1b}\\b"), "ab");
+    }
+
     #[test]
     fn dec_private_mode_sequences_are_dropped_entirely() {
         // Cursor-visibility toggling (`?25l`/`?25h`) — never SGR, must never
@@ -579,6 +677,40 @@ mod tests {
         assert_eq!(to_html("plain\u{1b}"), "plain");
         assert_eq!(to_html("plain\u{1b}["), "plain");
         assert_eq!(to_html("plain\u{1b}[31"), "plain");
+    }
+
+    #[test]
+    fn truncated_csi_at_end_of_input_is_dropped_without_swallowing_preceding_text() {
+        // No final byte is ever found — `consume_csi`'s `None` arm — distinct
+        // from a malformed CSI aborted by a real (non-terminator) byte.
+        assert_eq!(to_html("plain\u{1b}[31;4"), "plain");
+        assert_eq!(to_html("plain\u{1b}[?25"), "plain");
+    }
+
+    // --- malformed CSI: aborted mid-sequence, but the aborting byte itself
+    // is never lost — a consistent rule so a byte never simply disappears.
+
+    #[test]
+    fn csi_aborted_by_a_newline_does_not_swallow_the_newline() {
+        // The real-world case this fix exists for: a lone `ESC [` right at
+        // a line end (a program killed mid-write) must never eat the
+        // newline that follows and join two lines together.
+        assert_eq!(to_html("a\u{1b}[31\nb"), "a\nb");
+    }
+
+    #[test]
+    fn csi_aborted_by_an_esc_re_emits_that_esc_as_text() {
+        assert_eq!(to_html("a\u{1b}[3\u{1b}zb"), "a\u{1b}zb");
+    }
+
+    #[test]
+    fn csi_aborted_by_a_tab_re_emits_the_tab() {
+        assert_eq!(to_html("a\u{1b}[3\tb"), "a\tb");
+    }
+
+    #[test]
+    fn csi_aborted_by_a_non_ascii_byte_re_emits_that_byte() {
+        assert_eq!(to_html("a\u{1b}[3éb"), "aéb");
     }
 
     #[test]

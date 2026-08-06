@@ -6727,6 +6727,15 @@ mod bee_route_tests {
         snap: herdr::Snapshot,
         tab_calls: std::sync::Mutex<Vec<(String, Option<String>)>>,
         agent_calls: std::sync::Mutex<Vec<(String, Option<String>, Vec<String>)>>,
+        /// When set, `tab_create`/`agent_start` return this error instead of
+        /// a synthesized success — taken (moved out) on the first call, since
+        /// `herdr::HerdrError` carries no `Clone` impl. This is the one
+        /// combination `FakeHerdr::set_available(false)` can't produce: that
+        /// fails `snapshot()` itself (`terminal_create_routes_herdr_down_is_502`),
+        /// so `create_error_response` is never reached at all — here
+        /// `snapshot()` still succeeds and resolves a destination, and only
+        /// the placement call itself fails.
+        fail: std::sync::Mutex<Option<herdr::HerdrError>>,
     }
 
     impl RecordingHerdr {
@@ -6735,6 +6744,18 @@ mod bee_route_tests {
                 snap,
                 tab_calls: std::sync::Mutex::new(Vec::new()),
                 agent_calls: std::sync::Mutex::new(Vec::new()),
+                fail: std::sync::Mutex::new(None),
+            }
+        }
+
+        /// Same as `new`, but `tab_create`/`agent_start` fail with `err`
+        /// instead of succeeding — see the `fail` field's doc.
+        fn new_failing(snap: herdr::Snapshot, err: herdr::HerdrError) -> Self {
+            RecordingHerdr {
+                snap,
+                tab_calls: std::sync::Mutex::new(Vec::new()),
+                agent_calls: std::sync::Mutex::new(Vec::new()),
+                fail: std::sync::Mutex::new(Some(err)),
             }
         }
     }
@@ -6773,6 +6794,9 @@ mod bee_route_tests {
                 .lock()
                 .unwrap()
                 .push((workspace_id.to_string(), cwd.map(str::to_string)));
+            if let Some(err) = self.fail.lock().unwrap().take() {
+                return Err(err);
+            }
             Ok(herdr::TabCreated {
                 tab_id: format!("{workspace_id}:created-tab"),
                 pane_id: format!("{workspace_id}:created-pane"),
@@ -6788,6 +6812,9 @@ mod bee_route_tests {
                 .lock()
                 .unwrap()
                 .push((workspace_id.to_string(), cwd.map(str::to_string), argv.to_vec()));
+            if let Some(err) = self.fail.lock().unwrap().take() {
+                return Err(err);
+            }
             Ok(herdr::AgentStarted {
                 tab_id: format!("{workspace_id}:created-agent-tab"),
                 pane_id: format!("{workspace_id}:created-agent-pane"),
@@ -6962,6 +6989,88 @@ mod bee_route_tests {
             let b = unrouted.into_body().collect().await.unwrap().to_bytes();
             assert_eq!(a, b);
         }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth (the carried-over method-mismatch-oracle obligation, isolated —
+    /// mirrors
+    /// `terminal_route_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal`):
+    /// `terminal_create_routes_wrong_method_are_byte_identical_to_unrouted`
+    /// above sends no session cookie at all, so it would still pass
+    /// unchanged even with `MethodGate` deleted from either creation
+    /// handler entirely — `AuthSession`'s own rejection refuses the request
+    /// first, without `MethodGate` ever mattering. Verified by temporarily
+    /// deleting `_method: MethodGate<Post>,` from `terminal_create_pane` and
+    /// (separately) from `terminal_create_agent`: a GET carrying the same
+    /// JSON body a real POST would send then reaches the handler body
+    /// (against a valid session, the enabled switch, and the registered
+    /// project) and renders `409` — the default `FakeHerdr`'s fixture
+    /// anchors resolve under no real project root, so
+    /// `destination_unresolved_response` fires — nothing like the unrouted
+    /// path's bare 404, so this assertion goes red. Verified both ways
+    /// (each guard deleted, tested, then restored) before capping.
+    #[tokio::test]
+    async fn terminal_create_routes_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal()
+    {
+        let dir = fresh_root("terminal-create-wrong-method-isolated");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-create-wrong-method-isolated-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "create-wrong-method-isolated");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let unrouted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted_status = unrouted.status();
+        let unrouted_headers = unrouted.headers().clone();
+        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
+
+        let pane = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/p/{}/_terminal/create/pane", project.id))
+                    .header(header::COOKIE, cookie.clone())
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pane.status(), unrouted_status);
+        assert_eq!(pane.headers(), &unrouted_headers);
+        let pane_body = pane.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(pane_body, unrouted_body);
+
+        let agent = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/p/{}/_terminal/create/agent", project.id))
+                    .header(header::COOKIE, cookie)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({ "preset": "Claude" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(agent.status(), unrouted_status);
+        assert_eq!(agent.headers(), &unrouted_headers);
+        let agent_body = agent.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(agent_body, unrouted_body);
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
@@ -7203,6 +7312,92 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth: `create_error_response` — reached by no other test, since
+    /// `terminal_create_routes_herdr_down_is_502` fails earlier, at the
+    /// `snapshot()` call, and never reaches it — maps a herdr placement
+    /// failure (`WorkspaceNotFound`, or a `Remote` error carrying one of the
+    /// two placement codes) to `409`, and every other herdr error to `502`.
+    /// `RecordingHerdr::new_failing` lets `snapshot()` still succeed (so a
+    /// destination resolves and the route actually calls herdr) while the
+    /// placement call itself fails — the one combination
+    /// `terminal_create_routes_herdr_down_is_502`'s herdr-down double can't
+    /// produce. Both branches are exercised, on the two different create
+    /// routes, so replacing this function's body with any single status —
+    /// 409 always, or 502 always — makes one of the two assertions below go
+    /// red.
+    #[tokio::test]
+    async fn terminal_create_routes_map_a_workspace_conflict_to_409_and_any_other_herdr_error_to_502()
+    {
+        let dir = fresh_root("terminal-create-error-mapping");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-create-error-mapping-project");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // `tab_create` itself fails with a workspace-placement error (the
+        // destination resolved fine; herdr refused the actual creation) —
+        // must map to 409, never the generic 502.
+        let conflict_herdr = std::sync::Arc::new(RecordingHerdr::new_failing(
+            resolvable_snapshot(&root),
+            herdr::HerdrError::WorkspaceNotFound {
+                workspace_id: "w".into(),
+                message: "placement is gone".into(),
+            },
+        ));
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = conflict_herdr;
+        let project = register(&st, &root, "create-error-mapping");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let pane = app
+            .oneshot(create_pane_req(&project.id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(
+            pane.status(),
+            StatusCode::CONFLICT,
+            "a herdr WorkspaceNotFound failure must map to 409: {}",
+            body_string(pane).await
+        );
+
+        // A different project, so `agent_start` gets its own fresh double —
+        // an ordinary request failure, which must map to 502, never 409.
+        let dir2 = fresh_root("terminal-create-error-mapping-2");
+        enable_terminal(&dir2);
+        configure_preset(&dir2, "Claude", &["claude"]);
+        let root2 = fresh_root("terminal-create-error-mapping-project-2");
+        std::fs::create_dir_all(&root2).unwrap();
+        let other_herdr = std::sync::Arc::new(RecordingHerdr::new_failing(
+            resolvable_snapshot(&root2),
+            herdr::HerdrError::Request("boom".into()),
+        ));
+        let mut st2 = build_state_with_dir(&dir2);
+        st2.herdr = other_herdr;
+        let project2 = register(&st2, &root2, "create-error-mapping-2");
+        let app2 = router(st2);
+        let (_token2, cookie2) = rotate_token(app2.clone()).await;
+
+        let agent = app2
+            .oneshot(create_agent_req(
+                &project2.id,
+                &serde_json::json!({ "preset": "Claude" }),
+                Some(&cookie2),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            agent.status(),
+            StatusCode::BAD_GATEWAY,
+            "a generic herdr failure must map to 502, never 409: {}",
+            body_string(agent).await
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&dir2).ok();
+        std::fs::remove_dir_all(&root2).ok();
     }
 
     /// Truth: a resolved destination creates a plain shell and returns its
