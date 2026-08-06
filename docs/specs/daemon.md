@@ -91,6 +91,15 @@ serves (see the web-interface and agent-integration areas for that).
 - **What changes:** the running daemon is terminated and its record removed.
 - **Afterwards:** `mdview status` reports "not running"; the next `open`/agent
   call auto-starts a new one.
+- **Stale record:** when the record names a process that is already gone, stop
+  says so and clears the record. It returns promptly in every case — deciding
+  whether the recorded daemon is alive is bounded in time, because a dead
+  address does not always refuse a connection quickly and some networks drop
+  the attempt silently instead. An unbounded liveness check is what once left
+  stop waiting indefinitely and the viewer down.
+- **Recycled process id:** a process id is only signalled when the recorded
+  daemon actually answers as mdview. A stale record whose id has since been
+  reused by an unrelated program never causes that program to be signalled.
 
 ### Restart (`mdview restart`)
 

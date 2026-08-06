@@ -204,6 +204,23 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   passing tests while leaving the original race open, because both were written
   against the description of the bug rather than the mechanism.
   (2026-08-06, `20260806-a-guard-test-must-fail-when-its-guard-is-removed.md`)
+- **A dead address does not reliably refuse — every liveness probe in this
+  repo needs a bounded CONNECT, not just bounded reads and writes.**
+  `health_check` set read and write timeouts *after* connecting and left
+  `TcpStream::connect` unbounded. On a port with nothing listening the usual
+  answer is an immediate refusal, so this looked fine for a year; in a
+  sandboxed/WSL network the attempt is silently dropped instead, and the probe
+  waits forever. That single unbounded connect is what made `mdview stop` and
+  `mdview restart` hang on a stale daemon lock and left the viewer down until
+  a daemon was started on the port by hand. Reproduced with raw sockets and
+  then with the real binary — 25s+ before the fix, ~0.5s after. Any future
+  "is it alive?" probe here sets a connect timeout, and its test must run
+  against a dropped connection, not only a refused one: a refused port proves
+  the fast path and says nothing about the hang. Found in the same pass: the
+  stop path signalled the recorded process id unconditionally, so a stale
+  record whose id had been recycled would have killed an unrelated program —
+  confirm the recorded process actually answers as ours before signalling it.
+  (2026-08-06, `daemon-lock-stale`, `crates/mdview/tests/e2e_stop_stale_lock.rs`)
 - **A route that must be invisible to the wrong caller cannot be made
   invisible by a router fallback — the method oracle is closed by an
   extractor.** An opaque-404 route family leaks its own existence through
