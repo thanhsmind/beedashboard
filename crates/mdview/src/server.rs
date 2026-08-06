@@ -3620,39 +3620,156 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (edge) A gate approved and then revoked does not render as approved
-    /// — the stepper consults `gate_revoked_at` alongside `approved_gates`.
+    /// (regression, bbp-7 — the live defect) A gate that is currently
+    /// approved renders as approved (done), whatever `gate_revoked_at`
+    /// records — `gate_revoked_at` is bee's append-style historical anchor
+    /// for advisor staleness, not a current-state flag, and a revocation
+    /// recorded on an earlier day must never contradict a `true`
+    /// `approved_gates` entry recorded after it. This replaces
+    /// `board_revoked_execution_gate_does_not_render_as_approved`, which
+    /// encoded the opposite (wrong) rule from bbp-5: it asserted that
+    /// `approved_gates.execution: true` plus a `gate_revoked_at.execution`
+    /// entry rendered Execute as NOT done and carrying "Approved, then
+    /// revoked." — exactly this repo's own live board bug.
     #[tokio::test]
-    async fn board_revoked_execution_gate_does_not_render_as_approved() {
-        let root = fresh_root("top-revoked-gate");
+    async fn board_currently_approved_gate_renders_approved_despite_earlier_revocation() {
+        let root = fresh_root("top-approved-despite-revocation");
         write(
             &root,
             ".bee/state.json",
             r#"{
-                "feature": "revoked-gate-feature",
+                "feature": "revoked-then-reapproved-feature",
                 "approved_gates": {"context": true, "shape": true, "execution": true, "review": false},
                 "gate_revoked_at": {"execution": "2026-08-05T09:51:47.038Z"}
             }"#,
         );
 
         let st = build_state();
-        let project = register(&st, &root, "top-revoked-gate");
+        let project = register(&st, &root, "top-approved-despite-revocation");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
+            "an execution gate that is currently approved must render as done, whatever an earlier gate_revoked_at records: {body}"
+        );
+        assert!(
+            !body.contains("Approved, then revoked."),
+            "a currently-approved gate must never carry the revoked wording: {body}"
+        );
+        assert_eq!(
+            body.matches("class=\"bee-step bee-step--done\"").count(),
+            3,
+            "context, shape and execution are all cleanly approved: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) A gate that is NOT currently approved and carries a
+    /// `gate_revoked_at` entry renders as revoked — distinguishable from a
+    /// step that was simply never approved (bbp-7).
+    #[tokio::test]
+    async fn board_unapproved_gate_with_revocation_renders_as_revoked() {
+        let root = fresh_root("top-unapproved-revoked-gate");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "feature": "genuinely-revoked-feature",
+                "approved_gates": {"context": true, "shape": true, "execution": false, "review": false},
+                "gate_revoked_at": {"execution": "2026-08-05T09:51:47.038Z"}
+            }"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "top-unapproved-revoked-gate");
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
         assert!(
             !body.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
-            "a revoked execution gate must not render as an approved (done) step: {body}"
+            "an unapproved execution gate must not render as done: {body}"
         );
         assert!(
             body.contains("Approved, then revoked."),
-            "the revoked note must be stated: {body}"
+            "an unapproved gate carrying a revocation must read as revoked, not merely unreached: {body}"
         );
-        assert_eq!(
-            body.matches("class=\"bee-step bee-step--done\"").count(),
-            2,
-            "only context and shape are still cleanly approved: {body}"
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) A gate that is NOT approved and carries no `gate_revoked_at`
+    /// entry renders as not yet reached — never as revoked (bbp-7 honest
+    /// empty case).
+    #[tokio::test]
+    async fn board_unapproved_gate_with_no_revocation_renders_as_not_yet_reached() {
+        let root = fresh_root("top-unapproved-never-revoked-gate");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "feature": "never-approved-feature",
+                "approved_gates": {"context": true, "shape": true, "execution": false, "review": false}
+            }"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "top-unapproved-never-revoked-gate");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            !body.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
+            "an unapproved execution gate must not render as done: {body}"
+        );
+        assert!(
+            body.contains("Not yet approved."),
+            "an unapproved gate with no revocation must read as not yet reached: {body}"
+        );
+        assert!(
+            !body.contains("Approved, then revoked."),
+            "a gate with no revocation on record must never carry the revoked wording: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) A `gate_revoked_at` entry naming a different gate does not
+    /// affect this gate's rendering (bbp-7).
+    #[tokio::test]
+    async fn board_revocation_on_a_different_gate_does_not_affect_this_gate() {
+        let root = fresh_root("top-revocation-different-gate");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "feature": "unrelated-revocation-feature",
+                "approved_gates": {"context": true, "shape": false, "execution": false, "review": false},
+                "gate_revoked_at": {"context": "2026-08-05T09:51:47.038Z"}
+            }"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "top-revocation-different-gate");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("class=\"bee-step bee-step--done\" data-step=\"context\""),
+            "the context gate is currently approved and must render as done despite carrying its own revocation history: {body}"
+        );
+        assert!(
+            !body.contains("class=\"bee-step bee-step--done\" data-step=\"shape\""),
+            "the shape gate was never approved: {body}"
+        );
+        assert!(
+            !body.contains("Approved, then revoked."),
+            "the shape gate carries no gate_revoked_at entry of its own, so a context-gate revocation must not leak into it: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();

@@ -768,15 +768,22 @@ fn bee_board_asof() -> String {
 
 /// The lifecycle stepper (D5/D7): the four gates `.bee/state.json` actually
 /// tracks — context, shape, execution, review — each rendered as one step.
-/// A step is `done` only when its gate is `approved_gates.<gate> ==
-/// Some(true)` **and** it carries no `gate_revoked_at.<gate>` entry (a gate
-/// approved and then revoked is not done); `current` is the first step not
-/// done, in gate order. The review step's undone note is always the D7
-/// wording — independent review is something a human invokes, never
-/// automatic pending work — regardless of whether it was never approved or
-/// was approved and then revoked. No `state.json` at all renders one honest
-/// line rather than four steps all reading "not yet approved", which would
-/// misstate "we have no record" as "record says no".
+/// A step is `done` whenever its gate is `approved_gates.<gate> ==
+/// Some(true)`, full stop — `gate_revoked_at` is bee's append-style
+/// historical anchor for advisor staleness, not a current-state flag, and
+/// it never overrides a currently-true `approved_gates` entry (a gate
+/// revoked yesterday and re-approved today is approved, today's truth
+/// beating yesterday's history). `current` is the first step not done, in
+/// gate order. `gate_revoked_at` only changes what an undone step says: an
+/// undone gate that carries a revocation reads as "approved, then
+/// revoked" — it was taken away, not merely never reached — while an
+/// undone gate with no revocation on record reads as "not yet approved".
+/// The review step's undone note is always the D7 wording instead —
+/// independent review is something a human invokes, never automatic
+/// pending work — regardless of which of those two histories it carries.
+/// No `state.json` at all renders one honest line rather than four steps
+/// all reading "not yet approved", which would misstate "we have no
+/// record" as "record says no".
 fn bee_lifecycle_stepper(state: Option<&BeeState>) -> String {
     let Some(state) = state else {
         return r#"<p class="fg-empty">No lifecycle data recorded yet.</p>"#.to_string();
@@ -816,10 +823,7 @@ fn bee_lifecycle_stepper(state: Option<&BeeState>) -> String {
             .is_some()
     };
 
-    let done: Vec<bool> = GATES
-        .iter()
-        .map(|(key, _)| approved_flag(key) && !revoked_flag(key))
-        .collect();
+    let done: Vec<bool> = GATES.iter().map(|(key, _)| approved_flag(key)).collect();
     let current_idx = done.iter().position(|&d| !d);
 
     let mut items = String::new();
@@ -827,7 +831,11 @@ fn bee_lifecycle_stepper(state: Option<&BeeState>) -> String {
         let is_done = done[i];
         let is_current = current_idx == Some(i);
         let is_review = *key == "review";
-        let was_revoked = approved_flag(key) && revoked_flag(key);
+        // Revocation only tells a story about an *undone* gate: was it
+        // taken away (revoked) or has it simply never gotten there. A gate
+        // that is currently approved ignores `gate_revoked_at` entirely —
+        // see the doc comment above.
+        let was_revoked = !is_done && revoked_flag(key);
 
         let state_cls = if is_done {
             "bee-step--done"
@@ -2551,6 +2559,131 @@ pub const MERMAID_JS: &str = include_str!("../assets/mermaid.min.js");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mdview_core::bee::{BeeApprovedGates, BeeGateRevocations};
+
+    /// (regression, bbp-7 — the live defect, view-level) A gate that is
+    /// currently approved renders its step as done, whatever
+    /// `gate_revoked_at` records — a revocation recorded before the
+    /// current approval is history, not a contradiction of it.
+    #[test]
+    fn lifecycle_stepper_renders_currently_approved_gate_as_done_despite_earlier_revocation() {
+        let state = BeeState {
+            approved_gates: Some(BeeApprovedGates {
+                context: Some(true),
+                shape: Some(true),
+                execution: Some(true),
+                review: Some(false),
+            }),
+            gate_revoked_at: Some(BeeGateRevocations {
+                context: None,
+                shape: None,
+                execution: Some("2026-08-05T09:51:47.038Z".to_string()),
+                review: None,
+            }),
+            ..Default::default()
+        };
+        let html = bee_lifecycle_stepper(Some(&state));
+        assert!(
+            html.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
+            "the execution step must render as done: {html}"
+        );
+        assert!(
+            !html.contains("Approved, then revoked."),
+            "a currently-approved gate must never carry the revoked wording: {html}"
+        );
+    }
+
+    /// (happy, view-level) A gate that is not approved and carries a
+    /// revocation reads as revoked — distinguishable from a step that was
+    /// simply never approved.
+    #[test]
+    fn lifecycle_stepper_renders_unapproved_revoked_gate_as_revoked() {
+        let state = BeeState {
+            approved_gates: Some(BeeApprovedGates {
+                context: Some(true),
+                shape: Some(true),
+                execution: Some(false),
+                review: Some(false),
+            }),
+            gate_revoked_at: Some(BeeGateRevocations {
+                context: None,
+                shape: None,
+                execution: Some("2026-08-05T09:51:47.038Z".to_string()),
+                review: None,
+            }),
+            ..Default::default()
+        };
+        let html = bee_lifecycle_stepper(Some(&state));
+        assert!(
+            !html.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
+            "an unapproved execution gate must not render as done: {html}"
+        );
+        assert!(
+            html.contains("Approved, then revoked."),
+            "an unapproved gate carrying a revocation must read as revoked: {html}"
+        );
+    }
+
+    /// (happy, view-level; bbp-7 honest_empty) A gate that is not approved
+    /// and carries no revocation reads as not yet reached, never as
+    /// revoked.
+    #[test]
+    fn lifecycle_stepper_renders_unapproved_never_revoked_gate_as_not_yet_reached() {
+        let state = BeeState {
+            approved_gates: Some(BeeApprovedGates {
+                context: Some(true),
+                shape: Some(true),
+                execution: Some(false),
+                review: Some(false),
+            }),
+            gate_revoked_at: None,
+            ..Default::default()
+        };
+        let html = bee_lifecycle_stepper(Some(&state));
+        assert!(
+            !html.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
+            "an unapproved execution gate must not render as done: {html}"
+        );
+        assert!(
+            html.contains("Not yet approved."),
+            "an unapproved gate with no revocation on record must read as not yet reached: {html}"
+        );
+        assert!(
+            !html.contains("Approved, then revoked."),
+            "no revocation is on record, so the revoked wording must never appear: {html}"
+        );
+    }
+
+    /// (edge, view-level) A `gate_revoked_at` entry naming a different gate
+    /// does not affect this gate's rendering.
+    #[test]
+    fn lifecycle_stepper_revocation_on_another_gate_does_not_leak() {
+        let state = BeeState {
+            approved_gates: Some(BeeApprovedGates {
+                context: Some(true),
+                shape: Some(false),
+                execution: Some(false),
+                review: Some(false),
+            }),
+            gate_revoked_at: Some(BeeGateRevocations {
+                context: Some("2026-08-05T09:51:47.038Z".to_string()),
+                shape: None,
+                execution: None,
+                review: None,
+            }),
+            ..Default::default()
+        };
+        let html = bee_lifecycle_stepper(Some(&state));
+        assert!(
+            html.contains("class=\"bee-step bee-step--done\" data-step=\"context\""),
+            "context is currently approved and must render as done, whatever its own revocation history: {html}"
+        );
+        let revoked_count = html.matches("Approved, then revoked.").count();
+        assert_eq!(
+            revoked_count, 0,
+            "shape's own gate_revoked_at entry is absent, so context's revocation must not leak into it: {html}"
+        );
+    }
 
     #[test]
     fn heartbeat_age_reads_as_plain_relative_language_not_a_timestamp() {

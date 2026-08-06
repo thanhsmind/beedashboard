@@ -132,10 +132,14 @@ pub struct BeeState {
     /// `state.json`'s `approved_gates`. `None` when the file never carried
     /// the key — never fabricated as "all false".
     pub approved_gates: Option<BeeApprovedGates>,
-    /// `state.json`'s `gate_revoked_at`. Read independently of
-    /// `approved_gates` — a gate revoked after being approved still shows
-    /// `approved_gates.<gate> == Some(true)`, so a caller must consult both
-    /// to tell "approved" apart from "approved, then revoked".
+    /// `state.json`'s `gate_revoked_at` — bee's append-style historical
+    /// anchor for advisor staleness, not a current-state flag: a gate
+    /// revoked and then re-approved still carries its old revocation
+    /// timestamp here even though `approved_gates.<gate> == Some(true)`
+    /// now. A caller must never let this field override a currently-true
+    /// `approved_gates` entry; its only job is to tell an *undone* gate's
+    /// two histories apart — "revoked" (was approved, then taken away)
+    /// from "never reached" (no revocation on record).
     pub gate_revoked_at: Option<BeeGateRevocations>,
     /// `state.json`'s `route`. `None` when the file never carried the key.
     pub route: Option<BeeRoute>,
