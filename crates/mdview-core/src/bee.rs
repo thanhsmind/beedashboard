@@ -211,6 +211,33 @@ pub struct BeeHandoff {
     pub kind: Option<String>,
 }
 
+/// `.bee/config.json` — read for one field only, `gate_bypass` (bbp-9): bee
+/// can be configured to auto-approve its own approval gates, and a project
+/// running that way is something a manager should see.
+///
+/// `gate_bypass`'s value type is not stable across stores (this repo
+/// records the boolean `false`; the beehive store records the string
+/// `"total"`), so it is normalized defensively rather than typed as one
+/// JSON shape: a boolean `false` and a missing key both collapse to `None`
+/// ("off"); a string value bee itself writes (e.g. `"total"`) is carried
+/// through verbatim; any other JSON shape is carried through as its own
+/// text rather than guessed at or coerced to off — see
+/// [`normalize_gate_bypass`].
+///
+/// **This is the recorded setting, never the effective one.**
+/// `.bee/config.local.json` exists on disk as a machine-local overlay that
+/// bee itself resolves on top of this file — this reader does not open
+/// `config.local.json` and does not attempt to reproduce bee's resolution
+/// order, because doing so here would be silently wrong on any machine
+/// that overlays it, inside the one panel whose whole job is to be
+/// trustworthy. Every consumer of this field (see
+/// [`compute_attention_items`]) must word its output as the recorded
+/// setting, not a claim about what is actually enforced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeConfig {
+    pub gate_bypass: Option<String>,
+}
+
 /// One raw entry from `.bee/state.json`'s `workers[]`. `cell`, `tier` and
 /// `status` are each commonly `null` in practice (bee updates this array
 /// best-effort, not transactionally with the cell it names), so every field
@@ -583,6 +610,11 @@ pub struct BeeSnapshot {
     /// `.bee/HANDOFF.json`, when present — see [`BeeHandoff`]. `None` is the
     /// normal, expected shape for most stores; it is never a read error.
     pub handoff: Option<BeeHandoff>,
+    /// `.bee/config.json`, when present — see [`BeeConfig`]. `None` here
+    /// means only that the file itself is absent or unparseable; it does
+    /// NOT mean `gate_bypass` is on — see `BeeConfig::gate_bypass` and
+    /// [`normalize_gate_bypass`] for how "off" is actually decided.
+    pub config: Option<BeeConfig>,
     /// Human-readable notes naming what could not be read. Every path
     /// mentioned here is relative to the project root.
     pub read_errors: Vec<String>,
@@ -607,6 +639,7 @@ impl BeeSnapshot {
             running_workers: Vec::new(),
             attention: Vec::new(),
             handoff: None,
+            config: None,
             read_errors: Vec::new(),
         }
     }
@@ -697,8 +730,10 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         .unwrap_or_default();
 
     let handoff = read_handoff(&bee_dir, root, &mut read_errors);
+    let config = read_config(&bee_dir, root, &mut read_errors);
 
-    let attention = compute_attention_items(&buckets.stuck, &read_errors, handoff.as_ref());
+    let gate_bypass = config.as_ref().and_then(|c| c.gate_bypass.as_deref());
+    let attention = compute_attention_items(&buckets.stuck, &read_errors, handoff.as_ref(), gate_bypass);
 
     BeeSnapshot {
         present: true,
@@ -716,6 +751,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         running_workers,
         attention,
         handoff,
+        config,
         read_errors,
     }
 }
@@ -789,12 +825,22 @@ fn compute_running_workers(
 /// `"planned-next"` handoff is a different thing (a clean stop with the
 /// next claim already owned) and never fires this rule.
 ///
+/// bbp-9 adds a fourth, independent rule: a recorded `gate_bypass` that is
+/// not off (source spec §5c: `gate_bypass_level` off is "stopping by the
+/// rules"; anything else is "cảnh báo" — a warning). It fires on the value
+/// [`read_config`]/[`normalize_gate_bypass`] already normalized, and its
+/// wording names that value as the **recorded** setting only — never a
+/// claim about what is actually being enforced, because
+/// `.bee/config.local.json` can override it on a given machine and this
+/// reader never opens that file (see [`BeeConfig`]).
+///
 /// Adding a rule later means adding another `if` below and letting it fall
 /// into the sort — the ones here are never touched to make room for it.
 fn compute_attention_items(
     blocked_cells: &[BeeCell],
     read_errors: &[String],
     handoff: Option<&BeeHandoff>,
+    gate_bypass: Option<&str>,
 ) -> Vec<BeeAttentionItem> {
     let mut items = Vec::new();
 
@@ -839,6 +885,17 @@ fn compute_attention_items(
                 suggested_action: "Read the handoff note and decide whether to resume the work or set it aside — the store never marks a note as consumed, so date it yourself.".to_string(),
             });
         }
+    }
+
+    if let Some(level) = gate_bypass {
+        items.push(BeeAttentionItem {
+            severity: BeeAttentionSeverity::Warning,
+            title: format!("Gate bypass recorded as \"{level}\""),
+            detail: format!(
+                "`.bee/config.json` records `gate_bypass: \"{level}\"` — this project's own approval gates are recorded as being auto-approved. This is the recorded setting, not the effective one: a machine-local `.bee/config.local.json` overlay is never read by this board."
+            ),
+            suggested_action: "Confirm this bypass is still intended, and check the machine's own config.local.json for what is actually being enforced there.".to_string(),
+        });
     }
 
     items.sort_by(|a, b| b.severity.cmp(&a.severity));
@@ -930,6 +987,58 @@ fn read_handoff(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> O
             read_errors.push(format!("{}: could not parse ({e})", rel_str(&path, root)));
             None
         }
+    }
+}
+
+/// Read `.bee/config.json` (bbp-9), following [`read_state`]'s convention
+/// exactly: a missing file is silent and normal, while a read or parse
+/// error pushes one line onto `read_errors` and the rest of the snapshot
+/// still reads.
+///
+/// This reader opens `config.json` only — never `config.local.json`, the
+/// machine-local overlay bee itself resolves on top of it. See
+/// [`BeeConfig`] for why: reproducing that resolution here would be
+/// silently wrong on any machine that overlays it.
+fn read_config(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Option<BeeConfig> {
+    let path = bee_dir.join("config.json");
+    if !path.is_file() {
+        // No config.json is a normal, expected shape — silent, not a read
+        // error.
+        return None;
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            read_errors.push(format!("{}: could not read ({e})", rel_str(&path, root)));
+            return None;
+        }
+    };
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(v) => Some(BeeConfig {
+            gate_bypass: normalize_gate_bypass(v.get("gate_bypass")),
+        }),
+        Err(e) => {
+            read_errors.push(format!("{}: could not parse ({e})", rel_str(&path, root)));
+            None
+        }
+    }
+}
+
+/// Normalize `.bee/config.json`'s `gate_bypass` key defensively, because its
+/// value type is not stable across stores (`false` here, `"total"` in the
+/// beehive store). A missing key (`None`, the caller passes
+/// `v.get("gate_bypass")` straight through) and an explicit JSON `false`
+/// both mean off (`None`); a JSON string is carried through verbatim,
+/// whatever bee itself wrote into it; anything else (a bool `true`, a
+/// number, an object, `null`) is carried through as its own JSON text
+/// rather than guessed at or coerced to off — a value this reader does not
+/// recognize is exactly the case where guessing would be the wrong call.
+fn normalize_gate_bypass(v: Option<&Value>) -> Option<String> {
+    match v {
+        None => None,
+        Some(Value::Bool(false)) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(other) => Some(other.to_string()),
     }
 }
 
@@ -3763,8 +3872,9 @@ mod tests {
         // called twice over that same input, standing in for two
         // independent requests against unchanged data.
         let snap = read_snapshot(&root);
-        let first = compute_attention_items(&snap.buckets.stuck, &snap.read_errors, snap.handoff.as_ref());
-        let second = compute_attention_items(&snap.buckets.stuck, &snap.read_errors, snap.handoff.as_ref());
+        let gate_bypass = snap.config.as_ref().and_then(|c| c.gate_bypass.as_deref());
+        let first = compute_attention_items(&snap.buckets.stuck, &snap.read_errors, snap.handoff.as_ref(), gate_bypass);
+        let second = compute_attention_items(&snap.buckets.stuck, &snap.read_errors, snap.handoff.as_ref(), gate_bypass);
 
         assert_eq!(first.len(), 2);
         assert_eq!(first, second, "repeated calls over unchanged data must return the same order");
@@ -3895,6 +4005,159 @@ mod tests {
             snap.attention.iter().any(|i| i.title.contains("parked")),
             "handoff item missing: {:?}",
             snap.attention
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bbp-9: the config.json reader and the gate-bypass rule (D4/D6) ---
+
+    #[test]
+    fn gate_bypass_string_value_is_carried_through_as_itself() {
+        let root = fresh_root("config-bypass-total");
+        write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
+
+        let snap = read_snapshot(&root);
+        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        let config = snap.config.as_ref().expect("config should have been read");
+        assert_eq!(config.gate_bypass.as_deref(), Some("total"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn gate_bypass_false_is_carried_as_off() {
+        let root = fresh_root("config-bypass-false");
+        write(&root, ".bee/config.json", r#"{"gate_bypass": false}"#);
+
+        let snap = read_snapshot(&root);
+        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        let config = snap.config.as_ref().expect("config should have been read");
+        assert!(config.gate_bypass.is_none(), "false must normalize to off: {:?}", config.gate_bypass);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn no_gate_bypass_key_at_all_reads_as_off() {
+        let root = fresh_root("config-bypass-no-key");
+        write(&root, ".bee/config.json", r#"{"some_other_key": true}"#);
+
+        let snap = read_snapshot(&root);
+        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        let config = snap.config.as_ref().expect("config should have been read");
+        assert!(config.gate_bypass.is_none(), "a missing key must normalize to off: {:?}", config.gate_bypass);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn no_config_json_at_all_reads_as_off_and_pushes_no_read_error() {
+        let root = fresh_root("config-absent");
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        // No .bee/config.json written at all.
+
+        let snap = read_snapshot(&root);
+        assert!(snap.config.is_none(), "no config file should mean no config on the snapshot");
+        assert!(snap.read_errors.is_empty(), "an absent config.json must never be a read error: {:?}", snap.read_errors);
+        assert!(
+            snap.attention.is_empty(),
+            "an absent config.json must read as off, no attention item: {:?}",
+            snap.attention
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn malformed_config_json_pushes_exactly_one_read_error_rest_still_reads() {
+        let root = fresh_root("config-malformed");
+        write(&root, ".bee/config.json", "{ this is not valid json");
+        write(&root, ".bee/cells/good.json", &cell_json("good", "open"));
+
+        let snap = read_snapshot(&root);
+        assert!(snap.present);
+        assert!(snap.config.is_none());
+        assert_eq!(snap.buckets.waiting.len(), 1, "the well-formed cell must still parse");
+        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
+        assert!(snap.read_errors.iter().any(|e| e.contains("config.json")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unrecognised_gate_bypass_value_is_carried_through_not_coerced_to_off() {
+        let root = fresh_root("config-bypass-unrecognised");
+        write(&root, ".bee/config.json", r#"{"gate_bypass": true}"#);
+
+        let snap = read_snapshot(&root);
+        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        let config = snap.config.as_ref().expect("config should have been read");
+        assert!(
+            config.gate_bypass.is_some(),
+            "an unrecognised value must be carried through, not coerced to off: {:?}",
+            config.gate_bypass
+        );
+        assert_ne!(config.gate_bypass.as_deref(), Some("false"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn recorded_bypass_not_off_yields_exactly_one_item_naming_the_recorded_level() {
+        let root = fresh_root("attention-bypass-total");
+        write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+
+        let item = &snap.attention[0];
+        assert!(
+            item.title.contains("total") || item.detail.contains("total"),
+            "the item should name the recorded level: {:?}",
+            item
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn recorded_bypass_off_yields_no_item() {
+        let root = fresh_root("attention-bypass-off");
+        write(&root, ".bee/config.json", r#"{"gate_bypass": false}"#);
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+
+        let snap = read_snapshot(&root);
+        assert!(
+            snap.attention.is_empty(),
+            "an off bypass must yield no attention item: {:?}",
+            snap.attention
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn recorded_bypass_item_wording_marks_it_as_recorded_never_as_effective() {
+        let root = fresh_root("attention-bypass-wording");
+        write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+
+        let item = &snap.attention[0];
+        let rendered = format!("{} {} {}", item.title, item.detail, item.suggested_action);
+        assert!(
+            rendered.contains("recorded"),
+            "the wording must mark the value as the recorded setting: {rendered}"
+        );
+        // The wording is allowed to name "effective" only to disclaim it
+        // (this reader's own wording says "not the effective one"); it must
+        // never assert the recorded value as the effective level outright.
+        assert!(
+            !rendered.contains("is the effective level")
+                && !rendered.contains("this is the effective"),
+            "the wording must never assert the recorded value as the effective level: {rendered}"
         );
 
         std::fs::remove_dir_all(&root).ok();
