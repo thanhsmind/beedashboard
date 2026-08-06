@@ -4839,6 +4839,47 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (read-only, bbp-15) The fixture `.bee/` tree is byte-identical after
+    /// a board request whose fixture CONTAINS a populated
+    /// `.bee/reservations.json` — the pre-existing read-only tests each use
+    /// a fixture with no reservations file, so they would pass green
+    /// without the reservations reader ever running. This one exercises
+    /// it: the reader must open the file and parse its array without ever
+    /// writing back to it. No board markup reads `reservations` yet (that
+    /// lands with the process-health panel), so this proves only D4's
+    /// read-only guarantee over the new reader, not any rendering of it.
+    #[tokio::test]
+    async fn board_reading_is_read_only_with_a_populated_reservations_file_present() {
+        let root = fresh_root("reservations-read-only");
+        write(
+            &root,
+            ".bee/reservations.json",
+            r#"{"reservations": [
+                {"agent": "w1", "cell": "c-open", "path": "src/lib.rs", "kind": "lease", "session": "s1", "reserved_at": "2026-08-06T00:00:00.000Z", "released_at": null}
+            ]}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &timed_cell_json("c-open", "reservations-read-only", "open", &[], "w1", "x", "y"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "reservations-read-only");
+        let before = snapshot_tree(&root);
+
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let after = snapshot_tree(&root);
+        assert_eq!(
+            before, after,
+            ".bee/ tree changed after a request whose fixture carries a populated reservations.json"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (happy) bee-board-ux-2 / bbp-11: a finished feature's line in the
     /// Finished section still links to its feature detail page, and an
     /// in-flight feature's phase card links to its feature detail page too

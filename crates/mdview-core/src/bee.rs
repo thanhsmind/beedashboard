@@ -724,6 +724,44 @@ pub struct BeeCaptureQueue {
     pub waiting: usize,
 }
 
+/// One entry from `.bee/reservations.json`'s `reservations` array (bbp-15)
+/// — a file or glob currently locked by one agent while parallel work
+/// runs. Neither live store this reader was verified against holds a
+/// non-empty array (both are `{"reservations": []}`), so every field is
+/// read defensively and carried exactly as the store spells it — no
+/// renaming, no reshaping, and a field the store omits is simply `None`
+/// here rather than guessed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeReservation {
+    pub agent: Option<String>,
+    pub cell: Option<String>,
+    pub path: Option<String>,
+    pub kind: Option<String>,
+    pub session: Option<String>,
+    pub reserved_at: Option<String>,
+    pub released_at: Option<String>,
+}
+
+/// D5's process-health "tier mix" (bbp-15) — how the project's cells are
+/// spread across bee's model-tier dispatch rubric (`extraction` <
+/// `generation` < `ceiling`, cheapest to most expensive; see the
+/// bee-swarming skill's tier rubric). See [`compute_tier_mix`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeTierMix {
+    /// Count per tier value, exactly as cells spell it — not limited to
+    /// the three named tiers above, so a value this reader does not
+    /// recognize is still counted rather than silently dropped.
+    pub counts: std::collections::BTreeMap<String, usize>,
+    /// Cells with no `tier` key at all (or an explicit `null`) — counted
+    /// here, never dropped and never guessed into one of the tier buckets.
+    pub untiered: usize,
+    /// Share (0.0-1.0) of *tiered* cells (`untiered` excluded) whose tier
+    /// is `"ceiling"`, the most expensive tier. `None` when there are zero
+    /// tiered cells to take a share of — a zero-tiered store reports no
+    /// share, never a zero and never a division by zero.
+    pub expensive_tier_share: Option<f64>,
+}
+
 /// A typed snapshot of a project's `.bee/` store at read time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeeSnapshot {
@@ -801,6 +839,17 @@ pub struct BeeSnapshot {
     /// snapshot can place at all — the same `lanes ∪ {active feature}`
     /// union [`compute_phase_board`] already establishes.
     pub scribing_debt: Vec<String>,
+    /// `.bee/reservations.json`'s `reservations` array (bbp-15) — which
+    /// files are locked by which agent right now, a process-health signal:
+    /// work colliding on the same files is why a project slows down. Empty
+    /// is both the normal shape (neither live store this reader was
+    /// verified against holds one) and the fallback for a missing file or
+    /// an unexpected shape — see [`read_reservations`].
+    pub reservations: Vec<BeeReservation>,
+    /// D5's process-health "tier mix" (bbp-15) — see [`BeeTierMix`] and
+    /// [`compute_tier_mix`]. `None` only when this snapshot has no cells
+    /// at all to measure.
+    pub tier_mix: Option<BeeTierMix>,
     /// Human-readable notes naming what could not be read. Every path
     /// mentioned here is relative to the project root.
     pub read_errors: Vec<String>,
@@ -831,6 +880,8 @@ impl BeeSnapshot {
             review: BeeReview::default(),
             capture_queue: BeeCaptureQueue::default(),
             scribing_debt: Vec::new(),
+            reservations: Vec::new(),
+            tier_mix: None,
             read_errors: Vec::new(),
         }
     }
@@ -949,6 +1000,13 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     let capture_queue = read_capture_queue(&bee_dir, root, &mut read_errors);
     let scribing_debt = compute_scribing_debt(&phase_board, &lanes, state.as_ref(), &all_cells);
 
+    // bbp-15: the two process-health signals a manager reads to see whether
+    // parallel work is colliding (reservations) and where token spend is
+    // going (tier mix). Neither reads anything the rest of this function
+    // does not already open, except reservations.json itself.
+    let reservations = read_reservations(&bee_dir, root, &mut read_errors);
+    let tier_mix = compute_tier_mix(&all_cells);
+
     let attention = compute_attention_items(
         &buckets.stuck,
         &read_errors,
@@ -982,6 +1040,8 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         review,
         capture_queue,
         scribing_debt,
+        reservations,
+        tier_mix,
         read_errors,
     }
 }
@@ -1457,6 +1517,61 @@ fn normalize_gate_bypass(v: Option<&Value>) -> Option<String> {
         Some(Value::String(s)) => Some(s.clone()),
         Some(other) => Some(other.to_string()),
     }
+}
+
+/// Read `.bee/reservations.json` (bbp-15), following [`read_state`]'s
+/// convention exactly: a missing file is silent and normal, a read or
+/// parse error pushes one line onto `read_errors` and the rest of the
+/// snapshot still reads. The file's own top-level shape is
+/// `{"reservations": [...]}`; when that key is absent or is not itself a
+/// JSON array — a shape this reader has not observed on either live store
+/// it was verified against — the reservation list reads as empty rather
+/// than as an error, exactly like [`read_state`]'s handling of
+/// `workers[]`.
+fn read_reservations(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Vec<BeeReservation> {
+    let path = bee_dir.join("reservations.json");
+    if !path.is_file() {
+        // No reservations.json is the normal, expected shape (both live
+        // stores this reader was verified against hold none) — silent,
+        // not a read error.
+        return Vec::new();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            read_errors.push(format!("{}: could not read ({e})", rel_str(&path, root)));
+            return Vec::new();
+        }
+    };
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(v) => v
+            .get("reservations")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(parse_reservation).collect())
+            .unwrap_or_default(),
+        Err(e) => {
+            read_errors.push(format!("{}: could not parse ({e})", rel_str(&path, root)));
+            Vec::new()
+        }
+    }
+}
+
+/// Parse one `.bee/reservations.json` `reservations[]` entry. Every field
+/// is carried exactly as the store spells it (no renaming, no reshaping) —
+/// see [`BeeReservation`]. An array element that is not a JSON object
+/// carries nothing to read and is skipped rather than turned into a row of
+/// all-`None` fields.
+fn parse_reservation(v: &Value) -> Option<BeeReservation> {
+    v.as_object()?;
+    Some(BeeReservation {
+        agent: v.get("agent").and_then(Value::as_str).map(String::from),
+        cell: v.get("cell").and_then(Value::as_str).map(String::from),
+        path: v.get("path").and_then(Value::as_str).map(String::from),
+        kind: v.get("kind").and_then(Value::as_str).map(String::from),
+        session: v.get("session").and_then(Value::as_str).map(String::from),
+        reserved_at: v.get("reserved_at").and_then(Value::as_str).map(String::from),
+        released_at: v.get("released_at").and_then(Value::as_str).map(String::from),
+    })
 }
 
 /// Parse one `state.json` `workers[]` entry. `nickname` missing or
@@ -2719,6 +2834,31 @@ fn compute_scribing_debt(
         }
     }
     debt
+}
+
+/// Pure derivation over already-read cells (bbp-15) — see [`BeeTierMix`].
+/// `None` only when there are no cells at all to measure; an empty store
+/// reports absence, never a zeroed-out mix presented as a measurement.
+fn compute_tier_mix(all_cells: &[BeeCell]) -> Option<BeeTierMix> {
+    if all_cells.is_empty() {
+        return None;
+    }
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut untiered = 0usize;
+    for cell in all_cells {
+        match cell.tier.as_deref() {
+            Some(t) => *counts.entry(t.to_string()).or_insert(0) += 1,
+            None => untiered += 1,
+        }
+    }
+    let tiered_total: usize = counts.values().sum();
+    let expensive_tier_share = if tiered_total == 0 {
+        None
+    } else {
+        let expensive = counts.get("ceiling").copied().unwrap_or(0);
+        Some(expensive as f64 / tiered_total as f64)
+    };
+    Some(BeeTierMix { counts, untiered, expensive_tier_share })
 }
 
 #[cfg(test)]
@@ -5851,6 +5991,207 @@ mod tests {
 
         let snap = read_snapshot(&root);
         assert!(snap.attention.is_empty(), "a clean store must yield no attention items: {:?}", snap.attention);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bbp-15: reservations (D4) ---
+
+    #[test]
+    fn no_reservations_json_at_all_is_silent_no_read_error() {
+        let root = fresh_root("reservations-absent");
+        // No .bee/reservations.json written — both live stores this reader
+        // was verified against hold no such non-empty file either way.
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+
+        let snap = read_snapshot(&root);
+        assert!(snap.reservations.is_empty(), "no reservations file should mean no reservations on the snapshot");
+        assert!(
+            snap.read_errors.is_empty(),
+            "an absent reservations.json must never be a read error: {:?}",
+            snap.read_errors
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn empty_reservations_array_reads_as_empty() {
+        let root = fresh_root("reservations-empty");
+        write(&root, ".bee/reservations.json", r#"{"reservations": []}"#);
+
+        let snap = read_snapshot(&root);
+        assert!(snap.reservations.is_empty());
+        assert!(snap.read_errors.is_empty(), "an empty array is not a read error: {:?}", snap.read_errors);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn populated_reservations_array_carries_every_entry() {
+        let root = fresh_root("reservations-populated");
+        write(
+            &root,
+            ".bee/reservations.json",
+            r#"{"reservations": [
+                {"agent": "healthread", "cell": "bbp-15", "path": "crates/mdview-core/src/bee.rs", "kind": "lease", "session": "s1", "reserved_at": "2026-08-06T17:29:44.227Z", "released_at": null},
+                {"agent": "otheragent", "cell": "bbp-14", "path": "crates/mdview/src/server.rs", "kind": "intent", "session": "s2", "reserved_at": "2026-08-06T10:00:00.000Z", "released_at": "2026-08-06T11:00:00.000Z"}
+            ]}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.reservations.len(), 2, "both entries should be carried: {:?}", snap.reservations);
+        let first = &snap.reservations[0];
+        assert_eq!(first.agent.as_deref(), Some("healthread"));
+        assert_eq!(first.cell.as_deref(), Some("bbp-15"));
+        assert_eq!(first.path.as_deref(), Some("crates/mdview-core/src/bee.rs"));
+        assert_eq!(first.kind.as_deref(), Some("lease"));
+        assert_eq!(first.session.as_deref(), Some("s1"));
+        assert_eq!(first.reserved_at.as_deref(), Some("2026-08-06T17:29:44.227Z"));
+        assert!(first.released_at.is_none());
+        let second = &snap.reservations[1];
+        assert_eq!(second.agent.as_deref(), Some("otheragent"));
+        assert_eq!(second.released_at.as_deref(), Some("2026-08-06T11:00:00.000Z"));
+        assert!(snap.read_errors.is_empty());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn malformed_reservations_json_pushes_exactly_one_read_error_rest_still_reads() {
+        let root = fresh_root("reservations-malformed");
+        write(&root, ".bee/reservations.json", "{ this is not valid json");
+        write(&root, ".bee/cells/good.json", &cell_json("good", "open"));
+
+        let snap = read_snapshot(&root);
+        assert!(snap.present);
+        assert!(snap.reservations.is_empty());
+        assert_eq!(snap.buckets.waiting.len(), 1, "the well-formed cell must still parse");
+        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
+        assert!(snap.read_errors.iter().any(|e| e.contains("reservations.json")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn reservations_unexpected_shape_reads_as_absent_not_an_error() {
+        let root = fresh_root("reservations-unexpected-shape");
+        // An object where an array belongs — valid JSON, wrong shape.
+        write(&root, ".bee/reservations.json", r#"{"reservations": {"not": "an array"}}"#);
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+
+        let snap = read_snapshot(&root);
+        assert!(snap.reservations.is_empty(), "an unexpected shape should read as absent");
+        assert!(
+            snap.read_errors.is_empty(),
+            "an unexpected shape must never be a read error: {:?}",
+            snap.read_errors
+        );
+        assert_eq!(snap.buckets.waiting.len(), 1, "the rest of the snapshot still reads");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bbp-15: tier mix ---
+
+    fn cell_json_with_tier(id: &str, status: &str, tier: Option<&str>) -> String {
+        let tier_field = match tier {
+            Some(t) => format!(r#""{t}""#),
+            None => "null".to_string(),
+        };
+        format!(
+            r#"{{
+                "id": "{id}",
+                "feature": "demo",
+                "lane": "standard",
+                "title": "Cell {id}",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {{}},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "{status}",
+                "tier": {tier_field},
+                "trace": {{"worker": "w1"}}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn tier_mix_across_tiers_reports_counts_and_expensive_share() {
+        let root = fresh_root("tier-mix-across");
+        write(&root, ".bee/cells/c1.json", &cell_json_with_tier("c1", "capped", Some("extraction")));
+        write(&root, ".bee/cells/c2.json", &cell_json_with_tier("c2", "capped", Some("generation")));
+        write(&root, ".bee/cells/c3.json", &cell_json_with_tier("c3", "capped", Some("generation")));
+        write(&root, ".bee/cells/c4.json", &cell_json_with_tier("c4", "capped", Some("ceiling")));
+
+        let snap = read_snapshot(&root);
+        let mix = snap.tier_mix.as_ref().expect("four cells should yield a tier mix");
+        assert_eq!(mix.counts.get("extraction").copied(), Some(1));
+        assert_eq!(mix.counts.get("generation").copied(), Some(2));
+        assert_eq!(mix.counts.get("ceiling").copied(), Some(1));
+        assert_eq!(mix.untiered, 0);
+        assert_eq!(
+            mix.expensive_tier_share,
+            Some(0.25),
+            "1 of 4 tiered cells ran at the most expensive tier: {:?}",
+            mix.expensive_tier_share
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn tier_mix_counts_cells_with_no_tier_as_untiered_never_dropped_never_guessed() {
+        let root = fresh_root("tier-mix-untiered");
+        write(&root, ".bee/cells/c1.json", &cell_json_with_tier("c1", "capped", Some("generation")));
+        write(&root, ".bee/cells/c2.json", &cell_json_with_tier("c2", "capped", None));
+
+        let snap = read_snapshot(&root);
+        let mix = snap.tier_mix.as_ref().expect("two cells should yield a tier mix");
+        assert_eq!(mix.untiered, 1, "the tier-less cell must be counted, not dropped: {mix:?}");
+        assert_eq!(mix.counts.values().sum::<usize>(), 1, "the untiered cell must never be guessed into a bucket");
+        assert_eq!(mix.expensive_tier_share, Some(0.0), "0 of 1 tiered cells ran at the most expensive tier");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn tier_mix_zero_tiered_cells_reports_no_share() {
+        let root = fresh_root("tier-mix-zero-tiered");
+        write(&root, ".bee/cells/c1.json", &cell_json_with_tier("c1", "capped", None));
+        write(&root, ".bee/cells/c2.json", &cell_json_with_tier("c2", "capped", None));
+
+        let snap = read_snapshot(&root);
+        let mix = snap.tier_mix.as_ref().expect("two untiered cells should still yield a tier mix");
+        assert_eq!(mix.untiered, 2);
+        assert!(mix.counts.is_empty());
+        assert!(
+            mix.expensive_tier_share.is_none(),
+            "zero tiered cells must report no share, never a zero or a division by zero: {:?}",
+            mix.expensive_tier_share
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn tier_mix_empty_cell_store_reports_nothing() {
+        let root = fresh_root("tier-mix-empty-store");
+        write(&root, ".bee/state.json", r#"{"phase":"exploring"}"#);
+        // No cells at all.
+
+        let snap = read_snapshot(&root);
+        assert!(
+            snap.tier_mix.is_none(),
+            "an empty cell store must report nothing rather than zeros: {:?}",
+            snap.tier_mix
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
