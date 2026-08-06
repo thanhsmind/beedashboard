@@ -428,7 +428,12 @@ pub struct BeeSession {
 }
 
 /// One `.bee/lanes/<feature>.json` per-feature lane record, mirroring the
-/// subset of `.bee/state.json` the cockpit already shows.
+/// subset of `.bee/state.json` the cockpit already shows. A lane record is a
+/// full parallel copy of its feature's state, not a stub — it carries its
+/// own `approved_gates` and `created_at` exactly as `.bee/state.json` does
+/// for the globally active feature, so the by-phase board (bbp-10) can place
+/// a feature's gates and age from its own record rather than borrowing the
+/// active feature's.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeeLane {
     pub feature: String,
@@ -437,6 +442,15 @@ pub struct BeeLane {
     /// Free text, not a path field — scrubbed of any embedded absolute path
     /// before it reaches this struct; see [`scrub_paths`].
     pub next_action: Option<String>,
+    /// This lane's own `approved_gates`. `None` when the file never carried
+    /// the key — never fabricated as "all false". See
+    /// [`BeeState::approved_gates`] for the same shape on the active
+    /// feature.
+    pub approved_gates: Option<BeeApprovedGates>,
+    /// This lane's own `created_at`, verbatim. `.bee/state.json` carries no
+    /// equivalent field for the active feature, so a placement built from
+    /// `state.json` alone (bbp-10) always reports `None` here.
+    pub created_at: Option<String>,
 }
 
 /// One `.bee/runtime/workspaces/<id>.json` worktree/workspace record.
@@ -565,6 +579,55 @@ pub struct BeeAttentionItem {
     pub suggested_action: String,
 }
 
+/// Per-feature cell counts by D7 status, for one [`BeeFeaturePhase`].
+/// `dropped` cells and any unrecognized status count toward none of these
+/// fields and never toward `total` (D8) — a feature whose cells are all
+/// dropped reports zero everywhere here, honestly, rather than reading as
+/// complete or dividing by an empty denominator.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BeeFeatureCellCounts {
+    /// `status == "claimed"`.
+    pub doing: usize,
+    /// `status == "open"`.
+    pub waiting: usize,
+    /// `status == "blocked"`.
+    pub stuck: usize,
+    /// `status == "capped"`.
+    pub done: usize,
+    /// `doing + waiting + stuck + done` — the only denominator this
+    /// feature's counts are ever divided by. Never includes `dropped` or an
+    /// unrecognized status (D8).
+    pub total: usize,
+    /// `done / total`, when `total > 0`. `None` — never a guessed `0.0` —
+    /// when there is nothing to measure, whether because the feature has no
+    /// cells at all or because every one of its cells is `dropped` (D8).
+    pub done_fraction: Option<f64>,
+}
+
+/// One feature placed on its phase (bbp-10, D5's by-phase board), replacing
+/// "what cell state" with "what feature, how far along". Produced by
+/// [`compute_phase_board`] over data this snapshot already read — see that
+/// function for the union rule that decides which features appear here and
+/// where each one's `phase`/`approved_gates`/`next_action`/`created_at` come
+/// from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeFeaturePhase {
+    pub feature: String,
+    pub phase: Option<String>,
+    pub mode: Option<String>,
+    pub approved_gates: Option<BeeApprovedGates>,
+    /// Free text, not a path field — already scrubbed of any embedded
+    /// absolute path by the source it was read from ([`BeeLane::next_action`]
+    /// or [`BeeState::next_action`], both already scrubbed at their own read
+    /// site).
+    pub next_action: Option<String>,
+    /// `None` when this placement's phase/gates were sourced from
+    /// `.bee/state.json` rather than a lane record — `state.json` carries no
+    /// equivalent field for the globally active feature.
+    pub created_at: Option<String>,
+    pub cell_counts: BeeFeatureCellCounts,
+}
+
 /// A typed snapshot of a project's `.bee/` store at read time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeeSnapshot {
@@ -587,6 +650,11 @@ pub struct BeeSnapshot {
     pub sessions: Vec<BeeSession>,
     /// `.bee/lanes/*.json`, empty when the directory is absent (Slice 2).
     pub lanes: Vec<BeeLane>,
+    /// D5's by-phase board (bbp-10) — every feature the store knows on its
+    /// phase, with its own gates and its own cell counts. See
+    /// [`compute_phase_board`] for the union rule over `lanes` and the
+    /// globally active feature.
+    pub phase_board: Vec<BeeFeaturePhase>,
     /// `.bee/runtime/workspaces/*.json` (Slice 2).
     pub workspaces: Vec<BeeWorkspace>,
     /// `.bee/decisions.jsonl`, bounded (Slice 2).
@@ -633,6 +701,7 @@ impl BeeSnapshot {
             backlog: BeeBacklog::default(),
             sessions: Vec::new(),
             lanes: Vec::new(),
+            phase_board: Vec::new(),
             workspaces: Vec::new(),
             decisions: BeeDecisions::default(),
             worktrees: Vec::new(),
@@ -720,6 +789,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     let now = time::OffsetDateTime::now_utc();
     let sessions = read_sessions(&bee_dir, root, now, &mut read_errors);
     let lanes = read_lanes(&bee_dir, root, &mut read_errors);
+    let phase_board = compute_phase_board(&lanes, state.as_ref(), &all_cells);
     let workspaces = read_workspaces(&bee_dir, root, &mut read_errors);
     let decisions = read_decisions(&bee_dir, root, &mut read_errors);
     let worktrees = read_worktrees(root, &workspaces, now, &mut read_errors);
@@ -745,6 +815,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         backlog,
         sessions,
         lanes,
+        phase_board,
         workspaces,
         decisions,
         worktrees,
@@ -798,6 +869,108 @@ fn compute_running_workers(
         });
     }
     out
+}
+
+/// Place every feature the store knows on its phase (bbp-10, D5's by-phase
+/// board), in the shape [`compute_running_workers`] establishes: pure, no
+/// I/O, no clock of its own, over data this snapshot already read.
+///
+/// **The feature set is the UNION of `lanes` and the globally active
+/// feature named in `state.feature`** — never the lane list alone. bee's own
+/// active feature commonly has no lane file of its own (a lane record is
+/// only written once a feature is routed onto a lane other than the default
+/// pipeline), so a board built from `.bee/lanes/` alone would silently omit
+/// the one feature actually being worked on. Equally, a store with no
+/// `.bee/lanes/` directory at all — every project until it grows a second
+/// concurrent feature — must still place its one active feature correctly:
+/// `lanes` is simply empty then, and the union degrades to the singleton
+/// `{state.feature}`.
+///
+/// A feature present in both `lanes` and as the active feature is placed
+/// **exactly once**: its own lane record wins for `phase`/`approved_gates`/
+/// `next_action`/`created_at`, because the lane record is the fuller,
+/// feature-specific source — `state.json`'s view of that same feature is
+/// used only as a fallback, for the active feature when it has no lane
+/// record of its own. `created_at` has no equivalent field in `state.json`,
+/// so a placement sourced from `state.json` alone always reports `None`
+/// there.
+///
+/// `cell_counts` is a pure function of `all_cells` filtered to the
+/// placement's own feature name, bucketed exactly as D7 buckets the live
+/// cell set: `dropped` and any unrecognized status count toward no bucket,
+/// no `total`, and no `done_fraction` denominator (D8) — a feature whose
+/// cells are all dropped reports zero counts and a `None` fraction, never a
+/// completed-looking `1.0` and never a division by zero. A feature with no
+/// cells at all reports the same honest zero.
+fn compute_phase_board(
+    lanes: &[BeeLane],
+    state: Option<&BeeState>,
+    all_cells: &[BeeCell],
+) -> Vec<BeeFeaturePhase> {
+    let mut order: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for lane in lanes {
+        if seen.insert(lane.feature.as_str()) {
+            order.push(lane.feature.clone());
+        }
+    }
+    if let Some(active) = state.and_then(|s| s.feature.as_deref()) {
+        if seen.insert(active) {
+            order.push(active.to_string());
+        }
+    }
+
+    order
+        .into_iter()
+        .map(|feature| {
+            let lane = lanes.iter().find(|l| l.feature == feature);
+            let (phase, mode, approved_gates, next_action, created_at) = match lane {
+                Some(l) => (
+                    l.phase.clone(),
+                    l.mode.clone(),
+                    l.approved_gates.clone(),
+                    l.next_action.clone(),
+                    l.created_at.clone(),
+                ),
+                None => {
+                    // Only reached for the active feature when it carries no
+                    // lane record of its own.
+                    let s = state.filter(|s| s.feature.as_deref() == Some(feature.as_str()));
+                    (
+                        s.and_then(|s| s.phase.clone()),
+                        s.and_then(|s| s.mode.clone()),
+                        s.and_then(|s| s.approved_gates.clone()),
+                        s.and_then(|s| s.next_action.clone()),
+                        None,
+                    )
+                }
+            };
+            let cell_counts = compute_feature_cell_counts(&feature, all_cells);
+            BeeFeaturePhase { feature, phase, mode, approved_gates, next_action, created_at, cell_counts }
+        })
+        .collect()
+}
+
+/// D7-style cell counts for one feature (bbp-10): every non-dropped,
+/// recognized-status cell whose `feature` matches, bucketed exactly as
+/// [`read_snapshot`]'s own D7 buckets are. `dropped` and any unrecognized
+/// status contribute to nothing here, including `total` (D8).
+fn compute_feature_cell_counts(feature: &str, all_cells: &[BeeCell]) -> BeeFeatureCellCounts {
+    let mut counts = BeeFeatureCellCounts::default();
+    for cell in all_cells.iter().filter(|c| c.feature == feature) {
+        match cell.status.as_str() {
+            "claimed" => counts.doing += 1,
+            "open" => counts.waiting += 1,
+            "blocked" => counts.stuck += 1,
+            "capped" => counts.done += 1,
+            // "dropped" and any unrecognized status: no bucket, no total (D8).
+            _ => {}
+        }
+    }
+    counts.total = counts.doing + counts.waiting + counts.stuck + counts.done;
+    counts.done_fraction = if counts.total > 0 { Some(counts.done as f64 / counts.total as f64) } else { None };
+    counts
 }
 
 /// Generate D6's "needs attention" list over data this snapshot already
@@ -926,12 +1099,7 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
                 .and_then(Value::as_array)
                 .map(|arr| arr.iter().filter_map(parse_worker).collect())
                 .unwrap_or_default(),
-            approved_gates: v.get("approved_gates").and_then(Value::as_object).map(|g| BeeApprovedGates {
-                context: g.get("context").and_then(Value::as_bool),
-                shape: g.get("shape").and_then(Value::as_bool),
-                execution: g.get("execution").and_then(Value::as_bool),
-                review: g.get("review").and_then(Value::as_bool),
-            }),
+            approved_gates: parse_approved_gates(&v),
             gate_revoked_at: v.get("gate_revoked_at").and_then(Value::as_object).map(|g| BeeGateRevocations {
                 context: g.get("context").and_then(Value::as_str).map(String::from),
                 shape: g.get("shape").and_then(Value::as_str).map(String::from),
@@ -957,6 +1125,20 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
             None
         }
     }
+}
+
+/// Parse an `approved_gates` object shared by `.bee/state.json` and every
+/// `.bee/lanes/<feature>.json` record (bbp-10) — the same four gate names,
+/// each independently optional, never fabricated as `false` when the key is
+/// absent. Factored out so `read_state` and `parse_lane` never drift apart
+/// on this shape.
+fn parse_approved_gates(v: &Value) -> Option<BeeApprovedGates> {
+    v.get("approved_gates").and_then(Value::as_object).map(|g| BeeApprovedGates {
+        context: g.get("context").and_then(Value::as_bool),
+        shape: g.get("shape").and_then(Value::as_bool),
+        execution: g.get("execution").and_then(Value::as_bool),
+        review: g.get("review").and_then(Value::as_bool),
+    })
 }
 
 /// Read `.bee/HANDOFF.json` (bbp-8), following [`read_state`]'s convention
@@ -1335,8 +1517,10 @@ fn parse_lane(path: &Path, root: &Path) -> Result<BeeLane, String> {
         .get("next_action")
         .and_then(Value::as_str)
         .map(|s| scrub_paths(s, root));
+    let approved_gates = parse_approved_gates(&v);
+    let created_at = v.get("created_at").and_then(Value::as_str).map(String::from);
 
-    Ok(BeeLane { feature, phase, mode, next_action })
+    Ok(BeeLane { feature, phase, mode, next_action, approved_gates, created_at })
 }
 
 /// Read `.bee/runtime/workspaces/*.json` (D4). Absent yields an empty list.
@@ -4159,6 +4343,257 @@ mod tests {
                 && !rendered.contains("this is the effective"),
             "the wording must never assert the recorded value as the effective level: {rendered}"
         );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bbp-10: the by-phase board — union of lanes and the active
+    // feature, per-feature gates/created_at, per-feature cell counts (D8) ---
+
+    #[test]
+    fn lane_carries_its_own_approved_gates_and_created_at() {
+        let root = fresh_root("phase-board-lane-gates");
+        write(
+            &root,
+            ".bee/lanes/demo.json",
+            r#"{"feature":"demo","phase":"swarming","mode":"standard","next_action":"go",
+                "approved_gates":{"context":true,"shape":true,"execution":false,"review":false},
+                "created_at":"2026-08-01T00:00:00.000Z"}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.lanes.len(), 1);
+        let lane = &snap.lanes[0];
+        let gates = lane.approved_gates.as_ref().expect("a lane's own approved_gates should be Some");
+        assert_eq!(gates.context, Some(true));
+        assert_eq!(gates.shape, Some(true));
+        assert_eq!(gates.execution, Some(false));
+        assert_eq!(gates.review, Some(false));
+        assert_eq!(lane.created_at.as_deref(), Some("2026-08-01T00:00:00.000Z"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn lane_with_no_gates_or_created_at_reads_as_none_not_fabricated() {
+        let root = fresh_root("phase-board-lane-no-gates");
+        write(&root, ".bee/lanes/demo.json", r#"{"feature":"demo","phase":"swarming","mode":"standard"}"#);
+
+        let snap = read_snapshot(&root);
+        let lane = &snap.lanes[0];
+        assert!(lane.approved_gates.is_none(), "absent approved_gates must be None, never fabricated");
+        assert!(lane.created_at.is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn phase_board_is_the_union_of_lanes_and_the_distinct_active_feature() {
+        let root = fresh_root("phase-board-union");
+        write(&root, ".bee/state.json", r#"{"phase":"exploring","feature":"active-feature","mode":"standard"}"#);
+        write(&root, ".bee/lanes/alpha.json", r#"{"feature":"alpha","phase":"swarming","mode":"standard"}"#);
+        write(
+            &root,
+            ".bee/lanes/beta.json",
+            r#"{"feature":"beta","phase":"compounding-complete","mode":"small"}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(
+            snap.phase_board.len(),
+            3,
+            "the union of two lanes plus a distinct active feature is three: {:?}",
+            snap.phase_board
+        );
+        let active_count = snap.phase_board.iter().filter(|p| p.feature == "active-feature").count();
+        assert_eq!(active_count, 1, "the active feature must appear exactly once: {:?}", snap.phase_board);
+        let active = snap.phase_board.iter().find(|p| p.feature == "active-feature").unwrap();
+        assert_eq!(
+            active.phase.as_deref(),
+            Some("exploring"),
+            "the active feature with no lane record must take its phase from state.json"
+        );
+        assert!(snap.phase_board.iter().any(|p| p.feature == "alpha" && p.phase.as_deref() == Some("swarming")));
+        assert!(
+            snap.phase_board
+                .iter()
+                .any(|p| p.feature == "beta" && p.phase.as_deref() == Some("compounding-complete"))
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn phase_board_active_feature_with_its_own_lane_appears_once_lane_wins() {
+        let root = fresh_root("phase-board-dedup");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"phase":"exploring","feature":"demo","mode":"standard",
+                "approved_gates":{"context":true,"shape":false,"execution":false,"review":false}}"#,
+        );
+        write(
+            &root,
+            ".bee/lanes/demo.json",
+            r#"{"feature":"demo","phase":"swarming","mode":"standard",
+                "approved_gates":{"context":true,"shape":true,"execution":true,"review":false},
+                "created_at":"2026-08-01T00:00:00.000Z"}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(
+            snap.phase_board.len(),
+            1,
+            "the active feature that also has a lane record must appear exactly once: {:?}",
+            snap.phase_board
+        );
+        let entry = &snap.phase_board[0];
+        assert_eq!(
+            entry.phase.as_deref(),
+            Some("swarming"),
+            "the lane record must win for phase, not state.json's \"exploring\""
+        );
+        let gates = entry.approved_gates.as_ref().expect("gates should be Some");
+        assert_eq!(gates.shape, Some(true), "the lane record must win for its own gates too");
+        assert_eq!(entry.created_at.as_deref(), Some("2026-08-01T00:00:00.000Z"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn phase_board_with_no_lanes_directory_places_the_one_active_feature() {
+        let root = fresh_root("phase-board-no-lanes-dir");
+        write(&root, ".bee/state.json", r#"{"phase":"swarming","feature":"solo","mode":"standard"}"#);
+
+        let snap = read_snapshot(&root);
+        assert!(snap.lanes.is_empty(), "no .bee/lanes/ directory at all: {:?}", snap.lanes);
+        assert_eq!(
+            snap.phase_board.len(),
+            1,
+            "a store with no lanes at all must still place its one active feature: {:?}",
+            snap.phase_board
+        );
+        assert_eq!(snap.phase_board[0].feature, "solo");
+        assert_eq!(snap.phase_board[0].phase.as_deref(), Some("swarming"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn phase_board_lane_with_no_cells_reports_zero_counts_no_division_by_zero() {
+        let root = fresh_root("phase-board-empty-cells");
+        write(&root, ".bee/lanes/idle.json", r#"{"feature":"idle","phase":"swarming","mode":"standard"}"#);
+
+        let snap = read_snapshot(&root);
+        let entry = snap.phase_board.iter().find(|p| p.feature == "idle").unwrap();
+        assert_eq!(entry.cell_counts.total, 0);
+        assert_eq!(entry.cell_counts.done, 0);
+        assert!(
+            entry.cell_counts.done_fraction.is_none(),
+            "no cells means no measurement, never a guessed 0.0: {:?}",
+            entry.cell_counts
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn phase_board_feature_with_only_dropped_cells_reports_no_completion_no_division_artifact() {
+        let root = fresh_root("phase-board-all-dropped");
+        write(&root, ".bee/lanes/gone.json", r#"{"feature":"gone","phase":"swarming","mode":"standard"}"#);
+        write(&root, ".bee/cells/c1.json", &feature_cell_json("c1", "gone", "dropped", None, None));
+        write(&root, ".bee/cells/c2.json", &feature_cell_json("c2", "gone", "dropped", None, None));
+
+        let snap = read_snapshot(&root);
+        let entry = snap.phase_board.iter().find(|p| p.feature == "gone").unwrap();
+        assert_eq!(entry.cell_counts.total, 0, "all-dropped cells count toward no total (D8): {:?}", entry.cell_counts);
+        assert_eq!(entry.cell_counts.done, 0, "all-dropped must not read as completed work: {:?}", entry.cell_counts);
+        assert!(
+            entry.cell_counts.done_fraction.is_none(),
+            "an all-dropped feature must not read as complete, and must not divide by zero (D8): {:?}",
+            entry.cell_counts
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn phase_board_counts_mixed_statuses_correctly_excluding_dropped() {
+        let root = fresh_root("phase-board-mixed");
+        write(&root, ".bee/lanes/mixed.json", r#"{"feature":"mixed","phase":"swarming","mode":"standard"}"#);
+        write(&root, ".bee/cells/c1.json", &feature_cell_json("c1", "mixed", "claimed", None, None));
+        write(&root, ".bee/cells/c2.json", &feature_cell_json("c2", "mixed", "open", None, None));
+        write(&root, ".bee/cells/c3.json", &feature_cell_json("c3", "mixed", "blocked", None, None));
+        write(
+            &root,
+            ".bee/cells/c4.json",
+            &feature_cell_json("c4", "mixed", "capped", Some("2026-08-01T00:00:00.000Z"), Some("2026-08-01T01:00:00.000Z")),
+        );
+        write(&root, ".bee/cells/c5.json", &feature_cell_json("c5", "mixed", "dropped", None, None));
+
+        let snap = read_snapshot(&root);
+        let entry = snap.phase_board.iter().find(|p| p.feature == "mixed").unwrap();
+        assert_eq!(entry.cell_counts.doing, 1);
+        assert_eq!(entry.cell_counts.waiting, 1);
+        assert_eq!(entry.cell_counts.stuck, 1);
+        assert_eq!(entry.cell_counts.done, 1);
+        assert_eq!(entry.cell_counts.total, 4, "the dropped cell must not count toward the total (D8)");
+        let frac = entry.cell_counts.done_fraction.expect("total > 0 should yield Some fraction");
+        assert!((frac - 0.25).abs() < 1e-9, "done_fraction: {frac}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn phase_board_malformed_lane_pushes_one_read_error_other_lanes_still_read() {
+        let root = fresh_root("phase-board-malformed-lane");
+        write(&root, ".bee/lanes/bad.json", "{ this is not valid json");
+        write(&root, ".bee/lanes/good.json", r#"{"feature":"good","phase":"swarming","mode":"standard"}"#);
+
+        let snap = read_snapshot(&root);
+        assert_eq!(
+            snap.lanes.len(),
+            1,
+            "the malformed lane must not stop the good one from reading: {:?}",
+            snap.lanes
+        );
+        assert_eq!(snap.lanes[0].feature, "good");
+        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
+        assert!(snap.read_errors.iter().any(|e| e.contains("bad.json")));
+        let features: Vec<&str> = snap.phase_board.iter().map(|p| p.feature.as_str()).collect();
+        assert_eq!(
+            features,
+            vec!["good"],
+            "the phase board must reflect only the successfully-read lane: {:?}",
+            features
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn phase_board_lane_next_action_absolute_path_does_not_survive_onto_snapshot() {
+        let root = fresh_root("phase-board-scrub");
+        let root_str = root.to_string_lossy().into_owned();
+        let secret = root.join("secret.txt").to_string_lossy().into_owned();
+        let next_action = format!("Check {secret} for the next step.").replace('\\', "\\\\");
+        write(
+            &root,
+            ".bee/lanes/leaky.json",
+            &format!(r#"{{"feature":"leaky","phase":"swarming","mode":"standard","next_action":"{next_action}"}}"#),
+        );
+
+        let snap = read_snapshot(&root);
+        let entry = snap.phase_board.iter().find(|p| p.feature == "leaky").unwrap();
+        let rendered_next_action = entry.next_action.as_deref().unwrap_or("");
+        assert!(
+            !rendered_next_action.contains(&root_str),
+            "absolute path leaked into the phase board's next_action: {rendered_next_action}"
+        );
+        assert!(rendered_next_action.contains("next step"), "surrounding words must survive: {rendered_next_action}");
+
+        let serialized = serde_json::to_string(&snap).unwrap();
+        assert!(!serialized.contains(&root_str), "absolute path leaked into the snapshot: {serialized}");
 
         std::fs::remove_dir_all(&root).ok();
     }

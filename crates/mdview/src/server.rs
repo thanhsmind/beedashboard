@@ -2924,9 +2924,28 @@ mod bee_route_tests {
         )
     }
 
-    fn lane_json(feature: &str, phase: &str, mode: &str, next_action: &str) -> String {
+    /// A `.bee/lanes/<feature>.json` fixture. `approved_gates` takes a raw
+    /// JSON object body (e.g. `Some(r#""context": true, "shape": true"#)`)
+    /// so a caller can express exactly the gates it needs; `None` for either
+    /// optional param omits the key entirely, matching a lane record that
+    /// never carried it (bbp-10: a lane record carries its own
+    /// `approved_gates` and `created_at`, not just `feature`/`phase`/`mode`/
+    /// `next_action` — this builder must be able to express both).
+    fn lane_json(
+        feature: &str,
+        phase: &str,
+        mode: &str,
+        next_action: &str,
+        approved_gates: Option<&str>,
+        created_at: Option<&str>,
+    ) -> String {
+        let gates_field = approved_gates
+            .map(|g| format!(r#", "approved_gates": {{{g}}}"#))
+            .unwrap_or_default();
+        let created_at_field =
+            created_at.map(|c| format!(r#", "created_at": "{c}""#)).unwrap_or_default();
         format!(
-            r#"{{"feature": "{feature}", "phase": "{phase}", "mode": "{mode}", "next_action": "{next_action}"}}"#
+            r#"{{"feature": "{feature}", "phase": "{phase}", "mode": "{mode}", "next_action": "{next_action}"{gates_field}{created_at_field}}}"#
         )
     }
 
@@ -2981,7 +3000,7 @@ mod bee_route_tests {
             ".bee/sessions/stale.json",
             &session_json("sess-stale", &rfc3339_minutes_ago(120), "/home/x/transcript-stale.json", "ws-2", "codex"),
         );
-        write(&root, ".bee/lanes/demo.json", &lane_json("demo", "swarming", "standard", "run tests"));
+        write(&root, ".bee/lanes/demo.json", &lane_json("demo", "swarming", "standard", "run tests", None, None));
         write(
             &root,
             ".bee/runtime/workspaces/ws-1.json",
@@ -3130,7 +3149,7 @@ mod bee_route_tests {
             ".bee/sessions/a.json",
             &session_json("sess-a", &rfc3339_minutes_ago(2), "/home/x/t.json", "ws-1", "claude"),
         );
-        write(&root, ".bee/lanes/demo.json", &lane_json("demo", "swarming", "standard", "run tests"));
+        write(&root, ".bee/lanes/demo.json", &lane_json("demo", "swarming", "standard", "run tests", None, None));
         write(
             &root,
             ".bee/runtime/workspaces/ws-1.json",
