@@ -1417,14 +1417,25 @@ fn to_forward_slashes(p: &Path) -> String {
 /// only inspects the leading component, so it would also fire on a
 /// sentence that merely *starts* with a path — the same gap this function
 /// exists to close, just moved to the front of the string.) Otherwise,
-/// every maximal non-whitespace run in `s` that is itself absolute is
-/// reduced in place —
+/// every maximal non-whitespace run in `s` is inspected: an absolute path
+/// found either as the whole run or wrapped inside it — in parentheses,
+/// quotes, backticks, square brackets, angle brackets, or trailed by a
+/// comma, period or semicolon, since review-finding prose and ordinary
+/// sentences wrap and punctuate paths exactly that way — is reduced in
+/// place, with whatever wrapping was trimmed off re-emitted around the
+/// reduced result so the prose still reads correctly. A path is reduced —
 /// stripped relative to `root` when it falls under `root`, replaced with
 /// [`ABSOLUTE_PATH_REDACTED`] when it does not (never reduced to a bare
 /// filename in this shape: a filename alone, dropped into a sentence with
 /// no path context, reads as a plausible original word rather than a
-/// redaction). Everything else in `s` — surrounding words, punctuation,
-/// whitespace — is carried through byte-for-byte.
+/// redaction). A run with no absolute path inside it — a relative path, a
+/// bare filename, an ordinary word — is carried through byte-for-byte, wrap
+/// and all. Everything else in `s` — surrounding words, punctuation,
+/// whitespace — is likewise carried through byte-for-byte.
+///
+/// Absoluteness is judged by [`is_absolute_path_str`], not the platform-only
+/// `Path::is_absolute`, so a Windows-shaped path (`C:\Users\...`) is caught
+/// on a POSIX host too — a snapshot can be read on either platform.
 ///
 /// Applied at the reader (every free-text field `read_snapshot` produces
 /// passes through this before it reaches a public field), never at the
@@ -1450,10 +1461,9 @@ fn scrub_paths(s: &str, root: &Path) -> String {
         let token_end = after_ws.find(char::is_whitespace).unwrap_or(after_ws.len());
         let token = &after_ws[..token_end];
 
-        if Path::new(token).is_absolute() {
-            out.push_str(&reduce_embedded_path(token, root));
-        } else {
-            out.push_str(token);
+        match reduce_wrapped_token(token, root) {
+            Some(reduced) => out.push_str(&reduced),
+            None => out.push_str(token),
         }
 
         rest = &after_ws[token_end..];
@@ -1464,13 +1474,65 @@ fn scrub_paths(s: &str, root: &Path) -> String {
     out
 }
 
-/// Reduce one absolute-path token found embedded in free text (see
+/// Characters that can open a wrapper around an embedded path in prose:
+/// `(quoted)`, `"quoted"`, `` `quoted` ``, `[quoted]`, `<quoted>`.
+const PATH_WRAP_OPENERS: &[char] = &['(', '"', '\'', '`', '[', '<'];
+
+/// Characters that can close a wrapper, or trail a path as sentence
+/// punctuation: the mirrors of [`PATH_WRAP_OPENERS`] plus a trailing comma,
+/// period or semicolon.
+const PATH_WRAP_CLOSERS: &[char] = &[')', '"', '\'', '`', ']', '>', ',', '.', ';'];
+
+/// Whether `s` is an absolute path — POSIX (`Path::is_absolute`, which also
+/// covers a native Windows target) or Windows-shaped (a drive letter,
+/// a colon, then `\` or `/`) so a Windows path is still recognised when
+/// scrubbing runs on a POSIX host, as a snapshot committed on Windows can
+/// be read on either.
+fn is_absolute_path_str(s: &str) -> bool {
+    Path::new(s).is_absolute() || is_windows_drive_absolute(s)
+}
+
+fn is_windows_drive_absolute(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// Reduce one whitespace-delimited token from [`scrub_paths`] when it
+/// contains an absolute path — either as the whole token or wrapped inside
+/// leading/trailing delimiter characters (see [`PATH_WRAP_OPENERS`] and
+/// [`PATH_WRAP_CLOSERS`]) — by trimming the wrap off, testing the reduced
+/// middle for absoluteness, and re-emitting the trimmed wrap around the
+/// path's reduction. Returns `None` when the token — wrap trimmed or not —
+/// is not an absolute path, so the caller leaves the token byte-identical:
+/// a relative path in backticks, a bare filename in parentheses and
+/// ordinary prose all fall through here untouched.
+fn reduce_wrapped_token(token: &str, root: &Path) -> Option<String> {
+    let after_open = token.trim_start_matches(PATH_WRAP_OPENERS);
+    let leading = &token[..token.len() - after_open.len()];
+    let inner = after_open.trim_end_matches(PATH_WRAP_CLOSERS);
+    let trailing = &after_open[inner.len()..];
+
+    if inner.is_empty() || !is_absolute_path_str(inner) {
+        return None;
+    }
+
+    let mut out = String::with_capacity(leading.len() + trailing.len() + inner.len());
+    out.push_str(leading);
+    out.push_str(&reduce_embedded_path(inner, root));
+    out.push_str(trailing);
+    Some(out)
+}
+
+/// Reduce one absolute-path string found embedded in free text (see
 /// [`scrub_paths`]): stripped relative to `root` when under it, otherwise
 /// [`ABSOLUTE_PATH_REDACTED`] — deliberately not the bare-filename fallback
 /// `relativize` uses for a whole-string path, since a lone filename dropped
 /// into a sentence reads as ordinary prose rather than a redaction.
-fn reduce_embedded_path(token: &str, root: &Path) -> String {
-    match Path::new(token).strip_prefix(root) {
+fn reduce_embedded_path(path: &str, root: &Path) -> String {
+    match Path::new(path).strip_prefix(root) {
         Ok(rel) => to_forward_slashes(rel),
         Err(_) => ABSOLUTE_PATH_REDACTED.to_string(),
     }
@@ -2872,6 +2934,186 @@ mod tests {
         assert!(scrubbed.contains(ABSOLUTE_PATH_REDACTED), "expected the shared redaction text: {scrubbed}");
         assert!(scrubbed.starts_with("See "), "leading words dropped: {scrubbed}");
         assert!(scrubbed.ends_with(" for details."), "trailing words dropped: {scrubbed}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bbp-6: scrub_paths finds a path wrapped in a delimiter (D9) ---
+
+    #[test]
+    fn scrub_paths_reduces_a_path_wrapped_in_parentheses_wrap_survives() {
+        let root = fresh_root("scrub-wrap-parens");
+        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let text = format!("see ({file}) for details.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert!(scrubbed.contains("(crates/bee.rs)"), "wrapping parens were not preserved: {scrubbed}");
+        assert_eq!(scrubbed, "see (crates/bee.rs) for details.");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_reduces_a_path_wrapped_in_double_quotes_wrap_survives() {
+        let root = fresh_root("scrub-wrap-dquote");
+        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let text = format!("path was \"{file}\" at the time.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert_eq!(scrubbed, "path was \"crates/bee.rs\" at the time.");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_reduces_a_path_wrapped_in_backticks_wrap_survives() {
+        let root = fresh_root("scrub-wrap-backtick");
+        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let text = format!("review found `{file}` reads the whole tree.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert_eq!(scrubbed, "review found `crates/bee.rs` reads the whole tree.");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_reduces_a_path_wrapped_in_square_brackets_wrap_survives() {
+        let root = fresh_root("scrub-wrap-brackets");
+        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let text = format!("see [{file}] for the source.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert_eq!(scrubbed, "see [crates/bee.rs] for the source.");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_reduces_a_path_wrapped_in_angle_brackets_wrap_survives() {
+        let root = fresh_root("scrub-wrap-angle");
+        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let text = format!("open <{file}> in the editor.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert_eq!(scrubbed, "open <crates/bee.rs> in the editor.");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_reduces_a_path_trailed_by_a_comma_punctuation_survives() {
+        let root = fresh_root("scrub-trail-comma");
+        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let text = format!("{file}, then re-run the tests.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert_eq!(scrubbed, "crates/bee.rs, then re-run the tests.");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_reduces_a_path_trailed_by_a_period_punctuation_survives() {
+        let root = fresh_root("scrub-trail-period");
+        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let text = format!("Read {file}.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert_eq!(scrubbed, "Read crates/bee.rs.");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_reduces_a_path_trailed_by_a_semicolon_punctuation_survives() {
+        let root = fresh_root("scrub-trail-semicolon");
+        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let text = format!("{file}; check it next.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert_eq!(scrubbed, "crates/bee.rs; check it next.");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_reduces_a_wrapped_path_outside_the_root_to_the_shared_redaction_text() {
+        let root = fresh_root("scrub-wrap-outside");
+        let outside = std::env::temp_dir()
+            .join("mdview-bee-scrub-wrap-outside-target")
+            .join("secret.txt")
+            .to_string_lossy()
+            .into_owned();
+        let text = format!("see (`{outside}`) for the leak.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&outside), "absolute path outside root survived: {scrubbed}");
+        assert!(
+            !scrubbed.contains("secret.txt"),
+            "an outside-root path must be redacted, not reduced to a bare filename: {scrubbed}"
+        );
+        assert_eq!(scrubbed, format!("see (`{ABSOLUTE_PATH_REDACTED}`) for the leak."));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_handles_a_windows_shaped_absolute_path_embedded_mid_sentence() {
+        let root = fresh_root("scrub-windows-path");
+        let text = "see `C:\\Users\\alice\\.ssh\\id_rsa` before you continue.";
+
+        let scrubbed = scrub_paths(text, &root);
+
+        assert!(!scrubbed.contains("C:\\Users\\alice"), "windows-shaped absolute path survived: {scrubbed}");
+        assert_eq!(scrubbed, format!("see `{ABSOLUTE_PATH_REDACTED}` before you continue."));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_leaves_a_relative_path_in_backticks_unchanged() {
+        let root = fresh_root("scrub-wrap-relative");
+        let text = "see `docs/history/bee-board-pm/CONTEXT.md` for the decision.";
+
+        assert_eq!(scrub_paths(text, &root), text);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_leaves_a_bare_filename_in_parentheses_unchanged() {
+        let root = fresh_root("scrub-wrap-bare-filename");
+        let text = "see (bee.rs) for the reader.";
+
+        assert_eq!(scrub_paths(text, &root), text);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_leaves_ordinary_prose_byte_identical() {
+        let root = fresh_root("scrub-wrap-prose");
+        let text = "Execute (c-1), then cap the cell; move on, review next.";
+
+        assert_eq!(scrub_paths(text, &root), text);
 
         std::fs::remove_dir_all(&root).ok();
     }
