@@ -134,7 +134,12 @@ fn router(state: AppState) -> Router {
         .route("/api/projects", get(api_projects))
         .route("/settings", get(settings_page_handler))
         .route("/api/config", get(api_config).post(update_config))
-        .route("/settings/terminal/token", post(rotate_terminal_token))
+        // agent-terminal-11: was mounted with `.post(...)`, the same
+        // method-mismatch-oracle gap every other route in this family
+        // closes with `any(...)` + `MethodGate<Post>` — a `GET` here used
+        // to answer `405 Allow: POST`, distinguishable from an unrouted
+        // path without ever checking a session or a token.
+        .route("/settings/terminal/token", any(rotate_terminal_token))
         // agent-terminal-8: the only route that ever turns a presented token
         // into a session — see `login_terminal`. `any(...)` + `MethodGate<Post>`
         // (inside the handler) for the same method-mismatch-oracle reason as
@@ -326,7 +331,11 @@ fn current_token_view(st: &AppState) -> views::TerminalTokenView {
 /// session also means a second device can log in with a token it already
 /// holds instead of being forced to rotate and kick the first device out —
 /// the multi-device flow D3 needs.
-async fn rotate_terminal_token(State(st): State<AppState>, headers: HeaderMap) -> Response {
+async fn rotate_terminal_token(
+    _method: terminal_auth::MethodGate<terminal_auth::Post>,
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     if st.terminal_auth.is_configured() {
         let has_session = terminal_auth::session_cookie(&headers)
             .map(|sid| st.terminal_auth.session_valid(&sid))
@@ -801,6 +810,28 @@ struct KeysBody {
     keys: Vec<String>,
 }
 
+/// agent-terminal-11: the most named keys a single `/keys` request may carry.
+/// `body.keys` was unbounded — herdr forwards each name as its own action, so
+/// nothing capped how much work (or pane-visible input) one HTTP request
+/// could trigger. 1000 matches herdr's own server-side cap on `pane.read`'s
+/// `lines` (`SocketHerdr::read_pane`), the one other place this codebase
+/// bounds a herdr-bound list.
+const MAX_KEYS_PER_REQUEST: usize = 1000;
+
+/// The refusal `terminal_keys`/`unassigned_terminal_keys` give a request
+/// whose `keys` list exceeds `MAX_KEYS_PER_REQUEST` — a `400`, not the
+/// terminal family's opaque-404 (this is a validation failure on an already
+/// gated, already-authenticated request, not an auth refusal).
+fn keys_too_long_response(len: usize) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": format!("too many keys in one request ({len} > {MAX_KEYS_PER_REQUEST})")
+        })),
+    )
+        .into_response()
+}
+
 /// `POST /p/:id/_terminal/:pane_id/keys` (D3/D4) — named key presses into a
 /// pane, for menu navigation the free-text reply above can't reach (arrow
 /// keys, Enter, Escape, Tab, …). Modeled on herdr-go's `KeysBody { keys }`.
@@ -814,6 +845,9 @@ async fn terminal_keys(
 ) -> Response {
     if !terminal_family_enabled(&st) {
         return terminal_auth::opaque_404();
+    }
+    if body.keys.len() > MAX_KEYS_PER_REQUEST {
+        return keys_too_long_response(body.keys.len());
     }
     if let Err(refusal) = project_and_verify_pane_in_boundary(&st, &id, &pane_id).await {
         return refusal;
@@ -874,6 +908,17 @@ fn project_panes(
 /// project's panes into this group, or hiding them from their own project's
 /// page.
 ///
+/// agent-terminal-11: a project whose own boundary fails to construct used
+/// to contribute nothing to `assigned`, which meant *that project's own*
+/// panes fell through and rendered here as if they belonged to no project —
+/// the exact widening this group's session gate is the last line of defense
+/// against (per P6, there is no second containment check for this group; the
+/// gate is what authorizes). There is no way to tell, without a working
+/// boundary, which of the project's real panes those were — so the whole
+/// group fails closed to empty rather than guess, the same "fail closed to
+/// zero, not a crash and not a laxer check" rule `terminal_page` already
+/// applies to a single unconstructible project.
+///
 /// A pane's raw, unvalidated cwd is used for display here (or left empty if
 /// herdr never reported one) — never resolved through any `Boundary`, since
 /// per P6 there is no containment claim to make for a pane that belongs to
@@ -883,15 +928,21 @@ fn unassigned_panes(
     snapshot: &herdr::Snapshot,
     projects: &[mdview_core::domain::Project],
 ) -> Vec<views::TerminalPaneView> {
-    let assigned: std::collections::HashSet<String> = projects
-        .iter()
-        .flat_map(|p| {
-            mdview_core::paths_boundary::Boundary::new(vec![p.root_path.clone()])
-                .map(|boundary| project_panes(snapshot, &boundary))
-                .unwrap_or_default()
-        })
-        .map(|pane| pane.pane_id)
-        .collect();
+    let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for p in projects {
+        match mdview_core::paths_boundary::Boundary::new(vec![p.root_path.clone()]) {
+            Ok(boundary) => {
+                assigned.extend(project_panes(snapshot, &boundary).into_iter().map(|pane| pane.pane_id));
+            }
+            Err(_) => {
+                // Fail closed: this project's own panes cannot be told apart
+                // from a genuinely unassigned one without a working
+                // boundary, so the whole group renders empty rather than
+                // risk leaking them in.
+                return Vec::new();
+            }
+        }
+    }
 
     snapshot
         .agents
@@ -922,6 +973,13 @@ fn unassigned_panes(
 /// `any(...)` vs `.get(...)`), then the D7 enabled switch — every registered
 /// project's own boundary check happens inside `unassigned_panes`, not here.
 /// A silent herdr socket renders the same D6 remedy `terminal_page` uses.
+///
+/// agent-terminal-11: a registry read failure used to fall through
+/// `unwrap_or_default()` to an empty project list, which made every pane in
+/// the whole snapshot — including ones that plainly belong to a registered
+/// project — read as unassigned. Fail closed instead: an unreadable
+/// registry renders the group empty, the same as `unassigned_panes` failing
+/// closed on an unconstructable project boundary.
 async fn unassigned_terminal_page(
     _method: terminal_auth::MethodGate<terminal_auth::Get>,
     _session: terminal_auth::AuthSession,
@@ -930,7 +988,9 @@ async fn unassigned_terminal_page(
     if !terminal_family_enabled(&st) {
         return terminal_auth::opaque_404();
     }
-    let projects = st.engine.list_projects().unwrap_or_default();
+    let Ok(projects) = st.engine.list_projects() else {
+        return Html(views::unassigned_terminal_page(&[])).into_response();
+    };
     match st.herdr.snapshot().await {
         Ok(snapshot) => {
             let panes = unassigned_panes(&snapshot, &projects);
@@ -947,8 +1007,16 @@ async fn unassigned_terminal_page(
 /// `unassigned_panes` result, never trusted from the URL alone. A pane that
 /// is actually inside some registered project's boundary refuses here with
 /// the ordinary not-found — the two groups partition, they never overlap.
+///
+/// agent-terminal-11: same fail-closed rule as `unassigned_terminal_page` —
+/// a registry read failure refuses the pane (ordinary not-found) rather than
+/// falling through to an empty project list, which would have made every
+/// pane in the system, including ones inside a real project's boundary,
+/// verify as unassigned.
 async fn verify_pane_is_unassigned(st: &AppState, pane_id: &str) -> std::result::Result<(), Response> {
-    let projects = st.engine.list_projects().unwrap_or_default();
+    let Ok(projects) = st.engine.list_projects() else {
+        return Err(not_found("pane not found"));
+    };
     let snapshot = match st.herdr.snapshot().await {
         Ok(s) => s,
         Err(_) => return Err(herdr_down_response()),
@@ -1022,6 +1090,9 @@ async fn unassigned_terminal_keys(
 ) -> Response {
     if !terminal_family_enabled(&st) {
         return terminal_auth::opaque_404();
+    }
+    if body.keys.len() > MAX_KEYS_PER_REQUEST {
+        return keys_too_long_response(body.keys.len());
     }
     if let Err(refusal) = verify_pane_is_unassigned(&st, &pane_id).await {
         return refusal;
@@ -5796,6 +5867,558 @@ mod bee_route_tests {
             .await
             .unwrap();
         assert_eq!(owned_input_resp.status(), StatusCode::NOT_FOUND);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    // ---- agent-terminal-11: the Unassigned group's own guard tests ----
+    //
+    // A semantic review found every request the suite made to the three
+    // unassigned routes (screen, input, keys) carried a valid cookie --
+    // removing `AuthSession` from any of the three failed nothing. These
+    // pin the same three truths (no-session, wrong-method, switch-off)
+    // their project-scoped equivalents already carry, proven the same
+    // byte-identical-to-unrouted way.
+
+    /// Truth: without a terminal session,
+    /// `/_terminal/unassigned/{pane}/screen` answers byte-identically to an
+    /// unrouted path -- mirroring
+    /// `terminal_screen_without_a_session_is_byte_identical_to_an_unrouted_path`.
+    /// Verified by temporarily deleting `_session: AuthSession` from
+    /// `unassigned_terminal_screen`: with no other guard in front of it, the
+    /// handler falls through to `verify_pane_is_unassigned`'s ordinary
+    /// `not_found("pane not found")` -- an HTML body, distinct from this
+    /// opaque empty-body 404 -- so this assertion goes red exactly as its
+    /// project-scoped sibling's does.
+    #[tokio::test]
+    async fn unassigned_screen_without_a_session_is_byte_identical_to_an_unrouted_path() {
+        let dir = fresh_root("unassigned-screen-no-session");
+        enable_terminal(&dir);
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
+            let with_no_session = app
+                .clone()
+                .oneshot(unassigned_screen_req("w1:p1", cookie))
+                .await
+                .unwrap();
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
+            assert_eq!(with_no_session.status(), unrouted.status());
+            assert_eq!(with_no_session.headers(), unrouted.headers());
+            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
+            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(a, b);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Truth: without a terminal session, both unassigned write routes
+    /// (`/input`, `/keys`) answer byte-identically to an unrouted path --
+    /// mirroring
+    /// `terminal_write_routes_without_a_session_are_byte_identical_to_an_unrouted_path`.
+    /// Verified the same way as the screen route above, for both
+    /// `unassigned_terminal_input` and `unassigned_terminal_keys`.
+    #[tokio::test]
+    async fn unassigned_write_routes_without_a_session_are_byte_identical_to_an_unrouted_path() {
+        let dir = fresh_root("unassigned-write-no-session");
+        enable_terminal(&dir);
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let unrouted_status = unrouted.status();
+            let unrouted_headers = unrouted.headers().clone();
+            let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
+
+            let input = app
+                .clone()
+                .oneshot(unassigned_input_req("w1:p1", "hi", true, cookie))
+                .await
+                .unwrap();
+            assert_eq!(input.status(), unrouted_status);
+            assert_eq!(input.headers(), &unrouted_headers);
+            let input_body = input.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(input_body, unrouted_body);
+
+            let keys = app
+                .clone()
+                .oneshot(unassigned_keys_req("w1:p1", &["enter"], cookie))
+                .await
+                .unwrap();
+            assert_eq!(keys.status(), unrouted_status);
+            assert_eq!(keys.headers(), &unrouted_headers);
+            let keys_body = keys.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(keys_body, unrouted_body);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Truth: a wrong-method request to `/_terminal/unassigned/{pane}/screen`
+    /// (mounted via `any(...)` + `MethodGate<Get>`, never `.get(...)`) is
+    /// byte-identical to an unrouted path -- mirroring
+    /// `terminal_screen_wrong_method_is_byte_identical_to_unrouted`.
+    #[tokio::test]
+    async fn unassigned_screen_wrong_method_is_byte_identical_to_unrouted() {
+        let dir = fresh_root("unassigned-screen-wrong-method");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let posted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/_terminal/unassigned/w1:p1/screen")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
+        assert_eq!(posted.status(), unrouted.status());
+        assert_eq!(posted.headers(), unrouted.headers());
+        let a = posted.into_body().collect().await.unwrap().to_bytes();
+        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Truth: a wrong-method request to either unassigned write route is
+    /// byte-identical to an unrouted path -- mirroring
+    /// `terminal_write_routes_wrong_method_are_byte_identical_to_unrouted`.
+    #[tokio::test]
+    async fn unassigned_write_routes_wrong_method_are_byte_identical_to_unrouted() {
+        let dir = fresh_root("unassigned-write-wrong-method");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        for path_suffix in ["input", "keys"] {
+            let got = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/_terminal/unassigned/w1:p1/{path_suffix}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(got.status(), StatusCode::NOT_FOUND);
+            assert_eq!(got.status(), unrouted.status());
+            assert_eq!(got.headers(), unrouted.headers());
+            let a = got.into_body().collect().await.unwrap().to_bytes();
+            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(a, b);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Truth: with a valid session but the D7 `terminal.enabled` switch off,
+    /// `/_terminal/unassigned/{pane}/screen` still answers exactly as an
+    /// unrouted path would -- mirroring
+    /// `terminal_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session`.
+    #[tokio::test]
+    async fn unassigned_screen_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session() {
+        let dir = fresh_root("unassigned-screen-disabled");
+        // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let unrouted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted_status = unrouted.status();
+        let unrouted_headers = unrouted.headers().clone();
+        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
+
+        let screen = app
+            .oneshot(unassigned_screen_req("w1:p1", Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(screen.status(), unrouted_status);
+        assert_eq!(screen.headers(), &unrouted_headers);
+        let screen_body = screen.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            screen_body, unrouted_body,
+            "the unassigned screen endpoint must be unreachable while the switch is off, even with a valid session"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Truth: with a valid session but the switch off, both unassigned write
+    /// routes still answer exactly as an unrouted path would -- mirroring
+    /// `terminal_write_routes_disabled_are_byte_identical_to_unrouted_even_with_a_valid_session`.
+    #[tokio::test]
+    async fn unassigned_write_routes_disabled_are_byte_identical_to_unrouted_even_with_a_valid_session()
+    {
+        let dir = fresh_root("unassigned-write-disabled");
+        // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let unrouted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted_status = unrouted.status();
+        let unrouted_headers = unrouted.headers().clone();
+        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
+
+        let input = app
+            .clone()
+            .oneshot(unassigned_input_req("w1:p1", "hi", true, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(input.status(), unrouted_status);
+        assert_eq!(input.headers(), &unrouted_headers);
+        let input_body = input.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            input_body, unrouted_body,
+            "the unassigned input endpoint must be unreachable while the switch is off, even with a valid session"
+        );
+
+        let keys = app
+            .oneshot(unassigned_keys_req("w1:p1", &["enter"], Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(keys.status(), unrouted_status);
+        assert_eq!(keys.headers(), &unrouted_headers);
+        let keys_body = keys.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            keys_body, unrouted_body,
+            "the unassigned keys endpoint must be unreachable while the switch is off, even with a valid session"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Truth (the registry-failure must-have): a project whose own boundary
+    /// cannot be constructed never widens the set of panes the Unassigned
+    /// group exposes -- the same fail-closed code path this cell adds for a
+    /// registry read failure (`unassigned_panes` returning `Vec::new()`
+    /// rather than letting the project's own panes fall through as
+    /// "unassigned"). Forced deterministically by registering a project
+    /// whose root sits under `/etc`, on `paths_boundary::hard_deny_list`,
+    /// which `Boundary::new` refuses to construct on every platform this
+    /// suite runs on -- no locking or timing involved, unlike trying to
+    /// force a genuine SQLite I/O error on an already-open, long-lived
+    /// connection from a second connection in the same process, which this
+    /// cell found to be unreliable in this workspace (evidence: a dropped
+    /// table is visible to a *fresh* connection immediately but not to the
+    /// engine's own long-lived one, most likely because `crates/mdview`'s
+    /// dev-only `rusqlite` and `mdview-core`'s `rusqlite` link two separate
+    /// copies of the bundled SQLite that don't share WAL/locking state --
+    /// `mdview-core` has no public seam to inject a failing store, so a
+    /// dependable registry-Err test is out of this cell's file scope).
+    #[tokio::test]
+    async fn unassigned_group_fails_closed_when_a_projects_boundary_is_unconstructable() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("unassigned-boundary-unconstructable");
+        enable_terminal(&dir);
+        let scratch = fresh_root("unassigned-boundary-unconstructable-scratch");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&stray_root).unwrap();
+        let denied_root = PathBuf::from("/etc/mdview-test-fixture-nonexistent");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        // A pane whose cwd sits under the hard-deny-listed project's own
+        // root -- this is the pane that must NOT leak into Unassigned.
+        let denied_project_pane = fake
+            .agent_start("w1", Some(&denied_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let stray = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &denied_root, "denied-root-project");
+        assert_eq!(
+            project.root_path, denied_root,
+            "sanity: canonicalize falls back to the literal path when it doesn't exist"
+        );
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app.oneshot(unassigned_req(Some(&cookie))).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&denied_project_pane.name) && !body.contains(&stray.name),
+            "a project whose boundary cannot be constructed must fail the whole group closed to \
+             zero panes, not leak its own panes into Unassigned: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Truth (the carried-over method-mismatch-oracle obligation, isolated):
+    /// at least one wrong-method test must fail if `MethodGate` were removed
+    /// while a valid session and an enabled terminal are already in place.
+    /// Every other wrong-method test above runs with no session and the
+    /// switch off, so it would still pass unchanged even with `MethodGate`
+    /// deleted entirely -- `AuthSession`'s own rejection, or the
+    /// disabled-switch check, would answer the opaque 404 first, without
+    /// `MethodGate` ever mattering. Verified by temporarily deleting
+    /// `_method: MethodGate<Get>` from `terminal_page`: the POST then
+    /// reaches the handler body and (against the enabled switch, the
+    /// registered project, and the default available `FakeHerdr`) renders
+    /// `200 OK` with an empty pane list -- nothing like the unrouted path's
+    /// bare 404 -- so this assertion goes red.
+    #[tokio::test]
+    async fn terminal_route_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal()
+    {
+        let dir = fresh_root("terminal-wrong-method-isolated");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-wrong-method-isolated-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "wrong-method-isolated");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let posted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/p/{}/_terminal", project.id))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
+        assert_eq!(posted.status(), unrouted.status());
+        assert_eq!(posted.headers(), unrouted.headers());
+        let a = posted.into_body().collect().await.unwrap().to_bytes();
+        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth: the token-rotation route, now mounted with `any(...)` +
+    /// `MethodGate<Post>` instead of the `.post(...)` this cell replaces, is
+    /// unreachable by any method but `POST` -- mirroring
+    /// `api_terminal_config_wrong_method_is_byte_identical_to_unrouted`.
+    /// Verified by temporarily reverting the route table to
+    /// `.route("/settings/terminal/token", post(rotate_terminal_token))`: a
+    /// `GET` then answers `405 Allow: POST` instead of matching the unrouted
+    /// 404, and this assertion goes red.
+    #[tokio::test]
+    async fn rotate_terminal_token_wrong_method_is_byte_identical_to_unrouted() {
+        let dir = fresh_root("terminal-token-wrong-method");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let got = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/settings/terminal/token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(got.status(), StatusCode::NOT_FOUND);
+        assert_eq!(got.status(), unrouted.status());
+        assert_eq!(got.headers(), unrouted.headers());
+        let a = got.into_body().collect().await.unwrap().to_bytes();
+        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Truth (must-have): a single `/keys` request cannot queue an
+    /// unbounded number of key presses. `MAX_KEYS_PER_REQUEST` refuses a
+    /// request over the bound with `400`, before it ever reaches herdr --
+    /// proven against a real pane, so a bug that let the oversized list
+    /// through would show up as the pane's screen actually changing.
+    #[tokio::test]
+    async fn terminal_keys_request_exceeding_the_bound_is_refused_without_reaching_herdr() {
+        let dir = fresh_root("terminal-keys-bound");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-keys-bound-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let project = register(&st, &root, "keys-bound");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let too_many: Vec<&str> = std::iter::repeat("enter")
+            .take(MAX_KEYS_PER_REQUEST + 1)
+            .collect();
+        let resp = app
+            .oneshot(terminal_keys_req(
+                &project.id,
+                &started.pane_id,
+                &too_many,
+                Some(&cookie),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // The refusal must never have reached herdr: the pane's screen is
+        // exactly what `agent_start` seeded it with.
+        let read = fake
+            .read_pane(&started.pane_id, herdr::ReadSource::Visible, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            read.text, "❯ ",
+            "an oversized keys request must never reach the pane it targeted: {}",
+            read.text
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The Unassigned group's own instance of the same bound.
+    #[tokio::test]
+    async fn unassigned_keys_request_exceeding_the_bound_is_refused_without_reaching_herdr() {
+        let dir = fresh_root("unassigned-keys-bound");
+        enable_terminal(&dir);
+        let scratch = fresh_root("unassigned-keys-bound-scratch");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let stray = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let too_many: Vec<&str> = std::iter::repeat("enter")
+            .take(MAX_KEYS_PER_REQUEST + 1)
+            .collect();
+        let resp = app
+            .oneshot(unassigned_keys_req(&stray.pane_id, &too_many, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let read = fake
+            .read_pane(&stray.pane_id, herdr::ReadSource::Visible, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            read.text, "❯ ",
+            "an oversized keys request must never reach the pane it targeted: {}",
+            read.text
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&scratch).ok();

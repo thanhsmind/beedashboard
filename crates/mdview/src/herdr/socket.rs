@@ -983,6 +983,76 @@ mod tests {
         );
     }
 
+    /// agent-terminal-11: pins the send≠submit separation at the transport
+    /// layer, not only against `FakeHerdr` (which fuses text+submit into one
+    /// write by appending the newline itself and bumping the revision once —
+    /// see its own `send_input`). The real herdr wraps sent text in
+    /// bracketed paste, so a client that collapsed these into a single
+    /// `pane.send_input` call carrying both `text` and `keys` would leave
+    /// every reply sitting unsent in the composer while the screen poll
+    /// shows it there — a silent failure of the whole feature. Proven
+    /// against a real mock socket server: `submit: true` with non-empty text
+    /// must reach the socket as two distinct requests, the first carrying
+    /// only the text, the second carrying only the enter keypress.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sendinput_with_submit_issues_two_distinct_socket_requests() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("herdr.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let client = SocketHerdr::new(path.clone());
+
+            let server = tokio::spawn(async move {
+                let mut requests = Vec::new();
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut buf = Vec::new();
+                    let mut byte = [0u8; 1];
+                    loop {
+                        let n = stream.read(&mut byte).await.unwrap();
+                        if n == 0 || byte[0] == b'\n' {
+                            break;
+                        }
+                        buf.push(byte[0]);
+                    }
+                    let value: Value = serde_json::from_slice(&buf).unwrap();
+                    requests.push(value);
+                    let mut line = br#"{"id":"gw-0","result":{}}"#.to_vec();
+                    line.push(b'\n');
+                    stream.write_all(&line).await.unwrap();
+                    stream.flush().await.unwrap();
+                }
+                requests
+            });
+
+            client.send_input("w1:p1", "hello", true).await.unwrap();
+            server.await.unwrap()
+        })
+        .await
+        .expect("send_input must not hang");
+
+        assert_eq!(
+            outcome.len(),
+            2,
+            "submit=true must reach the socket as two distinct requests, not one fused write: {outcome:?}"
+        );
+        assert_eq!(outcome[0]["method"], "pane.send_input");
+        assert_eq!(outcome[0]["params"]["text"], "hello");
+        assert!(
+            outcome[0]["params"].get("keys").is_none(),
+            "the first request must carry only the text, not the enter keypress: {:?}",
+            outcome[0]
+        );
+        assert_eq!(outcome[1]["method"], "pane.send_input");
+        assert_eq!(outcome[1]["params"]["keys"], json!(["enter"]));
+        assert!(
+            outcome[1]["params"].get("text").is_none(),
+            "the second request must carry only the enter keypress, not the text: {:?}",
+            outcome[1]
+        );
+    }
+
     #[test]
     fn parse_response_rejects_bad_shape() {
         assert!(matches!(
