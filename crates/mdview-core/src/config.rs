@@ -119,8 +119,10 @@ impl Default for ServerConfig {
             port: 7700,
             // Bind all interfaces by default so the viewer is reachable from
             // other devices on the LAN (and from a browser when the daemon runs
-            // on a remote host). The server has no auth; `serve()` prints a
-            // non-loopback exposure warning at startup.
+            // on a remote host). The server has no auth outside the agent
+            // terminal family's token gate (D4, `crates/mdview/src/terminal_auth.rs`) —
+            // every other route, including this one, stays open; `serve()`
+            // prints a non-loopback exposure warning at startup.
             host: "0.0.0.0".into(),
             hostname: None,
             open_browser_on_start: false,

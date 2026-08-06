@@ -9,7 +9,12 @@ spec avoids code detail — see PRD.md for design and crates/ for code.)
 mdview is a local background server that makes a project's markdown viewable in
 a browser with **working cross-folder links**, live reload, full-text search,
 and a one-call agent integration over MCP. One daemon owns all state; browser
-tabs (and, later, a desktop window) are clients of it.
+tabs (and, later, a desktop window) are clients of it. mdview has absorbed
+herdr-go, the standalone gateway that watched and replied to coding agents
+running under [herdr](https://github.com/ogulcancelik/herdr): every registered
+project now also has a Terminal tab and a Transcript tab for the agents
+running under it. herdr-go is retired; mdview is its successor. See the
+Agent terminal spec.
 
 ## Core invariant
 
@@ -76,12 +81,20 @@ launcher — CLI, MCP, future desktop — coordinates through `~/.mdview/daemon.
   health, Claude Code MCP registration, and an AGENTS.md/CLAUDE.md mention of
   mdview's agent tool (all merged idempotently, with a backup where content
   already existed).
+- **Agent terminal** — a per-project Terminal tab and Transcript tab for
+  watching and replying to the coding agents herdr is running under that
+  project's root, plus two off-by-default background duties (keeping herdr
+  alive, notifying on status change). The only mdview surface gated by
+  authentication. See the Agent terminal spec.
 
 ## Boundaries (non-goals)
 
 Not a static site generator, editor, or public host. No cross-project link
-resolution, no semantic search, no authentication. Read-only: never writes user
-files.
+resolution, no semantic search. No authentication outside the agent terminal
+family's token gate (terminal, transcript, and agent-creation routes only —
+see the Agent terminal spec); every other route, including the document
+viewer itself, stays open exactly as before. Read-only outside that family:
+the viewer itself never writes user files.
 
 ## Status
 

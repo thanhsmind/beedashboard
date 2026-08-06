@@ -173,9 +173,10 @@ pub async fn serve() -> Result<()> {
     if !is_loopback_host(&cfg.host) {
         eprintln!(
             "warning: mdview is bound to a non-loopback address ({}) and has NO \
-             authentication — anyone who can reach this port can read every \
-             indexed file and each project's filesystem path. Bind 127.0.0.1 \
-             unless you intend LAN exposure.",
+             authentication outside the agent terminal, transcript and \
+             agent-creation routes — anyone who can reach this port can read \
+             every indexed file and each project's filesystem path. Bind \
+             127.0.0.1 unless you intend LAN exposure.",
             cfg.host
         );
     }
@@ -338,9 +339,10 @@ async fn api_projects(State(st): State<AppState>) -> impl IntoResponse {
 }
 
 /// One project's public API summary. Deliberately omits the absolute
-/// `root_path`: the server has no authentication, so exposing each project's
-/// filesystem layout over `/api/projects` leaks it to anyone who can reach the
-/// port (see the non-loopback bind warning in `serve`).
+/// `root_path`: this route carries no authentication (it is outside the
+/// agent terminal family, D4), so exposing each project's filesystem layout
+/// over `/api/projects` leaks it to anyone who can reach the port (see the
+/// non-loopback bind warning in `serve`).
 fn project_summary_json(id: &str, name: &str, file_count: usize) -> serde_json::Value {
     json!({
         "id": id,

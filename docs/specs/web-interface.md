@@ -58,8 +58,9 @@ content itself.
   to confirm, then removes the project from the registry and returns to the
   list. This removes only the registry entry and its index — **the files on
   disk are untouched**, and re-registering re-scans them. The endpoint is
-  unauthenticated like the rest of the server, so anyone who can reach it can
-  unregister a project (reversible; no data loss).
+  unauthenticated, like every route outside the agent terminal family (see the
+  Agent terminal spec), so anyone who can reach it can unregister a project
+  (reversible; no data loss).
 - **Which file a project opens to:** a fixed, predictable rule (never "whatever
   was indexed first"): a `README.md` wins over everything, else an `index.md`,
   else the shallowest-path then alphabetically-first markdown file. Basename
@@ -174,8 +175,10 @@ content itself.
 ## Actors & Access
 
 Not applicable in the role sense — a single local operator in a browser; no
-authentication, no distinct roles. A file page's sidebar data is the project's
-file list (paths + titles); no other actor consumes it.
+authentication and no distinct roles for anything this spec covers (the
+agent terminal family is gated separately — see the Agent terminal spec). A
+file page's sidebar data is the project's file list (paths + titles); no
+other actor consumes it.
 
 ## Business Rules
 
@@ -193,10 +196,11 @@ file list (paths + titles); no other actor consumes it.
   range (block granularity), and a selection that maps to nothing copies normally.
 - **R5 (per D 184c77b0).** A project's filesystem root path is never shown on
   the project list page — only its name, indexed file count, and last-seen
-  time. There is no authentication (per settings.md) and a wildcard/LAN-
-  reachable bind is a supported mode (settings.md R3), so the operator's local
-  path is treated the same way as any other local-only detail: never exposed
-  to whoever can reach the page.
+  time. The project list page carries no authentication (per settings.md,
+  outside the agent terminal family) and a wildcard/LAN-reachable bind is a
+  supported mode (settings.md R3), so the operator's local path is treated
+  the same way as any other local-only detail: never exposed to whoever can
+  reach the page.
 
 ## Edge Cases Settled
 

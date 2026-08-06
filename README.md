@@ -131,8 +131,9 @@ ssh -L 7700:localhost:7700 user@host   # then open http://localhost:7700
 ```
 
 > mdview can also bind your LAN (`mdview serve --host 0.0.0.0`) to read from a phone or
-> another machine. It has **no authentication**, so only expose it on networks you trust —
-> details in the [usage guide](docs/usage.md).
+> another machine. It has **no authentication** outside the agent terminal's token gate
+> (off by default — see [Agent terminal](#agent-terminal) below), so only expose it on
+> networks you trust — details in the [usage guide](docs/usage.md).
 
 ---
 
@@ -165,6 +166,22 @@ and pushes a reload signal over WebSocket.
 - **Rendering:** comrak (GFM) → server-side syntect highlight → ammonia sanitize. Mermaid renders client-side.
 - **Search:** SQLite FTS5.
 - **Safety:** only registered project roots are served; path traversal is guarded and project HTML is sanitized before it's sent.
+
+---
+
+## Agent terminal
+
+Every registered project also gets a **Terminal** tab (watch and reply to the coding
+agents running under that project) and a **Transcript** tab (each agent's own activity
+log). This is mdview's successor to [herdr-go](https://github.com/vantt/herdr-go), which
+is now retired — mdview absorbs it whole.
+
+It needs a running [herdr](https://github.com/ogulcancelik/herdr) to talk to; without one,
+the tab explains that plainly instead of hiding or breaking. It is **off until you switch
+it on** from the settings page, where an access token is generated for it — that token is
+the only part of mdview gated by authentication; everything else stays exactly as
+described above. Two more duties (keeping herdr alive, notifying on status change) are
+opt-in and off by default too.
 
 ---
 
