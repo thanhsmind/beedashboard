@@ -102,6 +102,13 @@ pub struct BeeCell {
     pub worker: Option<String>,
     pub claimed_at: Option<String>,
     pub capped_at: Option<String>,
+    /// The cell's own `behavior_change` flag (bbp-13): whether this cell's
+    /// work changes observable behavior, as opposed to pure refactor/docs/
+    /// process work. `false` when the key is absent — no cell in this
+    /// module's fixtures has ever omitted it, but a missing key reading as
+    /// "not a behavior change" is the safer default for
+    /// [`compute_scribing_debt`], which only ever counts `true`.
+    pub behavior_change: bool,
 }
 
 /// The four D7 buckets. A `dropped` cell or one with an unrecognized status
@@ -147,6 +154,26 @@ pub struct BeeState {
     /// of any embedded absolute path before it reaches this struct; see
     /// [`scrub_paths`].
     pub next_action: Option<String>,
+    /// `state.json`'s `last_scribing_run`, when present (bbp-13). `None`
+    /// means this feature has never been through a scribe pass while it was
+    /// the active feature — see [`compute_scribing_debt`].
+    pub last_scribing_run: Option<BeeLastScribingRun>,
+}
+
+/// `.bee/state.json`'s or a `.bee/lanes/<feature>.json`'s
+/// `last_scribing_run` object (bbp-13) — bee's own record of the last
+/// scribe (capture) pass, keyed by the feature it captured. Only `feature`
+/// is read: `date`, `at` and `areas_synced` have no consumer here (the
+/// scribing-debt derivation this exists for only ever needs to ask "did
+/// the most recent scribe pass name THIS feature?"), so they are left
+/// unread rather than carried for no reason. This repo's own
+/// `last_scribing_run.feature` and its `state.feature` can legitimately
+/// differ (a scribe pass for one feature, followed by routing a new one) —
+/// that mismatch is exactly the signal [`compute_scribing_debt`] looks
+/// for.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeLastScribingRun {
+    pub feature: Option<String>,
 }
 
 /// `.bee/state.json`'s `approved_gates` — the four gates a feature's work
@@ -451,6 +478,10 @@ pub struct BeeLane {
     /// equivalent field for the active feature, so a placement built from
     /// `state.json` alone (bbp-10) always reports `None` here.
     pub created_at: Option<String>,
+    /// This lane's own `last_scribing_run`, when present (bbp-13) — the
+    /// same shape [`BeeState::last_scribing_run`] carries for the active
+    /// feature; see [`compute_scribing_debt`].
+    pub last_scribing_run: Option<BeeLastScribingRun>,
 }
 
 /// One `.bee/runtime/workspaces/<id>.json` worktree/workspace record.
@@ -628,6 +659,71 @@ pub struct BeeFeaturePhase {
     pub cell_counts: BeeFeatureCellCounts,
 }
 
+/// Review status for one `.bee/review-candidates.jsonl` row (bbp-13),
+/// derived entirely by joining it against `.bee/reviews/*.json` sessions —
+/// the candidates file itself carries no status field of any kind. See
+/// [`compute_review`] for the exact join rule. Independent review is
+/// user-invoked (D7); nothing this status produces is ever worded as
+/// automatic pending work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeeReviewStatus {
+    /// None of this candidate's cells appear in any session's
+    /// `included[]`. A candidate naming zero cells — the shape live in
+    /// this repo's own store, one candidate with a null baseline and no
+    /// cells — can never match anything and is always `Unreviewed`, pinned
+    /// here rather than left to fall out of the join by accident.
+    Unreviewed,
+    /// At least one of this candidate's cells appears in a session that is
+    /// not settled: its `decision.status` is `pending`, or the session
+    /// carries no `decision` key at all (an in-progress review with no
+    /// verdict yet is still in review, never silently unreviewed). Checked
+    /// before `Settled` so a candidate re-opened for a fresh review after
+    /// an earlier session settled it still reads as needing attention.
+    InReview,
+    /// Every session naming one of this candidate's cells has a
+    /// `decision.status` of `approved` or `blocked`.
+    Settled,
+}
+
+/// One `.bee/review-candidates.jsonl` row (bbp-13), joined against every
+/// `.bee/reviews/*.json` session this snapshot read — see
+/// [`BeeReviewStatus`] and [`compute_review`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeReviewCandidate {
+    pub id: String,
+    pub feature: String,
+    /// `high-risk`, `standard`, or whatever mode string the candidate row
+    /// itself carries; `None` when the row has no `mode` key.
+    pub mode: Option<String>,
+    pub status: BeeReviewStatus,
+}
+
+/// `.bee/review-candidates.jsonl` joined against `.bee/reviews/*.json`
+/// (bbp-13, D6, D7) — see [`compute_review`]. Independent review is
+/// user-invoked; the board never presents anything here as automatic
+/// pending work.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeReview {
+    pub candidates: Vec<BeeReviewCandidate>,
+    /// Count of `P1` findings across every session whose own
+    /// `decision.status` is NOT `approved` or `blocked` (i.e. `pending` or
+    /// no decision at all) — an open P1 is stronger signal than a count of
+    /// unreviewed candidates. A finding with no `severity` key, or a
+    /// `severity` of `info`, is never counted here; only an exact `"P1"`
+    /// match is.
+    pub open_p1_findings: usize,
+}
+
+/// `.bee/capture-queue.jsonl`, summarized (bbp-13) — see
+/// [`read_capture_queue`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeCaptureQueue {
+    /// Distinct `stub` ids with no matching `flush` id — net of flushes,
+    /// never a raw stub count.
+    pub waiting: usize,
+}
+
 /// A typed snapshot of a project's `.bee/` store at read time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeeSnapshot {
@@ -691,6 +787,20 @@ pub struct BeeSnapshot {
     /// see [`promote_proposals_path`] — is never looked up and is simply
     /// absent as a key here, never a false `false`.
     pub promote_proposals: std::collections::BTreeMap<String, bool>,
+    /// `.bee/review-candidates.jsonl` joined against `.bee/reviews/*.json`
+    /// (bbp-13) — see [`BeeReview`] and [`compute_review`].
+    pub review: BeeReview,
+    /// `.bee/capture-queue.jsonl`, summarized (bbp-13) — see
+    /// [`BeeCaptureQueue`].
+    pub capture_queue: BeeCaptureQueue,
+    /// Feature names with scribing debt (bbp-13, Terms: "Knowledge debt") —
+    /// a feature with at least one `capped`, `behavior_change` cell whose
+    /// own `last_scribing_run` (state.json for the active feature, its own
+    /// lane record for a lane feature) does not name it. See
+    /// [`compute_scribing_debt`]. Only ever populated for a feature this
+    /// snapshot can place at all — the same `lanes ∪ {active feature}`
+    /// union [`compute_phase_board`] already establishes.
+    pub scribing_debt: Vec<String>,
     /// Human-readable notes naming what could not be read. Every path
     /// mentioned here is relative to the project root.
     pub read_errors: Vec<String>,
@@ -718,6 +828,9 @@ impl BeeSnapshot {
             handoff: None,
             config: None,
             promote_proposals: std::collections::BTreeMap::new(),
+            review: BeeReview::default(),
+            capture_queue: BeeCaptureQueue::default(),
+            scribing_debt: Vec::new(),
             read_errors: Vec::new(),
         }
     }
@@ -810,9 +923,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
 
     let handoff = read_handoff(&bee_dir, root, &mut read_errors);
     let config = read_config(&bee_dir, root, &mut read_errors);
-
     let gate_bypass = config.as_ref().and_then(|c| c.gate_bypass.as_deref());
-    let attention = compute_attention_items(&buckets.stuck, &read_errors, handoff.as_ref(), gate_bypass);
 
     // bbp-12: every distinct feature name this read has seen, from every
     // place a feature name is read — state.json's active feature, each
@@ -829,6 +940,25 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         feature_names.insert(cell.feature.as_str());
     }
     let promote_proposals = read_promote_proposals(root, feature_names.into_iter());
+
+    // bbp-13: review join, capture queue, scribing debt — see the
+    // module doc comment.
+    let review_candidates = read_review_candidates(&bee_dir, root, &mut read_errors);
+    let review_sessions = read_review_sessions(&bee_dir, root, &mut read_errors);
+    let review = compute_review(&review_candidates, &review_sessions);
+    let capture_queue = read_capture_queue(&bee_dir, root, &mut read_errors);
+    let scribing_debt = compute_scribing_debt(&phase_board, &lanes, state.as_ref(), &all_cells);
+
+    let attention = compute_attention_items(
+        &buckets.stuck,
+        &read_errors,
+        handoff.as_ref(),
+        gate_bypass,
+        &review,
+        &scribing_debt,
+        &capture_queue,
+        &promote_proposals,
+    );
 
     BeeSnapshot {
         present: true,
@@ -849,6 +979,9 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         handoff,
         config,
         promote_proposals,
+        review,
+        capture_queue,
+        scribing_debt,
         read_errors,
     }
 }
@@ -1033,6 +1166,19 @@ fn compute_feature_cell_counts(feature: &str, all_cells: &[BeeCell]) -> BeeFeatu
 /// `.bee/config.local.json` can override it on a given machine and this
 /// reader never opens that file (see [`BeeConfig`]).
 ///
+/// bbp-13 adds three more, independent rules, each worded as user-invoked
+/// work (D7) so nothing here reads as review already running on its own:
+/// - `review.open_p1_findings` non-empty (🔴 critical — an open P1 in a
+///   review that has not yet been settled is stronger signal than a count
+///   of candidates nobody has looked at).
+/// - An unreviewed candidate whose own `mode` is `high-risk` (🟠 serious —
+///   `review.candidates` filtered to [`BeeReviewStatus::Unreviewed`] with
+///   `mode == Some("high-risk")`).
+/// - Knowledge debt (🟡 warning — Terms: "Capped work whose learnings were
+///   never recorded", folded into the one number a human can act on):
+///   `scribing_debt.len()` plus `capture_queue.waiting` plus the count of
+///   features carrying an unapplied `promote_proposals` entry (bbp-12).
+///
 /// Adding a rule later means adding another `if` below and letting it fall
 /// into the sort — the ones here are never touched to make room for it.
 fn compute_attention_items(
@@ -1040,6 +1186,10 @@ fn compute_attention_items(
     read_errors: &[String],
     handoff: Option<&BeeHandoff>,
     gate_bypass: Option<&str>,
+    review: &BeeReview,
+    scribing_debt: &[String],
+    capture_queue: &BeeCaptureQueue,
+    promote_proposals: &std::collections::BTreeMap<String, bool>,
 ) -> Vec<BeeAttentionItem> {
     let mut items = Vec::new();
 
@@ -1097,6 +1247,54 @@ fn compute_attention_items(
         });
     }
 
+    if review.open_p1_findings > 0 {
+        let n = review.open_p1_findings;
+        let noun = if n == 1 { "finding" } else { "findings" };
+        items.push(BeeAttentionItem {
+            severity: BeeAttentionSeverity::Critical,
+            title: format!("{n} open P1 review {noun}"),
+            detail: format!(
+                "{n} P1 {noun} in a review session that has not yet been settled (approved or blocked)."
+            ),
+            suggested_action: "Independent review is user-invoked — when you next run it, resolve these P1s before anything else in scope.".to_string(),
+        });
+    }
+
+    let unreviewed_high_risk = review
+        .candidates
+        .iter()
+        .filter(|c| c.status == BeeReviewStatus::Unreviewed && c.mode.as_deref() == Some("high-risk"))
+        .count();
+    if unreviewed_high_risk > 0 {
+        let n = unreviewed_high_risk;
+        let noun = if n == 1 { "candidate" } else { "candidates" };
+        items.push(BeeAttentionItem {
+            severity: BeeAttentionSeverity::Serious,
+            title: format!("{n} high-risk review {noun} never reviewed"),
+            detail: format!(
+                "{n} high-risk review {noun} named in `.bee/review-candidates.jsonl` do not appear in any `.bee/reviews/*.json` session yet."
+            ),
+            suggested_action: "Independent review is user-invoked, never automatic — run it for these candidates when you are ready.".to_string(),
+        });
+    }
+
+    let promote_unapplied = promote_proposals.values().filter(|present| **present).count();
+    let knowledge_debt = scribing_debt.len() + capture_queue.waiting + promote_unapplied;
+    if knowledge_debt > 0 {
+        let noun = if knowledge_debt == 1 { "item" } else { "items" };
+        items.push(BeeAttentionItem {
+            severity: BeeAttentionSeverity::Warning,
+            title: format!("{knowledge_debt} knowledge-debt {noun}"),
+            detail: format!(
+                "{} feature(s) with capped work never scribed, {} capture-queue stub(s) still waiting, {} feature(s) with an unapplied promote-proposals.md.",
+                scribing_debt.len(),
+                capture_queue.waiting,
+                promote_unapplied
+            ),
+            suggested_action: "Run a scribing pass to fold this work into docs/knowledge before it is lost.".to_string(),
+        });
+    }
+
     items.sort_by(|a, b| b.severity.cmp(&a.severity));
     items
 }
@@ -1145,6 +1343,7 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
                 updated_at: r.get("updated_at").and_then(Value::as_str).map(String::from),
             }),
             next_action: v.get("next_action").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
+            last_scribing_run: parse_last_scribing_run(&v),
         }),
         Err(e) => {
             read_errors.push(format!("{}: could not parse ({e})", rel_str(&path, root)));
@@ -1165,6 +1364,16 @@ fn parse_approved_gates(v: &Value) -> Option<BeeApprovedGates> {
         execution: g.get("execution").and_then(Value::as_bool),
         review: g.get("review").and_then(Value::as_bool),
     })
+}
+
+/// Parse a `last_scribing_run` object shared by `.bee/state.json` and every
+/// `.bee/lanes/<feature>.json` record (bbp-13) — only `feature` is read,
+/// see [`BeeLastScribingRun`]. Factored out so `read_state` and
+/// `parse_lane` never drift apart on this shape.
+fn parse_last_scribing_run(v: &Value) -> Option<BeeLastScribingRun> {
+    v.get("last_scribing_run")
+        .and_then(Value::as_object)
+        .map(|l| BeeLastScribingRun { feature: l.get("feature").and_then(Value::as_str).map(String::from) })
 }
 
 /// Read `.bee/HANDOFF.json` (bbp-8), following [`read_state`]'s convention
@@ -1318,6 +1527,7 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
         .and_then(|t| t.get("capped_at"))
         .and_then(Value::as_str)
         .map(String::from);
+    let behavior_change = v.get("behavior_change").and_then(Value::as_bool).unwrap_or(false);
 
     Ok(BeeCell {
         id,
@@ -1330,6 +1540,7 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
         worker,
         claimed_at,
         capped_at,
+        behavior_change,
     })
 }
 
@@ -1545,8 +1756,9 @@ fn parse_lane(path: &Path, root: &Path) -> Result<BeeLane, String> {
         .map(|s| scrub_paths(s, root));
     let approved_gates = parse_approved_gates(&v);
     let created_at = v.get("created_at").and_then(Value::as_str).map(String::from);
+    let last_scribing_run = parse_last_scribing_run(&v);
 
-    Ok(BeeLane { feature, phase, mode, next_action, approved_gates, created_at })
+    Ok(BeeLane { feature, phase, mode, next_action, approved_gates, created_at, last_scribing_run })
 }
 
 /// Read `.bee/runtime/workspaces/*.json` (D4). Absent yields an empty list.
@@ -2210,6 +2422,303 @@ fn read_promote_proposals<'a>(
         }
     }
     out
+}
+
+// --- bbp-13: review join, capture queue, scribing debt ---
+
+/// One raw `.bee/review-candidates.jsonl` row, before it is joined against
+/// review sessions to derive a status — see [`BeeReviewCandidate`] and
+/// [`compute_review`]. Kept private: only the joined, public shape crosses
+/// into [`BeeSnapshot`].
+struct RawReviewCandidate {
+    id: String,
+    feature: String,
+    mode: Option<String>,
+    cells: Vec<String>,
+}
+
+/// Read `.bee/review-candidates.jsonl` (bbp-13, D4). A missing file is
+/// silent and normal, matching every optional-file precedent in this
+/// module. A malformed line, or one missing its own `id`, costs one
+/// `read_errors` note and the read continues with whatever else could be
+/// parsed.
+fn read_review_candidates(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Vec<RawReviewCandidate> {
+    let path = bee_dir.join("review-candidates.jsonl");
+    if !path.is_file() {
+        return Vec::new();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            read_errors.push(format!("{}: could not read ({e})", rel_str(&path, root)));
+            return Vec::new();
+        }
+    };
+
+    let mut out = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                read_errors.push(format!(
+                    "{}: line {} could not parse ({e})",
+                    rel_str(&path, root),
+                    i + 1
+                ));
+                continue;
+            }
+        };
+        let Some(id) = v.get("id").and_then(Value::as_str) else {
+            read_errors.push(format!("{}: line {} candidate missing \"id\"", rel_str(&path, root), i + 1));
+            continue;
+        };
+        let feature = v.get("feature").and_then(Value::as_str).unwrap_or_default().to_string();
+        let mode = v.get("mode").and_then(Value::as_str).map(String::from);
+        // A candidate naming zero cells (`cells: []`) is the shape live in
+        // this repo's own store — read exactly like any other array, empty
+        // or not; see the module-level pin on what an empty set means in
+        // `BeeReviewStatus::Unreviewed`'s own doc comment.
+        let cells = v
+            .get("cells")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(|c| c.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        out.push(RawReviewCandidate { id: id.to_string(), feature, mode, cells });
+    }
+    out
+}
+
+/// One `.bee/reviews/<...>.json` session, trimmed to what [`compute_review`]
+/// needs: which ids it covers, how many `P1` findings it carries, and its
+/// decision status (`None` when the file has no `decision` key at all).
+struct RawReviewSession {
+    /// Every id named in `included[]`, regardless of that entry's own
+    /// `type` (`cell`, `commit`, `feature`, ...) — a candidate's `cells[]`
+    /// only ever holds cell ids, so a commit or feature entry's id simply
+    /// never matches one; filtering by `type` first would add a second
+    /// place this code could drift from bee's own shape for no benefit.
+    included: std::collections::HashSet<String>,
+    /// Count of `findings[]` entries whose own `severity` is exactly
+    /// `"P1"` — a finding with no `severity` key, or `severity: "info"`,
+    /// is never counted here.
+    p1_findings: usize,
+    /// `decision.status`, when the session carries a `decision` object at
+    /// all. `None` for a session with no `decision` key — a different
+    /// shape from `Some("pending")`, but both are treated as "not settled"
+    /// by [`compute_review`].
+    decision_status: Option<String>,
+}
+
+/// Read `.bee/reviews/*.json` (bbp-13, D4), in the directory-listing shape
+/// [`read_lanes`] already establishes: absent directory yields an empty
+/// list, not an error; a malformed file costs one `read_errors` note and
+/// the read continues with whatever else could be parsed.
+fn read_review_sessions(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Vec<RawReviewSession> {
+    let dir = bee_dir.join("reviews");
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let mut entries: Vec<PathBuf> = match fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect(),
+        Err(e) => {
+            read_errors.push(format!(".bee/reviews: could not list ({e})"));
+            Vec::new()
+        }
+    };
+    entries.sort();
+
+    let mut sessions = Vec::new();
+    for path in entries {
+        match parse_review_session(&path) {
+            Ok(s) => sessions.push(s),
+            Err(e) => read_errors.push(format!("{}: {e}", rel_str(&path, root))),
+        }
+    }
+    sessions
+}
+
+/// Parse one `.bee/reviews/<...>.json` file. `included[]` entries are the
+/// real shape observed on disk — `{"type": "cell"|"commit"|..., "id": ...}`
+/// — but a bare string entry is accepted too, defensively, since the join
+/// only ever tests string membership either way. A session naming a cell
+/// that no longer exists in this snapshot's own `.bee/cells/` is not
+/// validated here at all — `included` is simply the set of ids the session
+/// itself claims, exactly as written; the join in [`compute_review`] never
+/// needs to know whether any of them still exist.
+fn parse_review_session(path: &Path) -> Result<RawReviewSession, String> {
+    let raw = fs::read_to_string(path).map_err(|e| format!("could not read ({e})"))?;
+    let v: Value = serde_json::from_str(&raw).map_err(|e| format!("could not parse ({e})"))?;
+
+    let included: std::collections::HashSet<String> = v
+        .get("included")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| match entry {
+                    Value::String(s) => Some(s.clone()),
+                    Value::Object(_) => entry.get("id").and_then(Value::as_str).map(String::from),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let p1_findings = v
+        .get("findings")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter(|f| f.get("severity").and_then(Value::as_str) == Some("P1")).count())
+        .unwrap_or(0);
+
+    let decision_status = v.get("decision").and_then(|d| d.get("status")).and_then(Value::as_str).map(String::from);
+
+    Ok(RawReviewSession { included, p1_findings, decision_status })
+}
+
+/// Join `.bee/review-candidates.jsonl` rows against `.bee/reviews/*.json`
+/// sessions (bbp-13, D4 — no I/O, over data already read) — see
+/// [`BeeReviewStatus`] for the exact status rule this applies per
+/// candidate, and [`BeeReview::open_p1_findings`] for the independent P1
+/// count.
+fn compute_review(candidates: &[RawReviewCandidate], sessions: &[RawReviewSession]) -> BeeReview {
+    let is_settled = |s: &&RawReviewSession| matches!(s.decision_status.as_deref(), Some("approved") | Some("blocked"));
+
+    let out_candidates = candidates
+        .iter()
+        .map(|c| {
+            let matching: Vec<&RawReviewSession> =
+                sessions.iter().filter(|s| c.cells.iter().any(|cell| s.included.contains(cell))).collect();
+            let status = if matching.is_empty() {
+                BeeReviewStatus::Unreviewed
+            } else if matching.iter().any(|s| !is_settled(s)) {
+                BeeReviewStatus::InReview
+            } else {
+                BeeReviewStatus::Settled
+            };
+            BeeReviewCandidate { id: c.id.clone(), feature: c.feature.clone(), mode: c.mode.clone(), status }
+        })
+        .collect();
+
+    let open_p1_findings = sessions.iter().filter(|s| !is_settled(s)).map(|s| s.p1_findings).sum();
+
+    BeeReview { candidates: out_candidates, open_p1_findings }
+}
+
+/// Read `.bee/capture-queue.jsonl` (bbp-13, D4). Lines of `kind: "stub"` (a
+/// note waiting to be written into documentation) and `kind: "flush"` (a
+/// record of a specific stub — named by its own `id` — having been
+/// written). `waiting` is net of flushes: a stub whose own `id` has a
+/// matching flush id is no longer waiting, never a raw stub count. A
+/// missing file is silent and normal (most stores have none); a malformed
+/// line, or a `stub`/`flush` row missing its own `id`, costs one
+/// `read_errors` note and the read continues with whatever else could be
+/// parsed. A row of any other `kind` (or none at all) is ignored, matching
+/// this module's unknown-status convention elsewhere — an unrecognised
+/// kind is not a store error.
+fn read_capture_queue(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> BeeCaptureQueue {
+    let path = bee_dir.join("capture-queue.jsonl");
+    if !path.is_file() {
+        return BeeCaptureQueue::default();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            read_errors.push(format!("{}: could not read ({e})", rel_str(&path, root)));
+            return BeeCaptureQueue::default();
+        }
+    };
+
+    let mut stub_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut flushed_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                read_errors.push(format!(
+                    "{}: line {} could not parse ({e})",
+                    rel_str(&path, root),
+                    i + 1
+                ));
+                continue;
+            }
+        };
+        let kind = v.get("kind").and_then(Value::as_str);
+        if kind != Some("stub") && kind != Some("flush") {
+            // an unrecognised kind, or a row with none at all: ignored, not
+            // a store error.
+            continue;
+        }
+        let Some(id) = v.get("id").and_then(Value::as_str) else {
+            read_errors.push(format!(
+                "{}: line {} {} row missing \"id\"",
+                rel_str(&path, root),
+                i + 1,
+                kind.unwrap()
+            ));
+            continue;
+        };
+        if kind == Some("stub") {
+            stub_ids.insert(id.to_string());
+        } else {
+            flushed_ids.insert(id.to_string());
+        }
+    }
+
+    BeeCaptureQueue { waiting: stub_ids.difference(&flushed_ids).count() }
+}
+
+/// Per-feature scribing debt (bbp-13, Terms: "Knowledge debt"): a feature
+/// has debt when at least one of its cells is `capped` with
+/// `behavior_change: true` and its own `last_scribing_run` — read from
+/// `.bee/state.json` for the active feature, from its own
+/// `.bee/lanes/<feature>.json` record for a lane feature, exactly the same
+/// lane-wins-over-state precedence [`compute_phase_board`] already
+/// establishes for `phase`/`approved_gates` — does not name it. No cell
+/// carries a "was this captured" flag; this is the only place that signal
+/// can come from, and only for a feature this snapshot can place at all
+/// (the `lanes ∪ {active feature}` union `phase_board` already is) — a
+/// feature with capped behavior_change work but neither a lane record nor
+/// the active slot cannot be checked here and is silently absent from the
+/// result, never guessed at either way.
+fn compute_scribing_debt(
+    phase_board: &[BeeFeaturePhase],
+    lanes: &[BeeLane],
+    state: Option<&BeeState>,
+    all_cells: &[BeeCell],
+) -> Vec<String> {
+    let mut debt = Vec::new();
+    for placement in phase_board {
+        let feature = placement.feature.as_str();
+        let has_capped_behavior_change =
+            all_cells.iter().any(|c| c.feature == feature && c.status == "capped" && c.behavior_change);
+        if !has_capped_behavior_change {
+            continue;
+        }
+        let last_scribing_run: Option<&BeeLastScribingRun> = match lanes.iter().find(|l| l.feature == feature) {
+            Some(l) => l.last_scribing_run.as_ref(),
+            None => state
+                .filter(|s| s.feature.as_deref() == Some(feature))
+                .and_then(|s| s.last_scribing_run.as_ref()),
+        };
+        let names_it = last_scribing_run.and_then(|l| l.feature.as_deref()) == Some(feature);
+        if !names_it {
+            debt.push(feature.to_string());
+        }
+    }
+    debt
 }
 
 #[cfg(test)]
@@ -4167,8 +4676,26 @@ mod tests {
         // independent requests against unchanged data.
         let snap = read_snapshot(&root);
         let gate_bypass = snap.config.as_ref().and_then(|c| c.gate_bypass.as_deref());
-        let first = compute_attention_items(&snap.buckets.stuck, &snap.read_errors, snap.handoff.as_ref(), gate_bypass);
-        let second = compute_attention_items(&snap.buckets.stuck, &snap.read_errors, snap.handoff.as_ref(), gate_bypass);
+        let first = compute_attention_items(
+            &snap.buckets.stuck,
+            &snap.read_errors,
+            snap.handoff.as_ref(),
+            gate_bypass,
+            &snap.review,
+            &snap.scribing_debt,
+            &snap.capture_queue,
+            &snap.promote_proposals,
+        );
+        let second = compute_attention_items(
+            &snap.buckets.stuck,
+            &snap.read_errors,
+            snap.handoff.as_ref(),
+            gate_bypass,
+            &snap.review,
+            &snap.scribing_debt,
+            &snap.capture_queue,
+            &snap.promote_proposals,
+        );
 
         assert_eq!(first.len(), 2);
         assert_eq!(first, second, "repeated calls over unchanged data must return the same order");
@@ -4871,6 +5398,460 @@ mod tests {
             "a strange feature name is not a store error: {:?}",
             snap.read_errors
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bbp-13: review join, capture queue, scribing debt, and the three
+    // attention rules they feed (D4, D6, D7) ---
+
+    fn candidate_json(id: &str, feature: &str, mode: &str, cells: &[&str]) -> String {
+        let cells_json = cells.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(",");
+        format!(
+            r#"{{"id":"{id}","type":"candidate","date":"2026-08-01T00:00:00.000Z","feature":"{feature}","head":"abc123","mode":"{mode}","baseline":null,"cells":[{cells_json}]}}"#
+        )
+    }
+
+    /// A `.bee/reviews/<id>.json` session fixture, in the real on-disk
+    /// shape: `included[]` is an array of `{"type": "cell", "id": ...}`
+    /// objects, never bare strings. `decision_status: None` omits the
+    /// `decision` key entirely, matching a session with no decision at all.
+    fn review_session_json(id: &str, included_cells: &[&str], p1_count: usize, decision_status: Option<&str>) -> String {
+        let included_json =
+            included_cells.iter().map(|c| format!(r#"{{"type":"cell","id":"{c}"}}"#)).collect::<Vec<_>>().join(",");
+        let findings_json: String =
+            (0..p1_count).map(|i| format!(r#"{{"id":"f{i}","severity":"P1","title":"x"}}"#)).collect::<Vec<_>>().join(",");
+        let decision_json = decision_status.map(|s| format!(r#","decision":{{"status":"{s}"}}"#)).unwrap_or_default();
+        format!(r#"{{"id":"{id}","included":[{included_json}],"findings":[{findings_json}]{decision_json}}}"#)
+    }
+
+    /// Like `cell_json`, but `behavior_change: true` — the shape
+    /// `compute_scribing_debt` looks for.
+    fn behavior_change_cell_json(id: &str, feature: &str, status: &str) -> String {
+        format!(
+            r#"{{
+                "id": "{id}",
+                "feature": "{feature}",
+                "lane": "standard",
+                "title": "Cell {id}",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {{}},
+                "behavior_change": true,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "{status}",
+                "tier": "generation",
+                "trace": {{"worker": "w1"}}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn candidate_in_no_session_is_unreviewed() {
+        let root = fresh_root("review-unreviewed");
+        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &["cell-1"]));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.review.candidates.len(), 1);
+        assert_eq!(snap.review.candidates[0].status, BeeReviewStatus::Unreviewed);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn candidate_whose_cell_is_in_a_pending_session_is_in_review() {
+        let root = fresh_root("review-pending");
+        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "high-risk", &["cell-1"]));
+        write(&root, ".bee/reviews/r1.json", &review_session_json("r1", &["cell-1"], 0, Some("pending")));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.review.candidates[0].status, BeeReviewStatus::InReview);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn candidate_whose_cell_is_in_an_approved_session_is_settled() {
+        let root = fresh_root("review-approved");
+        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &["cell-1"]));
+        write(&root, ".bee/reviews/r1.json", &review_session_json("r1", &["cell-1"], 0, Some("approved")));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.review.candidates[0].status, BeeReviewStatus::Settled);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn candidate_whose_cell_is_in_a_blocked_session_is_settled() {
+        let root = fresh_root("review-blocked");
+        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &["cell-1"]));
+        write(&root, ".bee/reviews/r1.json", &review_session_json("r1", &["cell-1"], 0, Some("blocked")));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(
+            snap.review.candidates[0].status,
+            BeeReviewStatus::Settled,
+            "blocked is settled too, not merely approved"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn session_naming_a_nonexistent_cell_does_not_crash_and_other_cells_still_join() {
+        let root = fresh_root("review-ghost-cell");
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            &format!(
+                "{}\n{}",
+                candidate_json("c1", "demo", "standard", &["cell-real"]),
+                candidate_json("c2", "demo", "standard", &["cell-other"]),
+            ),
+        );
+        write(
+            &root,
+            ".bee/reviews/r1.json",
+            &review_session_json("r1", &["cell-ghost", "cell-real"], 0, Some("approved")),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.review.candidates.len(), 2);
+        let c1 = snap.review.candidates.iter().find(|c| c.id == "c1").unwrap();
+        let c2 = snap.review.candidates.iter().find(|c| c.id == "c2").unwrap();
+        assert_eq!(c1.status, BeeReviewStatus::Settled, "the real cell must still join and settle");
+        assert_eq!(c2.status, BeeReviewStatus::Unreviewed, "an unrelated candidate stays unaffected");
+        assert!(snap.read_errors.is_empty(), "a ghost cell id in included[] is not a read error: {:?}", snap.read_errors);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn candidate_naming_zero_cells_is_always_unreviewed_pinned() {
+        // A candidate naming zero cells is the shape live in this repo's
+        // own store (one candidate, no cells, a null baseline). It can
+        // never appear in any session's included[], so it is pinned here
+        // to always read as Unreviewed — a choice, not an accident of the
+        // join, even when a session exists that would otherwise settle it.
+        let root = fresh_root("review-zero-cells");
+        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &[]));
+        write(&root, ".bee/reviews/r1.json", &review_session_json("r1", &["some-other-cell"], 0, Some("approved")));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.review.candidates[0].status, BeeReviewStatus::Unreviewed);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn finding_with_no_severity_or_info_severity_never_counted_as_p1() {
+        let root = fresh_root("review-severity-honest");
+        write(
+            &root,
+            ".bee/reviews/r1.json",
+            r#"{"id":"r1","included":[],"findings":[{"id":"f1","title":"no severity key"},{"id":"f2","severity":"info","title":"informational"}],"decision":{"status":"pending"}}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.review.open_p1_findings, 0, "neither a missing severity nor \"info\" counts as P1");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn session_with_no_decision_at_all_counts_as_not_settled() {
+        let root = fresh_root("review-no-decision");
+        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &["cell-1"]));
+        write(
+            &root,
+            ".bee/reviews/r1.json",
+            r#"{"id":"r1","included":[{"type":"cell","id":"cell-1"}],"findings":[{"id":"f1","severity":"P1"}]}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(
+            snap.review.candidates[0].status,
+            BeeReviewStatus::InReview,
+            "a session with no decision key at all is not settled"
+        );
+        assert_eq!(snap.review.open_p1_findings, 1, "the P1 in a decision-less session is open");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn malformed_review_candidate_line_costs_one_read_error_not_the_good_rows() {
+        let root = fresh_root("review-malformed-candidate");
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            &format!("{{ not valid json\n{}", candidate_json("good", "demo", "standard", &["cell-1"])),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.review.candidates.len(), 1, "the good row must still parse: {:?}", snap.review.candidates);
+        assert_eq!(snap.review.candidates[0].id, "good");
+        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
+        assert!(snap.read_errors.iter().any(|e| e.contains("review-candidates.jsonl")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn malformed_review_session_pushes_one_read_error_other_sessions_still_read() {
+        let root = fresh_root("review-malformed-session");
+        write(&root, ".bee/reviews/bad.json", "{ this is not valid json");
+        write(&root, ".bee/reviews/good.json", &review_session_json("good", &["cell-1"], 1, Some("pending")));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.review.open_p1_findings, 1, "the good session must still be read");
+        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
+        assert!(snap.read_errors.iter().any(|e| e.contains("bad.json")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn capture_queue_stubs_and_flushes_counted_correctly() {
+        let root = fresh_root("capture-queue-net");
+        write(
+            &root,
+            ".bee/capture-queue.jsonl",
+            concat!(
+                r#"{"kind":"stub","id":"s1","at":"2026-08-01T00:00:00.000Z","outcome":"x"}"#,
+                "\n",
+                r#"{"kind":"stub","id":"s2","at":"2026-08-01T00:00:00.000Z","outcome":"y"}"#,
+                "\n",
+                r#"{"kind":"flush","id":"s1","at":"2026-08-01T01:00:00.000Z","into":"docs/x.md"}"#,
+            ),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.capture_queue.waiting, 1, "s1 was flushed, s2 is still waiting");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn capture_queue_absent_file_is_silent_no_read_error() {
+        let root = fresh_root("capture-queue-absent");
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.capture_queue.waiting, 0);
+        assert!(
+            snap.read_errors.is_empty(),
+            "an absent capture-queue.jsonl must never be a read error: {:?}",
+            snap.read_errors
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn capture_queue_malformed_line_costs_one_read_error_not_the_good_rows() {
+        let root = fresh_root("capture-queue-malformed");
+        write(
+            &root,
+            ".bee/capture-queue.jsonl",
+            concat!(
+                "{ not valid json\n",
+                r#"{"kind":"stub","id":"s1","at":"2026-08-01T00:00:00.000Z","outcome":"x"}"#,
+            ),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.capture_queue.waiting, 1, "the good stub row must still count: {:?}", snap.capture_queue);
+        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
+        assert!(snap.read_errors.iter().any(|e| e.contains("capture-queue.jsonl")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn feature_with_capped_behavior_change_cells_and_no_matching_last_scribing_run_has_debt() {
+        let root = fresh_root("scribing-debt-active");
+        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"swarming"}"#);
+        write(&root, ".bee/cells/c1.json", &behavior_change_cell_json("c1", "demo", "capped"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.scribing_debt, vec!["demo".to_string()]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn feature_whose_last_scribing_run_names_it_has_no_debt() {
+        let root = fresh_root("scribing-debt-clean");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"demo","phase":"swarming","last_scribing_run":{"feature":"demo","date":"2026-08-01","at":"2026-08-01T00:00:00.000Z"}}"#,
+        );
+        write(&root, ".bee/cells/c1.json", &behavior_change_cell_json("c1", "demo", "capped"));
+
+        let snap = read_snapshot(&root);
+        assert!(
+            snap.scribing_debt.is_empty(),
+            "a matching last_scribing_run must clear the debt: {:?}",
+            snap.scribing_debt
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn lane_feature_whose_last_scribing_run_names_a_different_feature_still_has_debt() {
+        let root = fresh_root("scribing-debt-lane-mismatch");
+        write(
+            &root,
+            ".bee/lanes/demo.json",
+            r#"{"feature":"demo","phase":"swarming","last_scribing_run":{"feature":"some-other-feature","date":"2026-08-01","at":"2026-08-01T00:00:00.000Z"}}"#,
+        );
+        write(&root, ".bee/cells/c1.json", &behavior_change_cell_json("c1", "demo", "capped"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(
+            snap.scribing_debt,
+            vec!["demo".to_string()],
+            "a last_scribing_run naming a DIFFERENT feature still counts as debt: {:?}",
+            snap.scribing_debt
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn feature_with_no_behavior_change_cells_never_has_debt() {
+        let root = fresh_root("scribing-debt-none");
+        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"swarming"}"#);
+        write(&root, ".bee/cells/c1.json", &cell_json("c1", "capped"));
+
+        let snap = read_snapshot(&root);
+        assert!(
+            snap.scribing_debt.is_empty(),
+            "no behavior_change cells means no debt, capped or not: {:?}",
+            snap.scribing_debt
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn open_p1_review_findings_alone_yields_one_critical_item() {
+        let root = fresh_root("attention-open-p1");
+        write(
+            &root,
+            ".bee/reviews/r1.json",
+            r#"{"id":"r1","included":[],"findings":[{"id":"f1","severity":"P1","title":"x"}],"decision":{"status":"pending"}}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+        let item = &snap.attention[0];
+        assert_eq!(item.severity, BeeAttentionSeverity::Critical);
+        assert!(item.title.contains('1') && item.title.to_lowercase().contains("p1"), "title: {}", item.title);
+        assert!(
+            item.suggested_action.to_lowercase().contains("user-invoked"),
+            "the action must read as user-invoked work, never automatic pending review: {}",
+            item.suggested_action
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unreviewed_high_risk_candidate_alone_yields_one_serious_item() {
+        let root = fresh_root("attention-unreviewed-high-risk");
+        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "high-risk", &["cell-1"]));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+        let item = &snap.attention[0];
+        assert_eq!(item.severity, BeeAttentionSeverity::Serious);
+        assert!(item.title.to_lowercase().contains("high-risk"), "title: {}", item.title);
+        assert!(
+            item.suggested_action.to_lowercase().contains("user-invoked"),
+            "must be worded as user-invoked, never automatic: {}",
+            item.suggested_action
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unreviewed_standard_mode_candidate_does_not_fire_the_high_risk_rule() {
+        let root = fresh_root("attention-unreviewed-standard");
+        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &["cell-1"]));
+
+        let snap = read_snapshot(&root);
+        assert!(
+            snap.attention.is_empty(),
+            "a standard-mode unreviewed candidate must not fire the high-risk rule: {:?}",
+            snap.attention
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn knowledge_debt_alone_yields_one_warning_item() {
+        let root = fresh_root("attention-knowledge-debt");
+        write(
+            &root,
+            ".bee/capture-queue.jsonl",
+            r#"{"kind":"stub","id":"s1","at":"2026-08-01T00:00:00.000Z","outcome":"x"}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+        let item = &snap.attention[0];
+        assert_eq!(item.severity, BeeAttentionSeverity::Warning);
+        assert!(item.title.contains("knowledge-debt"), "title: {}", item.title);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn all_three_bbp13_rules_together_ordered_heaviest_first() {
+        let root = fresh_root("attention-all-three-bbp13");
+        write(
+            &root,
+            ".bee/reviews/r1.json",
+            r#"{"id":"r1","included":[],"findings":[{"id":"f1","severity":"P1","title":"x"}],"decision":{"status":"pending"}}"#,
+        );
+        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "high-risk", &["cell-1"]));
+        write(
+            &root,
+            ".bee/capture-queue.jsonl",
+            r#"{"kind":"stub","id":"s1","at":"2026-08-01T00:00:00.000Z","outcome":"x"}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.attention.len(), 3, "all three rules should fire: {:?}", snap.attention);
+        assert_eq!(snap.attention[0].severity, BeeAttentionSeverity::Critical);
+        assert_eq!(snap.attention[1].severity, BeeAttentionSeverity::Serious);
+        assert_eq!(snap.attention[2].severity, BeeAttentionSeverity::Warning);
+        assert!(snap.attention[0].title.to_lowercase().contains("p1"), "{:?}", snap.attention);
+        assert!(snap.attention[1].title.to_lowercase().contains("high-risk"), "{:?}", snap.attention);
+        assert!(snap.attention[2].title.contains("knowledge-debt"), "{:?}", snap.attention);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn none_of_the_bbp13_rules_fire_on_a_clean_store() {
+        let root = fresh_root("attention-bbp13-clean");
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+
+        let snap = read_snapshot(&root);
+        assert!(snap.attention.is_empty(), "a clean store must yield no attention items: {:?}", snap.attention);
+
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -4474,6 +4474,137 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (read-only, bbp-13) The fixture `.bee/` tree is byte-identical after
+    /// a board request whose fixture CONTAINS a populated
+    /// `.bee/review-candidates.jsonl` — the pre-existing read-only tests
+    /// each use a fixture with no candidates file, so they would pass
+    /// green without the review-candidates reader ever running. This one
+    /// exercises it: the reader must open the file, parse it and join it
+    /// (unreviewed, since no `.bee/reviews/` session exists here) without
+    /// ever writing back to it.
+    #[tokio::test]
+    async fn board_reading_is_read_only_with_a_populated_review_candidates_file_present() {
+        let root = fresh_root("review-candidates-read-only");
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            r#"{"id":"c1","type":"candidate","date":"2026-08-06T00:00:00.000Z","feature":"review-candidates-read-only","head":"abc123","mode":"high-risk","baseline":null,"cells":["c-open"]}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &timed_cell_json("c-open", "review-candidates-read-only", "open", &[], "w1", "x", "y"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "review-candidates-read-only");
+        let before = snapshot_tree(&root);
+
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("high-risk"),
+            "the unreviewed high-risk candidate should surface as an attention item: body missing expected text"
+        );
+
+        let after = snapshot_tree(&root);
+        assert_eq!(
+            before, after,
+            ".bee/ tree changed after a request whose fixture carries a populated review-candidates.jsonl"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (read-only, bbp-13) The fixture `.bee/` tree is byte-identical after
+    /// a board request whose fixture CONTAINS a populated
+    /// `.bee/reviews/<id>.json` session — the pre-existing read-only tests
+    /// each use a fixture with no `.bee/reviews/` directory at all, so they
+    /// would pass green without the review-session reader ever running.
+    /// This one exercises it: the reader must open the directory, parse
+    /// the session and count its open P1 finding without ever writing back
+    /// to it.
+    #[tokio::test]
+    async fn board_reading_is_read_only_with_a_populated_review_session_present() {
+        let root = fresh_root("review-session-read-only");
+        write(
+            &root,
+            ".bee/reviews/r1.json",
+            r#"{"id":"r1","included":[],"findings":[{"id":"f1","severity":"P1","title":"unresolved"}],"decision":{"status":"pending"}}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &timed_cell_json("c-open", "review-session-read-only", "open", &[], "w1", "x", "y"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "review-session-read-only");
+        let before = snapshot_tree(&root);
+
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("P1"),
+            "the open P1 finding should surface as an attention item: body missing expected text"
+        );
+
+        let after = snapshot_tree(&root);
+        assert_eq!(
+            before, after,
+            ".bee/ tree changed after a request whose fixture carries a populated review session"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (read-only, bbp-13) The fixture `.bee/` tree is byte-identical after
+    /// a board request whose fixture CONTAINS a populated
+    /// `.bee/capture-queue.jsonl` — the pre-existing read-only tests each
+    /// use a fixture with no capture-queue file, so they would pass green
+    /// without the capture-queue reader ever running. This one exercises
+    /// it: the reader must open the file, parse it and net the waiting
+    /// stubs against any flush without ever writing back to it.
+    #[tokio::test]
+    async fn board_reading_is_read_only_with_a_populated_capture_queue_present() {
+        let root = fresh_root("capture-queue-read-only");
+        write(
+            &root,
+            ".bee/capture-queue.jsonl",
+            r#"{"kind":"stub","id":"s1","at":"2026-08-06T00:00:00.000Z","outcome":"a note waiting to be written"}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &timed_cell_json("c-open", "capture-queue-read-only", "open", &[], "w1", "x", "y"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "capture-queue-read-only");
+        let before = snapshot_tree(&root);
+
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("knowledge-debt"),
+            "the waiting capture stub should surface as a knowledge-debt attention item: body missing expected text"
+        );
+
+        let after = snapshot_tree(&root);
+        assert_eq!(
+            before, after,
+            ".bee/ tree changed after a request whose fixture carries a populated capture-queue.jsonl"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (happy) bee-board-ux-2 / bbp-11: a finished feature's line in the
     /// Finished section still links to its feature detail page, and an
     /// in-flight feature's phase card links to its feature detail page too
