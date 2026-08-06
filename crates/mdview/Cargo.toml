@@ -44,6 +44,12 @@ rand.workspace = true
 # to close.
 subtle = "2.6"
 
+# Telegram notification transport (agent-terminal-17, D1/D7): rustls instead
+# of native TLS keeps the build self-contained (no system OpenSSL). Serde's
+# json feature is already pulled in via serde_json above; requested again
+# here so reqwest's own JSON body helper builds without a second dependency.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 # setsid(2) for fully detaching the auto-spawned daemon (Unix only).
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
