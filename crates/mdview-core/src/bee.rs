@@ -123,6 +123,62 @@ pub struct BeeState {
     /// used to move a cell between D7 buckets — see [`BeeRunningWorker`] for
     /// the joined, session-verified view this snapshot derives from it.
     pub workers: Vec<BeeWorker>,
+    /// `state.json`'s `approved_gates`. `None` when the file never carried
+    /// the key — never fabricated as "all false".
+    pub approved_gates: Option<BeeApprovedGates>,
+    /// `state.json`'s `gate_revoked_at`. Read independently of
+    /// `approved_gates` — a gate revoked after being approved still shows
+    /// `approved_gates.<gate> == Some(true)`, so a caller must consult both
+    /// to tell "approved" apart from "approved, then revoked".
+    pub gate_revoked_at: Option<BeeGateRevocations>,
+    /// `state.json`'s `route`. `None` when the file never carried the key.
+    pub route: Option<BeeRoute>,
+    /// `state.json`'s `next_action`. Free text, not a path field — scrubbed
+    /// of any embedded absolute path before it reaches this struct; see
+    /// [`scrub_paths`].
+    pub next_action: Option<String>,
+}
+
+/// `.bee/state.json`'s `approved_gates` — the four gates a feature's work
+/// passes through (context, shape, execution, review), each approved
+/// independently. A gate name entirely absent from the file reads as
+/// `None`, never fabricated as `false`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeApprovedGates {
+    pub context: Option<bool>,
+    pub shape: Option<bool>,
+    pub execution: Option<bool>,
+    pub review: Option<bool>,
+}
+
+/// `.bee/state.json`'s `gate_revoked_at` — the timestamp a gate was revoked
+/// after having been approved, keyed by the same four gate names as
+/// [`BeeApprovedGates`]. A gate name absent here was never revoked (or was
+/// never approved in the first place); this struct alone does not say
+/// which — see [`BeeState::approved_gates`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeGateRevocations {
+    pub context: Option<String>,
+    pub shape: Option<String>,
+    pub execution: Option<String>,
+    pub review: Option<String>,
+}
+
+/// `.bee/state.json`'s `route` — the lane classification recorded when the
+/// feature was routed. Only the six keys this snapshot ever reads; a
+/// version-specific extra (`route.feature` on bee 2.2.2, `route.demoted_at`
+/// on this repo's 2.1.15) is ignored rather than refused — neither bee
+/// version's `route` object is a superset of the other's.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeRoute {
+    pub class: Option<String>,
+    pub lane: Option<String>,
+    pub flags: Vec<String>,
+    pub product_files: Option<u64>,
+    /// Free text, not a path field — scrubbed of any embedded absolute path
+    /// before it reaches this struct; see [`scrub_paths`].
+    pub rationale: Option<String>,
+    pub updated_at: Option<String>,
 }
 
 /// One raw entry from `.bee/state.json`'s `workers[]`. `cell`, `tier` and
@@ -654,6 +710,31 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
                 .and_then(Value::as_array)
                 .map(|arr| arr.iter().filter_map(parse_worker).collect())
                 .unwrap_or_default(),
+            approved_gates: v.get("approved_gates").and_then(Value::as_object).map(|g| BeeApprovedGates {
+                context: g.get("context").and_then(Value::as_bool),
+                shape: g.get("shape").and_then(Value::as_bool),
+                execution: g.get("execution").and_then(Value::as_bool),
+                review: g.get("review").and_then(Value::as_bool),
+            }),
+            gate_revoked_at: v.get("gate_revoked_at").and_then(Value::as_object).map(|g| BeeGateRevocations {
+                context: g.get("context").and_then(Value::as_str).map(String::from),
+                shape: g.get("shape").and_then(Value::as_str).map(String::from),
+                execution: g.get("execution").and_then(Value::as_str).map(String::from),
+                review: g.get("review").and_then(Value::as_str).map(String::from),
+            }),
+            route: v.get("route").and_then(Value::as_object).map(|r| BeeRoute {
+                class: r.get("class").and_then(Value::as_str).map(String::from),
+                lane: r.get("lane").and_then(Value::as_str).map(String::from),
+                flags: r
+                    .get("flags")
+                    .and_then(Value::as_array)
+                    .map(|arr| arr.iter().filter_map(|f| f.as_str().map(String::from)).collect())
+                    .unwrap_or_default(),
+                product_files: r.get("product_files").and_then(Value::as_u64),
+                rationale: r.get("rationale").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
+                updated_at: r.get("updated_at").and_then(Value::as_str).map(String::from),
+            }),
+            next_action: v.get("next_action").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
         }),
         Err(e) => {
             read_errors.push(format!("{}: could not parse ({e})", rel_str(&path, root)));
@@ -3114,6 +3195,178 @@ mod tests {
         let text = "Execute (c-1), then cap the cell; move on, review next.";
 
         assert_eq!(scrub_paths(text, &root), text);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bbp-3: state.json gates, route and next_action ---
+
+    #[test]
+    fn state_full_gates_route_and_next_action_are_read() {
+        let root = fresh_root("state-full");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "phase": "swarming",
+                "feature": "demo",
+                "mode": "standard",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": false},
+                "route": {
+                    "class": "feature",
+                    "lane": "standard",
+                    "flags": ["cross-platform"],
+                    "product_files": 3,
+                    "rationale": "Small, well-scoped change.",
+                    "updated_at": "2026-08-01T00:00:00.000Z"
+                },
+                "next_action": "Invoke bee-swarming."
+            }"#,
+        );
+
+        let snap = read_snapshot(&root);
+        let state = snap.state.as_ref().expect("state.json should have been read");
+
+        let gates = state.approved_gates.as_ref().expect("approved_gates should be Some");
+        assert_eq!(gates.context, Some(true));
+        assert_eq!(gates.shape, Some(true));
+        assert_eq!(gates.execution, Some(true));
+        assert_eq!(gates.review, Some(false));
+
+        let route = state.route.as_ref().expect("route should be Some");
+        assert_eq!(route.class.as_deref(), Some("feature"));
+        assert_eq!(route.lane.as_deref(), Some("standard"));
+        assert_eq!(route.flags, vec!["cross-platform".to_string()]);
+        assert_eq!(route.product_files, Some(3));
+        assert_eq!(route.rationale.as_deref(), Some("Small, well-scoped change."));
+        assert_eq!(route.updated_at.as_deref(), Some("2026-08-01T00:00:00.000Z"));
+
+        assert_eq!(state.next_action.as_deref(), Some("Invoke bee-swarming."));
+        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn state_missing_gates_route_and_next_action_degrades_silently() {
+        let root = fresh_root("state-missing-new-fields");
+        write(&root, ".bee/state.json", r#"{"phase": "swarming", "feature": "demo", "mode": "standard"}"#);
+
+        let snap = read_snapshot(&root);
+        let state = snap.state.as_ref().expect("state.json should have been read");
+
+        assert!(state.approved_gates.is_none(), "approved_gates must be None, never fabricated");
+        assert!(state.gate_revoked_at.is_none(), "gate_revoked_at must be None, never fabricated");
+        assert!(state.route.is_none(), "route must be None, never fabricated");
+        assert!(state.next_action.is_none(), "next_action must be None, never fabricated");
+        assert!(
+            snap.read_errors.is_empty(),
+            "missing optional keys must not be a read error: {:?}",
+            snap.read_errors
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn state_route_with_unknown_extra_key_is_read_without_complaint() {
+        let root = fresh_root("state-route-drift");
+        // Both a bee-2.2.2-shaped `feature` key and this repo's `demoted_at`
+        // key, neither of which this reader ever looks at.
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "route": {
+                    "class": "feature",
+                    "lane": "small",
+                    "flags": [],
+                    "product_files": 1,
+                    "rationale": "Trivial.",
+                    "updated_at": "2026-08-01T00:00:00.000Z",
+                    "feature": "windows-shell-doctrine",
+                    "demoted_at": "2026-08-05T06:42:54.494Z"
+                }
+            }"#,
+        );
+
+        let snap = read_snapshot(&root);
+        let state = snap.state.as_ref().expect("state.json should have been read");
+        let route = state.route.as_ref().expect("route should be Some despite the unknown keys");
+        assert_eq!(route.class.as_deref(), Some("feature"));
+        assert_eq!(route.lane.as_deref(), Some("small"));
+        assert!(snap.read_errors.is_empty(), "an unknown route key must not be a read error: {:?}", snap.read_errors);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn state_gate_revoked_at_is_carried_alongside_a_still_true_approved_gate() {
+        let root = fresh_root("state-gate-revoked");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": false},
+                "gate_revoked_at": {"execution": "2026-08-05T09:51:47.038Z"}
+            }"#,
+        );
+
+        let snap = read_snapshot(&root);
+        let state = snap.state.as_ref().expect("state.json should have been read");
+
+        let gates = state.approved_gates.as_ref().expect("approved_gates should be Some");
+        assert_eq!(gates.execution, Some(true), "the store still marks execution approved");
+
+        let revoked = state.gate_revoked_at.as_ref().expect("gate_revoked_at should be Some");
+        assert_eq!(
+            revoked.execution.as_deref(),
+            Some("2026-08-05T09:51:47.038Z"),
+            "the revocation timestamp must be readable alongside the still-true approval"
+        );
+        assert!(revoked.context.is_none(), "context was never revoked");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn state_absolute_path_embedded_in_rationale_and_next_action_does_not_survive() {
+        let root = fresh_root("state-security-scrub");
+        let secret = root.join("src").join("bee.rs").to_string_lossy().into_owned();
+        let body = format!(
+            r#"{{
+                "route": {{
+                    "class": "feature",
+                    "lane": "standard",
+                    "flags": [],
+                    "product_files": 1,
+                    "rationale": "See {rationale_path} before merging.",
+                    "updated_at": "2026-08-01T00:00:00.000Z"
+                }},
+                "next_action": "Read {next_action_path} then continue."
+            }}"#,
+            rationale_path = secret.replace('\\', "\\\\"),
+            next_action_path = secret.replace('\\', "\\\\"),
+        );
+        write(&root, ".bee/state.json", &body);
+
+        let snap = read_snapshot(&root);
+        let serialized = serde_json::to_string(&snap).unwrap();
+
+        assert!(!serialized.contains(&secret), "an absolute path embedded in free text leaked into the snapshot");
+
+        let state = snap.state.as_ref().expect("state.json should have been read");
+        let route = state.route.as_ref().expect("route should be Some");
+        assert!(
+            route.rationale.as_deref().unwrap_or_default().contains("src/bee.rs"),
+            "rationale should still carry the reduced relative path: {:?}",
+            route.rationale
+        );
+        assert!(
+            state.next_action.as_deref().unwrap_or_default().contains("src/bee.rs"),
+            "next_action should still carry the reduced relative path: {:?}",
+            state.next_action
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
