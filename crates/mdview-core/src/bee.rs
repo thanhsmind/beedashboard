@@ -61,6 +61,12 @@
 //! grant — sibling directory gone, `state.json` missing or malformed — is
 //! reported unresolved, never dropped and never fatal.
 //!
+//! bee-board-pm (bbp-4) adds [`BeeSnapshot::attention`] — D6's generated,
+//! severity-ordered "needs attention" list, computed in
+//! [`compute_attention_items`] purely from `buckets.stuck` and
+//! `read_errors`, exactly as this module already computes
+//! `running_workers` from data it has already read.
+//!
 //! Every path-shaped value that crosses into a public field is rendered
 //! relative to the project root (or reduced to a bare filename when it
 //! falls outside the root) — no absolute path may survive into a
@@ -475,6 +481,39 @@ pub struct BeeDecisions {
     pub recent: Vec<BeeDecisionSummary>,
 }
 
+/// Severity of one generated "needs attention" item (D6). Variants are
+/// declared lightest-first so the derived [`Ord`] ranks `Critical` highest;
+/// [`compute_attention_items`] sorts descending by this so the heaviest
+/// items lead. Ranked to match the source spec's three tiers
+/// (`docs/history/bee-board-pm/pm-dashboard-spec.md` §5: 🟡 warning / 🟠
+/// serious / 🔴 critical) so a rule added later slots into the tier it
+/// already names, without moving the tiers this slice uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeeAttentionSeverity {
+    Warning,
+    Serious,
+    Critical,
+}
+
+/// One generated "needs attention" finding (D6). Not a bee concept — it
+/// exists only on the board, produced by [`compute_attention_items`] over
+/// data this snapshot already read. Every field is a plain, non-optional
+/// string or [`BeeAttentionSeverity`], so an item can never be constructed
+/// missing one of the four the board promises.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BeeAttentionItem {
+    pub severity: BeeAttentionSeverity,
+    /// Short label naming what fired. Built only from fields already
+    /// scrubbed/relativized before they reached this snapshot (`BeeCell`,
+    /// `read_errors`) — see [`scrub_paths`] and [`parse_cell`].
+    pub title: String,
+    /// The specifics behind `title` — which cells, which files.
+    pub detail: String,
+    /// What a human should do about it.
+    pub suggested_action: String,
+}
+
 /// A typed snapshot of a project's `.bee/` store at read time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeeSnapshot {
@@ -513,6 +552,10 @@ pub struct BeeSnapshot {
     /// reader that a `Waiting`/`Stuck` cell nonetheless has a live process
     /// against it, or flags one that does not agree with the store.
     pub running_workers: Vec<BeeRunningWorker>,
+    /// D6's generated "needs attention" list — see
+    /// [`compute_attention_items`]. Heaviest severity first, empty when
+    /// nothing this slice's rules cover is wrong.
+    pub attention: Vec<BeeAttentionItem>,
     /// Human-readable notes naming what could not be read. Every path
     /// mentioned here is relative to the project root.
     pub read_errors: Vec<String>,
@@ -535,6 +578,7 @@ impl BeeSnapshot {
             decisions: BeeDecisions::default(),
             worktrees: Vec::new(),
             running_workers: Vec::new(),
+            attention: Vec::new(),
             read_errors: Vec::new(),
         }
     }
@@ -624,6 +668,8 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         .map(|s| compute_running_workers(&s.workers, &all_cells, &sessions))
         .unwrap_or_default();
 
+    let attention = compute_attention_items(&buckets.stuck, &read_errors);
+
     BeeSnapshot {
         present: true,
         state,
@@ -638,6 +684,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         decisions,
         worktrees,
         running_workers,
+        attention,
         read_errors,
     }
 }
@@ -684,6 +731,59 @@ fn compute_running_workers(
         });
     }
     out
+}
+
+/// Generate D6's "needs attention" list over data this snapshot already
+/// read (D4 — no additional I/O, no clock of its own). Each rule below
+/// fires independently of the others and, when it fires, contributes
+/// exactly one item; the result is sorted heaviest severity first, and a
+/// stable sort keeps items of equal severity in the fixed order the rules
+/// are written in below, so the list never reshuffles between requests on
+/// unchanged data.
+///
+/// This slice's rules are the only ones existing snapshot data already
+/// supports:
+/// - `blocked_cells` non-empty (source spec A6, 🔴 critical: "every red
+///   cell is a fix-first cell").
+/// - `read_errors` non-empty (🔴 critical too: a file this board could not
+///   parse might just as easily be hiding a blocked cell as showing one,
+///   so every other number on the page should be read as provisional
+///   until it is fixed).
+///
+/// Adding a rule later means adding another `if` below and letting it fall
+/// into the sort — the two here are never touched to make room for it.
+fn compute_attention_items(blocked_cells: &[BeeCell], read_errors: &[String]) -> Vec<BeeAttentionItem> {
+    let mut items = Vec::new();
+
+    if !blocked_cells.is_empty() {
+        let n = blocked_cells.len();
+        let noun = if n == 1 { "cell" } else { "cells" };
+        let detail = blocked_cells
+            .iter()
+            .map(|c| format!("{} ({})", c.title, c.id))
+            .collect::<Vec<_>>()
+            .join("; ");
+        items.push(BeeAttentionItem {
+            severity: BeeAttentionSeverity::Critical,
+            title: format!("{n} {noun} blocked"),
+            detail,
+            suggested_action: "Every blocked cell is a fix-first cell — clear it before starting new work.".to_string(),
+        });
+    }
+
+    if !read_errors.is_empty() {
+        let n = read_errors.len();
+        let noun = if n == 1 { "file" } else { "files" };
+        items.push(BeeAttentionItem {
+            severity: BeeAttentionSeverity::Critical,
+            title: format!("{n} {noun} could not be read"),
+            detail: read_errors.join("; "),
+            suggested_action: "Repair or regenerate the file(s) named above — until they parse, every other number on this page may be incomplete.".to_string(),
+        });
+    }
+
+    items.sort_by(|a, b| b.severity.cmp(&a.severity));
+    items
 }
 
 fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Option<BeeState> {
@@ -3366,6 +3466,146 @@ mod tests {
             state.next_action.as_deref().unwrap_or_default().contains("src/bee.rs"),
             "next_action should still carry the reduced relative path: {:?}",
             state.next_action
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bbp-4: the attention list (D6) ---
+
+    #[test]
+    fn blocked_cells_yield_one_critical_attention_item_naming_a_suggested_action() {
+        let root = fresh_root("attention-blocked");
+        write(&root, ".bee/cells/c-blocked-1.json", &cell_json("c-blocked-1", "blocked"));
+        write(&root, ".bee/cells/c-blocked-2.json", &cell_json("c-blocked-2", "blocked"));
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.buckets.stuck.len(), 2, "both blocked cells should be in the stuck bucket");
+        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+
+        let item = &snap.attention[0];
+        assert_eq!(item.severity, BeeAttentionSeverity::Critical);
+        assert!(item.title.contains('2') && item.title.contains("cells"), "title: {}", item.title);
+        assert!(item.detail.contains("c-blocked-1"), "detail: {}", item.detail);
+        assert!(item.detail.contains("c-blocked-2"), "detail: {}", item.detail);
+        assert!(!item.suggested_action.trim().is_empty());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_errors_yield_one_critical_attention_item_naming_a_suggested_action() {
+        let root = fresh_root("attention-read-errors");
+        write(&root, ".bee/cells/good.json", &cell_json("good", "open"));
+        // A genuinely truncated file, parsed through the real code path —
+        // the same shape `malformed_state_and_truncated_cell_degrade_to_partial_snapshot`
+        // already proves produces one `read_errors` entry.
+        write(&root, ".bee/cells/bad.json", "{\"id\": \"bad\", \"status\": \"open\"");
+
+        let snap = read_snapshot(&root);
+        assert!(snap.buckets.stuck.is_empty(), "no blocked cell in this fixture");
+        assert_eq!(snap.read_errors.len(), 1, "expected one read error: {:?}", snap.read_errors);
+        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+
+        let item = &snap.attention[0];
+        assert_eq!(item.severity, BeeAttentionSeverity::Critical);
+        assert!(item.title.contains('1') && item.title.contains("file"), "title: {}", item.title);
+        assert!(item.detail.contains("bad.json"), "detail: {}", item.detail);
+        assert!(!item.suggested_action.trim().is_empty());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn blocked_cells_and_read_errors_together_yield_both_items_heaviest_first_in_a_stable_order() {
+        let root = fresh_root("attention-both");
+        write(&root, ".bee/cells/c-blocked.json", &cell_json("c-blocked", "blocked"));
+        write(&root, ".bee/cells/bad.json", "{\"id\": \"bad\", \"status\": \"open\"");
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.attention.len(), 2, "both rules should fire: {:?}", snap.attention);
+
+        // Both rules in this slice carry equal (Critical) severity — the
+        // real-store shape that proves the stable, rule-registration order
+        // a plain severity sort alone would not guarantee.
+        assert_eq!(snap.attention[0].severity, BeeAttentionSeverity::Critical);
+        assert_eq!(snap.attention[1].severity, BeeAttentionSeverity::Critical);
+        assert!(
+            snap.attention[0].title.contains("blocked"),
+            "blocked-cells item should sort first: {:?}",
+            snap.attention
+        );
+        assert!(
+            snap.attention[1].title.contains("could not be read"),
+            "read-errors item should sort second: {:?}",
+            snap.attention
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn clean_snapshot_yields_no_attention_items() {
+        let root = fresh_root("attention-clean");
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(&root, ".bee/cells/c-done.json", &cell_json("c-done", "capped"));
+
+        let snap = read_snapshot(&root);
+        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        assert!(
+            snap.attention.is_empty(),
+            "nothing wrong should yield an empty list, not a placeholder item: {:?}",
+            snap.attention
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn same_severity_items_return_in_a_deterministic_order_across_repeated_calls() {
+        let root = fresh_root("attention-determinism");
+        write(&root, ".bee/cells/c-blocked.json", &cell_json("c-blocked", "blocked"));
+        write(&root, ".bee/cells/bad.json", "{\"id\": \"bad\", \"status\": \"open\"");
+
+        // Real-shaped input, read once; the pure computation is then
+        // called twice over that same input, standing in for two
+        // independent requests against unchanged data.
+        let snap = read_snapshot(&root);
+        let first = compute_attention_items(&snap.buckets.stuck, &snap.read_errors);
+        let second = compute_attention_items(&snap.buckets.stuck, &snap.read_errors);
+
+        assert_eq!(first.len(), 2);
+        assert_eq!(first, second, "repeated calls over unchanged data must return the same order");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn computing_attention_perturbs_no_other_snapshot_field() {
+        let root = fresh_root("attention-no-side-effect");
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(&root, ".bee/cells/c-claimed.json", &cell_json("c-claimed", "claimed"));
+        write(&root, ".bee/cells/c-blocked.json", &cell_json("c-blocked", "blocked"));
+        write(&root, ".bee/cells/c-capped.json", &cell_json("c-capped", "capped"));
+        write(&root, ".bee/cells/c-dropped.json", &cell_json("c-dropped", "dropped"));
+        write(&root, ".bee/cells/bad.json", "{\"id\": \"bad\", \"status\": \"open\"");
+
+        let snap = read_snapshot(&root);
+
+        // The attention rules fired (both, since a blocked cell and a read
+        // error are both present) without changing anything they read from.
+        assert_eq!(snap.attention.len(), 2, "both rules should fire: {:?}", snap.attention);
+        assert_eq!(snap.buckets.doing.len(), 1, "claimed bucket unperturbed");
+        assert_eq!(snap.buckets.waiting.len(), 1, "open bucket unperturbed");
+        assert_eq!(snap.buckets.stuck.len(), 1, "blocked bucket unperturbed");
+        assert_eq!(snap.buckets.done.len(), 1, "capped bucket unperturbed");
+        assert!(snap.active, "an open/claimed cell should still mark the snapshot active");
+        assert_eq!(snap.read_errors.len(), 1, "read_errors unperturbed: {:?}", snap.read_errors);
+        assert!(
+            snap.read_errors.iter().any(|e| e.contains("bad.json")),
+            "the original read error should still be present: {:?}",
+            snap.read_errors
         );
 
         std::fs::remove_dir_all(&root).ok();
