@@ -255,6 +255,25 @@ fn poll_tail(dir: &Path, newest: &Path, cursor: &str) -> Result<ActivityChunk> {
 /// (the byte immediately before it is `\n`), the first line is a whole
 /// record and must be kept, not discarded on the assumption every
 /// non-zero start is torn.
+///
+/// [`OPEN_BACKFILL_BYTES`] is far smaller than [`MAX_READ_BYTES`], so the
+/// window this function reads can never itself trigger
+/// [`tail_from_open_file`]'s oversized-record branch (that branch only
+/// fires once a full [`MAX_READ_BYTES`] read comes back with no `\n` in
+/// it). When the window starts mid-record AND contains no `\n` anywhere —
+/// an agent still mid-write on a record bigger than the window, which is
+/// exactly the shape [`tail_from_open_file`]'s oversized handling exists
+/// for — there is no torn line to drop and nothing to render, and `start`
+/// itself was never validated as a record boundary in the first place.
+/// Returning it anyway (as this used to) leaves the caller resuming from a
+/// mid-record byte: the next poll's boundary check reads that as
+/// truncation, re-runs this whole backfill, and finds the exact same
+/// non-boundary offset again — a divider and a restart on every tick until
+/// the record finally terminates. Instead this locates the record's true
+/// start by scanning backward for the nearest preceding `\n` (or the start
+/// of the file) and re-reads from there with the very same
+/// [`tail_from_open_file`] the tailer uses, so the two paths agree and the
+/// offset this function returns is always a genuine boundary.
 fn backfill_file(
     path: &Path,
     from_subagent: bool,
@@ -265,7 +284,15 @@ fn backfill_file(
     let start = len.saturating_sub(OPEN_BACKFILL_BYTES);
     let on_boundary = offset_is_record_boundary(&mut file, start)?;
     let (mut raw_lines, new_offset) = tail_from_open_file(&mut file, start)?;
-    if start > 0 && !on_boundary && !raw_lines.is_empty() {
+    if start > 0 && !on_boundary {
+        if raw_lines.is_empty() {
+            let record_start = match find_prev_newline(&mut file, start)? {
+                Some(newline_pos) => newline_pos + 1,
+                None => 0,
+            };
+            let (lines, offset) = tail_from_open_file(&mut file, record_start)?;
+            return Ok((render_events(&lines, from_subagent, order), offset));
+        }
         raw_lines.remove(0);
     }
     Ok((render_events(&raw_lines, from_subagent, order), new_offset))
@@ -436,6 +463,22 @@ fn parse_cursor(cursor: &str) -> Result<(String, u64)> {
 /// characters it was told to look for can miss a shape nobody thought to
 /// list (the drive-prefix colon above is exactly that).
 ///
+/// The extension and the empty-name conditions are two separate `if`s
+/// rather than one `||`'d expression, and each is written so it alone
+/// decides a case the other cannot. A wholly empty `name` (`""`) already
+/// fails the extension check on its own — `""` can never end with the
+/// non-empty suffix `.jsonl` — so a check for whole-string emptiness folded
+/// in beside it, as this used to have, is never independently load-bearing:
+/// every input it rejects, the extension check already rejects too, and
+/// dropping it changes nothing observable. Checking the *stem* — `name`
+/// with the `.jsonl` suffix stripped — instead of the whole string is what
+/// makes the two conditions independently testable: a bare `.jsonl` (the
+/// extension present, no session id in front of it) passes the extension
+/// check yet is exactly the shape the empty-name guard exists to catch, so
+/// it fails here instead. See `cursor_never_escapes_the_project_dir`'s
+/// fixtures below, each written to fail if any one guard condition —
+/// including this one — is dropped.
+///
 /// `Path::components` is itself platform-conditional — it only recognises
 /// a Windows drive/UNC prefix as its own `Component::Prefix` when
 /// *compiled* for Windows, so a Unix-compiled test would never see `C:` as
@@ -446,7 +489,10 @@ fn parse_cursor(cursor: &str) -> Result<(String, u64)> {
 /// justified by that platform gap rather than convenience — before the
 /// remaining shape is checked structurally through path components.
 fn is_safe_cursor_name(name: &str) -> bool {
-    if name.is_empty() || !name.ends_with(".jsonl") {
+    let Some(stem) = name.strip_suffix(".jsonl") else {
+        return false;
+    };
+    if stem.is_empty() {
         return false;
     }
     if name.contains(':') || name.contains('\\') {
@@ -587,6 +633,33 @@ fn find_next_newline(file: &mut fs::File, start: u64, end: u64) -> std::io::Resu
             return Ok(Some(pos + i as u64));
         }
         pos += read as u64;
+    }
+    Ok(None)
+}
+
+/// Scan backward from `before` (exclusive) toward the start of the file for
+/// the nearest preceding `\n`, without buffering the scanned bytes — the
+/// backfill counterpart of [`find_next_newline`], used only by
+/// [`backfill_file`] when its tail window contains no record terminator at
+/// all: the record occupying that window may have begun anywhere earlier in
+/// the file, and its true start (the only thing that can safely become a
+/// returned cursor offset) has to be found before anything can be rendered.
+fn find_prev_newline(file: &mut fs::File, before: u64) -> std::io::Result<Option<u64>> {
+    const CHUNK: u64 = 64 * 1024;
+    let mut pos = before;
+    let mut buf = vec![0u8; CHUNK as usize];
+    while pos > 0 {
+        let want = CHUNK.min(pos) as usize;
+        let chunk_start = pos - want as u64;
+        file.seek(SeekFrom::Start(chunk_start))?;
+        let read = file.read(&mut buf[..want])?;
+        if read == 0 {
+            return Ok(None);
+        }
+        if let Some(i) = buf[..read].iter().rposition(|&b| b == b'\n') {
+            return Ok(Some(chunk_start + i as u64));
+        }
+        pos = chunk_start;
     }
     Ok(None)
 }
@@ -1007,12 +1080,21 @@ mod tests {
             // turns `sec\ret.jsonl:0` red; dropping the structural
             // single-component check alone turns `a/b.jsonl:0` red;
             // dropping the extension check alone turns `no-extension:0`
-            // red; dropping the non-empty check alone turns `:0` red.
+            // red; dropping the empty-stem (empty-name) check alone turns
+            // `.jsonl:0` red — a bare extension with no session id in front
+            // of it still ends with `.jsonl`, so the extension check alone
+            // would wrongly accept it. `:0` (a wholly empty name) is caught
+            // by the extension check itself, the same as `no-extension:0`
+            // — an empty string can never end with the non-empty suffix
+            // `.jsonl`, so it never distinguishes the empty-stem check from
+            // the extension check; it is kept here as a defensive
+            // regression fixture, not a single-property one.
             "ev:il.jsonl:0",   // colon only — no slash, no backslash, no ".."
             "sec\\ret.jsonl:0", // backslash only — no colon, no slash, no ".."
             "a/b.jsonl:0",     // multiple components (slash) only
             "no-extension:0",  // missing `.jsonl` suffix only
-            ":0",              // empty name only
+            ".jsonl:0",        // empty stem (session id) only — extension present
+            ":0",              // wholly empty name — caught by the extension check
             "s1.jsonl:not-a-number",
         ] {
             match read_activity_at(root.path(), "/w/e", Some(bad)) {
@@ -1361,5 +1443,88 @@ mod tests {
             "the record starting exactly at the window boundary must survive: {:?}",
             chunk.lines.last()
         );
+    }
+
+    /// The opening backfill window ([`OPEN_BACKFILL_BYTES`]) is far smaller
+    /// than the tailer's oversized-record window ([`MAX_READ_BYTES`]), so a
+    /// record still being written that's bigger than the backfill window —
+    /// but with no terminating `\n` yet anywhere in that window — used to
+    /// leave the opening cursor at a non-boundary offset. Every later poll
+    /// then read that as truncation, re-ran the whole backfill, and found
+    /// the same non-boundary offset again: the operator saw the transcript
+    /// restart and a truncation notice several times a second, on every
+    /// tick, until the record finally finished. This proves the storm no
+    /// longer happens: the opening cursor lands on a genuine boundary, the
+    /// very next poll is quiet (no divider, no re-backfill), and once the
+    /// record does terminate the transcript picks back up normally.
+    #[test]
+    fn oversized_backfill_record_never_storms_a_truncation_divider() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = project_dir(root.path(), "/w/storm");
+        let path = dir.join("s1.jsonl");
+
+        // A filler record, then a record still mid-write: bigger than the
+        // backfill window and with no closing quote/braces or newline yet
+        // — exactly what an agent part-way through writing a very large
+        // record looks like on disk.
+        let filler = "{\"type\":\"user\",\"message\":{\"content\":\"filler\"}}\n";
+        let huge_body = "x".repeat(OPEN_BACKFILL_BYTES as usize + 1_000);
+        let huge_prefix = format!(r#"{{"type":"user","message":{{"content":"{huge_body}"#);
+        let mut body = String::new();
+        body.push_str(filler);
+        body.push_str(&huge_prefix);
+        fs::write(&path, &body).unwrap();
+
+        let open = read_activity_at(root.path(), "/w/storm", None).unwrap();
+        let (name, offset) = parse_cursor(open.cursor.split(';').next().unwrap()).unwrap();
+        assert_eq!(name, "s1.jsonl");
+
+        // The offset the opening backfill hands back must be a genuine
+        // record boundary in the file's current content — never a byte cut
+        // out of the still-open record.
+        let mut f = fs::File::open(&path).unwrap();
+        assert!(
+            offset_is_record_boundary(&mut f, offset).unwrap(),
+            "opening backfill returned a cursor mid-record: offset {offset}"
+        );
+
+        // Polling immediately after must not read that offset as
+        // truncation: no divider, no re-run of the backfill.
+        let poll = read_activity_at(root.path(), "/w/storm", Some(&open.cursor)).unwrap();
+        assert!(
+            poll.lines.is_empty(),
+            "must wait quietly for the record to finish, not storm: {:?}",
+            poll.lines
+        );
+        assert_eq!(
+            poll.cursor, open.cursor,
+            "cursor must not move while the record is still open"
+        );
+
+        // Repeated polling — the storm, if the bug were still here, would
+        // show up as a fresh divider on every one of these ticks.
+        for _ in 0..3 {
+            let tick = read_activity_at(root.path(), "/w/storm", Some(&poll.cursor)).unwrap();
+            assert!(
+                tick.lines.is_empty(),
+                "must never storm a truncation divider while mid-record: {:?}",
+                tick.lines
+            );
+            assert_eq!(tick.cursor, poll.cursor);
+        }
+
+        // The record finally terminates and another lands after it.
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"\"}}\n").unwrap();
+        writeln!(f, r#"{{"type":"user","message":{{"content":"after"}}}}"#).unwrap();
+        drop(f);
+
+        let after = read_activity_at(root.path(), "/w/storm", Some(&poll.cursor)).unwrap();
+        assert!(
+            !after.lines.iter().any(|l| l.contains("truncated")),
+            "must never storm a truncation divider: {:?}",
+            after.lines
+        );
+        assert_eq!(after.lines.last().unwrap(), "» after");
     }
 }
