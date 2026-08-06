@@ -793,13 +793,22 @@
   // transcript yet — a named state is shown once and left alone, never
   // repainted back to "Loading…" and never left blank as if broken.
   //
-  // Two defects fixed here (independent review, agent-terminal-20):
+  // Two defects fixed here (independent review, agent-terminal-20), plus a
+  // fix to the fix (independent review, agent-terminal-22):
   // (1) `pollOne` used to fire on every `POLL_MS` tick with no guard against
   // an outstanding request — a poll slower than `POLL_MS` (a slow herdr, a
   // large tail) let the next tick fire with the *same* `cursors[paneId]`,
   // so both responses carried the same records and both got appended,
   // showing every record twice. `inFlight` skips a tick whose predecessor
   // hasn't resolved yet, the same cursor is then only ever read once.
+  // agent-terminal-20's first version cleared `inFlight` in the *headers*
+  // handler — before the cursor below had advanced — so a tick landing in
+  // that window still refetched with the stale cursor and still
+  // double-appended, the exact defect the flag exists to prevent. The flag
+  // now clears only once the request has fully settled: in a `.then`
+  // chained *after* the cursor advance on success, and in `.catch` on
+  // outright failure — never on headers alone, and independently on both
+  // paths, so one path left uncleared can never wedge the other.
   // (2) every non-ok response used to be swallowed as "nothing to do",
   // leaving the last-good content on screen forever while silently
   // re-sending the same cursor — indistinguishable from an idle agent. A
@@ -871,7 +880,11 @@
       inFlight[paneId] = true;
       fetch(transcriptUrl(paneId, cursors[paneId]), { credentials: "same-origin" })
         .then(function (res) {
-          inFlight[paneId] = false;
+          // Headers have arrived, but the request has not settled — the
+          // in-flight flag stays set until the body below has been read and
+          // the cursor (if any) has advanced. Clearing here would let a poll
+          // tick land before the body finishes parsing, refetch with the
+          // same cursor, and append the same records twice.
           if (res.status === 404) {
             // The transcript route's session/method/switch guards all answer
             // the same opaque 404 (D4) — from the client the one meaningful
@@ -899,7 +912,17 @@
           cursors[paneId] = body.cursor;
           appendLines(el, body.lines || []);
         })
+        .then(function () {
+          // The request has settled — success or a handled non-ok status —
+          // and any cursor advance above has already happened. Clear here,
+          // not on headers, so the next tick can only ever refetch once this
+          // poll is truly done.
+          inFlight[paneId] = false;
+        })
         .catch(function () {
+          // The request failed outright (network error, a rejected
+          // `res.json()`). Settle the flag here too, or this pane's poller
+          // wedges forever after one error — no other path clears it.
           inFlight[paneId] = false;
           showState(el, paneId, TRANSCRIPT_ERROR_TEXT);
         });

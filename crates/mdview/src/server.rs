@@ -75,6 +75,37 @@ impl HasTerminalAuth for AppState {
     }
 }
 
+/// D7/D9 outbox (agent-terminal-22): the only code path that ever reads or
+/// writes this store is `TerminalBackground::reconcile_notify` (the notify
+/// switch); the supervisor switch never touches it. So the real sqlite file
+/// — and the `.sqlite-wal`/`.sqlite-shm` sidecars `NotifyStore::open`'s WAL
+/// mode creates alongside it — is only opened when `cfg.notify_enabled` is
+/// already true. A config with the switch off gets an in-memory store
+/// instead: the exact same `NotifyStore` type every other code path already
+/// expects, so a markdown-only install that never flips the switch never
+/// gains a database file it didn't ask for.
+///
+/// A failure to open the real sqlite file (permissions, disk full, …) must
+/// never crash a daemon whose primary job is serving markdown — fall back to
+/// an in-memory outbox rather than propagate the error, matching every other
+/// "degrade rather than fail" seam this feature already has (D6's herdr-down
+/// state, the boundary's fail-closed empty pane list).
+fn open_notify_store(
+    cfg: &mdview_core::config::TerminalConfig,
+    override_dir: Option<&std::path::Path>,
+) -> mdview_core::notify_store::NotifyStore {
+    if !cfg.notify_enabled {
+        return mdview_core::notify_store::NotifyStore::open_in_memory()
+            .expect("in-memory sqlite always opens");
+    }
+    let notify_store_path = mdview_core::config::notify_store_path_override(override_dir);
+    mdview_core::notify_store::NotifyStore::open(&notify_store_path).unwrap_or_else(|e| {
+        tracing::warn!("notify outbox open failed ({e}); using an in-memory outbox");
+        mdview_core::notify_store::NotifyStore::open_in_memory()
+            .expect("in-memory sqlite always opens")
+    })
+}
+
 /// Start the daemon: watcher + HTTP server. Blocks until shutdown.
 pub async fn serve() -> Result<()> {
     let engine = Arc::new(runtime::build_engine()?);
@@ -88,20 +119,7 @@ pub async fn serve() -> Result<()> {
     // raw error or a crash.
     let herdr_socket_path = herdr::socket::default_socket_path()
         .unwrap_or_else(|_| PathBuf::from("/nonexistent/herdr.sock"));
-    // D7/D9 outbox: a failure to open the real sqlite file (permissions,
-    // disk full, …) must never crash a daemon whose primary job is serving
-    // markdown — fall back to an in-memory outbox rather than propagate the
-    // error, matching every other "degrade rather than fail" seam this
-    // feature already has (D6's herdr-down state, the boundary's fail-closed
-    // empty pane list).
-    let notify_store_path = mdview_core::config::notify_store_path_override(None);
-    let notify_store = Arc::new(
-        mdview_core::notify_store::NotifyStore::open(&notify_store_path).unwrap_or_else(|e| {
-            tracing::warn!("notify outbox open failed ({e}); using an in-memory outbox");
-            mdview_core::notify_store::NotifyStore::open_in_memory()
-                .expect("in-memory sqlite always opens")
-        }),
-    );
+    let notify_store = Arc::new(open_notify_store(&engine.config.terminal, None));
     let state = AppState {
         engine: engine.clone(),
         reload_tx: reload_tx.clone(),
@@ -4571,6 +4589,22 @@ mod bee_route_tests {
 
         // Leaving both switch fields off this submission (only `enabled` is
         // carried) must stop both live tasks — no restart needed.
+        //
+        // agent-terminal-22: these two off-assertions still only read
+        // `TerminalBackground`'s own reported state (`supervisor_running()` /
+        // `notify_running()` — both just `slot.lock().unwrap().is_some()`),
+        // which `reconcile_*`'s `(false, Some(handle)) => handle.abort()` arm
+        // empties via `take()` regardless of whether `abort()` is actually
+        // called — so deleting the `abort()` call itself would leave these
+        // green. Strengthening them to observe the cancellation as a real
+        // side effect (not just the bookkeeping flag) depends on
+        // `TerminalBackground`/`Supervisor`/`PollWatcher` (main.rs,
+        // supervisor.rs, watcher.rs) exposing one, which is agent-terminal-21's
+        // work and not yet landed as of this cell (no such API exists on
+        // `TerminalBackground` at the time of writing) — this file cannot
+        // reach into main.rs to add it. Left as a named gap rather than a
+        // fabricated or silently-still-toothless assertion; revisit once
+        // agent-terminal-21 lands that side effect.
         let off_req = Request::builder()
             .method("POST")
             .uri("/api/terminal-config")
@@ -4587,6 +4621,44 @@ mod bee_route_tests {
         assert!(
             !st.terminal_background.notify_running(),
             "turning the notify switch off must stop the watcher without a restart"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// agent-terminal-22, truth: "With both switches off, starting the
+    /// server creates no notification database or sidecar files." Only
+    /// `TerminalBackground::reconcile_notify` (the notify switch) ever reads
+    /// or writes the outbox — the supervisor switch never touches it — so
+    /// `open_notify_store` must not create the real sqlite file (or the WAL
+    /// journal `NotifyStore::open`'s WAL mode creates alongside it) until the
+    /// config it is given already has `notify_enabled` set. `serve()` itself
+    /// binds a real socket and blocks on the watcher, so it is not
+    /// unit-testable directly; this drives the same lazy-open decision it
+    /// makes, extracted into `open_notify_store` for exactly this reason.
+    #[test]
+    fn notify_store_opens_lazily_only_once_the_notify_switch_is_on() {
+        let dir = fresh_root("notify-store-lazy-open");
+        let path = mdview_core::config::notify_store_path_override(Some(&dir));
+
+        let off = mdview_core::config::TerminalConfig::default();
+        assert!(!off.notify_enabled, "the switch must default to off");
+        let _store = open_notify_store(&off, Some(&dir));
+        assert!(
+            !path.exists(),
+            "opening the store with the notify switch off must not create a database file: {}",
+            path.display()
+        );
+
+        let on = mdview_core::config::TerminalConfig {
+            notify_enabled: true,
+            ..Default::default()
+        };
+        let _store = open_notify_store(&on, Some(&dir));
+        assert!(
+            path.exists(),
+            "opening the store with the notify switch on must create the real outbox: {}",
+            path.display()
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -6306,19 +6378,26 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// agent-terminal-20, truth: "A poll that outlives its interval cannot
-    /// cause a record to be appended twice" — a grep-based proof over the
-    /// vendored client source `views::APP_JS` is served from
-    /// (`assets/app.js`), the same shape
+    /// agent-terminal-20/22, truth: "A poll whose body is still arriving when
+    /// the next tick fires cannot cause a record to be appended twice" — a
+    /// grep-based proof over the vendored client source `views::APP_JS` is
+    /// served from (`assets/app.js`), the same shape
     /// `typed_text_and_named_keys_never_appear_in_a_tracing_call` above uses
     /// for a client-file guarantee `cargo test` can otherwise only assert on
-    /// as a string, since there is no JS test runner in this workspace. The
-    /// transcript poller's `pollOne` must check an in-flight flag before
-    /// dispatching a new fetch for the same pane, and must clear that flag
-    /// on every settled outcome (success and failure) so a genuinely
-    /// finished poll can fire again.
+    /// as a string, since there is no JS test runner in this workspace.
+    ///
+    /// agent-terminal-20's original version of this test only checked that
+    /// `"inFlight[paneId] = false;"` appears *somewhere* in the file. That
+    /// string occurs twice by design (the success settle and the failure
+    /// `.catch`), so it stayed green even with agent-terminal-20's actual
+    /// bug in place — clearing the flag in the *headers* handler, before the
+    /// cursor below had advanced, which reopens the exact double-append the
+    /// flag exists to prevent (see docs/history/learnings/
+    /// 20260805-toothless-security-assertions.md: a bare `contains` proves
+    /// nothing about *where* a match sits). This version pins each clear to
+    /// its specific block instead of the string in isolation.
     #[test]
-    fn transcript_poller_guards_against_an_overlapping_in_flight_poll() {
+    fn transcript_poller_clears_the_in_flight_flag_only_once_the_request_has_settled() {
         let js = views::APP_JS;
         assert!(
             js.contains("if (inFlight[paneId]) return;"),
@@ -6328,24 +6407,81 @@ mod bee_route_tests {
             js.contains("inFlight[paneId] = true;"),
             "the transcript poller must mark a pane in-flight before dispatching its fetch"
         );
+
+        // The headers handler (the first `.then`, keyed by its own comment)
+        // must not clear the flag — clearing there, before the cursor below
+        // has advanced, is exactly the bug this test exists to catch.
+        let headers_start = js
+            .find("// Headers have arrived, but the request has not settled")
+            .expect("the headers-handler comment documenting why it must not clear the flag must exist");
+        let headers_end = js[headers_start..]
+            .find("return res.json();")
+            .map(|i| headers_start + i)
+            .expect("the headers handler must return the parsed body");
+        let headers_block = &js[headers_start..headers_end];
         assert!(
-            js.contains("inFlight[paneId] = false;"),
-            "the transcript poller must clear the in-flight flag once a poll settles"
+            !headers_block.contains("inFlight[paneId] = false;"),
+            "the in-flight flag must not clear on headers alone, before the cursor has \
+             advanced — a tick landing in that window would refetch with the same cursor \
+             and double-append: {headers_block}"
+        );
+
+        // The cursor must advance, and only then may the flag clear on the
+        // success path — enforced by requiring the clear to appear in the
+        // source *after* the cursor assignment (the promise chain settles
+        // its `.then` callbacks strictly in that order).
+        let cursor_idx = js
+            .find("cursors[paneId] = body.cursor;")
+            .expect("the cursor must advance on a successful poll");
+        let settle_idx = js[cursor_idx..]
+            .find("inFlight[paneId] = false;")
+            .map(|i| cursor_idx + i);
+        assert!(
+            settle_idx.is_some(),
+            "the success path must clear the in-flight flag after the cursor advances"
+        );
+
+        // The failure path must independently clear the flag too — deleting
+        // just this clear (leaving the success-path clear alone) is exactly
+        // the case a plain `contains` on the flag-clear string cannot catch,
+        // since the success-path clear still matches. Pin the check to the
+        // failure path's own comment so this can only pass if the clear
+        // lives inside that specific block.
+        let catch_start = js
+            .find("// The request failed outright (network error")
+            .expect("the failure-path catch comment must exist");
+        let catch_end = js[catch_start..]
+            .find("function pollAll(")
+            .map(|i| catch_start + i)
+            .expect("pollAll must follow the transcript poller's pollOne");
+        let catch_block = &js[catch_start..catch_end];
+        assert!(
+            catch_block.contains("inFlight[paneId] = false;"),
+            "the failure path must clear the in-flight flag too, or one error wedges this \
+             pane's poller forever: {catch_block}"
         );
     }
 
-    /// agent-terminal-20, truth: "A rejected or failed transcript request
-    /// surfaces a named state instead of stale content" and "A session that
-    /// is no longer valid is distinguishable to the reader from a transient
-    /// server error" — same grep-based-over-`views::APP_JS` proof shape as
-    /// `transcript_poller_guards_against_an_overlapping_in_flight_poll`
-    /// above. The transcript route answers every guard failure (no session,
-    /// wrong method, switch off) with the same opaque 404 (D4), so the
-    /// client's own distinguishing read of a 404 is "this session no longer
-    /// authenticates" — a named text distinct from the one shown for any
-    /// other non-ok response or an outright failed request.
+    /// agent-terminal-20/22, truth: "Swapping the session-expired and
+    /// transient-error states makes a test fail" — same grep-based-over-
+    /// `views::APP_JS` proof shape as the in-flight test above, but pinned to
+    /// each branch's *specific* constant rather than checking the two
+    /// constants exist and their declaration lines differ.
+    ///
+    /// agent-terminal-20's original version asserted only that a status
+    /// check (`res.status === 404`) appears somewhere, and that the two
+    /// `var SESSION_EXPIRED_TEXT` / `var TRANSCRIPT_ERROR_TEXT` declaration
+    /// lines are textually unequal. Neither assertion reads which constant
+    /// is actually used inside which branch, so swapping the two
+    /// `showState(...)` calls between the 404 branch and the non-ok branch —
+    /// showing the wrong state for each failure kind — left both assertions
+    /// green (see docs/history/learnings/20260805-toothless-security-assertions.md:
+    /// an assertion must be checked against the value that would actually
+    /// leak/change, not a nearby literal). This version extracts each
+    /// branch's own source and requires it to name the one constant it must
+    /// use and not the other.
     #[test]
-    fn transcript_poller_names_a_session_expired_state_distinct_from_a_transient_error() {
+    fn transcript_poller_distinguishes_session_expired_from_a_transient_error() {
         let js = views::APP_JS;
         assert!(
             js.contains("SESSION_EXPIRED_TEXT"),
@@ -6355,22 +6491,61 @@ mod bee_route_tests {
             js.contains("TRANSCRIPT_ERROR_TEXT"),
             "the transcript poller must name a transient-error state, distinct from session-expired"
         );
+
+        let status_check = js
+            .find("if (res.status === 404) {")
+            .expect("the 404 branch must exist");
+        let ok_check = js[status_check..]
+            .find("if (!res.ok) {")
+            .map(|i| status_check + i)
+            .expect("the non-ok branch must exist");
+        let after_ok = js[ok_check..]
+            .find("return res.json();")
+            .map(|i| ok_check + i)
+            .expect("the branch that parses the successful body must exist");
+
+        let session_expired_branch = &js[status_check..ok_check];
+        let transient_error_branch = &js[ok_check..after_ok];
+
         assert!(
-            js.contains("res.status === 404"),
-            "a 404 (the transcript route's opaque answer to every guard failure, D4) must route to the \
-             session-expired state, not the generic error state"
+            session_expired_branch.contains("SESSION_EXPIRED_TEXT"),
+            "a 404 (the opaque answer to every guard failure, D4) must show the \
+             session-expired state: {session_expired_branch}"
         );
-        // The two named states must actually read differently, or a reader
-        // could not tell one from the other.
-        let session_text = js
-            .lines()
-            .find(|l| l.contains("var SESSION_EXPIRED_TEXT"))
-            .expect("SESSION_EXPIRED_TEXT must be declared");
-        let error_text = js
-            .lines()
-            .find(|l| l.contains("var TRANSCRIPT_ERROR_TEXT"))
-            .expect("TRANSCRIPT_ERROR_TEXT must be declared");
-        assert_ne!(session_text, error_text, "the two named states must carry different wording");
+        assert!(
+            !session_expired_branch.contains("TRANSCRIPT_ERROR_TEXT"),
+            "a 404 must not also show the transient-error state, or the two states could be \
+             swapped and this test would not notice: {session_expired_branch}"
+        );
+        assert!(
+            transient_error_branch.contains("TRANSCRIPT_ERROR_TEXT"),
+            "a non-404, non-ok response must show the transient-error state: {transient_error_branch}"
+        );
+        assert!(
+            !transient_error_branch.contains("SESSION_EXPIRED_TEXT"),
+            "a non-404, non-ok response must not also show the session-expired state, or the \
+             two states could be swapped and this test would not notice: {transient_error_branch}"
+        );
+
+        // A network failure (the `.catch`) must also read as transient, not
+        // as session-expired — the reader should not be told to re-auth just
+        // because the request never reached the server at all.
+        let catch_start = js
+            .find("// The request failed outright (network error")
+            .expect("the failure-path catch comment must exist");
+        let catch_end = js[catch_start..]
+            .find("function pollAll(")
+            .map(|i| catch_start + i)
+            .expect("pollAll must follow the transcript poller's pollOne");
+        let catch_block = &js[catch_start..catch_end];
+        assert!(
+            catch_block.contains("TRANSCRIPT_ERROR_TEXT"),
+            "a network failure must show the transient-error state: {catch_block}"
+        );
+        assert!(
+            !catch_block.contains("SESSION_EXPIRED_TEXT"),
+            "a network failure must not show the session-expired state: {catch_block}"
+        );
     }
 
     /// A POST request to `/p/{id}/_terminal/{pane_id}/input` carrying a JSON
