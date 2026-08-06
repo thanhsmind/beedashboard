@@ -4,7 +4,8 @@
 
 use mdview_core::bee::{
     BeeAttentionItem, BeeAttentionSeverity, BeeBacklog, BeeBuckets, BeeCell, BeeFeaturePhase,
-    BeeRunningWorker, BeeSession, BeeShippedFeature, BeeSnapshot, BeeState, BeeWorktree,
+    BeeReview, BeeReviewStatus, BeeRunningWorker, BeeSession, BeeShippedFeature, BeeSnapshot,
+    BeeState, BeeWorktree,
 };
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
@@ -1604,21 +1605,37 @@ fn bee_panels_section(snapshot: &BeeSnapshot) -> String {
     {backlog}
     {sessions}
   </div>"#,
-        backlog = bee_backlog_panel(&snapshot.backlog),
+        backlog = bee_backlog_panel(&snapshot.backlog, &snapshot.review),
         sessions = bee_sessions_panel(&snapshot.sessions),
     )
 }
 
-/// Backlog panel: PBI items grouped by current status (a summary, not a
-/// per-item dump, so it stays readable no matter how many PBIs a real store
-/// holds), and findings grouped by severity with the P1 count visually
-/// weighted (`bee-severity--p1`) since a P1 blocks. `findings.recent` is a
+/// Backlog & review panel (bbp-14): PBI items grouped by current status —
+/// each item's own escaped title alongside the status counts, so a manager
+/// reads not just how many are proposed or in flight but WHAT they are —
+/// findings grouped by severity with the P1 count visually weighted
+/// (`bee-severity--p1`) since a P1 blocks, and the review queue by state
+/// (D7: independent review is presented as owner-invoked, never as pending
+/// automatic work — see [`bee_review_queue_body`]). `findings.recent` is a
 /// bounded slice of `findings.total` (`RECENT_DETAIL_CAP` in
 /// `mdview_core::bee`) — when it is showing fewer than the true total, the
-/// panel says so instead of looking smaller than the real backlog. An empty
-/// PBI list and an empty finding set each render their own honest empty
-/// state rather than a hidden section or a bare `0`.
-fn bee_backlog_panel(backlog: &BeeBacklog) -> String {
+/// panel says so instead of looking smaller than the real backlog. The PBI
+/// title list beneath the status chips is bounded the same way, at
+/// [`BACKLOG_PBI_DISPLAY_CAP`] — a live store the size of `beehive`'s (123
+/// PBIs) turned an early, uncapped draft of this list into exactly the
+/// "per-item dump" the status chips exist to avoid; capping it, and stating
+/// its true total alongside the visible subset, is what keeps this a
+/// supporting panel rather than a second scroll of the whole backlog. An
+/// empty PBI list and an empty finding set each render their own honest
+/// empty state rather than a hidden section or a bare `0`.
+/// How many PBI titles the backlog panel shows before it falls back to a
+/// "Showing X of Y" note (bbp-14) — the same cap discipline
+/// `mdview_core::bee`'s own `RECENT_DETAIL_CAP` already applies to findings,
+/// mirrored here at the view layer since `BeeBacklog::pbis` itself is
+/// uncapped (every distinct PBI, so the status counts stay exact).
+const BACKLOG_PBI_DISPLAY_CAP: usize = 20;
+
+fn bee_backlog_panel(backlog: &BeeBacklog, review: &BeeReview) -> String {
     let pbi_body = if backlog.pbis.is_empty() {
         "<p class=\"fg-empty\">No backlog items yet.</p>".to_string()
     } else {
@@ -1637,11 +1654,36 @@ fn bee_backlog_panel(backlog: &BeeBacklog) -> String {
             })
             .collect();
         let total = backlog.pbis.len();
+        let shown = backlog.pbis.iter().take(BACKLOG_PBI_DISPLAY_CAP);
+        let mut rows = String::new();
+        let mut shown_count = 0usize;
+        for pbi in shown {
+            shown_count += 1;
+            rows.push_str(&format!(
+                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{title}</div><div class="bee-cell__meta">{status} · {feature}</div></div>"#,
+                title = esc(&pbi.title),
+                status = esc(&pbi.status),
+                feature = esc(&pbi.feature),
+            ));
+        }
+        let list_note = if shown_count < total {
+            format!(
+                r#"<p class="bee-cell__meta">Showing {shown_count} of {total} backlog items.</p>"#,
+                shown_count = shown_count,
+                total = total,
+            )
+        } else {
+            format!(
+                r#"<p class="bee-cell__meta">{total} backlog item{plural} total.</p>"#,
+                total = total,
+                plural = if total == 1 { "" } else { "s" },
+            )
+        };
         format!(
-            r#"<div class="bee-panel__chips">{chips}</div><p class="bee-cell__meta">{total} backlog item{plural} total</p>"#,
+            r#"<div class="bee-panel__chips">{chips}</div>{list_note}<div class="bee-panel__list">{rows}</div>"#,
             chips = chips,
-            total = total,
-            plural = if total == 1 { "" } else { "s" },
+            list_note = list_note,
+            rows = rows,
         )
     };
 
@@ -1686,16 +1728,77 @@ fn bee_backlog_panel(backlog: &BeeBacklog) -> String {
         )
     };
 
+    let review_body = bee_review_queue_body(review);
+
     format!(
         r#"<section class="fg-card bee-panel">
-  <h3 class="bee-panel__head">Backlog</h3>
+  <h3 class="bee-panel__head">Backlog &amp; Review</h3>
   <h4 class="bee-panel__subhead">PBIs by status</h4>
   {pbi_body}
   <h4 class="bee-panel__subhead">Findings by severity</h4>
   {findings_body}
+  <h4 class="bee-panel__subhead">Review queue by state</h4>
+  {review_body}
 </section>"#,
         pbi_body = pbi_body,
         findings_body = findings_body,
+        review_body = review_body,
+    )
+}
+
+/// The review queue's body (bbp-14, D6, D7): unreviewed / in review /
+/// settled counts, joined from `.bee/review-candidates.jsonl` against
+/// `.bee/reviews/*.json` by `mdview_core::bee`'s own review join, with the
+/// open-P1 count called out first as the sharpest number on the panel.
+/// Independent review is presented as something the owner invokes, never as
+/// a stage the board implies is already running — every sentence here is
+/// worded that way, matching the lifecycle stepper's own D7 wording.
+///
+/// A candidate list of zero is genuinely ambiguous by itself: it is the
+/// shape both of "this project has never run a review" and of "everything
+/// has already been folded and the candidates file has rolled over" — the
+/// snapshot cannot tell those two claims apart from `review.candidates`
+/// alone, so rendering `0/0/0` here would be exactly the zero-dressed-as-a-
+/// measurement mistake D5's honest-empty-state rule forbids elsewhere. The
+/// panel says its state is unknown instead. Once there is at least one
+/// candidate, every count below is real and computed — including a store
+/// whose candidates are ALL `Unreviewed` because no session has ever named
+/// their cells, which is a genuine zero for `In review`/`Settled`, not a
+/// manufactured one.
+fn bee_review_queue_body(review: &BeeReview) -> String {
+    if review.candidates.is_empty() {
+        return r#"<p class="fg-empty">Review state unknown — no review candidates or sessions are recorded yet. Independent review is invoked by the owner; it is never presented as work already pending.</p>"#
+            .to_string();
+    }
+
+    let mut unreviewed = 0usize;
+    let mut in_review = 0usize;
+    let mut settled = 0usize;
+    for c in &review.candidates {
+        match c.status {
+            BeeReviewStatus::Unreviewed => unreviewed += 1,
+            BeeReviewStatus::InReview => in_review += 1,
+            BeeReviewStatus::Settled => settled += 1,
+        }
+    }
+
+    let p1_line = if review.open_p1_findings > 0 {
+        let n = review.open_p1_findings;
+        format!(
+            r#"<p class="bee-cell__meta bee-severity--p1"><strong>{n} open P1 finding{plural}</strong> in a review session not yet settled.</p>"#,
+            n = n,
+            plural = if n == 1 { "" } else { "s" },
+        )
+    } else {
+        r#"<p class="bee-cell__meta">No open P1 findings.</p>"#.to_string()
+    };
+
+    format!(
+        r#"{p1_line}<div class="bee-panel__chips"><span class="fg-chip fg-chip--neutral">Unreviewed: {unreviewed}</span><span class="fg-chip fg-chip--neutral">In review: {in_review}</span><span class="fg-chip fg-chip--neutral">Settled: {settled}</span></div><p class="bee-cell__meta">Independent review is invoked by the owner — nothing here runs on its own.</p>"#,
+        p1_line = p1_line,
+        unreviewed = unreviewed,
+        in_review = in_review,
+        settled = settled,
     )
 }
 

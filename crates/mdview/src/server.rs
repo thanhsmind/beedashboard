@@ -3116,6 +3116,40 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (bbp-14, edge) 25 PBIs exceed the backlog panel's own display cap
+    /// (20), so the visible title list must state its true total (25)
+    /// alongside the capped subset actually shown — the status count chips
+    /// above it are computed over the full, uncapped set and must still
+    /// read 25, never 20. Found by rendering `beehive`'s real 123-PBI store
+    /// against an early, uncapped draft of this list, which turned the
+    /// panel into exactly the unreadable per-item dump its own status chips
+    /// exist to avoid.
+    #[tokio::test]
+    async fn capped_backlog_pbi_subset_states_its_true_total() {
+        let root = fresh_root("panels-backlog-capped");
+        let mut jsonl = String::new();
+        for i in 0..25 {
+            jsonl.push_str(&format!(
+                "{{\"kind\":\"pbi\",\"id\":\"PBI-{i}\",\"title\":\"Backlog item {i}\",\"status\":\"proposed\",\"feature\":\"demo\"}}\n"
+            ));
+        }
+        write(&root, ".bee/backlog.jsonl", &jsonl);
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-backlog-capped");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("proposed: 25"), "the status chip count must cover every PBI, capped or not: {body}");
+        assert!(
+            body.contains("Showing 20 of 25 backlog items."),
+            "the capped PBI subset must state its true total: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// bee-cockpit-6 / bbp-11 (edge, split — see the split rationale above):
     /// no backlog. Both the PBI list and the finding list render their own
     /// honest empty state, no bare `0`.
@@ -3179,6 +3213,206 @@ mod bee_route_tests {
 
         assert!(body.contains("data-phase-board-count=\"0\""), "{body}");
         assert!(body.contains("No features are tracked by phase right now."), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── bbp-14: the backlog & review panel ─────────────────────────────────
+
+    /// (happy) Each PBI's own title now renders alongside its status, not
+    /// only the per-status count — a manager reads WHAT is proposed or in
+    /// flight, not only how many.
+    #[tokio::test]
+    async fn backlog_panel_lists_each_pbi_title_under_its_status() {
+        let root = fresh_root("panels-backlog-titles");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Add search\",\"status\":\"in-flight\",\"feature\":\"demo\"}\n\
+             {\"kind\":\"pbi\",\"id\":\"PBI-2\",\"title\":\"Add filter\",\"status\":\"done\",\"feature\":\"demo\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-backlog-titles");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Add search"), "PBI-1's title must render: {body}");
+        assert!(body.contains("Add filter"), "PBI-2's title must render: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (untrusted) A PBI title carrying `< > & "` must render as text, never
+    /// as markup — the same guarantee `esc()` already gives every other
+    /// free-text field on the board, exercised here at the one new site
+    /// this cell adds (bare PBI titles were never rendered before bbp-14).
+    #[tokio::test]
+    async fn untrusted_pbi_title_renders_as_text() {
+        let root = fresh_root("panels-backlog-untrusted-title");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Fix <script>alert(1)</script> & \\\"quote\\\" it.\",\"status\":\"proposed\",\"feature\":\"demo\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-backlog-untrusted-title");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("Fix &lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;quote&quot; it."),
+            "escaped title missing: {body}"
+        );
+        assert!(!body.contains("<script>alert(1)</script>"), "raw script tag leaked: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (security, D9) A PBI title with an absolute path embedded mid-
+    /// sentence must be scrubbed before it ever reaches the body — the same
+    /// mid-sentence scrub already proven for `next_action` and a lane's
+    /// `next_action`, exercised here at the new PBI-title render site.
+    #[tokio::test]
+    async fn backlog_pbi_title_embedded_absolute_path_does_not_leak() {
+        let root = fresh_root("panels-backlog-title-scrub");
+        let secret = root.join("src").join("secret.rs").to_string_lossy().into_owned();
+        let secret_escaped = secret.replace('\\', "\\\\");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            &format!(
+                "{{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Fix {path} before shipping.\",\"status\":\"proposed\",\"feature\":\"demo\"}}\n",
+                path = secret_escaped,
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-backlog-title-scrub");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(!body.contains(&secret), "the backlog panel leaked an absolute PBI-title path: {body}");
+        assert!(body.contains("src/secret.rs"), "the reduced relative path should still read: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy) The review queue states unreviewed / in review / settled
+    /// counts from the candidates × sessions join, with the open-P1 count
+    /// called out first as the sharpest number on the panel (D6).
+    /// Independent review is worded as owner-invoked throughout (D7).
+    #[tokio::test]
+    async fn review_queue_states_counts_by_state_with_open_p1_called_out() {
+        let root = fresh_root("panels-review-happy");
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            "{\"id\":\"c1\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"demo\",\"head\":\"h1\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-a\"]}\n\
+             {\"id\":\"c2\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"demo\",\"head\":\"h2\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-b\"]}\n\
+             {\"id\":\"c3\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"demo\",\"head\":\"h3\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-c\"]}\n",
+        );
+        write(
+            &root,
+            ".bee/reviews/r1.json",
+            r#"{"id":"r1","included":[{"type":"cell","id":"cell-a"}],"findings":[],"decision":{"status":"approved"}}"#,
+        );
+        write(
+            &root,
+            ".bee/reviews/r2.json",
+            r#"{"id":"r2","included":[{"type":"cell","id":"cell-b"}],"findings":[{"id":"f1","severity":"P1","title":"x"}],"decision":{"status":"pending"}}"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-review-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Unreviewed: 1"), "{body}");
+        assert!(body.contains("In review: 1"), "{body}");
+        assert!(body.contains("Settled: 1"), "{body}");
+        assert!(body.contains("1 open P1 finding"), "the open P1 count must be called out: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) A store with no review candidates and no review sessions
+    /// renders an honest UNKNOWN review state — never `0/0/0`. Zero
+    /// unreviewed and "we have never looked" are different facts; the panel
+    /// must not collapse them (the same instinct as D5's honest-empty-state
+    /// rule elsewhere on the board).
+    #[tokio::test]
+    async fn review_queue_with_no_candidates_and_no_sessions_renders_unknown_not_zeros() {
+        let root = fresh_root("panels-review-unknown");
+        write(&root, "README.md", "# hi");
+        std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-review-unknown");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Review state unknown"), "{body}");
+        assert!(!body.contains("Unreviewed: 0"), "an unknown review state must not render as a clean zero: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge) A store WITH review candidates but no `.bee/reviews/` session
+    /// at all renders every candidate as `Unreviewed` — a real, computed
+    /// count, distinct from the unknown state above (which has no
+    /// candidates to count in the first place).
+    #[tokio::test]
+    async fn review_queue_with_candidates_but_no_sessions_renders_all_unreviewed() {
+        let root = fresh_root("panels-review-all-unreviewed");
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            "{\"id\":\"c1\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"demo\",\"head\":\"h1\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-a\"]}\n\
+             {\"id\":\"c2\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"demo\",\"head\":\"h2\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-b\"]}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-review-all-unreviewed");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(!body.contains("Review state unknown"), "candidates exist — this is a real count, not unknown: {body}");
+        assert!(body.contains("Unreviewed: 2"), "{body}");
+        assert!(body.contains("In review: 0"), "{body}");
+        assert!(body.contains("Settled: 0"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (D7) Independent review reads as owner-invoked wherever the review
+    /// queue names it, never as a stage the board implies runs on its own —
+    /// checked against the panel's own body text rather than against a
+    /// single fixed string, so a future wording change cannot silently
+    /// reintroduce "pending" language.
+    #[tokio::test]
+    async fn review_queue_never_words_review_as_automatic_pending_work() {
+        let root = fresh_root("panels-review-d7-wording");
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            "{\"id\":\"c1\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"demo\",\"head\":\"h1\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-a\"]}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-review-d7-wording");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("invoked by the owner"), "the review queue must read as owner-invoked: {body}");
 
         std::fs::remove_dir_all(&root).ok();
     }
