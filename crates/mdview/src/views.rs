@@ -318,7 +318,11 @@ const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
         if (!body) return;
         if (lastRevision[paneId] === body.revision) return;
         lastRevision[paneId] = body.revision;
-        el.textContent = body.text;
+        // `body.text` is safe, pre-escaped HTML from mdview-core's ansi
+        // translator (agent-terminal-12) — never the raw pane text — so
+        // `innerHTML` here renders ANSI colour/attribute markup rather than
+        // showing literal escape characters.
+        el.innerHTML = body.text;
       })
       .catch(function () { el.textContent = HERDR_DOWN_TEXT; });
   }

@@ -713,10 +713,13 @@
   }
   connect();
 
-  // Terminal screen poll (agent-terminal-6): each pane's `.term-screen`
-  // viewport polls its own `/p/:id/_terminal/:pane_id/screen` endpoint on a
-  // fixed interval and shows the plain text herdr returned — no ANSI colour,
-  // no xterm.js, both deliberately out of scope until slice 3. A `revision`
+  // Terminal screen poll (agent-terminal-6, ANSI rendering agent-terminal-12):
+  // each pane's `.term-screen` viewport polls its own
+  // `/p/:id/_terminal/:pane_id/screen` endpoint on a fixed interval. The
+  // server (`mdview_core::ansi::to_html`) has already translated herdr's raw
+  // ANSI screen into safe, escaped HTML carrying `ansi-*` colour/attribute
+  // classes — never xterm.js, this is a polled snapshot, not a live PTY — so
+  // the poller assigns it via `innerHTML`, not `textContent`. A `revision`
   // that hasn't changed since the last successful poll skips the repaint.
   //
   // On any failed poll (herdr silent, the pane gone, the network hiccups)
@@ -755,7 +758,9 @@
           if (!body) return;
           if (lastRevision[paneId] === body.revision) return; // unchanged, skip repaint
           lastRevision[paneId] = body.revision;
-          el.textContent = body.text;
+          // `body.text` is safe, pre-escaped ANSI-translated HTML — see the
+          // doc comment above this IIFE.
+          el.innerHTML = body.text;
         })
         .catch(function () {
           el.textContent = HERDR_DOWN_TEXT;

@@ -667,10 +667,14 @@ const HERDR_DOWN_REMEDY: &str = "herdr is not running";
 
 /// `GET /p/:id/_terminal/:pane_id/screen` (D2/D3/D4/D6) — one pane's current
 /// screen, polled by the client in `assets/app.js`. Modeled on herdr-go's
-/// `ScreenBody { text, revision }` (`herdr-go/src/web/screen.rs`): the raw
-/// screen text plus a revision the client compares to skip a redundant
-/// repaint, rendered as plain text — no ANSI colour, no xterm.js, both
-/// deliberately out of scope for this slice.
+/// `ScreenBody { text, revision }` (`herdr-go/src/web/screen.rs`), but the
+/// `text` field now carries safe, escaped HTML rather than raw text
+/// (agent-terminal-12): `mdview_core::ansi::to_html` translates herdr's raw
+/// ANSI screen into `<span class="ansi-…">` markup server-side — text is
+/// HTML-escaped before any markup wraps it, and any escape sequence the
+/// translator does not model (cursor movement, OSC titles, …) is dropped
+/// rather than ever reaching the page. `revision` is unchanged; the client
+/// still compares it to skip a redundant repaint.
 ///
 /// Guarded exactly like `terminal_page`: `MethodGate<Get>` + `AuthSession`
 /// run before this body, then the D7 enabled switch, then the same D2
@@ -705,7 +709,10 @@ async fn terminal_screen(
         return not_found("pane not found");
     }
     match st.herdr.read_pane(&pane_id, herdr::ReadSource::Visible, 0).await {
-        Ok(read) => Json(json!({ "text": read.text, "revision": read.revision })).into_response(),
+        Ok(read) => {
+            Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": read.revision }))
+                .into_response()
+        }
         Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
         // Any other herdr failure (socket gone, protocol mismatch, a
         // request-level error) collapses to the same D6 remedy `terminal_page`
@@ -1047,7 +1054,10 @@ async fn unassigned_terminal_screen(
         return refusal;
     }
     match st.herdr.read_pane(&pane_id, herdr::ReadSource::Visible, 0).await {
-        Ok(read) => Json(json!({ "text": read.text, "revision": read.revision })).into_response(),
+        Ok(read) => {
+            Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": read.revision }))
+                .into_response()
+        }
         Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
         Err(_) => herdr_down_response(),
     }
@@ -4685,10 +4695,12 @@ mod bee_route_tests {
 
     /// agent-terminal-6, truth: "The rendered screen shows the text herdr
     /// returned, with a UTF-8 screen containing wide CJK and emoji intact" —
-    /// proven on the JSON the client polls (`assets/app.js` renders it via
-    /// `textContent`, so nothing further escapes or mangles it after this).
-    /// Also pins the response shape against herdr-go's `ScreenBody { text,
-    /// revision }`.
+    /// proven on the JSON the client polls. Since agent-terminal-12, `text`
+    /// carries `mdview_core::ansi::to_html`'s output rather than the raw
+    /// string; this screen carries no ANSI codes and no HTML metacharacters,
+    /// so translation is the identity here — `ansi.rs`'s own tests cover the
+    /// colour/attribute/escaping cases. Also pins the response shape against
+    /// herdr-go's `ScreenBody { text, revision }`.
     #[tokio::test]
     async fn terminal_screen_returns_the_panes_text_and_revision_with_utf8_intact() {
         let dir = fresh_root("terminal-screen-utf8");
@@ -4717,6 +4729,54 @@ mod bee_route_tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["text"], serde_json::json!(screen_text), "{body}");
         assert_eq!(json["revision"], serde_json::json!(1), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// agent-terminal-12, truth: "A screen carrying SGR colour, bold and
+    /// inverse sequences renders as styled markup, not as literal escape
+    /// characters" and "HTML metacharacters in the screen text are escaped,
+    /// and no unrecognised escape sequence is ever emitted into the page" —
+    /// proven at the HTTP layer, not only inside `ansi.rs`'s own unit tests,
+    /// so a future regression that stops the endpoint from calling the
+    /// translator at all is caught here.
+    #[tokio::test]
+    async fn terminal_screen_translates_ansi_into_safe_html_through_the_real_endpoint() {
+        let dir = fresh_root("terminal-screen-ansi");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-ansi-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let raw = "\u{1b}[31m<script>bad</script>\u{1b}[0m\u{1b}[2Jplain";
+        fake.seed_scroll_pane(&started.pane_id, raw, raw, None);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "screen-ansi");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let resp = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, Some(&cookie)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let text = json["text"].as_str().unwrap();
+        assert_eq!(
+            text,
+            mdview_core::ansi::to_html(raw),
+            "the screen endpoint must return mdview-core's ansi translation verbatim: {text}"
+        );
+        assert!(text.contains("ansi-fg-red"), "no colour markup: {text}");
+        assert!(!text.contains("<script>"), "raw script tag leaked: {text}");
+        assert!(text.contains("&lt;script&gt;"), "text must still be escaped: {text}");
+        assert!(text.ends_with("plain"), "cursor-clear escape must be dropped, not shown: {text}");
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
@@ -4951,8 +5011,12 @@ mod bee_route_tests {
         let body = body_string(screen_resp).await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         let text = json["text"].as_str().unwrap();
+        // agent-terminal-12: `FakeHerdr` echoes non-Enter keys as a literal
+        // `<key>` token, which is itself an HTML metacharacter sequence — the
+        // ansi translator escapes it like any other screen text, so the
+        // assertion checks for the escaped form rather than the raw one.
         assert!(
-            text.ends_with("<down>\n"),
+            text.ends_with("&lt;down&gt;\n"),
             "named keys must reach the pane in order: {text:?}"
         );
 
