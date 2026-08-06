@@ -88,6 +88,17 @@ pub struct TerminalConfig {
     /// preset-create request until the operator configures at least one.
     #[serde(default)]
     pub agent_presets: Vec<AgentPreset>,
+    /// D7/D9's notification destination: the Telegram chat id status-change
+    /// alerts are sent to. Unlike the bot token (never a `Config` field —
+    /// see [`notify_credential_path_override`] below) a chat id names a
+    /// destination, not a credential, so it is an ordinary `Config` field:
+    /// visible on `GET /api/config` and in the settings HTML like any other
+    /// setting. `None` (the default) means no destination is configured —
+    /// `TelegramNotifier::new` (`crates/mdview/src/notify/telegram.rs`)
+    /// requires both halves, so a configuration missing this one never
+    /// attempts a delivery no matter what the switch says.
+    #[serde(default)]
+    pub notify_chat_id: Option<String>,
 }
 
 /// One D8 agent-create preset: a label the terminal page's creation
@@ -186,6 +197,113 @@ pub fn registry_db_path() -> PathBuf {
 
 pub fn daemon_lock_path() -> PathBuf {
     data_dir().join("daemon.lock")
+}
+
+/// `<data_dir>/notify.sqlite`, or `override_dir/notify.sqlite` when given —
+/// the D7/D9 notification outbox (`crate::notify_store::NotifyStore`),
+/// mirroring `config_path_override` so a route-level test never touches the
+/// real `~/.mdview`.
+pub fn notify_store_path_override(override_dir: Option<&Path>) -> PathBuf {
+    resolve_data_dir(override_dir).join("notify.sqlite")
+}
+
+/// File name for the Telegram bot token, written beside `config.toml` in the
+/// same data directory `crates/mdview/src/terminal_auth.rs`'s own token file
+/// uses, for the same reason (P1's rule, extended to this second secret):
+/// `Config` is serialized whole and unauthenticated by `GET /api/config`, so
+/// a credential stored inside it would be one request away regardless of
+/// what the settings HTML masks. A distinct file from `terminal.token` —
+/// saving one never disturbs the other.
+const NOTIFY_CREDENTIAL_FILE_NAME: &str = "telegram.token";
+
+/// `<data_dir>/telegram.token`, or `override_dir/telegram.token` when given
+/// — mirrors `config_path_override`/`terminal_auth::token_path_override` so
+/// a route-level test never touches the real `~/.mdview`.
+pub fn notify_credential_path_override(override_dir: Option<&Path>) -> PathBuf {
+    resolve_data_dir(override_dir).join(NOTIFY_CREDENTIAL_FILE_NAME)
+}
+
+/// Persist the Telegram bot token beside the config: a fresh `O_EXCL`-created
+/// temp file (never collides with, or inherits the permissions of, anything
+/// already there), owner-only permissions where the platform supports them
+/// (unix `0600`), then `rename`d over the target — so the target path is
+/// always either the previous complete file or the new one, never a partial
+/// write, and a failed write never touches it at all. Mirrors
+/// `terminal_auth::write_token_file`'s shape exactly — the mechanism this
+/// repeats for a second secret rather than inventing a new one — duplicated
+/// rather than shared because that module lives in the `mdview` binary
+/// crate and this one must stay reachable from `mdview-core`, which the
+/// settings route (`crates/mdview/src/server.rs`) and the notify reconciler
+/// (`crates/mdview/src/main.rs`) both depend on.
+pub fn save_notify_credential(path: &Path, secret: &str) -> Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Config("credential path has no parent directory".into()))?;
+    std::fs::create_dir_all(dir)?;
+    let tmp_path = dir.join(format!(
+        "{NOTIFY_CREDENTIAL_FILE_NAME}.tmp-{}",
+        std::process::id()
+    ));
+    write_owner_only(&tmp_path, secret.as_bytes())?;
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+#[cfg(not(unix))]
+fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// The credential currently on disk, or `None` if it has never been saved.
+/// Returns the raw secret — callers (the notify reconciler in the `mdview`
+/// binary crate) may use it only to build an outbound client, never to
+/// answer an HTTP response. Use [`masked_notify_credential`] for anything
+/// rendered to a client.
+pub fn load_notify_credential(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The credential's last four characters, or `None` if it has never been
+/// saved — the only view of the credential any HTTP response may ever
+/// carry. Unlike the terminal token's reveal-once (P2), there is no `Full`
+/// view here at all: the form that sets this value is write-only, so this
+/// function is called on every render, including the one immediately after
+/// a save.
+pub fn masked_notify_credential(path: &Path) -> Option<String> {
+    load_notify_credential(path).map(|s| mask_secret(&s))
+}
+
+fn mask_secret(secret: &str) -> String {
+    let n = secret.chars().count();
+    if n <= 4 {
+        "*".repeat(n)
+    } else {
+        let visible: String = secret.chars().skip(n - 4).collect();
+        format!("{}{}", "*".repeat(n - 4), visible)
+    }
 }
 
 impl Config {
@@ -343,6 +461,88 @@ mod tests {
         c.save_to(&p).unwrap();
         let loaded = Config::load_from(&p);
         assert_eq!(loaded.server.hostname.as_deref(), Some("my-machine.local"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn notify_chat_id_defaults_to_none_and_roundtrips() {
+        // Unlike the credential, the destination is an ordinary Config field
+        // (it names a target, not a secret) — round-trips through TOML like
+        // every other setting.
+        assert_eq!(Config::default().terminal.notify_chat_id, None);
+
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-chatid-{}", std::process::id()));
+        let p = dir.join("config.toml");
+        let mut c = Config::default();
+        c.terminal.notify_chat_id = Some("-100123456789".into());
+        c.save_to(&p).unwrap();
+        let loaded = Config::load_from(&p);
+        assert_eq!(loaded.terminal.notify_chat_id.as_deref(), Some("-100123456789"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn notify_credential_absent_until_saved_then_masked_never_full() {
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = notify_credential_path_override(Some(&dir));
+
+        assert_eq!(load_notify_credential(&path), None);
+        assert_eq!(masked_notify_credential(&path), None);
+
+        let secret = "shhh-bot-token-abcd1234";
+        save_notify_credential(&path, secret).unwrap();
+
+        assert_eq!(load_notify_credential(&path).as_deref(), Some(secret));
+        let masked = masked_notify_credential(&path).unwrap();
+        assert_eq!(masked, "*******************1234");
+        assert!(!masked.contains(secret), "masked view must never carry the full secret");
+
+        // Saving again (rotation) overwrites atomically rather than
+        // appending or leaving a stale temp file behind.
+        save_notify_credential(&path, "second-secret-9999").unwrap();
+        assert_eq!(load_notify_credential(&path).as_deref(), Some("second-secret-9999"));
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![NOTIFY_CREDENTIAL_FILE_NAME.to_string()],
+            "no leftover temp file beside the credential: {entries:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn notify_credential_never_becomes_a_config_field() {
+        // The leak assertion is written against the value that would leak
+        // (the fixture's own generated secret and the file path it lives
+        // beside), not a hardcoded literal — a decorative assertion would
+        // stay green even if the credential quietly became a Config field
+        // under a different name.
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-leak-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cred_path = notify_credential_path_override(Some(&dir));
+        let secret = "definitely-a-secret-value-42";
+        save_notify_credential(&cred_path, secret).unwrap();
+
+        let mut c = Config::default();
+        c.terminal.notify_chat_id = Some("42".into());
+        let config_path = config_path_override(Some(&dir));
+        c.save_to(&config_path).unwrap();
+        let config_text = std::fs::read_to_string(&config_path).unwrap();
+
+        assert!(
+            !config_text.contains(secret),
+            "config.toml must never carry the Telegram credential: {config_text}"
+        );
+        assert!(
+            !config_text.to_lowercase().contains("telegram"),
+            "config.toml must carry no telegram-shaped field at all: {config_text}"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

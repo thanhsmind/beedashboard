@@ -1987,7 +1987,25 @@ pub enum TerminalTokenView {
     Full(String),
 }
 
-pub fn settings_page(cfg: &Config, saved: bool, token_view: TerminalTokenView) -> String {
+/// What the settings page's notification section renders for the Telegram
+/// credential (agent-terminal-18). Unlike [`TerminalTokenView`] there is no
+/// `Full` variant at all: this credential is never rendered back in full,
+/// not even once — the form that sets it (`/api/terminal-config`) is
+/// write-only for this field, so this is the *only* view any response ever
+/// carries, including the one immediately after a save.
+pub enum NotifyCredentialView {
+    /// No credential has ever been saved.
+    NotConfigured,
+    /// The last four characters of the saved credential.
+    Masked(String),
+}
+
+pub fn settings_page(
+    cfg: &Config,
+    saved: bool,
+    token_view: TerminalTokenView,
+    notify_credential_view: NotifyCredentialView,
+) -> String {
     let banner = if saved {
         "<div class=\"fg-banner fg-banner--success\"><span class=\"fg-banner__dot\"></span><span class=\"fg-banner__body\">Saved. Server &amp; indexing changes apply after restart (<code>mdview stop &amp;&amp; mdview serve</code>).</span></div>"
     } else {
@@ -2015,6 +2033,20 @@ pub fn settings_page(cfg: &Config, saved: bool, token_view: TerminalTokenView) -
                 full = esc(&full)
             ),
             "Rotate token",
+        ),
+    };
+
+    // D7/D9: the notification credential is never rendered back in full
+    // (unlike the terminal token above) — see `NotifyCredentialView`'s own
+    // doc comment for why there is no `Full` variant to match here at all.
+    let (notify_credential_hint, notify_credential_placeholder) = match notify_credential_view {
+        NotifyCredentialView::NotConfigured => (
+            "No Telegram bot token saved yet.".to_string(),
+            "Paste the bot token".to_string(),
+        ),
+        NotifyCredentialView::Masked(masked) => (
+            format!("Bot token: {masked} — leave blank to keep it.", masked = esc(&masked)),
+            "Leave blank to keep the current token".to_string(),
         ),
     };
 
@@ -2114,6 +2146,18 @@ pub fn settings_page(cfg: &Config, saved: bool, token_view: TerminalTokenView) -
       <label class="fg-check"><input type="checkbox" name="notify_enabled" {term_notify}><span class="fg-check__text">Notify on agent status change</span></label>
       <span class="fg-field__hint">Requires a valid terminal session to save — sign in above with the token first.</span>
     </fieldset>
+    <fieldset><legend>Telegram notification <span class="fg-chip fg-chip--neutral">token required</span></legend>
+      <div class="fg-field">
+        <label class="fg-field__label">Chat id</label>
+        <input class="fg-input" name="notify_chat_id" value="{notify_chat_id}">
+        <span class="fg-field__hint">The destination the notifier sends agent status changes to.</span>
+      </div>
+      <div class="fg-field">
+        <label class="fg-field__label">Bot token</label>
+        <input class="fg-input" type="password" name="notify_telegram_token" autocomplete="off" placeholder="{notify_credential_placeholder}">
+        <span class="fg-field__hint">{notify_credential_hint}</span>
+      </div>
+    </fieldset>
     <button type="submit" class="fg-btn fg-btn--primary">Save terminal settings</button>
   </form>
 </main>"#,
@@ -2137,6 +2181,9 @@ pub fn settings_page(cfg: &Config, saved: bool, token_view: TerminalTokenView) -
         term_enabled = checked(cfg.terminal.enabled),
         term_supervisor = checked(cfg.terminal.supervisor_enabled),
         term_notify = checked(cfg.terminal.notify_enabled),
+        notify_chat_id = esc(cfg.terminal.notify_chat_id.as_deref().unwrap_or("")),
+        notify_credential_hint = notify_credential_hint,
+        notify_credential_placeholder = esc(&notify_credential_placeholder),
         tr_stdio = sel(&cfg.mcp.transport, "stdio"),
         tr_http = sel(&cfg.mcp.transport, "http"),
     );

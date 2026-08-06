@@ -55,6 +55,18 @@ pub struct AppState {
     /// transcript reader then resolves the root exactly where Claude Code
     /// itself writes it.
     pub transcript_root: Option<PathBuf>,
+    /// D7's live background manager (agent-terminal-18): reconciled against
+    /// the D7 switches at startup and on every `update_terminal_config`
+    /// write, so flipping a switch takes effect without a restart. One
+    /// instance per `AppState`, shared (via its own internal `Arc`-free
+    /// interior mutability) across every clone the way `terminal_auth` is.
+    pub terminal_background: Arc<crate::TerminalBackground>,
+    /// The D7/D9 notification outbox (agent-terminal-17): opened once at
+    /// startup — in-memory for every route test, so no test ever touches
+    /// the real `~/.mdview/notify.sqlite` — and handed to
+    /// `terminal_background` on every reconcile rather than reopened per
+    /// toggle.
+    pub notify_store: Arc<mdview_core::notify_store::NotifyStore>,
 }
 
 impl HasTerminalAuth for AppState {
@@ -76,6 +88,20 @@ pub async fn serve() -> Result<()> {
     // raw error or a crash.
     let herdr_socket_path = herdr::socket::default_socket_path()
         .unwrap_or_else(|_| PathBuf::from("/nonexistent/herdr.sock"));
+    // D7/D9 outbox: a failure to open the real sqlite file (permissions,
+    // disk full, …) must never crash a daemon whose primary job is serving
+    // markdown — fall back to an in-memory outbox rather than propagate the
+    // error, matching every other "degrade rather than fail" seam this
+    // feature already has (D6's herdr-down state, the boundary's fail-closed
+    // empty pane list).
+    let notify_store_path = mdview_core::config::notify_store_path_override(None);
+    let notify_store = Arc::new(
+        mdview_core::notify_store::NotifyStore::open(&notify_store_path).unwrap_or_else(|e| {
+            tracing::warn!("notify outbox open failed ({e}); using an in-memory outbox");
+            mdview_core::notify_store::NotifyStore::open_in_memory()
+                .expect("in-memory sqlite always opens")
+        }),
+    );
     let state = AppState {
         engine: engine.clone(),
         reload_tx: reload_tx.clone(),
@@ -84,7 +110,21 @@ pub async fn serve() -> Result<()> {
         terminal_auth: TerminalAuth::new(None),
         herdr: Arc::new(herdr::socket::SocketHerdr::new(herdr_socket_path)),
         transcript_root: None,
+        terminal_background: Arc::new(crate::TerminalBackground::new()),
+        notify_store,
     };
+
+    // D7: reconcile the live background against whatever the config already
+    // says, once at startup — a config that already had a switch on before
+    // this restart must keep behaving as if it does, not silently go dark
+    // until the operator re-saves the settings page.
+    let telegram = telegram_credentials(&engine.config.terminal, state.config_data_dir.as_deref());
+    state.terminal_background.reconcile(
+        &engine.config.terminal,
+        state.herdr.clone(),
+        state.notify_store.clone(),
+        telegram,
+    );
 
     // Filesystem watcher (kept alive for the process lifetime).
     let _watch = crate::watch::spawn_watchers(engine.clone(), reload_tx.clone())?;
@@ -315,7 +355,14 @@ async fn settings_page_handler(State(st): State<AppState>, Query(flag): Query<Sa
         st.config_data_dir.as_deref(),
     ));
     let token_view = current_token_view(&st);
-    Html(views::settings_page(&cfg, flag.saved.is_some(), token_view)).into_response()
+    let notify_credential_view = current_notify_credential_view(&st);
+    Html(views::settings_page(
+        &cfg,
+        flag.saved.is_some(),
+        token_view,
+        notify_credential_view,
+    ))
+    .into_response()
 }
 
 /// The token state `settings_page` renders on every ordinary render — masked
@@ -326,6 +373,20 @@ fn current_token_view(st: &AppState) -> views::TerminalTokenView {
     match st.terminal_auth.masked() {
         Some(masked) => views::TerminalTokenView::Masked(masked),
         None => views::TerminalTokenView::NotGenerated,
+    }
+}
+
+/// The Telegram credential state `settings_page` renders — masked to the
+/// last four characters, or "never saved". Unlike [`current_token_view`]
+/// there is no reveal-once counterpart anywhere in this module: this is the
+/// only view of the credential any response ever carries, including the one
+/// immediately after `update_terminal_config` saves it.
+fn current_notify_credential_view(st: &AppState) -> views::NotifyCredentialView {
+    let cred_path =
+        mdview_core::config::notify_credential_path_override(st.config_data_dir.as_deref());
+    match mdview_core::config::masked_notify_credential(&cred_path) {
+        Some(masked) => views::NotifyCredentialView::Masked(masked),
+        None => views::NotifyCredentialView::NotConfigured,
     }
 }
 
@@ -377,7 +438,13 @@ async fn rotate_terminal_token(
             let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
                 st.config_data_dir.as_deref(),
             ));
-            let html = views::settings_page(&cfg, false, views::TerminalTokenView::Full(full_token));
+            let notify_credential_view = current_notify_credential_view(&st);
+            let html = views::settings_page(
+                &cfg,
+                false,
+                views::TerminalTokenView::Full(full_token),
+                notify_credential_view,
+            );
             Html(html).into_response()
         }
         Err(e) => internal_error(&e.to_string()),
@@ -417,6 +484,17 @@ struct TerminalConfigForm {
     enabled: Option<String>,
     supervisor_enabled: Option<String>,
     notify_enabled: Option<String>,
+    /// D7/D9 notification destination — a plain (non-secret) field, see
+    /// `TerminalConfig::notify_chat_id`. Only overwrites the stored value
+    /// when non-blank, matching every other optional field on this form
+    /// (`update_config`'s host/exclude_patterns/etc): submitting the form
+    /// with the field left as rendered never clobbers it.
+    notify_chat_id: Option<String>,
+    /// D7/D9 notification credential (the Telegram bot token). Write-only:
+    /// this form never receives the current value back to redisplay it, so
+    /// a blank submission always means "leave the saved credential alone",
+    /// never "clear it".
+    notify_telegram_token: Option<String>,
 }
 
 /// POST /api/terminal-config — the D7 switches (terminal enable, herdr
@@ -439,7 +517,40 @@ async fn update_terminal_config(
     cfg.terminal.enabled = form.enabled.is_some();
     cfg.terminal.supervisor_enabled = form.supervisor_enabled.is_some();
     cfg.terminal.notify_enabled = form.notify_enabled.is_some();
+    if let Some(dest) = form
+        .notify_chat_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        cfg.terminal.notify_chat_id = Some(dest.to_string());
+    }
+    // Per this cell's own rule (mirroring P1): the credential is never a
+    // `Config` field, so it is written to its own owner-only file, not into
+    // `cfg` — a blank submission leaves whatever is already on disk alone.
+    let cred_path = mdview_core::config::notify_credential_path_override(st.config_data_dir.as_deref());
+    if let Some(secret) = form
+        .notify_telegram_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let _ = mdview_core::config::save_notify_credential(&cred_path, secret);
+    }
     let _ = cfg.save_to(&config_path);
+
+    // The switches control live tasks, not just stored values (D7): every
+    // save reconciles `terminal_background` against the just-written config,
+    // so turning a switch on or off takes effect immediately, with no
+    // restart, and turning one off stops exactly what it started.
+    let telegram = telegram_credentials(&cfg.terminal, st.config_data_dir.as_deref());
+    st.terminal_background.reconcile(
+        &cfg.terminal,
+        st.herdr.clone(),
+        st.notify_store.clone(),
+        telegram,
+    );
+
     Redirect::to("/settings?saved=1").into_response()
 }
 
@@ -739,6 +850,27 @@ fn terminal_family_enabled(st: &AppState) -> bool {
         st.config_data_dir.as_deref(),
     ));
     cfg.terminal.enabled
+}
+
+/// The Telegram credentials to build a live notifier from — `Some((token,
+/// chat_id))` only when both the destination (`cfg.notify_chat_id`, an
+/// ordinary `Config` field) and the credential (its own owner-only file
+/// beside the config — P1's rule, extended to this second secret) are
+/// present and non-empty. `None` in every other case, which is exactly the
+/// condition under which `notify::TelegramNotifier::new` falls back to the
+/// null channel inside `TerminalBackground::reconcile` — so a configuration
+/// missing either half never attempts a delivery, whatever the switch says.
+fn telegram_credentials(
+    cfg: &mdview_core::config::TerminalConfig,
+    config_data_dir: Option<&std::path::Path>,
+) -> Option<(String, String)> {
+    let cred_path = mdview_core::config::notify_credential_path_override(config_data_dir);
+    let token = mdview_core::config::load_notify_credential(&cred_path)?;
+    let chat_id = cfg.notify_chat_id.clone()?;
+    if token.trim().is_empty() || chat_id.trim().is_empty() {
+        return None;
+    }
+    Some((token, chat_id))
 }
 
 /// The exact wording `terminal_down_page` renders for D6 — shared so the
@@ -2190,6 +2322,14 @@ mod bee_route_tests {
             // transcript tests set this explicitly (see
             // `transcript_root_dir` below).
             transcript_root: None,
+            // A fresh manager per state, mirroring `terminal_auth` above —
+            // no route test shares live background tasks across states.
+            terminal_background: Arc::new(crate::TerminalBackground::new()),
+            // In-memory outbox — no route test ever touches a real sqlite
+            // file for this.
+            notify_store: Arc::new(
+                mdview_core::notify_store::NotifyStore::open_in_memory().unwrap(),
+            ),
         }
     }
 
@@ -4388,6 +4528,239 @@ mod bee_route_tests {
         assert!(saved.terminal.enabled);
         assert!(saved.terminal.supervisor_enabled);
         assert!(saved.terminal.notify_enabled);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// agent-terminal-18's key_link: the switches control **live tasks**,
+    /// not just stored config values. Reconciliation happens synchronously
+    /// inside `update_terminal_config`, so this is provable with no sleep or
+    /// timing at all — right after each response, `terminal_background`'s
+    /// own bookkeeping already reflects the new switch state. With both
+    /// switches off (the state before the first POST below) nothing is
+    /// running at all — the same D7 guarantee `main.rs`'s
+    /// `default_config_starts_nothing` proves at the manager level, proven
+    /// here end-to-end through the real gated route.
+    #[tokio::test]
+    async fn gated_switch_route_starts_and_stops_the_live_background_tasks() {
+        let dir = fresh_root("terminal-switches-live-tasks");
+        let st = build_state_with_dir(&dir);
+        let app = router(st.clone());
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        assert!(!st.terminal_background.supervisor_running());
+        assert!(!st.terminal_background.notify_running());
+
+        let on_req = Request::builder()
+            .method("POST")
+            .uri("/api/terminal-config")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(header::COOKIE, cookie.clone())
+            .body(Body::from("enabled=on&supervisor_enabled=on&notify_enabled=on"))
+            .unwrap();
+        let resp = app.clone().oneshot(on_req).await.unwrap();
+        assert!(resp.status().is_redirection());
+        assert!(
+            st.terminal_background.supervisor_running(),
+            "turning the supervisor switch on through the gated route must start the watchdog"
+        );
+        assert!(
+            st.terminal_background.notify_running(),
+            "turning the notify switch on through the gated route must start the watcher"
+        );
+
+        // Leaving both switch fields off this submission (only `enabled` is
+        // carried) must stop both live tasks — no restart needed.
+        let off_req = Request::builder()
+            .method("POST")
+            .uri("/api/terminal-config")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(header::COOKIE, cookie)
+            .body(Body::from("enabled=on"))
+            .unwrap();
+        let resp = app.oneshot(off_req).await.unwrap();
+        assert!(resp.status().is_redirection());
+        assert!(
+            !st.terminal_background.supervisor_running(),
+            "turning the supervisor switch off must stop the watchdog without a restart"
+        );
+        assert!(
+            !st.terminal_background.notify_running(),
+            "turning the notify switch off must stop the watcher without a restart"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The destination and credential the settings page's notification
+    /// section writes (D7/D9) sit behind the same P3 gate as the switches —
+    /// this cell extends `update_terminal_config`'s existing session check
+    /// to two more fields on the same endpoint rather than adding a second
+    /// one. Mirrors `terminal_switches_require_a_valid_terminal_session`.
+    #[tokio::test]
+    async fn notify_destination_and_credential_require_a_valid_terminal_session() {
+        let dir = fresh_root("terminal-notify-gated");
+        let st = build_state_with_dir(&dir);
+        let app = router(st.clone());
+        let cred_path = mdview_core::config::notify_credential_path_override(Some(&dir));
+
+        let notify_req = |cookie: Option<&str>| {
+            let mut b = Request::builder()
+                .method("POST")
+                .uri("/api/terminal-config")
+                .header("content-type", "application/x-www-form-urlencoded");
+            if let Some(c) = cookie {
+                b = b.header(header::COOKIE, c.to_string());
+            }
+            b.body(Body::from("notify_chat_id=12345&notify_telegram_token=secret-bot-token"))
+                .unwrap()
+        };
+
+        // No session at all.
+        let resp = app.clone().oneshot(notify_req(None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // An unknown/stale session cookie.
+        let resp = app
+            .clone()
+            .oneshot(notify_req(Some("mdview_terminal_session=not-a-real-session")))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let cfg_after_refusals = Config::load_from(&dir.join("config.toml"));
+        assert_eq!(cfg_after_refusals.terminal.notify_chat_id, None);
+        assert_eq!(mdview_core::config::load_notify_credential(&cred_path), None);
+
+        // A real session, obtained the same way every other gated-switch
+        // test does, succeeds.
+        let (_full_token, cookie) = rotate_token(app.clone()).await;
+        let resp = app.clone().oneshot(notify_req(Some(&cookie))).await.unwrap();
+        assert!(
+            resp.status().is_redirection(),
+            "a valid terminal session could not save the notification settings, got {}",
+            resp.status()
+        );
+
+        let saved = Config::load_from(&dir.join("config.toml"));
+        assert_eq!(saved.terminal.notify_chat_id.as_deref(), Some("12345"));
+        assert_eq!(
+            mdview_core::config::load_notify_credential(&cred_path).as_deref(),
+            Some("secret-bot-token")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P3 extended: `POST /api/config` is unauthenticated (D4 leaves it that
+    /// way) and its own `SettingsForm` has no `notify_chat_id`/
+    /// `notify_telegram_token` field at all — submitting them there must
+    /// have zero effect, the same guarantee
+    /// `post_api_config_with_terminal_fields_leaves_every_switch_unchanged`
+    /// proves for the switches.
+    #[tokio::test]
+    async fn post_api_config_with_notify_fields_leaves_destination_and_credential_unchanged() {
+        let dir = fresh_root("terminal-notify-not-via-api-config");
+        let st = build_state_with_dir(&dir);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(
+                "port=58313&notify_chat_id=12345&notify_telegram_token=secret-bot-token",
+            ))
+            .unwrap();
+        let resp = router(st).oneshot(req).await.unwrap();
+        assert!(resp.status().is_redirection());
+
+        let saved = Config::load_from(&dir.join("config.toml"));
+        assert_eq!(saved.server.port, 58313, "the legitimate field was not saved");
+        assert_eq!(
+            saved.terminal.notify_chat_id, None,
+            "POST /api/config set the notification destination"
+        );
+        let cred_path = mdview_core::config::notify_credential_path_override(Some(&dir));
+        assert_eq!(
+            mdview_core::config::load_notify_credential(&cred_path),
+            None,
+            "POST /api/config wrote a Telegram credential file"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The credential must never appear on `GET /api/config`, before or
+    /// after it is saved — mirrors
+    /// `api_config_never_contains_the_token_value_before_or_after_generation`,
+    /// against the real submitted secret value rather than a hardcoded
+    /// guess (a leak assertion must be written against the value that would
+    /// leak — `docs/history/learnings/20260805-toothless-security-assertions.md`).
+    #[tokio::test]
+    async fn api_config_never_contains_the_notify_credential() {
+        let dir = fresh_root("terminal-notify-cred-not-in-api-config");
+        let st = build_state_with_dir(&dir);
+        let app = router(st.clone());
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let secret = "unique-telegram-secret-98765";
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/terminal-config")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(header::COOKIE, cookie)
+            .body(Body::from(format!(
+                "notify_chat_id=555&notify_telegram_token={secret}"
+            )))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert!(resp.status().is_redirection());
+
+        let resp = get(app, "/api/config").await;
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(secret),
+            "GET /api/config leaked the Telegram credential: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Unlike the terminal token's documented reveal-once (P2), the
+    /// credential has no reveal path at all — every render, including
+    /// `/settings` immediately after the save that set it, carries at most
+    /// its last four characters.
+    #[tokio::test]
+    async fn settings_page_never_reveals_the_notify_credential_in_full() {
+        let dir = fresh_root("terminal-notify-cred-never-full");
+        let st = build_state_with_dir(&dir);
+        let app = router(st.clone());
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let secret = "never-shown-in-full-abcd";
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/terminal-config")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(header::COOKIE, cookie)
+            .body(Body::from(format!(
+                "notify_chat_id=555&notify_telegram_token={secret}"
+            )))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert!(resp.status().is_redirection());
+
+        let resp = get(app, "/settings").await;
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(secret),
+            "/settings rendered the Telegram credential in full: {body}"
+        );
+        let last_four = &secret[secret.len() - 4..];
+        assert!(
+            body.contains(last_four),
+            "/settings dropped the masked credential entirely: {body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
