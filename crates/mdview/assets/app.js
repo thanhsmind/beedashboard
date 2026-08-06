@@ -792,6 +792,25 @@
   // D6: `body.available === false` means this pane's agent has written no
   // transcript yet — a named state is shown once and left alone, never
   // repainted back to "Loading…" and never left blank as if broken.
+  //
+  // Two defects fixed here (independent review, agent-terminal-20):
+  // (1) `pollOne` used to fire on every `POLL_MS` tick with no guard against
+  // an outstanding request — a poll slower than `POLL_MS` (a slow herdr, a
+  // large tail) let the next tick fire with the *same* `cursors[paneId]`,
+  // so both responses carried the same records and both got appended,
+  // showing every record twice. `inFlight` skips a tick whose predecessor
+  // hasn't resolved yet, the same cursor is then only ever read once.
+  // (2) every non-ok response used to be swallowed as "nothing to do",
+  // leaving the last-good content on screen forever while silently
+  // re-sending the same cursor — indistinguishable from an idle agent. A
+  // named state now always replaces the viewport's own message area,
+  // distinguishing a session that is no longer valid (the transcript route
+  // answers an opaque 404 for that, same as every other terminal-family
+  // guard failure — D4) from a transient failure (a non-404 error status,
+  // or the request failing outright), so the operator knows a session
+  // needs re-establishing on Settings rather than the transcript itself
+  // being stuck. Recovering (any next successful, parsed response) clears
+  // the named state without disturbing lines already appended.
   (function () {
     var main = document.querySelector("main.fg-page[data-project-id]");
     if (!main) return;
@@ -801,8 +820,12 @@
 
     var POLL_MS = 1500;
     var NO_TRANSCRIPT_TEXT = "No transcript yet for this pane.";
+    var SESSION_EXPIRED_TEXT = "Session expired — sign in again on the Settings page to keep watching.";
+    var TRANSCRIPT_ERROR_TEXT = "Couldn't reach the transcript — retrying…";
     var cursors = {}; // pane id -> cursor to resume from on the next poll
     var started = {}; // pane id -> the viewport's placeholder has been cleared
+    var inFlight = {}; // pane id -> a poll for this pane is still outstanding
+    var errorEl = {}; // pane id -> the named-state element currently shown, if any
 
     function transcriptUrl(paneId, cursor) {
       var url = "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/transcript";
@@ -821,14 +844,50 @@
       if (lines.length) el.scrollTop = el.scrollHeight;
     }
 
+    // Shows `text` as a standing, visible state for this pane — replacing
+    // whatever named state (if any) is already shown, never appended beside
+    // accumulated transcript lines and never silently dropped.
+    function showState(el, paneId, text) {
+      var node = errorEl[paneId];
+      if (!node) {
+        node = document.createElement("div");
+        node.className = "term-transcript__line term-transcript__state";
+        el.appendChild(node);
+        errorEl[paneId] = node;
+      }
+      node.textContent = text;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function clearState(paneId) {
+      var node = errorEl[paneId];
+      if (node && node.parentNode) node.parentNode.removeChild(node);
+      errorEl[paneId] = null;
+    }
+
     function pollOne(el) {
       var paneId = el.getAttribute("data-pane-id");
+      if (inFlight[paneId]) return; // a slow predecessor is still out; never race it with the same cursor
+      inFlight[paneId] = true;
       fetch(transcriptUrl(paneId, cursors[paneId]), { credentials: "same-origin" })
         .then(function (res) {
-          return res.ok ? res.json() : null;
+          inFlight[paneId] = false;
+          if (res.status === 404) {
+            // The transcript route's session/method/switch guards all answer
+            // the same opaque 404 (D4) — from the client the one meaningful
+            // read of a 404 here is "this session no longer authenticates".
+            showState(el, paneId, SESSION_EXPIRED_TEXT);
+            return null;
+          }
+          if (!res.ok) {
+            showState(el, paneId, TRANSCRIPT_ERROR_TEXT);
+            return null;
+          }
+          return res.json();
         })
         .then(function (body) {
           if (!body) return;
+          clearState(paneId);
           if (body.available === false) {
             if (!started[paneId]) el.textContent = NO_TRANSCRIPT_TEXT;
             return;
@@ -840,7 +899,10 @@
           cursors[paneId] = body.cursor;
           appendLines(el, body.lines || []);
         })
-        .catch(function () {});
+        .catch(function () {
+          inFlight[paneId] = false;
+          showState(el, paneId, TRANSCRIPT_ERROR_TEXT);
+        });
     }
 
     function pollAll() {

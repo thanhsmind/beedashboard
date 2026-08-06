@@ -5774,6 +5774,122 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&transcript_root).ok();
     }
 
+    /// Truth: "Without a session, the Transcript *page* route returns an
+    /// opaque 404, identical to an unknown route" — with the D7 switch
+    /// already ON, so this isolates the session gate itself rather than the
+    /// disabled-switch check (the trap this feature has already fallen into
+    /// three times: a no-session test with the switch left off passes on the
+    /// switch, not on `AuthSession` — see
+    /// `docs/history/learnings/20260805-toothless-security-assertions.md`).
+    /// Every other test that reaches `transcript_page`
+    /// (`transcript_page_renders_the_tab_and_a_viewport_per_pane`,
+    /// `transcript_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session`)
+    /// carries a valid cookie, so none of them would go red if
+    /// `_session: terminal_auth::AuthSession` were deleted from
+    /// `transcript_page` — this one does. Mirrors
+    /// `terminal_route_without_a_session_is_byte_identical_to_an_unrouted_path`
+    /// (the Terminal tab's own page-route sibling proof). Verified by
+    /// temporarily deleting `_session: terminal_auth::AuthSession` from
+    /// `transcript_page` and re-running: it went red (200, not 404) before
+    /// the guard was restored.
+    #[tokio::test]
+    async fn transcript_page_without_a_session_is_byte_identical_to_an_unrouted_path() {
+        let dir = fresh_root("transcript-page-no-session");
+        enable_terminal(&dir);
+        let root = fresh_root("transcript-page-no-session-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "transcript-page-no-session");
+        let app = router(st);
+
+        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
+            let with_no_session = app
+                .clone()
+                .oneshot(transcript_page_req(&project.id, cookie))
+                .await
+                .unwrap();
+            let unrouted = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/this-path-was-never-routed")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
+            assert_eq!(with_no_session.status(), unrouted.status());
+            assert_eq!(with_no_session.headers(), unrouted.headers());
+            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
+            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(a, b);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Truth (the carried-over method-mismatch-oracle obligation, isolated,
+    /// mirroring
+    /// `terminal_route_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal`):
+    /// at least one wrong-method test against the Transcript *page* route
+    /// must fail if `MethodGate` were removed from `transcript_page` while a
+    /// valid session and an enabled terminal are already in place. A
+    /// no-session/switch-off wrong-method test would still pass unchanged
+    /// even with `MethodGate` deleted entirely, since `AuthSession`'s own
+    /// rejection (or the disabled switch) answers the same opaque 404 first
+    /// without `MethodGate` ever mattering — this test instead POSTs with a
+    /// freshly rotated session and the switch on, so `MethodGate` alone
+    /// stands between the POST and the handler body. Verified by temporarily
+    /// deleting `_method: terminal_auth::MethodGate<terminal_auth::Get>` from
+    /// `transcript_page` and re-running this test: it went red (200, the
+    /// rendered Transcript page, not 404) before the guard was restored.
+    #[tokio::test]
+    async fn transcript_page_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal()
+    {
+        let dir = fresh_root("transcript-page-wrong-method-isolated");
+        enable_terminal(&dir);
+        let root = fresh_root("transcript-page-wrong-method-isolated-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "transcript-page-wrong-method-isolated");
+        let app = router(st);
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let posted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/p/{}/_transcript", project.id))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unrouted = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/this-path-was-never-routed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
+        assert_eq!(posted.status(), unrouted.status());
+        assert_eq!(posted.headers(), unrouted.headers());
+        let a = posted.into_body().collect().await.unwrap().to_bytes();
+        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(a, b);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Truth: "The Transcript tab is a separate tab from Terminal on a
     /// project page" — the page route renders the nav link and one
     /// `.term-transcript` viewport per pane, distinct from `.term-screen`.
@@ -5815,6 +5931,73 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// agent-terminal-20, truth: "A poll that outlives its interval cannot
+    /// cause a record to be appended twice" — a grep-based proof over the
+    /// vendored client source `views::APP_JS` is served from
+    /// (`assets/app.js`), the same shape
+    /// `typed_text_and_named_keys_never_appear_in_a_tracing_call` above uses
+    /// for a client-file guarantee `cargo test` can otherwise only assert on
+    /// as a string, since there is no JS test runner in this workspace. The
+    /// transcript poller's `pollOne` must check an in-flight flag before
+    /// dispatching a new fetch for the same pane, and must clear that flag
+    /// on every settled outcome (success and failure) so a genuinely
+    /// finished poll can fire again.
+    #[test]
+    fn transcript_poller_guards_against_an_overlapping_in_flight_poll() {
+        let js = views::APP_JS;
+        assert!(
+            js.contains("if (inFlight[paneId]) return;"),
+            "the transcript poller must skip a tick while a poll for that pane is already outstanding"
+        );
+        assert!(
+            js.contains("inFlight[paneId] = true;"),
+            "the transcript poller must mark a pane in-flight before dispatching its fetch"
+        );
+        assert!(
+            js.contains("inFlight[paneId] = false;"),
+            "the transcript poller must clear the in-flight flag once a poll settles"
+        );
+    }
+
+    /// agent-terminal-20, truth: "A rejected or failed transcript request
+    /// surfaces a named state instead of stale content" and "A session that
+    /// is no longer valid is distinguishable to the reader from a transient
+    /// server error" — same grep-based-over-`views::APP_JS` proof shape as
+    /// `transcript_poller_guards_against_an_overlapping_in_flight_poll`
+    /// above. The transcript route answers every guard failure (no session,
+    /// wrong method, switch off) with the same opaque 404 (D4), so the
+    /// client's own distinguishing read of a 404 is "this session no longer
+    /// authenticates" — a named text distinct from the one shown for any
+    /// other non-ok response or an outright failed request.
+    #[test]
+    fn transcript_poller_names_a_session_expired_state_distinct_from_a_transient_error() {
+        let js = views::APP_JS;
+        assert!(
+            js.contains("SESSION_EXPIRED_TEXT"),
+            "the transcript poller must name a session-expired state"
+        );
+        assert!(
+            js.contains("TRANSCRIPT_ERROR_TEXT"),
+            "the transcript poller must name a transient-error state, distinct from session-expired"
+        );
+        assert!(
+            js.contains("res.status === 404"),
+            "a 404 (the transcript route's opaque answer to every guard failure, D4) must route to the \
+             session-expired state, not the generic error state"
+        );
+        // The two named states must actually read differently, or a reader
+        // could not tell one from the other.
+        let session_text = js
+            .lines()
+            .find(|l| l.contains("var SESSION_EXPIRED_TEXT"))
+            .expect("SESSION_EXPIRED_TEXT must be declared");
+        let error_text = js
+            .lines()
+            .find(|l| l.contains("var TRANSCRIPT_ERROR_TEXT"))
+            .expect("TRANSCRIPT_ERROR_TEXT must be declared");
+        assert_ne!(session_text, error_text, "the two named states must carry different wording");
     }
 
     /// A POST request to `/p/{id}/_terminal/{pane_id}/input` carrying a JSON
