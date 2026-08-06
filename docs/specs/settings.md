@@ -11,7 +11,13 @@ coverage: partial
 The single place to view and change mdview's local configuration: server
 binding, the renderer theme, indexing behavior, and the MCP integration. There
 is one operator (whoever runs mdview on their own machine) and no
-authentication — anyone who can reach the settings page can change it.
+authentication on this page or any other route outside the agent terminal
+family — anyone who can reach the settings page can change it. The one
+exception: `/settings` is also where the agent terminal's access token is
+generated, shown in full exactly once, and rotated — presenting that token
+is the only way past the gate on the terminal, transcript, and
+agent-creation routes (see the Agent terminal spec). Generating or viewing
+that token, like every other setting, is itself unauthenticated.
 
 ## Entry Points & Triggers
 

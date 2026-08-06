@@ -13,6 +13,7 @@ pub struct Config {
     pub indexing: IndexingConfig,
     pub renderer: RendererConfig,
     pub search: SearchConfig,
+    pub terminal: TerminalConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,14 +58,71 @@ pub struct SearchConfig {
     pub enable_semantic: bool,
 }
 
+/// The D7 opt-in switches for the agent terminal surface, all off until the
+/// user turns them on from the settings page. The terminal token itself is
+/// deliberately **not** a field here (P1, `mdview/src/terminal_auth.rs`):
+/// `Config` is serialized whole and unauthenticated by `GET /api/config`, so
+/// anything stored inside it is one request away regardless of what the
+/// settings HTML masks. `#[derive(Default)]` gives every switch `false`,
+/// matching a config that has never seen this section.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// The terminal surface itself (D2/D3) — panes and screens are reachable
+    /// only once this is on.
+    pub enabled: bool,
+    /// D7: keep the herdr supervisor process alive. mdview spawns nothing
+    /// while this is off.
+    pub supervisor_enabled: bool,
+    /// D7: Telegram notification on agent status change. mdview makes no
+    /// outbound call while this is off.
+    pub notify_enabled: bool,
+    /// D8/P4: operator-authored agent-create presets, keyed by label — the
+    /// terminal page's creation controls
+    /// (`crates/mdview/src/views.rs::terminal_create_controls`) offer
+    /// exactly these labels and nothing else, and
+    /// `crates/mdview/src/server.rs::terminal_create_agent` is the only
+    /// place a label is ever turned into the argv it keys into. No HTTP
+    /// request ever supplies or reads an `argv` — this config field is the
+    /// only source. Defaults to empty: a fresh install refuses every
+    /// preset-create request until the operator configures at least one.
+    #[serde(default)]
+    pub agent_presets: Vec<AgentPreset>,
+    /// D7/D9's notification destination: the Telegram chat id status-change
+    /// alerts are sent to. Unlike the bot token (never a `Config` field —
+    /// see [`notify_credential_path_override`] below) a chat id names a
+    /// destination, not a credential, so it is an ordinary `Config` field:
+    /// visible on `GET /api/config` and in the settings HTML like any other
+    /// setting. `None` (the default) means no destination is configured —
+    /// `TelegramNotifier::new` (`crates/mdview/src/notify/telegram.rs`)
+    /// requires both halves, so a configuration missing this one never
+    /// attempts a delivery no matter what the switch says.
+    #[serde(default)]
+    pub notify_chat_id: Option<String>,
+}
+
+/// One D8 agent-create preset: a label the terminal page's creation
+/// controls offer, keyed to the argv that is started when a client picks it
+/// by name. Operator-authored config only — never populated from, or
+/// exposed raw to, an HTTP request body (`crates/mdview/src/server.rs`'s
+/// create routes deserialize only a `preset` label, never `argv`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AgentPreset {
+    pub label: String,
+    pub argv: Vec<String>,
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             port: 7700,
             // Bind all interfaces by default so the viewer is reachable from
             // other devices on the LAN (and from a browser when the daemon runs
-            // on a remote host). The server has no auth; `serve()` prints a
-            // non-loopback exposure warning at startup.
+            // on a remote host). The server has no auth outside the agent
+            // terminal family's token gate (D4, `crates/mdview/src/terminal_auth.rs`) —
+            // every other route, including this one, stays open; `serve()`
+            // prints a non-loopback exposure warning at startup.
             host: "0.0.0.0".into(),
             hostname: None,
             open_browser_on_start: false,
@@ -117,8 +175,22 @@ pub fn data_dir() -> PathBuf {
         .join(".mdview")
 }
 
+/// `data_dir()`, or `override_dir` when given. Callers that must be testable
+/// without touching the developer's real `~/.mdview` (route handlers exercised
+/// through a test harness) resolve the data directory through this instead of
+/// calling `data_dir()` directly. With `override_dir` unset this returns
+/// exactly what `data_dir()` returns.
+pub fn resolve_data_dir(override_dir: Option<&Path>) -> PathBuf {
+    override_dir.map(Path::to_path_buf).unwrap_or_else(data_dir)
+}
+
 pub fn config_path() -> PathBuf {
     data_dir().join("config.toml")
+}
+
+/// `config_path()`, or `override_dir/config.toml` when given.
+pub fn config_path_override(override_dir: Option<&Path>) -> PathBuf {
+    resolve_data_dir(override_dir).join("config.toml")
 }
 
 pub fn registry_db_path() -> PathBuf {
@@ -127,6 +199,147 @@ pub fn registry_db_path() -> PathBuf {
 
 pub fn daemon_lock_path() -> PathBuf {
     data_dir().join("daemon.lock")
+}
+
+/// `<data_dir>/notify.sqlite`, or `override_dir/notify.sqlite` when given —
+/// the D7/D9 notification outbox (`crate::notify_store::NotifyStore`),
+/// mirroring `config_path_override` so a route-level test never touches the
+/// real `~/.mdview`.
+pub fn notify_store_path_override(override_dir: Option<&Path>) -> PathBuf {
+    resolve_data_dir(override_dir).join("notify.sqlite")
+}
+
+/// File name for the Telegram bot token, written beside `config.toml` in the
+/// same data directory `crates/mdview/src/terminal_auth.rs`'s own token file
+/// uses, for the same reason (P1's rule, extended to this second secret):
+/// `Config` is serialized whole and unauthenticated by `GET /api/config`, so
+/// a credential stored inside it would be one request away regardless of
+/// what the settings HTML masks. A distinct file from `terminal.token` —
+/// saving one never disturbs the other.
+const NOTIFY_CREDENTIAL_FILE_NAME: &str = "telegram.token";
+
+/// `<data_dir>/telegram.token`, or `override_dir/telegram.token` when given
+/// — mirrors `config_path_override`/`terminal_auth::token_path_override` so
+/// a route-level test never touches the real `~/.mdview`.
+pub fn notify_credential_path_override(override_dir: Option<&Path>) -> PathBuf {
+    resolve_data_dir(override_dir).join(NOTIFY_CREDENTIAL_FILE_NAME)
+}
+
+/// Persist the Telegram bot token beside the config: a fresh `O_EXCL`-created
+/// temp file (never collides with, or inherits the permissions of, anything
+/// already there), owner-only permissions where the platform supports them
+/// (unix `0600`), then `rename`d over the target — so the target path is
+/// always either the previous complete file or the new one, never a partial
+/// write, and a failed write never touches it at all. Mirrors
+/// `terminal_auth::write_token_file`'s shape — the mechanism this repeats
+/// for a second secret rather than inventing a new one — duplicated rather
+/// than shared because that module lives in the `mdview` binary crate and
+/// this one must stay reachable from `mdview-core`, which the settings
+/// route (`crates/mdview/src/server.rs`) and the notify reconciler
+/// (`crates/mdview/src/main.rs`) both depend on.
+///
+/// The temp file's name carries fresh randomness (agent-terminal-21),
+/// exactly as `terminal_auth::write_token_file`'s does from a slice of the
+/// token it is writing — never `std::process::id()` alone. A fixed,
+/// pid-only name is stable for the life of the process, so `create_new`
+/// makes the *second* call in that process (or a call racing another
+/// thread's save, or a call after a previous crash left its temp file
+/// behind before the rename landed) collide on the exact same path and fail
+/// permanently, silently, while a caller that discards the `Result` (as
+/// `crates/mdview/src/server.rs::update_terminal_config` does today) goes
+/// on to report success anyway. A fresh random suffix on every call makes
+/// that collision astronomically unlikely instead.
+///
+/// A failure here is logged (`tracing::warn!`) rather than only returned —
+/// today's one caller discards the `Result` with `let _ =`, so this is what
+/// actually surfaces the failure until that caller stops doing so; a caller
+/// that does check the `Result` still gets the real error either way.
+pub fn save_notify_credential(path: &Path, secret: &str) -> Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Config("credential path has no parent directory".into()))?;
+    std::fs::create_dir_all(dir)?;
+    let tmp_path = dir.join(format!(
+        "{NOTIFY_CREDENTIAL_FILE_NAME}.tmp-{}",
+        random_temp_suffix()
+    ));
+    let result = write_owner_only(&tmp_path, secret.as_bytes())
+        .and_then(|()| std::fs::rename(&tmp_path, path).map_err(Error::from));
+    if let Err(ref e) = result {
+        tracing::warn!("failed to save notify credential to {}: {e}", path.display());
+        // Best-effort: a failed write never leaves debris beside the
+        // credential for a later save to trip over.
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// 8 hex characters of fresh randomness — the same width
+/// `terminal_auth::write_token_file` derives from a slice of the token it
+/// writes, reused here via a dedicated generator because this call has no
+/// token of its own to slice.
+fn random_temp_suffix() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 4];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(unix)]
+fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+#[cfg(not(unix))]
+fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+/// The credential currently on disk, or `None` if it has never been saved.
+/// Returns the raw secret — callers (the notify reconciler in the `mdview`
+/// binary crate) may use it only to build an outbound client, never to
+/// answer an HTTP response. Use [`masked_notify_credential`] for anything
+/// rendered to a client.
+pub fn load_notify_credential(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The credential's last four characters, or `None` if it has never been
+/// saved — the only view of the credential any HTTP response may ever
+/// carry. Unlike the terminal token's reveal-once (P2), there is no `Full`
+/// view here at all: the form that sets this value is write-only, so this
+/// function is called on every render, including the one immediately after
+/// a save.
+pub fn masked_notify_credential(path: &Path) -> Option<String> {
+    load_notify_credential(path).map(|s| mask_secret(&s))
+}
+
+fn mask_secret(secret: &str) -> String {
+    let n = secret.chars().count();
+    if n <= 4 {
+        "*".repeat(n)
+    } else {
+        let visible: String = secret.chars().skip(n - 4).collect();
+        format!("{}{}", "*".repeat(n - 4), visible)
+    }
 }
 
 impl Config {
@@ -202,9 +415,75 @@ mod tests {
     }
 
     #[test]
+    fn resolve_data_dir_uses_override_when_set() {
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-override-{}", std::process::id()));
+        assert_eq!(resolve_data_dir(Some(&dir)), dir);
+        assert_eq!(
+            config_path_override(Some(&dir)),
+            dir.join("config.toml")
+        );
+    }
+
+    #[test]
+    fn resolve_data_dir_falls_back_to_data_dir_when_unset() {
+        assert_eq!(resolve_data_dir(None), data_dir());
+        assert_eq!(config_path_override(None), config_path());
+    }
+
+    #[test]
     fn default_host_binds_all_interfaces() {
         // Fresh installs must default to the LAN-reachable wildcard bind.
         assert_eq!(ServerConfig::default().host, "0.0.0.0");
+    }
+
+    #[test]
+    fn terminal_switches_default_off_and_carry_no_token_field() {
+        // A config that has never seen the terminal section — the shape a
+        // pre-existing install's config.toml has today — must still resolve
+        // every switch to off, never on by an absent-field accident.
+        let c = Config::default();
+        assert!(!c.terminal.enabled);
+        assert!(!c.terminal.supervisor_enabled);
+        assert!(!c.terminal.notify_enabled);
+
+        // Round-trips through TOML with no token anywhere in the section.
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-terminal-{}", std::process::id()));
+        let p = dir.join("config.toml");
+        c.save_to(&p).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("[terminal]"));
+        assert!(!text.to_lowercase().contains("token"));
+        let loaded = Config::load_from(&p);
+        assert!(!loaded.terminal.enabled);
+        assert!(!loaded.terminal.supervisor_enabled);
+        assert!(!loaded.terminal.notify_enabled);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn agent_presets_default_to_empty_and_roundtrip() {
+        // A fresh config (or one that has never seen D8's preset list) must
+        // start empty — the terminal page's creation controls and the
+        // preset-create route both fail closed on an empty list.
+        let c = Config::default();
+        assert!(c.terminal.agent_presets.is_empty());
+
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-presets-{}", std::process::id()));
+        let p = dir.join("config.toml");
+        let mut c = Config::default();
+        c.terminal.agent_presets = vec![AgentPreset {
+            label: "Claude".into(),
+            argv: vec!["claude".into()],
+        }];
+        c.save_to(&p).unwrap();
+        let loaded = Config::load_from(&p);
+        assert_eq!(loaded.terminal.agent_presets.len(), 1);
+        assert_eq!(loaded.terminal.agent_presets[0].label, "Claude");
+        assert_eq!(
+            loaded.terminal.agent_presets[0].argv,
+            vec!["claude".to_string()]
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -218,6 +497,196 @@ mod tests {
         c.save_to(&p).unwrap();
         let loaded = Config::load_from(&p);
         assert_eq!(loaded.server.hostname.as_deref(), Some("my-machine.local"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn notify_chat_id_defaults_to_none_and_roundtrips() {
+        // Unlike the credential, the destination is an ordinary Config field
+        // (it names a target, not a secret) — round-trips through TOML like
+        // every other setting.
+        assert_eq!(Config::default().terminal.notify_chat_id, None);
+
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-chatid-{}", std::process::id()));
+        let p = dir.join("config.toml");
+        let mut c = Config::default();
+        c.terminal.notify_chat_id = Some("-100123456789".into());
+        c.save_to(&p).unwrap();
+        let loaded = Config::load_from(&p);
+        assert_eq!(loaded.terminal.notify_chat_id.as_deref(), Some("-100123456789"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn notify_credential_absent_until_saved_then_masked_never_full() {
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = notify_credential_path_override(Some(&dir));
+
+        assert_eq!(load_notify_credential(&path), None);
+        assert_eq!(masked_notify_credential(&path), None);
+
+        let secret = "shhh-bot-token-abcd1234";
+        save_notify_credential(&path, secret).unwrap();
+
+        assert_eq!(load_notify_credential(&path).as_deref(), Some(secret));
+        let masked = masked_notify_credential(&path).unwrap();
+        assert_eq!(masked, "*******************1234");
+        assert!(!masked.contains(secret), "masked view must never carry the full secret");
+
+        // Saving again (rotation) overwrites atomically rather than
+        // appending or leaving a stale temp file behind.
+        save_notify_credential(&path, "second-secret-9999").unwrap();
+        assert_eq!(load_notify_credential(&path).as_deref(), Some("second-secret-9999"));
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![NOTIFY_CREDENTIAL_FILE_NAME.to_string()],
+            "no leftover temp file beside the credential: {entries:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn notify_credential_never_becomes_a_config_field() {
+        // The leak assertion is written against the value that would leak
+        // (the fixture's own generated secret and the file path it lives
+        // beside), not a hardcoded literal — a decorative assertion would
+        // stay green even if the credential quietly became a Config field
+        // under a different name.
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-leak-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cred_path = notify_credential_path_override(Some(&dir));
+        let secret = "definitely-a-secret-value-42";
+        save_notify_credential(&cred_path, secret).unwrap();
+
+        let mut c = Config::default();
+        c.terminal.notify_chat_id = Some("42".into());
+        let config_path = config_path_override(Some(&dir));
+        c.save_to(&config_path).unwrap();
+        let config_text = std::fs::read_to_string(&config_path).unwrap();
+
+        assert!(
+            !config_text.contains(secret),
+            "config.toml must never carry the Telegram credential: {config_text}"
+        );
+        assert!(
+            !config_text.to_lowercase().contains("telegram"),
+            "config.toml must carry no telegram-shaped field at all: {config_text}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Defect (3): two genuinely concurrent saves in the same process must
+    /// not collide on the temp file name. Under the historical bug (the
+    /// name derived only from `std::process::id()`, fixed for the life of
+    /// the process) two threads racing `save_notify_credential` would
+    /// deterministically have one `create_new` fail with `AlreadyExists` —
+    /// permanently, since nothing ever cleans that name up. A fresh random
+    /// suffix per call makes the two temp paths different, so both calls
+    /// succeed regardless of scheduling.
+    #[test]
+    fn concurrent_saves_never_collide_on_the_temp_name() {
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-race-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = notify_credential_path_override(Some(&dir));
+
+        let path_a = path.clone();
+        let path_b = path.clone();
+        let a = std::thread::spawn(move || save_notify_credential(&path_a, "secret-a"));
+        let b = std::thread::spawn(move || save_notify_credential(&path_b, "secret-b"));
+        let result_a = a.join().unwrap();
+        let result_b = b.join().unwrap();
+
+        assert!(result_a.is_ok(), "first concurrent save must succeed: {result_a:?}");
+        assert!(result_b.is_ok(), "second concurrent save must succeed: {result_b:?}");
+        // Whichever rename lands last wins the final content; either is
+        // fine — the point proven here is that neither call itself failed.
+        let final_value = load_notify_credential(&path);
+        assert!(
+            final_value.as_deref() == Some("secret-a") || final_value.as_deref() == Some("secret-b"),
+            "credential must hold whichever concurrent save landed last, got {final_value:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Defect (3), the other half: a temp file left behind by a crash
+    /// before its rename landed (a real scenario under the old fixed-name
+    /// scheme — `std::process::id()` is identical across a restart within
+    /// the same short-lived process, so a stale temp file from a previous
+    /// run could sit at the exact path a later save would also pick) must
+    /// never block a later save from succeeding.
+    #[test]
+    fn a_leftover_temp_file_never_blocks_a_later_save() {
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-leftover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = notify_credential_path_override(Some(&dir));
+
+        // Simulate the historical bug's leftover: the fixed pid-derived
+        // name a pre-fix build would have used, never cleaned up because
+        // its rename never ran.
+        let stale = dir.join(format!("{NOTIFY_CREDENTIAL_FILE_NAME}.tmp-{}", std::process::id()));
+        std::fs::write(&stale, b"leftover from a crashed save").unwrap();
+
+        let result = save_notify_credential(&path, "fresh-secret");
+        assert!(result.is_ok(), "a leftover temp file must never block a later save: {result:?}");
+        assert_eq!(load_notify_credential(&path).as_deref(), Some("fresh-secret"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Defect (2): a save that genuinely cannot write must report the
+    /// failure, not silently succeed — the function-level contract that
+    /// underlies the "surface, don't discard" fix, provable independent of
+    /// whatever a given caller does with the returned `Result`.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_that_cannot_write_reports_the_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-denied-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = notify_credential_path_override(Some(&dir));
+        // No write permission on the containing directory: `create_new`
+        // cannot create the temp file at all.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = save_notify_credential(&path, "should-never-land");
+
+        // Restore write permission before cleanup, or `remove_dir_all` fails too.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err(), "a save that cannot write must report failure, not Ok(())");
+        assert_eq!(
+            load_notify_credential(&path),
+            None,
+            "a failed save must never leave a partial credential readable"
+        );
+    }
+
+    /// Defect (4): the identical mechanism next door
+    /// (`crates/mdview/src/terminal_auth.rs::token_file_is_created_owner_only_on_unix`)
+    /// carries this assertion; the credential file had none. Catches a
+    /// regression that drops the owner-only mode.
+    #[cfg(unix)]
+    #[test]
+    fn credential_file_is_created_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = notify_credential_path_override(Some(&dir));
+        save_notify_credential(&path, "mode-check-secret").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "telegram credential file must be owner-read/write only");
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

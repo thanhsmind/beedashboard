@@ -712,4 +712,297 @@
     ws.onerror = function () { try { ws.close(); } catch (e) {} };
   }
   connect();
+
+  // Terminal screen poll (agent-terminal-6, ANSI rendering agent-terminal-12):
+  // each pane's `.term-screen` viewport polls its own
+  // `/p/:id/_terminal/:pane_id/screen` endpoint on a fixed interval. The
+  // server (`mdview_core::ansi::to_html`) has already translated herdr's raw
+  // ANSI screen into safe, escaped HTML carrying `ansi-*` colour/attribute
+  // classes — never xterm.js, this is a polled snapshot, not a live PTY — so
+  // the poller assigns it via `innerHTML`, not `textContent`. A `revision`
+  // that hasn't changed since the last successful poll skips the repaint.
+  //
+  // On any failed poll (herdr silent, the pane gone, the network hiccups)
+  // the viewport shows the same "herdr is not running" wording the page's
+  // own down-state renders (D6) — never left blank, and never mistaken for
+  // "the pane has no output". The interval itself never changes on failure:
+  // there is no backoff and no faster retry, so a herdr outage can never
+  // turn this poller into a request storm against a socket that is already
+  // struggling to answer.
+  (function () {
+    var main = document.querySelector("main.fg-page[data-project-id]");
+    if (!main) return;
+    var projectId = main.getAttribute("data-project-id");
+    var screens = Array.prototype.slice.call(document.querySelectorAll(".term-screen[data-pane-id]"));
+    if (!projectId || !screens.length) return;
+
+    var POLL_MS = 1500;
+    var HERDR_DOWN_TEXT = "herdr is not running";
+    var lastRevision = {}; // pane id -> last-rendered revision
+
+    function screenUrl(paneId) {
+      return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/screen";
+    }
+
+    function pollOne(el) {
+      var paneId = el.getAttribute("data-pane-id");
+      fetch(screenUrl(paneId), { credentials: "same-origin" })
+        .then(function (res) {
+          if (!res.ok) {
+            el.textContent = HERDR_DOWN_TEXT;
+            return null;
+          }
+          return res.json();
+        })
+        .then(function (body) {
+          if (!body) return;
+          if (lastRevision[paneId] === body.revision) return; // unchanged, skip repaint
+          lastRevision[paneId] = body.revision;
+          // `body.text` is safe, pre-escaped ANSI-translated HTML — see the
+          // doc comment above this IIFE.
+          el.innerHTML = body.text;
+        })
+        .catch(function () {
+          el.textContent = HERDR_DOWN_TEXT;
+        });
+    }
+
+    function pollAll() {
+      screens.forEach(pollOne);
+    }
+
+    pollAll();
+    setInterval(pollAll, POLL_MS);
+  })();
+
+  // Transcript poll (agent-terminal-16, D9): each pane's `.term-transcript`
+  // viewport, on the separate Transcript tab, polls its own
+  // `/p/:id/_terminal/:pane_id/transcript` endpoint on the same fixed
+  // interval as the screen poller above. The cursor the endpoint returns is
+  // held here, client-side, per pane — nothing about the transcript is ever
+  // stored server-side (`mdview-core`'s transcript module doc) — and every
+  // poll *appends* the newly returned records rather than replacing the
+  // viewport's contents, so nothing already shown is ever lost between
+  // polls, unlike the screen poller's full-repaint `innerHTML` above.
+  //
+  // `body.lines` already carries safe, pre-escaped HTML from mdview-core's
+  // ansi translator — the same one the screen poller uses — so each line is
+  // assigned via `innerHTML`, never `textContent`, matching that precedent.
+  //
+  // D6: `body.available === false` means this pane's agent has written no
+  // transcript yet — a named state is shown once and left alone, never
+  // repainted back to "Loading…" and never left blank as if broken.
+  //
+  // Two defects fixed here (independent review, agent-terminal-20), plus a
+  // fix to the fix (independent review, agent-terminal-22):
+  // (1) `pollOne` used to fire on every `POLL_MS` tick with no guard against
+  // an outstanding request — a poll slower than `POLL_MS` (a slow herdr, a
+  // large tail) let the next tick fire with the *same* `cursors[paneId]`,
+  // so both responses carried the same records and both got appended,
+  // showing every record twice. `inFlight` skips a tick whose predecessor
+  // hasn't resolved yet, the same cursor is then only ever read once.
+  // agent-terminal-20's first version cleared `inFlight` in the *headers*
+  // handler — before the cursor below had advanced — so a tick landing in
+  // that window still refetched with the stale cursor and still
+  // double-appended, the exact defect the flag exists to prevent. The flag
+  // now clears only once the request has fully settled: in a `.then`
+  // chained *after* the cursor advance on success, and in `.catch` on
+  // outright failure — never on headers alone, and independently on both
+  // paths, so one path left uncleared can never wedge the other.
+  // (2) every non-ok response used to be swallowed as "nothing to do",
+  // leaving the last-good content on screen forever while silently
+  // re-sending the same cursor — indistinguishable from an idle agent. A
+  // named state now always replaces the viewport's own message area,
+  // distinguishing a session that is no longer valid (the transcript route
+  // answers an opaque 404 for that, same as every other terminal-family
+  // guard failure — D4) from a transient failure (a non-404 error status,
+  // or the request failing outright), so the operator knows a session
+  // needs re-establishing on Settings rather than the transcript itself
+  // being stuck. Recovering (any next successful, parsed response) clears
+  // the named state without disturbing lines already appended.
+  (function () {
+    var main = document.querySelector("main.fg-page[data-project-id]");
+    if (!main) return;
+    var projectId = main.getAttribute("data-project-id");
+    var viewports = Array.prototype.slice.call(document.querySelectorAll(".term-transcript[data-pane-id]"));
+    if (!projectId || !viewports.length) return;
+
+    var POLL_MS = 1500;
+    var NO_TRANSCRIPT_TEXT = "No transcript yet for this pane.";
+    var SESSION_EXPIRED_TEXT = "Session expired — sign in again on the Settings page to keep watching.";
+    var TRANSCRIPT_ERROR_TEXT = "Couldn't reach the transcript — retrying…";
+    var cursors = {}; // pane id -> cursor to resume from on the next poll
+    var started = {}; // pane id -> the viewport's placeholder has been cleared
+    var inFlight = {}; // pane id -> a poll for this pane is still outstanding
+    var errorEl = {}; // pane id -> the named-state element currently shown, if any
+
+    function transcriptUrl(paneId, cursor) {
+      var url = "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/transcript";
+      return cursor ? url + "?cursor=" + encodeURIComponent(cursor) : url;
+    }
+
+    function appendLines(el, lines) {
+      lines.forEach(function (html) {
+        var line = document.createElement("div");
+        line.className = "term-transcript__line";
+        // `html` is safe, pre-escaped markup — see the doc comment above
+        // this IIFE.
+        line.innerHTML = html;
+        el.appendChild(line);
+      });
+      if (lines.length) el.scrollTop = el.scrollHeight;
+    }
+
+    // Shows `text` as a standing, visible state for this pane — replacing
+    // whatever named state (if any) is already shown, never appended beside
+    // accumulated transcript lines and never silently dropped.
+    function showState(el, paneId, text) {
+      var node = errorEl[paneId];
+      if (!node) {
+        node = document.createElement("div");
+        node.className = "term-transcript__line term-transcript__state";
+        el.appendChild(node);
+        errorEl[paneId] = node;
+      }
+      node.textContent = text;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function clearState(paneId) {
+      var node = errorEl[paneId];
+      if (node && node.parentNode) node.parentNode.removeChild(node);
+      errorEl[paneId] = null;
+    }
+
+    function pollOne(el) {
+      var paneId = el.getAttribute("data-pane-id");
+      if (inFlight[paneId]) return; // a slow predecessor is still out; never race it with the same cursor
+      inFlight[paneId] = true;
+      fetch(transcriptUrl(paneId, cursors[paneId]), { credentials: "same-origin" })
+        .then(function (res) {
+          // Headers have arrived, but the request has not settled — the
+          // in-flight flag stays set until the body below has been read and
+          // the cursor (if any) has advanced. Clearing here would let a poll
+          // tick land before the body finishes parsing, refetch with the
+          // same cursor, and append the same records twice.
+          if (res.status === 404) {
+            // The transcript route's session/method/switch guards all answer
+            // the same opaque 404 (D4) — from the client the one meaningful
+            // read of a 404 here is "this session no longer authenticates".
+            showState(el, paneId, SESSION_EXPIRED_TEXT);
+            return null;
+          }
+          if (!res.ok) {
+            showState(el, paneId, TRANSCRIPT_ERROR_TEXT);
+            return null;
+          }
+          return res.json();
+        })
+        .then(function (body) {
+          if (!body) return;
+          clearState(paneId);
+          if (body.available === false) {
+            if (!started[paneId]) el.textContent = NO_TRANSCRIPT_TEXT;
+            return;
+          }
+          if (!started[paneId]) {
+            el.textContent = "";
+            started[paneId] = true;
+          }
+          cursors[paneId] = body.cursor;
+          appendLines(el, body.lines || []);
+        })
+        .then(function () {
+          // The request has settled — success or a handled non-ok status —
+          // and any cursor advance above has already happened. Clear here,
+          // not on headers, so the next tick can only ever refetch once this
+          // poll is truly done.
+          inFlight[paneId] = false;
+        })
+        .catch(function () {
+          // The request failed outright (network error, a rejected
+          // `res.json()`). Settle the flag here too, or this pane's poller
+          // wedges forever after one error — no other path clears it.
+          inFlight[paneId] = false;
+          showState(el, paneId, TRANSCRIPT_ERROR_TEXT);
+        });
+    }
+
+    function pollAll() {
+      viewports.forEach(pollOne);
+    }
+
+    pollAll();
+    setInterval(pollAll, POLL_MS);
+  })();
+
+  // Terminal reply + keys (agent-terminal-9, D3): posts free text and named
+  // keys back to a pane. Send≠submit stays two distinct actions here too —
+  // "Send" posts with `submit: true` (herdr presses Enter as its own,
+  // separate call), "Stage" posts with `submit: false` so the text lands in
+  // the pane's composer without being sent. After either send, this never
+  // repaints the screen itself — the existing `.term-screen` poller above
+  // already runs on its own interval and will pick up the change on its
+  // next tick, per this cell's instruction not to invent a second refresh
+  // mechanism.
+  (function () {
+    var main = document.querySelector("main.fg-page[data-project-id]");
+    if (!main) return;
+    var projectId = main.getAttribute("data-project-id");
+    if (!projectId) return;
+
+    function inputUrl(paneId) {
+      return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/input";
+    }
+
+    function keysUrl(paneId) {
+      return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/keys";
+    }
+
+    function postJson(url, body) {
+      return fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    function sendReply(paneId, text, submit, input) {
+      if (!text) return;
+      postJson(inputUrl(paneId), { text: text, submit: submit })
+        .then(function (res) {
+          if (res.ok && input) input.value = "";
+        })
+        .catch(function () {});
+    }
+
+    Array.prototype.slice.call(document.querySelectorAll(".term-reply[data-pane-id]")).forEach(function (form) {
+      var paneId = form.getAttribute("data-pane-id");
+      var input = form.querySelector(".term-reply__text");
+      var stageBtn = form.querySelector(".term-reply__stage");
+
+      form.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        sendReply(paneId, input.value, true, input);
+      });
+
+      if (stageBtn) {
+        stageBtn.addEventListener("click", function () {
+          sendReply(paneId, input.value, false, input);
+        });
+      }
+    });
+
+    Array.prototype.slice.call(document.querySelectorAll(".term-keys[data-pane-id]")).forEach(function (group) {
+      var paneId = group.getAttribute("data-pane-id");
+      Array.prototype.slice.call(group.querySelectorAll("button[data-key]")).forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var key = btn.getAttribute("data-key");
+          if (!key) return;
+          postJson(keysUrl(paneId), { keys: [key] }).catch(function () {});
+        });
+      });
+    });
+  })();
 })();

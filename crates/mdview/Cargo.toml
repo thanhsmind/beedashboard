@@ -16,6 +16,7 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
+thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -30,6 +31,25 @@ notify-debouncer-full.workspace = true
 # daemon binds a wildcard host (0.0.0.0) — display-URL only, never connectivity.
 if-addrs = "0.13"
 
+# herdr client (agent-terminal-2): request/response over a Unix domain
+# socket / Windows named pipe. mdview-core stays async-runtime-free, so this
+# port lives here where tokio and axum are already dependencies.
+async-trait.workspace = true
+interprocess.workspace = true
+rand.workspace = true
+
+# Constant-time token comparison in terminal_auth.rs (agent-terminal-7): a
+# hand-rolled XOR loop has no compiler barrier against being optimized into
+# an early-exit, which would reopen the timing leak the comparison exists
+# to close.
+subtle = "2.6"
+
+# Telegram notification transport (agent-terminal-17, D1/D7): rustls instead
+# of native TLS keeps the build self-contained (no system OpenSSL). Serde's
+# json feature is already pulled in via serde_json above; requested again
+# here so reqwest's own JSON body helper builds without a second dependency.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 # setsid(2) for fully detaching the auto-spawned daemon (Unix only).
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
@@ -43,3 +63,5 @@ libc.workspace = true
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# socket.rs's local-io-failure test binds a scratch Unix socket.
+tempfile = "3"

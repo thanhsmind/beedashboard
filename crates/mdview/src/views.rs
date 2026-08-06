@@ -39,7 +39,14 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
     )
 }
 
-pub fn project_list_page(projects: &[(Project, usize)]) -> String {
+/// `unassigned_visible` is D5/D4's presence marker, never contents: `true`
+/// exactly when the D7 `terminal.enabled` switch is on (checked with no
+/// herdr call and no session, so this unauthenticated page never learns
+/// whether any pane is actually unassigned) — renders a link to
+/// `/_terminal/unassigned`, whose own route is gated like every other
+/// terminal route. `false` (the default) renders this page byte-identical
+/// to how it looked before this feature existed.
+pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool) -> String {
     let listing = if projects.is_empty() {
         "<p class=\"fg-empty\">Chưa có project nào. Đăng ký: <code>mdview register &lt;dir&gt;</code> hoặc gọi MCP <code>mdview_view_file</code>.</p>".to_string()
     } else {
@@ -66,20 +73,40 @@ pub fn project_list_page(projects: &[(Project, usize)]) -> String {
         }
         format!(r#"<div class="proj-cards">{cards}</div>"#, cards = cards)
     };
+    // D5/D4: presence only — no agent name, no cwd, not even a count, ever
+    // reaches this markup. The link's own route (`/_terminal/unassigned`)
+    // carries the same session/switch/method gate as every other terminal
+    // route; this card only says the group exists.
+    let unassigned_card = if unassigned_visible {
+        r#"<div class="proj-cards">
+  <a class="fg-card proj-card__link" href="/_terminal/unassigned">
+    <div class="fg-card__title">Unassigned agents</div>
+    <div class="fg-card__sub">Agents running outside every registered project</div>
+  </a>
+</div>"#
+            .to_string()
+    } else {
+        String::new()
+    };
     let body = format!(
         r#"{topbar}
-<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{listing}</main>"#,
+<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{listing}{unassigned_card}</main>"#,
         topbar = topbar(""),
-        listing = listing
+        listing = listing,
+        unassigned_card = unassigned_card,
     );
     layout("Projects", "", &body)
 }
 
-/// A bee project's landing page (D3): a card linking into the bee board, plus
-/// a card to open the project's docs when it has any. Rendered only when the
-/// project has a `.bee/` directory — a non-bee project keeps the old
-/// redirect-to-entry-file behavior in `server.rs::project_home` untouched.
-pub fn project_home_page(project: &Project, entry: Option<&str>) -> String {
+/// A registered project's landing page: a card linking into the bee board
+/// when the project has one (D3), plus a card to open the project's docs
+/// when it has any. D6/agent-terminal-8: this is the only page carrying the
+/// [`project_tabs`] strip, so it renders for **every** registered project —
+/// not only bee ones — otherwise a project with no `.bee/` directory would
+/// redirect straight to its entry file and never show the Terminal tab at
+/// all. `bee` gates only the Bee board card; the tab strip itself is
+/// unconditional.
+pub fn project_home_page(project: &Project, entry: Option<&str>, bee: bool) -> String {
     let docs_card = match entry {
         Some(rel) => format!(
             r#"<a class="fg-card proj-card__link" href="/p/{pid}/{rel}">
@@ -91,15 +118,25 @@ pub fn project_home_page(project: &Project, entry: Option<&str>) -> String {
         ),
         None => String::new(),
     };
+    let bee_card = if bee {
+        format!(
+            r#"<a class="fg-card proj-card__link" href="/p/{pid}/_bee">
+  <div class="fg-card__title">Bee board</div>
+  <div class="fg-card__sub">Doing · Waiting · Stuck · Done</div>
+</a>"#,
+            pid = esc(&project.id),
+        )
+    } else {
+        String::new()
+    };
     let body = format!(
         r#"{topbar}
+{tab_style}
 <main class="fg-page">
   <h2 class="fg-pagehead__title">{name}</h2>
+  {tabs}
   <div class="proj-cards">
-    <a class="fg-card proj-card__link" href="/p/{pid}/_bee">
-      <div class="fg-card__title">Bee board</div>
-      <div class="fg-card__sub">Doing · Waiting · Stuck · Done</div>
-    </a>
+    {bee_card}
     {docs_card}
   </div>
 </main>"#,
@@ -107,11 +144,491 @@ pub fn project_home_page(project: &Project, entry: Option<&str>) -> String {
             "<span class=\"crumb\">{name}</span>",
             name = esc(&project.name)
         )),
+        tab_style = PROJECT_TAB_STYLE,
         name = esc(&project.name),
-        pid = esc(&project.id),
+        tabs = project_tabs(&project.id, "overview"),
+        bee_card = bee_card,
         docs_card = docs_card,
     );
     layout(&project.name, "", &body)
+}
+
+/// Inline styling for [`project_tabs`] — kept beside the pages that render
+/// it (same precedent as `bee_board_page`'s own inline `<style>`), not added
+/// to `app.css`: this cell's declared files are `server.rs`/`views.rs` only.
+const PROJECT_TAB_STYLE: &str = r#"<style>
+.proj-tabs { display: flex; gap: var(--space-4); margin-bottom: var(--space-4); border-bottom: var(--border-width-hairline) solid var(--color-border); }
+.proj-tab { padding: var(--space-2) 0; color: var(--color-text-muted); text-decoration: none; border-bottom: 2px solid transparent; }
+.proj-tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
+.term-pane__cwd { color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }
+.term-pane__meta { color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
+.term-screen { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
+.term-reply { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
+.term-reply__text { flex: 1; min-width: 0; padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); background: var(--color-bg); color: var(--color-text); }
+.term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; }
+.term-keys { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
+.term-keys button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
+.term-transcript { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
+.term-transcript__line { white-space: pre-wrap; word-break: break-word; }
+</style>"#;
+
+/// D6: the Terminal tab is always present on a project page, whether or not
+/// herdr is running or the terminal has ever been reached — this renders
+/// from the project id alone, with no herdr call and no auth check, so its
+/// presence never depends on either. `active` is `"overview"`, `"terminal"`
+/// or `"transcript"` (agent-terminal-16, D9: the Transcript tab sits beside
+/// Terminal, not inside its frame).
+fn project_tabs(project_id: &str, active: &str) -> String {
+    let id = esc(project_id);
+    let cls = |key: &str| {
+        if key == active {
+            "proj-tab proj-tab--active"
+        } else {
+            "proj-tab"
+        }
+    };
+    format!(
+        r#"<nav class="proj-tabs" aria-label="Project sections">
+  <a class="{overview_cls}" href="/p/{id}/">Overview</a>
+  <a class="{terminal_cls}" href="/p/{id}/_terminal">Terminal</a>
+  <a class="{transcript_cls}" href="/p/{id}/_transcript">Transcript</a>
+</nav>"#,
+        overview_cls = cls("overview"),
+        terminal_cls = cls("terminal"),
+        transcript_cls = cls("transcript"),
+        id = id,
+    )
+}
+
+/// One agent already resolved against a project's D2 containment boundary
+/// (`server.rs::project_panes`) — plain display fields only, no herdr wire
+/// type crosses into this module.
+pub struct TerminalPaneView {
+    pub pane_id: String,
+    pub kind: String,
+    pub name: String,
+    pub status: String,
+    pub title: String,
+    pub cwd: String,
+}
+
+/// Shared by [`terminal_page`] and [`unassigned_terminal_page`]: one pane's
+/// card — screen viewport, reply form, key buttons — the exact widget set
+/// `assets/app.js`'s project-scoped poller/handlers drive. `empty_msg` is
+/// rendered instead when `panes` is empty, kept distinct per caller so an
+/// empty project and an empty Unassigned group are never confusable with
+/// each other, or with [`terminal_down_page`]'s herdr-silent wording.
+fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
+    if panes.is_empty() {
+        return format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_msg));
+    }
+    let mut out = String::new();
+    for p in panes {
+        out.push_str(&format!(
+            r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
+  <div class="fg-card__title">{name} <span class="fg-chip fg-chip--neutral">{status}</span></div>
+  <div class="term-pane__meta">{kind}{title_sep}{title}</div>
+  <div class="term-pane__cwd">{cwd}</div>
+  <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
+  <form class="term-reply" data-pane-id="{pane_id}">
+    <input type="text" class="term-reply__text" placeholder="Type a reply…" aria-label="Reply to {name}" autocomplete="off">
+    <button type="submit" class="term-reply__send">Send</button>
+    <button type="button" class="term-reply__stage">Stage</button>
+  </form>
+  <div class="term-keys" data-pane-id="{pane_id}" aria-label="Send a key to {name}">
+    <button type="button" data-key="up">↑</button>
+    <button type="button" data-key="down">↓</button>
+    <button type="button" data-key="left">←</button>
+    <button type="button" data-key="right">→</button>
+    <button type="button" data-key="enter">Enter</button>
+    <button type="button" data-key="escape">Esc</button>
+    <button type="button" data-key="tab">Tab</button>
+  </div>
+</div>"#,
+            pane_id = esc(&p.pane_id),
+            name = esc(&p.name),
+            status = esc(&p.status),
+            kind = esc(&p.kind),
+            title_sep = if p.title.is_empty() { "" } else { " · " },
+            title = esc(&p.title),
+            cwd = esc(&p.cwd),
+        ));
+    }
+    out
+}
+
+/// Inline wiring for [`terminal_create_controls`]'s "New shell"/preset
+/// buttons — POSTs to `create/pane` or `create/agent` and reloads the page
+/// on success so the freshly created pane joins `assets/app.js`'s own
+/// poller on the next render.
+///
+/// agent-terminal-13: not folded into `assets/app.js` — that file is not
+/// among this cell's declared files (`crates/mdview/src/server.rs`,
+/// `crates/mdview/src/views.rs`, `crates/mdview-core/src/config.rs`), so the
+/// creation controls' own click wiring lives here instead, the same
+/// deliberate duplication `UNASSIGNED_TERMINAL_SCRIPT` already documents for
+/// the same reason ("a later cell to fold both into one shared script once
+/// `assets/app.js` is in scope").
+const TERMINAL_CREATE_SCRIPT: &str = r#"<script>
+(function () {
+  function postJson(url, body) {
+    return fetch(url, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+  function afterCreate(promise, failMsg) {
+    promise
+      .then(function (res) {
+        if (res.ok) {
+          location.reload();
+          return;
+        }
+        return res.json().then(function (b) {
+          alert((b && b.error) || failMsg);
+        });
+      })
+      .catch(function () {
+        alert(failMsg);
+      });
+  }
+  Array.prototype.slice
+    .call(document.querySelectorAll(".term-create[data-project-id]"))
+    .forEach(function (box) {
+      var pid = box.getAttribute("data-project-id");
+      var paneBtn = box.querySelector(".term-create__pane");
+      if (paneBtn) {
+        paneBtn.addEventListener("click", function () {
+          afterCreate(
+            postJson("/p/" + encodeURIComponent(pid) + "/_terminal/create/pane", {}),
+            "could not start a shell"
+          );
+        });
+      }
+      Array.prototype.slice
+        .call(box.querySelectorAll(".term-create__agent[data-preset]"))
+        .forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            afterCreate(
+              postJson("/p/" + encodeURIComponent(pid) + "/_terminal/create/agent", {
+                preset: btn.getAttribute("data-preset"),
+              }),
+              "could not start an agent"
+            );
+          });
+        });
+    });
+})();
+</script>"#;
+
+/// D8's creation controls (agent-terminal-13): a "New shell" button is
+/// always offered — plain-shell creation needs no preset — plus one button
+/// per operator-configured preset **label**, never argv (P4): the argv
+/// itself never crosses into this view, only the label the server's
+/// `terminal_create_agent` keys it by. Zero configured presets renders zero
+/// preset buttons, proving the must-have "with no presets configured, the
+/// creation control offers nothing [for agents]" at the render layer — the
+/// route-level half of that same truth is `terminal_create_agent`'s own
+/// refusal when `body.preset` matches nothing.
+fn terminal_create_controls(project_id: &str, presets: &[String]) -> String {
+    let preset_buttons: String = presets
+        .iter()
+        .map(|label| {
+            format!(
+                r#"<button type="button" class="term-create__agent" data-preset="{attr}">{label}</button>"#,
+                attr = esc(label),
+                label = esc(label),
+            )
+        })
+        .collect();
+    format!(
+        r#"<div class="term-create" data-project-id="{pid}">
+  <button type="button" class="term-create__pane">New shell</button>
+  {preset_buttons}
+</div>
+{script}"#,
+        pid = esc(project_id),
+        preset_buttons = preset_buttons,
+        script = TERMINAL_CREATE_SCRIPT,
+    )
+}
+
+/// `GET /p/:id/_terminal` up state (D2/D6): the project-scoped pane list.
+/// Zero panes renders a named empty state, not a blank page — distinct
+/// wording from [`terminal_down_page`] so an empty list is never mistaken
+/// for herdr being unreachable, or the reverse. `presets` is the exact
+/// configured D8 preset label list (`mdview_core::config::AgentPreset`'s
+/// labels, in `Config.terminal.agent_presets` order) — this view never sees
+/// argv.
+pub fn terminal_page(project: &Project, panes: &[TerminalPaneView], presets: &[String]) -> String {
+    let rows = pane_cards(panes, "No agents are running under this project right now.");
+    // `data-project-id` lets `assets/app.js`'s screen poller build each
+    // pane's `/p/:id/_terminal/:pane_id/screen` URL without threading the id
+    // through every `.term-screen` element individually.
+    let body = format!(
+        r#"{topbar}
+{tab_style}
+<main class="fg-page" data-project-id="{pid}">
+  <h2 class="fg-pagehead__title">{name}</h2>
+  {tabs}
+  {create}
+  <div class="term-panes">{rows}</div>
+</main>"#,
+        topbar = topbar(&format!(
+            "<span class=\"crumb\">{name} · terminal</span>",
+            name = esc(&project.name)
+        )),
+        tab_style = PROJECT_TAB_STYLE,
+        pid = esc(&project.id),
+        name = esc(&project.name),
+        tabs = project_tabs(&project.id, "terminal"),
+        create = terminal_create_controls(&project.id, presets),
+        rows = rows,
+    );
+    layout(&format!("{} · terminal", project.name), "", &body)
+}
+
+/// One pane's transcript card (agent-terminal-16, D9): the same
+/// identity/meta header [`pane_cards`] renders for the screen, with a
+/// `.term-transcript` viewport in place of `.term-screen`, `.term-reply` and
+/// `.term-keys` — this tab is read-only. `assets/app.js`'s transcript poller
+/// fills the viewport in, appending each newly returned record rather than
+/// replacing the viewport's contents, so nothing already shown is lost
+/// between polls.
+fn transcript_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
+    if panes.is_empty() {
+        return format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_msg));
+    }
+    let mut out = String::new();
+    for p in panes {
+        out.push_str(&format!(
+            r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
+  <div class="fg-card__title">{name} <span class="fg-chip fg-chip--neutral">{status}</span></div>
+  <div class="term-pane__meta">{kind}{title_sep}{title}</div>
+  <div class="term-pane__cwd">{cwd}</div>
+  <div class="term-transcript" data-pane-id="{pane_id}" aria-live="polite">Loading activity…</div>
+</div>"#,
+            pane_id = esc(&p.pane_id),
+            name = esc(&p.name),
+            status = esc(&p.status),
+            kind = esc(&p.kind),
+            title_sep = if p.title.is_empty() { "" } else { " · " },
+            title = esc(&p.title),
+            cwd = esc(&p.cwd),
+        ));
+    }
+    out
+}
+
+/// `GET /p/:id/_transcript` up state (D9): the Transcript tab beside
+/// Terminal, not a toggle inside its frame — the same project-scoped,
+/// D2-boundary-filtered pane list `terminal_page` builds, rendered with a
+/// transcript viewport per pane instead of a screen. Zero panes renders the
+/// same wording `terminal_page` uses for the same reason (never mistaken for
+/// herdr being unreachable, see [`terminal_down_page`], which this tab's
+/// down state also reuses — listing which panes belong to this project
+/// still needs a herdr snapshot even though transcript content itself
+/// doesn't).
+pub fn transcript_page(project: &Project, panes: &[TerminalPaneView]) -> String {
+    let rows = transcript_cards(panes, "No agents are running under this project right now.");
+    // `data-project-id` lets `assets/app.js`'s transcript poller build each
+    // pane's `/p/:id/_terminal/:pane_id/transcript` URL, mirroring the
+    // screen poller's own `data-project-id` use on `terminal_page`.
+    let body = format!(
+        r#"{topbar}
+{tab_style}
+<main class="fg-page" data-project-id="{pid}">
+  <h2 class="fg-pagehead__title">{name}</h2>
+  {tabs}
+  <div class="term-panes">{rows}</div>
+</main>"#,
+        topbar = topbar(&format!(
+            "<span class=\"crumb\">{name} · transcript</span>",
+            name = esc(&project.name)
+        )),
+        tab_style = PROJECT_TAB_STYLE,
+        pid = esc(&project.id),
+        name = esc(&project.name),
+        tabs = project_tabs(&project.id, "transcript"),
+        rows = rows,
+    );
+    layout(&format!("{} · transcript", project.name), "", &body)
+}
+
+/// Inline poller/reply/keys wiring for [`unassigned_terminal_page`], scoped
+/// to `.unassigned-panes` so it never touches a project page's own panes.
+/// `assets/app.js`'s existing terminal script is not reused here — it
+/// resolves every URL from a `data-project-id` attribute
+/// (`/p/:id/_terminal/...`), and this group belongs to no project id; that
+/// file is also not among this cell's declared files. This duplicates its
+/// shape deliberately rather than inventing a different wiring convention —
+/// flagged here for a later cell to fold both into one shared script once
+/// `assets/app.js` is in scope.
+const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
+(function () {
+  var POLL_MS = 1500;
+  var HERDR_DOWN_TEXT = "herdr is not running";
+  var lastRevision = {};
+
+  function screenUrl(paneId) {
+    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/screen";
+  }
+  function inputUrl(paneId) {
+    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/input";
+  }
+  function keysUrl(paneId) {
+    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/keys";
+  }
+
+  function pollOne(el) {
+    var paneId = el.getAttribute("data-pane-id");
+    fetch(screenUrl(paneId), { credentials: "same-origin" })
+      .then(function (res) {
+        if (!res.ok) { el.textContent = HERDR_DOWN_TEXT; return null; }
+        return res.json();
+      })
+      .then(function (body) {
+        if (!body) return;
+        if (lastRevision[paneId] === body.revision) return;
+        lastRevision[paneId] = body.revision;
+        // `body.text` is safe, pre-escaped HTML from mdview-core's ansi
+        // translator (agent-terminal-12) — never the raw pane text — so
+        // `innerHTML` here renders ANSI colour/attribute markup rather than
+        // showing literal escape characters.
+        el.innerHTML = body.text;
+      })
+      .catch(function () { el.textContent = HERDR_DOWN_TEXT; });
+  }
+
+  function pollAll() {
+    Array.prototype.slice
+      .call(document.querySelectorAll(".unassigned-panes .term-screen[data-pane-id]"))
+      .forEach(pollOne);
+  }
+  pollAll();
+  setInterval(pollAll, POLL_MS);
+
+  function postJson(url, body) {
+    return fetch(url, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function sendReply(paneId, text, submit, input) {
+    if (!text) return;
+    postJson(inputUrl(paneId), { text: text, submit: submit })
+      .then(function (res) { if (res.ok && input) input.value = ""; })
+      .catch(function () {});
+  }
+
+  Array.prototype.slice
+    .call(document.querySelectorAll(".unassigned-panes .term-reply[data-pane-id]"))
+    .forEach(function (form) {
+      var paneId = form.getAttribute("data-pane-id");
+      var input = form.querySelector(".term-reply__text");
+      var stageBtn = form.querySelector(".term-reply__stage");
+      form.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        sendReply(paneId, input.value, true, input);
+      });
+      if (stageBtn) {
+        stageBtn.addEventListener("click", function () {
+          sendReply(paneId, input.value, false, input);
+        });
+      }
+    });
+
+  Array.prototype.slice
+    .call(document.querySelectorAll(".unassigned-panes .term-keys[data-pane-id]"))
+    .forEach(function (group) {
+      var paneId = group.getAttribute("data-pane-id");
+      Array.prototype.slice.call(group.querySelectorAll("button[data-key]")).forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var key = btn.getAttribute("data-key");
+          if (!key) return;
+          postJson(keysUrl(paneId), { keys: [key] }).catch(function () {});
+        });
+      });
+    });
+})();
+</script>"#;
+
+/// `GET /_terminal/unassigned` up state (D5/D4/D6): every herdr pane whose
+/// cwd sits under no registered project root, gated identically to
+/// [`terminal_page`] (session, D7 switch, method) — this view renders only
+/// what the route already decided to hand it, so it carries no gate logic
+/// of its own. Zero panes renders a named empty state distinct from both
+/// [`terminal_page`]'s own empty wording and [`unassigned_terminal_down_page`].
+pub fn unassigned_terminal_page(panes: &[TerminalPaneView]) -> String {
+    let rows = pane_cards(panes, "No agents are running outside a registered project right now.");
+    let body = format!(
+        r#"{topbar}
+{tab_style}
+<main class="fg-page">
+  <h2 class="fg-pagehead__title">Unassigned agents</h2>
+  <p class="term-pane__meta">Agents running outside every registered project. Registering a project here never happens automatically (D5) — <a href="/">register it from the project list</a> if you want it to have its own Terminal tab.</p>
+  <div class="term-panes unassigned-panes">{rows}</div>
+</main>
+{script}"#,
+        topbar = topbar("<span class=\"crumb\">Unassigned agents</span>"),
+        tab_style = PROJECT_TAB_STYLE,
+        rows = rows,
+        script = UNASSIGNED_TERMINAL_SCRIPT,
+    );
+    layout("Unassigned agents", "", &body)
+}
+
+/// `GET /_terminal/unassigned` down state (D6): herdr's socket did not
+/// answer — same remedy wording [`terminal_down_page`] renders, so a poller
+/// or a reader sees an identical state whether the silence was noticed on a
+/// project page or here.
+pub fn unassigned_terminal_down_page() -> String {
+    let body = format!(
+        r#"{topbar}
+{tab_style}
+<main class="fg-page">
+  <h2 class="fg-pagehead__title">Unassigned agents</h2>
+  <div class="fg-card term-pane">
+    <div class="fg-card__title">herdr is not running</div>
+    <div class="term-pane__meta">Start herdr, then reload this page — mdview does not start it for you unless the herdr supervisor is switched on in Settings.</div>
+  </div>
+</main>"#,
+        topbar = topbar("<span class=\"crumb\">Unassigned agents</span>"),
+        tab_style = PROJECT_TAB_STYLE,
+    );
+    layout("Unassigned agents", "", &body)
+}
+
+/// `GET /p/:id/_terminal` down state (D6): herdr's socket did not answer.
+/// Names the remedy instead of hiding the tab or showing a raw error —
+/// deliberately different wording from the empty-panes state in
+/// [`terminal_page`] so the two are never visually or textually confusable.
+pub fn terminal_down_page(project: &Project) -> String {
+    let body = format!(
+        r#"{topbar}
+{tab_style}
+<main class="fg-page">
+  <h2 class="fg-pagehead__title">{name}</h2>
+  {tabs}
+  <div class="fg-card term-pane">
+    <div class="fg-card__title">herdr is not running</div>
+    <div class="term-pane__meta">Start herdr, then reload this page — mdview does not start it for you unless the herdr supervisor is switched on in Settings.</div>
+  </div>
+</main>"#,
+        topbar = topbar(&format!(
+            "<span class=\"crumb\">{name} · terminal</span>",
+            name = esc(&project.name)
+        )),
+        tab_style = PROJECT_TAB_STYLE,
+        name = esc(&project.name),
+        tabs = project_tabs(&project.id, "terminal"),
+    );
+    layout(&format!("{} · terminal", project.name), "", &body)
 }
 
 /// The read-only bee cell board (D4/D7): the project's four cell buckets,
@@ -1453,8 +1970,52 @@ fn highlight_excerpt(excerpt: &str) -> String {
         .replace("&lt;/mark&gt;", "</mark>")
 }
 
-pub fn settings_page(cfg: &Config, saved: bool) -> String {
-    let banner = if saved {
+/// What the settings page's Terminal section renders for the token (D10).
+/// Per P2 [`TerminalTokenView::Full`] is built exclusively from the direct
+/// response of the rotate action — no other call site is allowed to
+/// reconstruct it from a stored plaintext, because there is no stored
+/// plaintext to read: `terminal_auth::TerminalAuth::rotate` is the only
+/// function anywhere that ever returns the full value.
+pub enum TerminalTokenView {
+    /// No token has ever been generated.
+    NotGenerated,
+    /// The last four characters of the configured token — every render
+    /// except the one that just generated or rotated it.
+    Masked(String),
+    /// The token in full. Rendered exactly once, in the response of the
+    /// rotate action itself.
+    Full(String),
+}
+
+/// What the settings page's notification section renders for the Telegram
+/// credential (agent-terminal-18). Unlike [`TerminalTokenView`] there is no
+/// `Full` variant at all: this credential is never rendered back in full,
+/// not even once — the form that sets it (`/api/terminal-config`) is
+/// write-only for this field, so this is the *only* view any response ever
+/// carries, including the one immediately after a save.
+pub enum NotifyCredentialView {
+    /// No credential has ever been saved.
+    NotConfigured,
+    /// The last four characters of the saved credential.
+    Masked(String),
+}
+
+pub fn settings_page(
+    cfg: &Config,
+    saved: bool,
+    notify_credential_save_failed: bool,
+    token_view: TerminalTokenView,
+    notify_credential_view: NotifyCredentialView,
+) -> String {
+    // agent-terminal-24: checked first, so a failed credential save is never
+    // shadowed by `saved=1` also being set on the same redirect — a user
+    // whose token could not be written must see the failure, not the
+    // generic success banner (`update_terminal_config` in server.rs never
+    // sends both flags at once, but this order makes the page's own
+    // guarantee independent of that caller detail).
+    let banner = if notify_credential_save_failed {
+        "<div class=\"fg-banner fg-banner--danger\"><span class=\"fg-banner__dot\"></span><span class=\"fg-banner__body\">The Telegram bot token could not be saved. Notifications will keep using the previous token, if any — try again.</span></div>"
+    } else if saved {
         "<div class=\"fg-banner fg-banner--success\"><span class=\"fg-banner__dot\"></span><span class=\"fg-banner__body\">Saved. Server &amp; indexing changes apply after restart (<code>mdview stop &amp;&amp; mdview serve</code>).</span></div>"
     } else {
         ""
@@ -1462,6 +2023,41 @@ pub fn settings_page(cfg: &Config, saved: bool) -> String {
     let checked = |b: bool| if b { "checked" } else { "" };
     let sel = |v: &str, opt: &str| if v == opt { "selected" } else { "" };
     let excludes = cfg.indexing.exclude_patterns.join("\n");
+
+    let (token_banner, token_button_label) = match token_view {
+        TerminalTokenView::NotGenerated => (
+            "<p class=\"fg-field__hint\">No terminal token yet — generate one to switch the terminal on.</p>".to_string(),
+            "Generate token",
+        ),
+        TerminalTokenView::Masked(masked) => (
+            format!(
+                "<p class=\"fg-field__hint\">Token: <code>{masked}</code></p>",
+                masked = esc(&masked)
+            ),
+            "Rotate token",
+        ),
+        TerminalTokenView::Full(full) => (
+            format!(
+                "<div class=\"fg-banner fg-banner--success\"><span class=\"fg-banner__dot\"></span><span class=\"fg-banner__body\">Token generated — copy it now, it will not be shown again: <code>{full}</code></span></div>",
+                full = esc(&full)
+            ),
+            "Rotate token",
+        ),
+    };
+
+    // D7/D9: the notification credential is never rendered back in full
+    // (unlike the terminal token above) — see `NotifyCredentialView`'s own
+    // doc comment for why there is no `Full` variant to match here at all.
+    let (notify_credential_hint, notify_credential_placeholder) = match notify_credential_view {
+        NotifyCredentialView::NotConfigured => (
+            "No Telegram bot token saved yet.".to_string(),
+            "Paste the bot token".to_string(),
+        ),
+        NotifyCredentialView::Masked(masked) => (
+            format!("Bot token: {masked} — leave blank to keep it.", masked = esc(&masked)),
+            "Leave blank to keep the current token".to_string(),
+        ),
+    };
 
     let body = format!(
         r#"{topbar}
@@ -1536,6 +2132,43 @@ pub fn settings_page(cfg: &Config, saved: bool) -> String {
     </fieldset>
     <button type="submit" class="fg-btn fg-btn--primary">Save</button>
   </form>
+  <form class="fg-settings" method="post" action="/settings/terminal/token">
+    <fieldset><legend>Terminal token</legend>
+      {token_banner}
+      <button type="submit" class="fg-btn">{token_button_label}</button>
+    </fieldset>
+  </form>
+  <form class="fg-settings" method="post" action="/settings/terminal/login">
+    <fieldset><legend>Terminal sign-in</legend>
+      <div class="fg-field">
+        <label class="fg-field__label">Token</label>
+        <input class="fg-input" type="password" name="token" autocomplete="off" placeholder="Paste the terminal token">
+      </div>
+      <span class="fg-field__hint">Needed once per device/browser — signing in starts a session that lasts until the token is next rotated.</span>
+      <button type="submit" class="fg-btn fg-btn--primary">Sign in</button>
+    </fieldset>
+  </form>
+  <form class="fg-settings" method="post" action="/api/terminal-config">
+    <fieldset><legend>Terminal <span class="fg-chip fg-chip--neutral">token required</span></legend>
+      <label class="fg-check"><input type="checkbox" name="enabled" {term_enabled}><span class="fg-check__text">Enable the terminal</span></label>
+      <label class="fg-check"><input type="checkbox" name="supervisor_enabled" {term_supervisor}><span class="fg-check__text">Keep herdr running (supervisor)</span></label>
+      <label class="fg-check"><input type="checkbox" name="notify_enabled" {term_notify}><span class="fg-check__text">Notify on agent status change</span></label>
+      <span class="fg-field__hint">Requires a valid terminal session to save — sign in above with the token first.</span>
+    </fieldset>
+    <fieldset><legend>Telegram notification <span class="fg-chip fg-chip--neutral">token required</span></legend>
+      <div class="fg-field">
+        <label class="fg-field__label">Chat id</label>
+        <input class="fg-input" name="notify_chat_id" value="{notify_chat_id}">
+        <span class="fg-field__hint">The destination the notifier sends agent status changes to.</span>
+      </div>
+      <div class="fg-field">
+        <label class="fg-field__label">Bot token</label>
+        <input class="fg-input" type="password" name="notify_telegram_token" autocomplete="off" placeholder="{notify_credential_placeholder}">
+        <span class="fg-field__hint">{notify_credential_hint}</span>
+      </div>
+    </fieldset>
+    <button type="submit" class="fg-btn fg-btn--primary">Save terminal settings</button>
+  </form>
 </main>"#,
         topbar = topbar("<span class=\"crumb\">Settings</span>"),
         banner = banner,
@@ -1552,6 +2185,14 @@ pub fn settings_page(cfg: &Config, saved: bool) -> String {
         maxmb = cfg.indexing.max_file_size_mb,
         excludes = esc(&excludes),
         mcp_on = checked(cfg.mcp.enabled),
+        token_banner = token_banner,
+        token_button_label = token_button_label,
+        term_enabled = checked(cfg.terminal.enabled),
+        term_supervisor = checked(cfg.terminal.supervisor_enabled),
+        term_notify = checked(cfg.terminal.notify_enabled),
+        notify_chat_id = esc(cfg.terminal.notify_chat_id.as_deref().unwrap_or("")),
+        notify_credential_hint = notify_credential_hint,
+        notify_credential_placeholder = esc(&notify_credential_placeholder),
         tr_stdio = sel(&cfg.mcp.transport, "stdio"),
         tr_http = sel(&cfg.mcp.transport, "http"),
     );
@@ -1643,5 +2284,59 @@ mod tests {
         let round_tripped: String =
             serde_json::from_str(&escaped).expect("escaped blob must still be valid JSON");
         assert_eq!(round_tripped, source);
+    }
+
+    fn sample_project() -> Project {
+        Project {
+            id: "proj-1".into(),
+            name: "Proj One".into(),
+            root_path: std::path::PathBuf::from("/tmp/proj-1"),
+            created_at: "2026-08-05T00:00:00Z".into(),
+            last_seen_at: "2026-08-05T00:00:00Z".into(),
+        }
+    }
+
+    /// agent-terminal-13, must-have: "the terminal page gains the creation
+    /// controls, offering only the configured preset labels" — every
+    /// configured label renders as its own button, carrying the label as
+    /// `data-preset` (what `terminal_create_agent`'s body actually reads),
+    /// and an unconfigured label never appears.
+    #[test]
+    fn terminal_page_lists_only_configured_preset_labels() {
+        let project = sample_project();
+        let presets = vec!["Claude".to_string(), "Codex".to_string()];
+        let html = terminal_page(&project, &[], &presets);
+        assert!(html.contains(r#"data-preset="Claude">Claude</button>"#), "{html}");
+        assert!(html.contains(r#"data-preset="Codex">Codex</button>"#), "{html}");
+        assert!(!html.contains("data-preset=\"Aider\""), "an unconfigured label must never render: {html}");
+        // The plain-shell control is unconditional — it needs no preset.
+        assert!(html.contains(r#"<button type="button" class="term-create__pane">New shell</button>"#));
+    }
+
+    /// agent-terminal-13, must-have: "with no presets configured, the
+    /// creation control offers nothing" — zero preset buttons render, while
+    /// the plain-shell button (which needs no preset) still does.
+    #[test]
+    fn terminal_page_renders_no_preset_controls_when_none_configured() {
+        let project = sample_project();
+        let html = terminal_page(&project, &[], &[]);
+        // Checked as rendered HTML attribute shapes, not bare substrings:
+        // `TERMINAL_CREATE_SCRIPT` itself contains the literal selector
+        // `.term-create__agent[data-preset]` and `getAttribute("data-preset")`
+        // on every render regardless of preset count, so a plain
+        // `.contains("term-create__agent")` would false-negative here.
+        assert!(!html.contains("class=\"term-create__agent\""), "{html}");
+        assert!(!html.contains("data-preset=\""), "{html}");
+        assert!(html.contains("class=\"term-create__pane\""), "{html}");
+    }
+
+    /// A preset label carrying HTML metacharacters must render escaped, the
+    /// same discipline every other operator/user-controlled string in this
+    /// module follows.
+    #[test]
+    fn terminal_create_controls_escapes_preset_labels() {
+        let html = terminal_create_controls("proj-1", &["<script>alert(1)</script>".to_string()]);
+        assert!(!html.contains("<script>alert(1)</script>"), "{html}");
+        assert!(html.contains("&lt;script&gt;"), "{html}");
     }
 }

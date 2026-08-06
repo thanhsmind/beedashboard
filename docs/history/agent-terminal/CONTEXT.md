@@ -151,7 +151,14 @@ From the quick scout only. Downstream agents read these before planning.
 
 ### Resolve Before Planning
 
-None. Every product decision this feature needed is locked in D1–D10.
+Raised during slice 2, after D1–D10 were locked:
+
+- [ ] **D5 says "panes"; the code lists agents.** herdr's wire model keeps panes
+      and agents as independent lists. Both the project listing and the
+      Unassigned group iterate agents, so a plain shell tab with no agent
+      attached is visible nowhere in mdview. Either D5's wording should say
+      agents, or agentless panes belong in the group too. This is the user's
+      call, not planning's — E5 is titled "Nothing lost".
 
 ### Deferred To Planning
 

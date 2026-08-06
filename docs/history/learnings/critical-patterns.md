@@ -189,3 +189,18 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   paraphrase to work from. Name the gap in the new decision's rationale rather
   than presenting the supersession as though the original were still directly
   checkable. (2026-07-20, `20260720-windows-daemon-fixes.md`)
+- **A test standing in for a security guard must isolate that guard, and its
+  author must have deleted the guard and seen it go red.** In a chain of
+  guards (method, session, feature switch, containment), a test named for one
+  of them typically supplies a request that *any* of them would refuse, so it
+  passes with the named guard gone. In `agent-terminal` a 480-test green suite
+  was live through two authentication holes and four such tests: a no-session
+  test ran with the feature switch off, the wrong-method tests sent no cookie,
+  and the one route family with no containment check to fall back on had no
+  guard test at all. A guard test satisfies every other guard so only the one
+  under test can refuse. Rank guard tests by what fails if the guard is gone,
+  not by how many guards the route has. Related: a fix is proven by naming the
+  mutation that would break it — two `agent-terminal` fixes shipped with
+  passing tests while leaving the original race open, because both were written
+  against the description of the bug rather than the mechanism.
+  (2026-08-06, `20260806-a-guard-test-must-fail-when-its-guard-is-removed.md`)

@@ -1,0 +1,637 @@
+{
+  "version": "0.7.4",
+  "protocol": 16,
+  "focused_workspace_id": "wB",
+  "focused_tab_id": "wB:t1",
+  "focused_pane_id": "wB:p1",
+  "workspaces": [
+    {
+      "workspace_id": "w3",
+      "number": 1,
+      "label": "fgos-dev",
+      "focused": false,
+      "pane_count": 1,
+      "tab_count": 1,
+      "active_tab_id": "w3:t6",
+      "agent_status": "working"
+    },
+    {
+      "workspace_id": "w5",
+      "number": 2,
+      "label": "forgent",
+      "focused": false,
+      "pane_count": 3,
+      "tab_count": 1,
+      "active_tab_id": "w5:t9",
+      "agent_status": "working"
+    },
+    {
+      "workspace_id": "w7",
+      "number": 3,
+      "label": "herdr-gateway",
+      "focused": false,
+      "pane_count": 2,
+      "tab_count": 1,
+      "active_tab_id": "w7:t1",
+      "agent_status": "done"
+    },
+    {
+      "workspace_id": "w8",
+      "number": 4,
+      "label": "design-extract",
+      "focused": false,
+      "pane_count": 1,
+      "tab_count": 1,
+      "active_tab_id": "w8:t1",
+      "agent_status": "done"
+    },
+    {
+      "workspace_id": "wB",
+      "number": 5,
+      "label": "forgent",
+      "focused": true,
+      "pane_count": 1,
+      "tab_count": 1,
+      "active_tab_id": "wB:t1",
+      "agent_status": "unknown"
+    }
+  ],
+  "tabs": [
+    {
+      "tab_id": "w3:t6",
+      "workspace_id": "w3",
+      "number": 6,
+      "label": "ui",
+      "focused": false,
+      "pane_count": 1,
+      "agent_status": "working"
+    },
+    {
+      "tab_id": "w5:t9",
+      "workspace_id": "w5",
+      "number": 9,
+      "label": "workers-2",
+      "focused": false,
+      "pane_count": 3,
+      "agent_status": "working"
+    },
+    {
+      "tab_id": "w7:t1",
+      "workspace_id": "w7",
+      "number": 1,
+      "label": "1",
+      "focused": false,
+      "pane_count": 2,
+      "agent_status": "done"
+    },
+    {
+      "tab_id": "w8:t1",
+      "workspace_id": "w8",
+      "number": 1,
+      "label": "1",
+      "focused": false,
+      "pane_count": 1,
+      "agent_status": "done"
+    },
+    {
+      "tab_id": "wB:t1",
+      "workspace_id": "wB",
+      "number": 1,
+      "label": "1",
+      "focused": true,
+      "pane_count": 1,
+      "agent_status": "unknown"
+    }
+  ],
+  "panes": [
+    {
+      "pane_id": "w3:p6",
+      "terminal_id": "term_656ba68e39f5e1",
+      "workspace_id": "w3",
+      "tab_id": "w3:t6",
+      "focused": false,
+      "cwd": "/home/dev/projects/fgos/fgos-dev",
+      "foreground_cwd": "/home/dev/projects/fgos/fgos-dev",
+      "agent": "claude",
+      "terminal_title": "⠂ Kiểm tra quy trình reject review và trạng thái chạy lại",
+      "terminal_title_stripped": "Kiểm tra quy trình reject review và trạng thái chạy lại",
+      "agent_status": "working",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "22b6c4be-f93b-44dd-8eb8-4adc081b1981"
+      },
+      "scroll": {
+        "offset_from_bottom": 0,
+        "max_offset_from_bottom": 0,
+        "viewport_rows": 71
+      },
+      "revision": 4
+    },
+    {
+      "pane_id": "w5:p1Z",
+      "terminal_id": "term_65708ec9ceabf5c",
+      "workspace_id": "w5",
+      "tab_id": "w5:t9",
+      "focused": false,
+      "cwd": "/home/dev/projects/forgent",
+      "foreground_cwd": "/home/dev/projects/forgent",
+      "agent": "claude",
+      "terminal_title": "✳ Thảo luận kế hoạch STR64 và các task liên quan",
+      "terminal_title_stripped": "Thảo luận kế hoạch STR64 và các task liên quan",
+      "agent_status": "idle",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "6cd9d4fa-7d21-437f-9945-c86c906519fc"
+      },
+      "scroll": {
+        "offset_from_bottom": 0,
+        "max_offset_from_bottom": 0,
+        "viewport_rows": 69
+      },
+      "revision": 4
+    },
+    {
+      "pane_id": "w5:p1T",
+      "terminal_id": "term_656f36f4a748f52",
+      "workspace_id": "w5",
+      "tab_id": "w5:t9",
+      "focused": false,
+      "cwd": "/home/dev/projects/forgent",
+      "foreground_cwd": "/home/dev/projects/forgent",
+      "label": "P50",
+      "agent": "claude",
+      "terminal_title": "✳ Triển khai STR68",
+      "terminal_title_stripped": "Triển khai STR68",
+      "agent_status": "idle",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "892884e1-e184-4d04-8890-4f7f375fd0cd"
+      },
+      "scroll": {
+        "offset_from_bottom": 0,
+        "max_offset_from_bottom": 0,
+        "viewport_rows": 34
+      },
+      "revision": 12
+    },
+    {
+      "pane_id": "w5:p11",
+      "terminal_id": "term_656db4784843832",
+      "workspace_id": "w5",
+      "tab_id": "w5:t9",
+      "focused": false,
+      "cwd": "/home/dev/projects/forgent",
+      "foreground_cwd": "/home/dev/projects/forgent",
+      "label": "STR64 - planning",
+      "agent": "claude",
+      "terminal_title": "⠐ Bee chuyển sang slice 2, str64",
+      "terminal_title_stripped": "Bee chuyển sang slice 2, str64",
+      "agent_status": "working",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "9ef9aec6-3ab4-45c2-96f6-70f378458514"
+      },
+      "scroll": {
+        "offset_from_bottom": 0,
+        "max_offset_from_bottom": 0,
+        "viewport_rows": 33
+      },
+      "revision": 18
+    },
+    {
+      "pane_id": "w7:pG",
+      "terminal_id": "term_656f4f6f5cbe856",
+      "workspace_id": "w7",
+      "tab_id": "w7:t1",
+      "focused": false,
+      "cwd": "/home/dev/projects/herdr-gateway",
+      "foreground_cwd": "/home/dev/projects/herdr-gateway",
+      "agent": "claude",
+      "terminal_title": "✳ Kiểm tra danh sách công việc backlog",
+      "terminal_title_stripped": "Kiểm tra danh sách công việc backlog",
+      "agent_status": "done",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "08c8a98d-ae2b-40b1-bb2b-68f6e9bcfed5"
+      },
+      "scroll": {
+        "offset_from_bottom": 0,
+        "max_offset_from_bottom": 0,
+        "viewport_rows": 34
+      },
+      "revision": 30
+    },
+    {
+      "pane_id": "w7:pJ",
+      "terminal_id": "term_65706c8ecc01c5a",
+      "workspace_id": "w7",
+      "tab_id": "w7:t1",
+      "focused": false,
+      "cwd": "/home/dev/projects/herdr-gateway",
+      "foreground_cwd": "/home/dev/projects/herdr-gateway",
+      "agent": "claude",
+      "terminal_title": "⠂ Brainstorm workspace and agent creation UX design",
+      "terminal_title_stripped": "Brainstorm workspace and agent creation UX design",
+      "agent_status": "working",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "bd6bd789-96ee-4869-af98-3a4ab05154e9"
+      },
+      "scroll": {
+        "offset_from_bottom": 0,
+        "max_offset_from_bottom": 0,
+        "viewport_rows": 33
+      },
+      "revision": 16
+    },
+    {
+      "pane_id": "w8:p1",
+      "terminal_id": "term_656cefb50dd591a",
+      "workspace_id": "w8",
+      "tab_id": "w8:t1",
+      "focused": false,
+      "cwd": "/home/dev/projects/design-extract",
+      "foreground_cwd": "/home/dev/projects/design-extract",
+      "agent": "claude",
+      "terminal_title": "✳ Claude Code",
+      "terminal_title_stripped": "Claude Code",
+      "agent_status": "done",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "6f6130da-6406-44b9-b9a4-000b46e163cb"
+      },
+      "scroll": {
+        "offset_from_bottom": 0,
+        "max_offset_from_bottom": 0,
+        "viewport_rows": 71
+      },
+      "revision": 25
+    },
+    {
+      "pane_id": "wB:p1",
+      "terminal_id": "term_6570771c7b3405b",
+      "workspace_id": "wB",
+      "tab_id": "wB:t1",
+      "focused": true,
+      "cwd": "/home/dev/projects/forgent",
+      "foreground_cwd": "/home/dev/projects/forgent",
+      "terminal_title": "dev@host:~/projects/forgent",
+      "terminal_title_stripped": "dev@host:~/projects/forgent",
+      "agent_status": "unknown",
+      "scroll": {
+        "offset_from_bottom": 0,
+        "max_offset_from_bottom": 0,
+        "viewport_rows": 71
+      },
+      "revision": 1
+    }
+  ],
+  "layouts": [
+    {
+      "workspace_id": "w3",
+      "tab_id": "w3:t6",
+      "zoomed": false,
+      "area": {
+        "x": 36,
+        "y": 1,
+        "width": 44,
+        "height": 23
+      },
+      "focused_pane_id": "w3:p6",
+      "panes": [
+        {
+          "pane_id": "w3:p6",
+          "focused": true,
+          "rect": {
+            "x": 36,
+            "y": 1,
+            "width": 44,
+            "height": 23
+          }
+        }
+      ],
+      "splits": []
+    },
+    {
+      "workspace_id": "w5",
+      "tab_id": "w5:t9",
+      "zoomed": false,
+      "area": {
+        "x": 36,
+        "y": 1,
+        "width": 44,
+        "height": 23
+      },
+      "focused_pane_id": "w5:p11",
+      "panes": [
+        {
+          "pane_id": "w5:p1Z",
+          "focused": false,
+          "rect": {
+            "x": 36,
+            "y": 1,
+            "width": 22,
+            "height": 23
+          }
+        },
+        {
+          "pane_id": "w5:p1T",
+          "focused": false,
+          "rect": {
+            "x": 58,
+            "y": 1,
+            "width": 22,
+            "height": 12
+          }
+        },
+        {
+          "pane_id": "w5:p11",
+          "focused": true,
+          "rect": {
+            "x": 58,
+            "y": 13,
+            "width": 22,
+            "height": 11
+          }
+        }
+      ],
+      "splits": [
+        {
+          "id": "split_0_root",
+          "direction": "right",
+          "ratio": 0.5,
+          "rect": {
+            "x": 36,
+            "y": 1,
+            "width": 44,
+            "height": 23
+          }
+        },
+        {
+          "id": "split_1_1",
+          "direction": "down",
+          "ratio": 0.5,
+          "rect": {
+            "x": 58,
+            "y": 1,
+            "width": 22,
+            "height": 23
+          }
+        }
+      ]
+    },
+    {
+      "workspace_id": "w7",
+      "tab_id": "w7:t1",
+      "zoomed": false,
+      "area": {
+        "x": 36,
+        "y": 1,
+        "width": 44,
+        "height": 23
+      },
+      "focused_pane_id": "w7:pG",
+      "panes": [
+        {
+          "pane_id": "w7:pG",
+          "focused": true,
+          "rect": {
+            "x": 36,
+            "y": 1,
+            "width": 44,
+            "height": 12
+          }
+        },
+        {
+          "pane_id": "w7:pJ",
+          "focused": false,
+          "rect": {
+            "x": 36,
+            "y": 13,
+            "width": 44,
+            "height": 11
+          }
+        }
+      ],
+      "splits": [
+        {
+          "id": "split_0_root",
+          "direction": "down",
+          "ratio": 0.5,
+          "rect": {
+            "x": 36,
+            "y": 1,
+            "width": 44,
+            "height": 23
+          }
+        }
+      ]
+    },
+    {
+      "workspace_id": "w8",
+      "tab_id": "w8:t1",
+      "zoomed": false,
+      "area": {
+        "x": 36,
+        "y": 1,
+        "width": 44,
+        "height": 23
+      },
+      "focused_pane_id": "w8:p1",
+      "panes": [
+        {
+          "pane_id": "w8:p1",
+          "focused": true,
+          "rect": {
+            "x": 36,
+            "y": 1,
+            "width": 44,
+            "height": 23
+          }
+        }
+      ],
+      "splits": []
+    },
+    {
+      "workspace_id": "wB",
+      "tab_id": "wB:t1",
+      "zoomed": false,
+      "area": {
+        "x": 36,
+        "y": 1,
+        "width": 44,
+        "height": 23
+      },
+      "focused_pane_id": "wB:p1",
+      "panes": [
+        {
+          "pane_id": "wB:p1",
+          "focused": true,
+          "rect": {
+            "x": 36,
+            "y": 1,
+            "width": 44,
+            "height": 23
+          }
+        }
+      ],
+      "splits": []
+    }
+  ],
+  "agents": [
+    {
+      "terminal_id": "term_656ba68e39f5e1",
+      "agent": "claude",
+      "terminal_title": "⠂ Kiểm tra quy trình reject review và trạng thái chạy lại",
+      "terminal_title_stripped": "Kiểm tra quy trình reject review và trạng thái chạy lại",
+      "agent_status": "working",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "22b6c4be-f93b-44dd-8eb8-4adc081b1981"
+      },
+      "workspace_id": "w3",
+      "tab_id": "w3:t6",
+      "pane_id": "w3:p6",
+      "focused": false,
+      "cwd": "/home/dev/projects/fgos/fgos-dev",
+      "foreground_cwd": "/home/dev/projects/fgos/fgos-dev",
+      "revision": 4
+    },
+    {
+      "terminal_id": "term_65708ec9ceabf5c",
+      "agent": "claude",
+      "terminal_title": "✳ Thảo luận kế hoạch STR64 và các task liên quan",
+      "terminal_title_stripped": "Thảo luận kế hoạch STR64 và các task liên quan",
+      "agent_status": "idle",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "6cd9d4fa-7d21-437f-9945-c86c906519fc"
+      },
+      "workspace_id": "w5",
+      "tab_id": "w5:t9",
+      "pane_id": "w5:p1Z",
+      "focused": false,
+      "cwd": "/home/dev/projects/forgent",
+      "foreground_cwd": "/home/dev/projects/forgent",
+      "revision": 4
+    },
+    {
+      "terminal_id": "term_656f36f4a748f52",
+      "agent": "claude",
+      "terminal_title": "✳ Triển khai STR68",
+      "terminal_title_stripped": "Triển khai STR68",
+      "agent_status": "idle",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "892884e1-e184-4d04-8890-4f7f375fd0cd"
+      },
+      "workspace_id": "w5",
+      "tab_id": "w5:t9",
+      "pane_id": "w5:p1T",
+      "focused": false,
+      "cwd": "/home/dev/projects/forgent",
+      "foreground_cwd": "/home/dev/projects/forgent",
+      "revision": 12
+    },
+    {
+      "terminal_id": "term_656db4784843832",
+      "agent": "claude",
+      "terminal_title": "⠐ Bee chuyển sang slice 2, str64",
+      "terminal_title_stripped": "Bee chuyển sang slice 2, str64",
+      "agent_status": "working",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "9ef9aec6-3ab4-45c2-96f6-70f378458514"
+      },
+      "workspace_id": "w5",
+      "tab_id": "w5:t9",
+      "pane_id": "w5:p11",
+      "focused": false,
+      "cwd": "/home/dev/projects/forgent",
+      "foreground_cwd": "/home/dev/projects/forgent",
+      "revision": 18
+    },
+    {
+      "terminal_id": "term_656f4f6f5cbe856",
+      "agent": "claude",
+      "terminal_title": "✳ Kiểm tra danh sách công việc backlog",
+      "terminal_title_stripped": "Kiểm tra danh sách công việc backlog",
+      "agent_status": "done",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "08c8a98d-ae2b-40b1-bb2b-68f6e9bcfed5"
+      },
+      "workspace_id": "w7",
+      "tab_id": "w7:t1",
+      "pane_id": "w7:pG",
+      "focused": false,
+      "cwd": "/home/dev/projects/herdr-gateway",
+      "foreground_cwd": "/home/dev/projects/herdr-gateway",
+      "revision": 30
+    },
+    {
+      "terminal_id": "term_65706c8ecc01c5a",
+      "agent": "claude",
+      "terminal_title": "⠂ Brainstorm workspace and agent creation UX design",
+      "terminal_title_stripped": "Brainstorm workspace and agent creation UX design",
+      "agent_status": "working",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "bd6bd789-96ee-4869-af98-3a4ab05154e9"
+      },
+      "workspace_id": "w7",
+      "tab_id": "w7:t1",
+      "pane_id": "w7:pJ",
+      "focused": false,
+      "cwd": "/home/dev/projects/herdr-gateway",
+      "foreground_cwd": "/home/dev/projects/herdr-gateway",
+      "revision": 16
+    },
+    {
+      "terminal_id": "term_656cefb50dd591a",
+      "agent": "claude",
+      "terminal_title": "✳ Claude Code",
+      "terminal_title_stripped": "Claude Code",
+      "agent_status": "done",
+      "agent_session": {
+        "source": "herdr:claude",
+        "agent": "claude",
+        "kind": "id",
+        "value": "6f6130da-6406-44b9-b9a4-000b46e163cb"
+      },
+      "workspace_id": "w8",
+      "tab_id": "w8:t1",
+      "pane_id": "w8:p1",
+      "focused": false,
+      "cwd": "/home/dev/projects/design-extract",
+      "foreground_cwd": "/home/dev/projects/design-extract",
+      "revision": 25
+    }
+  ]
+}

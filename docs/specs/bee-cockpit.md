@@ -127,10 +127,12 @@ An unknown cell or feature name returns a clean not-found, never a blank page.
 
 ### No absolute filesystem paths, anywhere
 
-The server has no authentication and can be bound to a non-loopback address. bee's
-store is full of absolute paths — the files a cell touches, a worker's identity, a
-session's transcript, a workspace root. **None of them may reach the page.** Path-shaped
-values are rendered relative to the project root or dropped.
+This surface carries no authentication of its own — like every mdview route
+outside the agent terminal family (see the Agent terminal spec) — and can be
+bound to a non-loopback address. bee's store is full of absolute paths — the
+files a cell touches, a worker's identity, a session's transcript, a
+workspace root. **None of them may reach the page.** Path-shaped values are
+rendered relative to the project root or dropped.
 
 The tests that guard this assert against the **fixture's own root path** and against
 absolute-path shape in general. They deliberately do not assert on a production-looking
