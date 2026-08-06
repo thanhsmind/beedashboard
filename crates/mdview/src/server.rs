@@ -2409,26 +2409,82 @@ mod bee_route_tests {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
-    /// (relative path, content bytes) for every file under `dir` — the D4
-    /// read-only probe's before/after snapshot.
-    fn snapshot_tree(dir: &Path) -> Vec<(String, Vec<u8>)> {
-        fn walk(base: &Path, cur: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+    /// One entry in a `snapshot_tree` — either a directory or a file with
+    /// its content. Recording directories closes a hole in the D4
+    /// read-only probe: a reader that calls `create_dir_all` before
+    /// `read_dir` (the obvious idiom for listing a directory such as
+    /// `.bee/reviews/`) writes into the user's store, but a file-only
+    /// snapshot never noticed — the new directory carried no bytes to
+    /// diff. `Debug` on this enum keeps `assert_eq!`'s failure message
+    /// readable: a lone new directory prints as `Dir("...")`, not as an
+    /// unexplained length mismatch.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum TreeEntry {
+        Dir(String),
+        File(String, Vec<u8>),
+    }
+
+    impl TreeEntry {
+        fn rel_path(&self) -> &str {
+            match self {
+                TreeEntry::Dir(p) | TreeEntry::File(p, _) => p,
+            }
+        }
+    }
+
+    /// One entry per file (with content) and one entry per directory,
+    /// for everything under `dir` — the D4 read-only probe's before/after
+    /// snapshot. Sorted by relative path so the comparison is deterministic
+    /// regardless of filesystem iteration order.
+    fn snapshot_tree(dir: &Path) -> Vec<TreeEntry> {
+        fn walk(base: &Path, cur: &Path, out: &mut Vec<TreeEntry>) {
             for entry in std::fs::read_dir(cur).unwrap() {
                 let entry = entry.unwrap();
                 let path = entry.path();
+                let rel = path.strip_prefix(base).unwrap().to_string_lossy().into_owned();
                 if path.is_dir() {
+                    out.push(TreeEntry::Dir(rel));
                     walk(base, &path, out);
                 } else {
-                    let rel = path.strip_prefix(base).unwrap().to_string_lossy().into_owned();
                     let content = std::fs::read(&path).unwrap();
-                    out.push((rel, content));
+                    out.push(TreeEntry::File(rel, content));
                 }
             }
         }
         let mut out = Vec::new();
         walk(dir, dir, &mut out);
-        out.sort();
+        out.sort_by(|a, b| a.rel_path().cmp(b.rel_path()));
         out
+    }
+
+    #[test]
+    fn snapshot_tree_notices_an_empty_directory_created_under_bee() {
+        let root = fresh_root("snapshot-tree-dir");
+        write(&root, "README.md", "# hi");
+        write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
+
+        let before = snapshot_tree(&root);
+        // No files written — just the directory itself, the shape a
+        // `create_dir_all` before a `read_dir` leaves behind.
+        std::fs::create_dir_all(root.join(".bee/reviews")).unwrap();
+        let after = snapshot_tree(&root);
+
+        assert_ne!(
+            before, after,
+            "an empty directory created under .bee/ went unnoticed by the read-only probe"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn snapshot_tree_of_an_empty_tree_compares_equal_to_itself() {
+        let root = fresh_root("snapshot-tree-empty");
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert_eq!(snapshot_tree(&root), snapshot_tree(&root));
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[tokio::test]
