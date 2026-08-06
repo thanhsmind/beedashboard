@@ -80,6 +80,8 @@ use std::path::{Path, PathBuf};
 pub struct BeeCell {
     pub id: String,
     pub feature: String,
+    /// Free text, not a path field — scrubbed of any embedded absolute path
+    /// before it reaches this struct; see [`scrub_paths`].
     pub title: String,
     pub lane: String,
     /// Raw status string as read from the cell file (`open`, `claimed`,
@@ -240,6 +242,8 @@ const SESSION_LIVE_MINUTES: f64 = 30.0;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeePbi {
     pub id: String,
+    /// Free text, not a path field — scrubbed of any embedded absolute path
+    /// before it reaches this struct; see [`scrub_paths`].
     pub title: String,
     /// `proposed`, `in-flight`, `parked`, `done`, `declined`, or anything
     /// else a future bee version introduces — folded from the LAST event
@@ -263,7 +267,11 @@ pub struct BeeFinding {
     pub ts: String,
     /// The row's own `type` field (e.g. `"finding"`, `"proposal"`).
     pub kind: String,
+    /// Free text, not a path field — scrubbed of any embedded absolute path
+    /// before it reaches this struct; see [`scrub_paths`].
     pub title: String,
+    /// Free text, not a path field — scrubbed of any embedded absolute path
+    /// before it reaches this struct; see [`scrub_paths`].
     pub detail: String,
     /// `P1`, `P2`, `P3`, or empty when the row carries none.
     pub severity: String,
@@ -313,6 +321,8 @@ pub struct BeeLane {
     pub feature: String,
     pub phase: Option<String>,
     pub mode: Option<String>,
+    /// Free text, not a path field — scrubbed of any embedded absolute path
+    /// before it reaches this struct; see [`scrub_paths`].
     pub next_action: Option<String>,
 }
 
@@ -392,6 +402,8 @@ impl BeeWorktree {
 pub struct BeeDecisionSummary {
     pub id: String,
     pub date: String,
+    /// Free text, not a path field — scrubbed of any embedded absolute path
+    /// before it reaches this struct; see [`scrub_paths`].
     pub decision: String,
     pub scope: Option<String>,
 }
@@ -685,8 +697,8 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
     let title = v
         .get("title")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string();
+        .unwrap_or_default();
+    let title = scrub_paths(title, root);
     let lane = v
         .get("lane")
         .and_then(Value::as_str)
@@ -788,7 +800,8 @@ fn read_backlog(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> B
                     continue;
                 }
             };
-            let title = v.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
+            let title = v.get("title").and_then(Value::as_str).unwrap_or_default();
+            let title = scrub_paths(title, root);
             let status = v.get("status").and_then(Value::as_str).unwrap_or_default().to_string();
             let feature = v.get("feature").and_then(Value::as_str).unwrap_or_default().to_string();
             pbis.insert(id.clone(), BeePbi { id, title, status, feature });
@@ -804,8 +817,8 @@ fn read_backlog(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> B
             findings.push(BeeFinding {
                 ts: v.get("ts").and_then(Value::as_str).unwrap_or_default().to_string(),
                 kind: v.get("type").and_then(Value::as_str).unwrap_or_default().to_string(),
-                title: v.get("title").and_then(Value::as_str).unwrap_or_default().to_string(),
-                detail: v.get("detail").and_then(Value::as_str).unwrap_or_default().to_string(),
+                title: scrub_paths(v.get("title").and_then(Value::as_str).unwrap_or_default(), root),
+                detail: scrub_paths(v.get("detail").and_then(Value::as_str).unwrap_or_default(), root),
                 severity,
                 layer: v.get("layer").and_then(Value::as_str).unwrap_or_default().to_string(),
                 feature: v.get("feature").and_then(Value::as_str).unwrap_or_default().to_string(),
@@ -919,7 +932,7 @@ fn read_lanes(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Vec
 
     let mut lanes = Vec::new();
     for path in entries {
-        match parse_lane(&path) {
+        match parse_lane(&path, root) {
             Ok(l) => lanes.push(l),
             Err(e) => read_errors.push(format!("{}: {e}", rel_str(&path, root))),
         }
@@ -927,7 +940,7 @@ fn read_lanes(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Vec
     lanes
 }
 
-fn parse_lane(path: &Path) -> Result<BeeLane, String> {
+fn parse_lane(path: &Path, root: &Path) -> Result<BeeLane, String> {
     let raw = fs::read_to_string(path).map_err(|e| format!("could not read ({e})"))?;
     let v: Value = serde_json::from_str(&raw).map_err(|e| format!("could not parse ({e})"))?;
 
@@ -938,7 +951,10 @@ fn parse_lane(path: &Path) -> Result<BeeLane, String> {
         .to_string();
     let phase = v.get("phase").and_then(Value::as_str).map(String::from);
     let mode = v.get("mode").and_then(Value::as_str).map(String::from);
-    let next_action = v.get("next_action").and_then(Value::as_str).map(String::from);
+    let next_action = v
+        .get("next_action")
+        .and_then(Value::as_str)
+        .map(|s| scrub_paths(s, root));
 
     Ok(BeeLane { feature, phase, mode, next_action })
 }
@@ -1182,7 +1198,7 @@ fn read_decisions(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) ->
             recent_decides.push(BeeDecisionSummary {
                 id: v.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
                 date: v.get("date").and_then(Value::as_str).unwrap_or_default().to_string(),
-                decision: v.get("decision").and_then(Value::as_str).unwrap_or_default().to_string(),
+                decision: scrub_paths(v.get("decision").and_then(Value::as_str).unwrap_or_default(), root),
                 scope: v.get("scope").and_then(Value::as_str).map(String::from),
             });
             // The file is append-ordered, so the tail is always the most
@@ -1347,6 +1363,11 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
     }
 }
 
+/// Shared redaction text for an absolute path that cannot be made relative
+/// to the project root — used by [`relativize`], [`rel_str`] and
+/// [`scrub_paths`] so the three never invent a second wording.
+const ABSOLUTE_PATH_REDACTED: &str = "(absolute path redacted)";
+
 /// Render `s` relative to `root` when it names a path under `root`. When `s`
 /// is not absolute it is returned unchanged (the common case — most
 /// path-shaped fields, like `trace.worker`, are plain identifiers, not
@@ -1363,7 +1384,7 @@ fn relativize(s: &str, root: &Path) -> String {
         Err(_) => p
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "(absolute path redacted)".to_string()),
+            .unwrap_or_else(|| ABSOLUTE_PATH_REDACTED.to_string()),
     }
 }
 
@@ -1374,12 +1395,85 @@ fn rel_str(path: &Path, root: &Path) -> String {
         Err(_) => path
             .file_name()
             .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "(absolute path redacted)".to_string()),
+            .unwrap_or_else(|| ABSOLUTE_PATH_REDACTED.to_string()),
     }
 }
 
 fn to_forward_slashes(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
+}
+
+/// Scrub every absolute path embedded inside free text — as opposed to
+/// [`relativize`], which only handles a string that IS a path in full.
+/// Every field this feature renders (`next_action`, `route.rationale`, a
+/// handoff paragraph, review-finding prose, a cell or PBI title) is prose
+/// that may merely *contain* a path mid-sentence, so `relativize`'s own
+/// `is_absolute()` guard is a no-op on it — this is D9's actual gap.
+///
+/// A string that is wholly an absolute path — no whitespace anywhere in it,
+/// so it is a single token — delegates straight to [`relativize`], so the
+/// two agree exactly on that case, whole-path reduction included. (A naive
+/// `Path::new(s).is_absolute()` check on the *whole* `s` is not enough: it
+/// only inspects the leading component, so it would also fire on a
+/// sentence that merely *starts* with a path — the same gap this function
+/// exists to close, just moved to the front of the string.) Otherwise,
+/// every maximal non-whitespace run in `s` that is itself absolute is
+/// reduced in place —
+/// stripped relative to `root` when it falls under `root`, replaced with
+/// [`ABSOLUTE_PATH_REDACTED`] when it does not (never reduced to a bare
+/// filename in this shape: a filename alone, dropped into a sentence with
+/// no path context, reads as a plausible original word rather than a
+/// redaction). Everything else in `s` — surrounding words, punctuation,
+/// whitespace — is carried through byte-for-byte.
+///
+/// Applied at the reader (every free-text field `read_snapshot` produces
+/// passes through this before it reaches a public field), never at the
+/// view, so the snapshot itself can never carry an absolute path and no
+/// future render site can forget to call it.
+fn scrub_paths(s: &str, root: &Path) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    if !s.chars().any(char::is_whitespace) && Path::new(s).is_absolute() {
+        return relativize(s, root);
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        let Some(token_start) = rest.find(|c: char| !c.is_whitespace()) else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..token_start]);
+        let after_ws = &rest[token_start..];
+        let token_end = after_ws.find(char::is_whitespace).unwrap_or(after_ws.len());
+        let token = &after_ws[..token_end];
+
+        if Path::new(token).is_absolute() {
+            out.push_str(&reduce_embedded_path(token, root));
+        } else {
+            out.push_str(token);
+        }
+
+        rest = &after_ws[token_end..];
+        if rest.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// Reduce one absolute-path token found embedded in free text (see
+/// [`scrub_paths`]): stripped relative to `root` when under it, otherwise
+/// [`ABSOLUTE_PATH_REDACTED`] — deliberately not the bare-filename fallback
+/// `relativize` uses for a whole-string path, since a lone filename dropped
+/// into a sentence reads as ordinary prose rather than a redaction.
+fn reduce_embedded_path(token: &str, root: &Path) -> String {
+    match Path::new(token).strip_prefix(root) {
+        Ok(rel) => to_forward_slashes(rel),
+        Err(_) => ABSOLUTE_PATH_REDACTED.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -2684,5 +2778,101 @@ mod tests {
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    // --- bbp-1: scrub_paths, the free-text absolute-path scrubber (D9) ---
+
+    #[test]
+    fn scrub_paths_reduces_a_path_embedded_mid_sentence_words_survive() {
+        let root = fresh_root("scrub-mid-sentence");
+        let file = root.join("src").join("bee.rs").to_string_lossy().into_owned();
+        let text = format!("Please look at {file} before you continue.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert!(scrubbed.starts_with("Please look at "), "leading words dropped: {scrubbed}");
+        assert!(scrubbed.ends_with(" before you continue."), "trailing words dropped: {scrubbed}");
+        assert!(scrubbed.contains("src/bee.rs"), "path was not reduced relative to root: {scrubbed}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_reduces_several_paths_in_one_string() {
+        let root = fresh_root("scrub-several");
+        let a = root.join("a.md").to_string_lossy().into_owned();
+        let b = root.join("sub").join("b.md").to_string_lossy().into_owned();
+        let text = format!("{a} and also {b} both matter.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&a), "first path survived: {scrubbed}");
+        assert!(!scrubbed.contains(&b), "second path survived: {scrubbed}");
+        assert!(scrubbed.contains("a.md"), "first path was not reduced: {scrubbed}");
+        assert!(scrubbed.contains("sub/b.md"), "second path was not reduced: {scrubbed}");
+        assert!(scrubbed.contains(" and also "), "middle words dropped: {scrubbed}");
+        assert!(scrubbed.ends_with(" both matter."), "trailing words dropped: {scrubbed}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_leaves_a_path_free_string_byte_identical() {
+        let root = fresh_root("scrub-no-path");
+        let text = "Execute c-1, then cap the cell and move on.";
+
+        assert_eq!(scrub_paths(text, &root), text);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_leaves_an_empty_string_empty() {
+        let root = fresh_root("scrub-empty");
+
+        assert_eq!(scrub_paths("", &root), "");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_on_a_string_that_is_wholly_a_path_matches_relativize_exactly() {
+        let root = fresh_root("scrub-wholly-path");
+
+        let inside = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        assert_eq!(scrub_paths(&inside, &root), relativize(&inside, &root));
+
+        let outside = std::env::temp_dir()
+            .join("mdview-bee-scrub-wholly-outside")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(scrub_paths(&outside, &root), relativize(&outside, &root));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scrub_paths_redacts_an_embedded_path_outside_the_root_rather_than_relativizing_it() {
+        let root = fresh_root("scrub-outside-embedded");
+        let outside = std::env::temp_dir()
+            .join("mdview-bee-scrub-outside-embedded-target")
+            .join("secret.txt")
+            .to_string_lossy()
+            .into_owned();
+        let text = format!("See {outside} for details.");
+
+        let scrubbed = scrub_paths(&text, &root);
+
+        assert!(!scrubbed.contains(&outside), "absolute path outside root survived: {scrubbed}");
+        assert!(
+            !scrubbed.contains("secret.txt"),
+            "an outside-root path must be redacted, not reduced to a bare filename: {scrubbed}"
+        );
+        assert!(scrubbed.contains(ABSOLUTE_PATH_REDACTED), "expected the shared redaction text: {scrubbed}");
+        assert!(scrubbed.starts_with("See "), "leading words dropped: {scrubbed}");
+        assert!(scrubbed.ends_with(" for details."), "trailing words dropped: {scrubbed}");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }
