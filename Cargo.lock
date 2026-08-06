@@ -1315,6 +1315,7 @@ dependencies = [
  "notify",
  "notify-debouncer-full",
  "nucleo-matcher",
+ "rand 0.8.7",
  "rusqlite",
  "serde",
  "serde_json",

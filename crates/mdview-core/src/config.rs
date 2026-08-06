@@ -229,12 +229,29 @@ pub fn notify_credential_path_override(override_dir: Option<&Path>) -> PathBuf {
 /// (unix `0600`), then `rename`d over the target — so the target path is
 /// always either the previous complete file or the new one, never a partial
 /// write, and a failed write never touches it at all. Mirrors
-/// `terminal_auth::write_token_file`'s shape exactly — the mechanism this
-/// repeats for a second secret rather than inventing a new one — duplicated
-/// rather than shared because that module lives in the `mdview` binary
-/// crate and this one must stay reachable from `mdview-core`, which the
-/// settings route (`crates/mdview/src/server.rs`) and the notify reconciler
+/// `terminal_auth::write_token_file`'s shape — the mechanism this repeats
+/// for a second secret rather than inventing a new one — duplicated rather
+/// than shared because that module lives in the `mdview` binary crate and
+/// this one must stay reachable from `mdview-core`, which the settings
+/// route (`crates/mdview/src/server.rs`) and the notify reconciler
 /// (`crates/mdview/src/main.rs`) both depend on.
+///
+/// The temp file's name carries fresh randomness (agent-terminal-21),
+/// exactly as `terminal_auth::write_token_file`'s does from a slice of the
+/// token it is writing — never `std::process::id()` alone. A fixed,
+/// pid-only name is stable for the life of the process, so `create_new`
+/// makes the *second* call in that process (or a call racing another
+/// thread's save, or a call after a previous crash left its temp file
+/// behind before the rename landed) collide on the exact same path and fail
+/// permanently, silently, while a caller that discards the `Result` (as
+/// `crates/mdview/src/server.rs::update_terminal_config` does today) goes
+/// on to report success anyway. A fresh random suffix on every call makes
+/// that collision astronomically unlikely instead.
+///
+/// A failure here is logged (`tracing::warn!`) rather than only returned —
+/// today's one caller discards the `Result` with `let _ =`, so this is what
+/// actually surfaces the failure until that caller stops doing so; a caller
+/// that does check the `Result` still gets the real error either way.
 pub fn save_notify_credential(path: &Path, secret: &str) -> Result<()> {
     let dir = path
         .parent()
@@ -242,11 +259,28 @@ pub fn save_notify_credential(path: &Path, secret: &str) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     let tmp_path = dir.join(format!(
         "{NOTIFY_CREDENTIAL_FILE_NAME}.tmp-{}",
-        std::process::id()
+        random_temp_suffix()
     ));
-    write_owner_only(&tmp_path, secret.as_bytes())?;
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    let result = write_owner_only(&tmp_path, secret.as_bytes())
+        .and_then(|()| std::fs::rename(&tmp_path, path).map_err(Error::from));
+    if let Err(ref e) = result {
+        tracing::warn!("failed to save notify credential to {}: {e}", path.display());
+        // Best-effort: a failed write never leaves debris beside the
+        // credential for a later save to trip over.
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    result
+}
+
+/// 8 hex characters of fresh randomness — the same width
+/// `terminal_auth::write_token_file` derives from a slice of the token it
+/// writes, reused here via a dedicated generator because this call has no
+/// token of its own to slice.
+fn random_temp_suffix() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 4];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(unix)]
@@ -542,6 +576,114 @@ mod tests {
             !config_text.to_lowercase().contains("telegram"),
             "config.toml must carry no telegram-shaped field at all: {config_text}"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Defect (3): two genuinely concurrent saves in the same process must
+    /// not collide on the temp file name. Under the historical bug (the
+    /// name derived only from `std::process::id()`, fixed for the life of
+    /// the process) two threads racing `save_notify_credential` would
+    /// deterministically have one `create_new` fail with `AlreadyExists` —
+    /// permanently, since nothing ever cleans that name up. A fresh random
+    /// suffix per call makes the two temp paths different, so both calls
+    /// succeed regardless of scheduling.
+    #[test]
+    fn concurrent_saves_never_collide_on_the_temp_name() {
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-race-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = notify_credential_path_override(Some(&dir));
+
+        let path_a = path.clone();
+        let path_b = path.clone();
+        let a = std::thread::spawn(move || save_notify_credential(&path_a, "secret-a"));
+        let b = std::thread::spawn(move || save_notify_credential(&path_b, "secret-b"));
+        let result_a = a.join().unwrap();
+        let result_b = b.join().unwrap();
+
+        assert!(result_a.is_ok(), "first concurrent save must succeed: {result_a:?}");
+        assert!(result_b.is_ok(), "second concurrent save must succeed: {result_b:?}");
+        // Whichever rename lands last wins the final content; either is
+        // fine — the point proven here is that neither call itself failed.
+        let final_value = load_notify_credential(&path);
+        assert!(
+            final_value.as_deref() == Some("secret-a") || final_value.as_deref() == Some("secret-b"),
+            "credential must hold whichever concurrent save landed last, got {final_value:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Defect (3), the other half: a temp file left behind by a crash
+    /// before its rename landed (a real scenario under the old fixed-name
+    /// scheme — `std::process::id()` is identical across a restart within
+    /// the same short-lived process, so a stale temp file from a previous
+    /// run could sit at the exact path a later save would also pick) must
+    /// never block a later save from succeeding.
+    #[test]
+    fn a_leftover_temp_file_never_blocks_a_later_save() {
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-leftover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = notify_credential_path_override(Some(&dir));
+
+        // Simulate the historical bug's leftover: the fixed pid-derived
+        // name a pre-fix build would have used, never cleaned up because
+        // its rename never ran.
+        let stale = dir.join(format!("{NOTIFY_CREDENTIAL_FILE_NAME}.tmp-{}", std::process::id()));
+        std::fs::write(&stale, b"leftover from a crashed save").unwrap();
+
+        let result = save_notify_credential(&path, "fresh-secret");
+        assert!(result.is_ok(), "a leftover temp file must never block a later save: {result:?}");
+        assert_eq!(load_notify_credential(&path).as_deref(), Some("fresh-secret"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Defect (2): a save that genuinely cannot write must report the
+    /// failure, not silently succeed — the function-level contract that
+    /// underlies the "surface, don't discard" fix, provable independent of
+    /// whatever a given caller does with the returned `Result`.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_that_cannot_write_reports_the_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-denied-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = notify_credential_path_override(Some(&dir));
+        // No write permission on the containing directory: `create_new`
+        // cannot create the temp file at all.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = save_notify_credential(&path, "should-never-land");
+
+        // Restore write permission before cleanup, or `remove_dir_all` fails too.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err(), "a save that cannot write must report failure, not Ok(())");
+        assert_eq!(
+            load_notify_credential(&path),
+            None,
+            "a failed save must never leave a partial credential readable"
+        );
+    }
+
+    /// Defect (4): the identical mechanism next door
+    /// (`crates/mdview/src/terminal_auth.rs::token_file_is_created_owner_only_on_unix`)
+    /// carries this assertion; the credential file had none. Catches a
+    /// regression that drops the owner-only mode.
+    #[cfg(unix)]
+    #[test]
+    fn credential_file_is_created_owner_only_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = notify_credential_path_override(Some(&dir));
+        save_notify_credential(&path, "mode-check-secret").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "telegram credential file must be owner-read/write only");
 
         std::fs::remove_dir_all(&dir).ok();
     }

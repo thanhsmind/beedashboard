@@ -1,8 +1,13 @@
 //! Telegram channel — outbound `sendMessage` via the Bot API (D1: ported
-//! from herdr-go's `notify::telegram`). The bot token is read from the
-//! environment only (never a config key, never logged); the destination
-//! chat id is plain config. `reqwest` is built against `rustls` (not native
-//! TLS) so the release build stays self-contained.
+//! from herdr-go's `notify::telegram`). The bot token is never a `Config`
+//! field or logged (P1, extended by agent-terminal-21): the caller
+//! (`crates/mdview/src/server.rs::telegram_credentials`) resolves it from
+//! its own owner-only file beside the config
+//! (`mdview_core::config::save_notify_credential`/`load_notify_credential`),
+//! not the environment, and hands it to [`TelegramNotifier::new`] already
+//! resolved. The destination chat id is plain config. `reqwest` is built
+//! against `rustls` (not native TLS) so the release build stays
+//! self-contained.
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -17,8 +22,9 @@ pub struct TelegramNotifier {
 }
 
 impl TelegramNotifier {
-    /// Build a notifier. `token` comes from the environment (resolved by the
-    /// caller); `chat_id` is config. Returns `None` if either is missing —
+    /// Build a notifier. `token` is the raw credential, already resolved by
+    /// the caller from its own file (never the environment, never
+    /// `Config`); `chat_id` is config. Returns `None` if either is missing —
     /// notify then stays on the null channel, fail-closed.
     pub fn new(token: Option<String>, chat_id: Option<String>) -> Option<Self> {
         match (token, chat_id) {

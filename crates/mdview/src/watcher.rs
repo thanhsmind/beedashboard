@@ -4,10 +4,13 @@
 //! a duplicate snapshot read (or a status that has not actually changed)
 //! from surfacing as a fresh event.
 //!
-//! This module is not started anywhere yet — nothing here runs until a
-//! later cell wires it in behind the D7 opt-in switch.
+//! Wired in behind the D7 opt-in switch by `crate::TerminalBackground`
+//! (`crates/mdview/src/main.rs`): `reconcile` is the only place a
+//! [`PollWatcher`] is ever run, and a switch left off drives it to poll
+//! nothing.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -101,7 +104,12 @@ impl PollWatcher {
 
     /// Like [`run`](Self::run) but awaits an async handler for each change —
     /// used to feed the notify service (record → drain) per change.
-    pub async fn run_async<F, Fut>(self, mut on_change: F)
+    /// `ticks` counts every completed poll cycle — a real,
+    /// externally-observable side effect of the loop still running, so a
+    /// caller proving "switched off stops the task" has something to
+    /// observe beyond its own bookkeeping (`crate::TerminalBackground`,
+    /// this cell's trace).
+    pub async fn run_async<F, Fut>(self, ticks: Arc<AtomicU64>, mut on_change: F)
     where
         F: FnMut(StatusChange) -> Fut + Send,
         Fut: std::future::Future<Output = ()> + Send,
@@ -113,6 +121,7 @@ impl PollWatcher {
             for change in self.poll_once(&mut cursor).await {
                 on_change(change).await;
             }
+            ticks.fetch_add(1, Ordering::Relaxed);
         }
     }
 }

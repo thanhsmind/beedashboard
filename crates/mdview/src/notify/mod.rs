@@ -8,9 +8,10 @@
 //! delivered only after a successful send, so a crash between the two
 //! resends rather than loses it.
 //!
-//! This module is not started anywhere yet (D7): nothing here drains the
-//! outbox or sends anything until a later cell wires it in behind the
-//! opt-in switch.
+//! Wired in behind the D7 opt-in switch by `crate::TerminalBackground`
+//! (`crates/mdview/src/main.rs`): `reconcile` is the only place a
+//! [`NotifyService`] is ever driven, and a switch left off drains nothing
+//! and sends nothing.
 
 pub mod telegram;
 
