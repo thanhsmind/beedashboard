@@ -364,6 +364,13 @@ async fn api_config(State(st): State<AppState>) -> impl IntoResponse {
 #[derive(serde::Deserialize)]
 struct SavedFlag {
     saved: Option<String>,
+    /// Set by `update_terminal_config` when `save_notify_credential` failed
+    /// (agent-terminal-24) — a distinct query flag rather than overloading
+    /// `saved`, so a failed credential write is never rendered as success.
+    /// Only ever carries the literal `"1"`; never the credential itself
+    /// (that would put the secret in the redirect target, which this cell's
+    /// own prohibition forbids).
+    notify_error: Option<String>,
 }
 
 async fn settings_page_handler(State(st): State<AppState>, Query(flag): Query<SavedFlag>) -> Response {
@@ -377,6 +384,7 @@ async fn settings_page_handler(State(st): State<AppState>, Query(flag): Query<Sa
     Html(views::settings_page(
         &cfg,
         flag.saved.is_some(),
+        flag.notify_error.is_some(),
         token_view,
         notify_credential_view,
     ))
@@ -459,6 +467,7 @@ async fn rotate_terminal_token(
             let notify_credential_view = current_notify_credential_view(&st);
             let html = views::settings_page(
                 &cfg,
+                false,
                 false,
                 views::TerminalTokenView::Full(full_token),
                 notify_credential_view,
@@ -547,13 +556,23 @@ async fn update_terminal_config(
     // `Config` field, so it is written to its own owner-only file, not into
     // `cfg` — a blank submission leaves whatever is already on disk alone.
     let cred_path = mdview_core::config::notify_credential_path_override(st.config_data_dir.as_deref());
+    // agent-terminal-24: the write can fail (permissions, a full disk, a
+    // vanished parent dir — `save_notify_credential` already logs the path,
+    // never the secret, at `warn` on error). Previously this result was
+    // discarded and the redirect always claimed success, so a user whose
+    // token never reached disk was told it had and then found notifications
+    // silently not working. The switches and destination below still save
+    // independently of this outcome; only the redirect distinguishes it.
+    let mut notify_credential_save_failed = false;
     if let Some(secret) = form
         .notify_telegram_token
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        let _ = mdview_core::config::save_notify_credential(&cred_path, secret);
+        if mdview_core::config::save_notify_credential(&cred_path, secret).is_err() {
+            notify_credential_save_failed = true;
+        }
     }
     let _ = cfg.save_to(&config_path);
 
@@ -569,7 +588,16 @@ async fn update_terminal_config(
         telegram,
     );
 
-    Redirect::to("/settings?saved=1").into_response()
+    // agent-terminal-24: a failed credential write redirects to the
+    // failure flag instead of `saved=1` — never both, so the settings page
+    // never shows the success banner for a save that didn't happen. Neither
+    // query value ever carries the credential itself (`SavedFlag`'s doc
+    // comment).
+    if notify_credential_save_failed {
+        Redirect::to("/settings?notify_error=1").into_response()
+    } else {
+        Redirect::to("/settings?saved=1").into_response()
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -2270,6 +2298,7 @@ mod bee_route_tests {
     use mdview_core::domain::Project;
     use mdview_core::{Config, SqliteStore};
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
     use tower::ServiceExt;
 
     fn fresh_root(name: &str) -> PathBuf {
@@ -4589,22 +4618,6 @@ mod bee_route_tests {
 
         // Leaving both switch fields off this submission (only `enabled` is
         // carried) must stop both live tasks — no restart needed.
-        //
-        // agent-terminal-22: these two off-assertions still only read
-        // `TerminalBackground`'s own reported state (`supervisor_running()` /
-        // `notify_running()` — both just `slot.lock().unwrap().is_some()`),
-        // which `reconcile_*`'s `(false, Some(handle)) => handle.abort()` arm
-        // empties via `take()` regardless of whether `abort()` is actually
-        // called — so deleting the `abort()` call itself would leave these
-        // green. Strengthening them to observe the cancellation as a real
-        // side effect (not just the bookkeeping flag) depends on
-        // `TerminalBackground`/`Supervisor`/`PollWatcher` (main.rs,
-        // supervisor.rs, watcher.rs) exposing one, which is agent-terminal-21's
-        // work and not yet landed as of this cell (no such API exists on
-        // `TerminalBackground` at the time of writing) — this file cannot
-        // reach into main.rs to add it. Left as a named gap rather than a
-        // fabricated or silently-still-toothless assertion; revisit once
-        // agent-terminal-21 lands that side effect.
         let off_req = Request::builder()
             .method("POST")
             .uri("/api/terminal-config")
@@ -4621,6 +4634,49 @@ mod bee_route_tests {
         assert!(
             !st.terminal_background.notify_running(),
             "turning the notify switch off must stop the watcher without a restart"
+        );
+
+        // agent-terminal-24 (closing agent-terminal-22's named gap): the two
+        // `running()` assertions above only read `TerminalBackground`'s own
+        // bookkeeping (`slot.lock().unwrap().is_some()`), which
+        // `reconcile_*`'s `(false, Some(handle)) => handle.abort()` arm
+        // empties via `take()` regardless of whether `abort()` actually does
+        // anything — deleting the `abort()` call would still leave them
+        // green. `supervisor_ticks`/`notify_ticks` (main.rs, landed by
+        // agent-terminal-21) are a real, externally-observable side effect
+        // of each loop still running, reachable from here because they are
+        // private to the crate root and this module is one of its
+        // descendants. This route always reconciles through the fixed
+        // production intervals (5s supervisor, 2000ms notify — no test-only
+        // fast-interval seam reaches `update_terminal_config`), so proving
+        // the tick count stays put after "off" means waiting past both real
+        // intervals rather than a short sleep: a short wait would pass
+        // whether or not cancellation worked, because production's next
+        // tick isn't due yet either way — exactly the "no mutation would
+        // make it fail" shape this cell's dispatch warns against.
+        //
+        // Verified red/green by hand for this cell: temporarily replacing
+        // `existing.handle.abort()` with a no-op in both
+        // `reconcile_supervisor_with_intervals`'s and
+        // `reconcile_notify_with_interval`'s `(false, Some(existing))` arms
+        // (main.rs) turned both assertions below red — ticks kept advancing
+        // past `_at_off` — while leaving the `running()` assertions above
+        // green, and the running-through-a-restart assertions in
+        // `main.rs` unaffected. Restored before committing.
+        let supervisor_ticks_at_off = st.terminal_background.supervisor_ticks();
+        let notify_ticks_at_off = st.terminal_background.notify_ticks();
+        tokio::time::sleep(Duration::from_millis(5_300)).await;
+        assert_eq!(
+            st.terminal_background.supervisor_ticks(),
+            supervisor_ticks_at_off,
+            "the watchdog kept ticking after the switch was turned off — the bookkeeping \
+             slot emptied but the loop itself was not actually cancelled"
+        );
+        assert_eq!(
+            st.terminal_background.notify_ticks(),
+            notify_ticks_at_off,
+            "the watcher kept ticking after the switch was turned off — the bookkeeping \
+             slot emptied but the loop itself was not actually cancelled"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -4832,6 +4888,89 @@ mod bee_route_tests {
         assert!(
             body.contains(last_four),
             "/settings dropped the masked credential entirely: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// agent-terminal-24, the last-mile fix: `update_terminal_config` used to
+    /// discard `save_notify_credential`'s `Result` and always redirect to
+    /// `?saved=1`, so a user whose credential could not be written was told
+    /// it had been. Forces the real failure `config::tests::
+    /// a_save_that_cannot_write_reports_the_failure` proves at the config
+    /// layer (`crates/mdview-core/src/config.rs`) — no write permission on
+    /// the credential directory — through the actual gated route, and checks
+    /// every must-have this cell names: the redirect never claims success,
+    /// the credential itself never appears in the redirect target, the page
+    /// that redirect lands on shows failure rather than the success banner,
+    /// and no credential ever reaches disk.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn credential_save_failure_is_reported_as_failure_not_saved() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = fresh_root("terminal-notify-cred-save-fails");
+        let st = build_state_with_dir(&dir);
+        let app = router(st.clone());
+        let (_token, cookie) = rotate_token(app.clone()).await;
+
+        let cred_path = mdview_core::config::notify_credential_path_override(Some(&dir));
+        let cred_dir = cred_path.parent().unwrap();
+        std::fs::create_dir_all(cred_dir).unwrap();
+        // No write permission on the credential's own directory: the same
+        // failure shape `a_save_that_cannot_write_reports_the_failure`
+        // exercises directly against `save_notify_credential`.
+        std::fs::set_permissions(cred_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let secret = "should-never-reach-disk-or-response";
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/terminal-config")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(header::COOKIE, cookie)
+            .body(Body::from(format!("notify_telegram_token={secret}")))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+
+        // Restore write permission before any further filesystem I/O
+        // (cleanup, the follow-up GET below), or later steps fail too.
+        std::fs::set_permissions(cred_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(resp.status().is_redirection());
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert_ne!(
+            location, "/settings?saved=1",
+            "a failed credential save must not redirect to the same target a successful save uses"
+        );
+        assert!(
+            !location.contains(secret),
+            "the redirect target must never carry the credential: {location}"
+        );
+
+        assert_eq!(
+            mdview_core::config::load_notify_credential(&cred_path),
+            None,
+            "a failed save must never leave a partial credential readable"
+        );
+
+        let resp = get(app, &location).await;
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(secret),
+            "/settings rendered the Telegram credential after a failed save: {body}"
+        );
+        assert!(
+            !body.contains("fg-banner--success"),
+            "a failed credential save must not show the generic success banner: {body}"
+        );
+        assert!(
+            body.contains("could not be saved"),
+            "a failed credential save must tell the user it failed: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();

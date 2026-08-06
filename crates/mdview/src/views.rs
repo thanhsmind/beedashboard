@@ -2003,10 +2003,19 @@ pub enum NotifyCredentialView {
 pub fn settings_page(
     cfg: &Config,
     saved: bool,
+    notify_credential_save_failed: bool,
     token_view: TerminalTokenView,
     notify_credential_view: NotifyCredentialView,
 ) -> String {
-    let banner = if saved {
+    // agent-terminal-24: checked first, so a failed credential save is never
+    // shadowed by `saved=1` also being set on the same redirect — a user
+    // whose token could not be written must see the failure, not the
+    // generic success banner (`update_terminal_config` in server.rs never
+    // sends both flags at once, but this order makes the page's own
+    // guarantee independent of that caller detail).
+    let banner = if notify_credential_save_failed {
+        "<div class=\"fg-banner fg-banner--danger\"><span class=\"fg-banner__dot\"></span><span class=\"fg-banner__body\">The Telegram bot token could not be saved. Notifications will keep using the previous token, if any — try again.</span></div>"
+    } else if saved {
         "<div class=\"fg-banner fg-banner--success\"><span class=\"fg-banner__dot\"></span><span class=\"fg-banner__body\">Saved. Server &amp; indexing changes apply after restart (<code>mdview stop &amp;&amp; mdview serve</code>).</span></div>"
     } else {
         ""
