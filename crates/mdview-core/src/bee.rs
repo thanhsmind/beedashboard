@@ -683,6 +683,14 @@ pub struct BeeSnapshot {
     /// NOT mean `gate_bypass` is on — see `BeeConfig::gate_bypass` and
     /// [`normalize_gate_bypass`] for how "off" is actually decided.
     pub config: Option<BeeConfig>,
+    /// Presence-only read of `docs/history/<feature>/promote-proposals.md`
+    /// (bbp-12), never its contents, keyed by every distinct feature name
+    /// this snapshot read (the active feature in `state.json`, every lane,
+    /// every cell). A feature name that fails [`validate_feature_name`] —
+    /// the only gate a name passes through before touching the filesystem,
+    /// see [`promote_proposals_path`] — is never looked up and is simply
+    /// absent as a key here, never a false `false`.
+    pub promote_proposals: std::collections::BTreeMap<String, bool>,
     /// Human-readable notes naming what could not be read. Every path
     /// mentioned here is relative to the project root.
     pub read_errors: Vec<String>,
@@ -709,6 +717,7 @@ impl BeeSnapshot {
             attention: Vec::new(),
             handoff: None,
             config: None,
+            promote_proposals: std::collections::BTreeMap::new(),
             read_errors: Vec::new(),
         }
     }
@@ -805,6 +814,22 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     let gate_bypass = config.as_ref().and_then(|c| c.gate_bypass.as_deref());
     let attention = compute_attention_items(&buckets.stuck, &read_errors, handoff.as_ref(), gate_bypass);
 
+    // bbp-12: every distinct feature name this read has seen, from every
+    // place a feature name is read — state.json's active feature, each
+    // lane, each cell — deduplicated via the set before any of them is
+    // ever joined onto a filesystem path (see `validate_feature_name`).
+    let mut feature_names: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    if let Some(f) = state.as_ref().and_then(|s| s.feature.as_deref()) {
+        feature_names.insert(f);
+    }
+    for lane in &lanes {
+        feature_names.insert(lane.feature.as_str());
+    }
+    for cell in &all_cells {
+        feature_names.insert(cell.feature.as_str());
+    }
+    let promote_proposals = read_promote_proposals(root, feature_names.into_iter());
+
     BeeSnapshot {
         present: true,
         state,
@@ -823,6 +848,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         attention,
         handoff,
         config,
+        promote_proposals,
         read_errors,
     }
 }
@@ -2100,6 +2126,90 @@ fn reduce_embedded_path(path: &str, root: &Path) -> String {
         Ok(rel) => to_forward_slashes(rel),
         Err(_) => ABSOLUTE_PATH_REDACTED.to_string(),
     }
+}
+
+/// The only gate a `feature` name passes through before it is ever joined
+/// onto a filesystem path — see [`promote_proposals_path`], the sole call
+/// site. `feature` is unvalidated free text everywhere this module reads
+/// it — `.bee/state.json`'s active feature, a `.bee/lanes/*.json` record,
+/// a `.bee/cells/*.json` record — and none of those three sources is under
+/// this code's control, so this check runs the same way regardless of
+/// which one a name came from.
+///
+/// Rejected: an empty string; a leading `.` (this alone covers a bare `.`
+/// or `..` component, since both start with `.`, as well as any
+/// dotfile-shaped name); either platform's path separator, `/` or `\`,
+/// checked unconditionally rather than only on its native platform, since
+/// a store written on one OS can be read on another; an absolute-path
+/// shape, POSIX or Windows-drive-prefixed (via [`is_windows_drive_absolute`],
+/// the same check [`scrub_paths`] already trusts elsewhere in this file);
+/// and any control character, NUL included. Anything else — an ordinary
+/// slug, hyphens and digits included — passes.
+fn validate_feature_name(feature: &str) -> bool {
+    if feature.is_empty() {
+        return false;
+    }
+    if feature.starts_with('.') {
+        return false;
+    }
+    if feature.contains('/') || feature.contains('\\') {
+        return false;
+    }
+    if Path::new(feature).is_absolute() || is_windows_drive_absolute(feature) {
+        return false;
+    }
+    if feature.chars().any(|c| c.is_control()) {
+        return false;
+    }
+    true
+}
+
+/// Join `feature` onto its promote-proposals path under `root` — the ONLY
+/// place in this module a `feature` string is joined onto a filesystem
+/// path for this read (bbp-12). Returns `None`, building no [`PathBuf`] at
+/// all, when [`validate_feature_name`] rejects `feature`: a rejected name
+/// is never looked up, so this function's return value is itself the
+/// proof a test needs — call it directly and assert `None`, rather than
+/// inferring "no lookup happened" from a rendered page that might simply
+/// have hidden the result.
+fn promote_proposals_path(root: &Path, feature: &str) -> Option<PathBuf> {
+    if !validate_feature_name(feature) {
+        return None;
+    }
+    Some(root.join("docs").join("history").join(feature).join("promote-proposals.md"))
+}
+
+/// Whether `feature`'s `docs/history/<feature>/promote-proposals.md`
+/// exists — presence only; its contents are never read. `None` when
+/// [`promote_proposals_path`] built no path for `feature` (an invalid
+/// name): the lookup was never attempted, so the caller reports nothing
+/// about that feature's proposals rather than a false "does not exist".
+/// Never pushes to `read_errors` — a strange feature name is not a store
+/// error (see [`read_snapshot`]).
+fn has_promote_proposals(root: &Path, feature: &str) -> Option<bool> {
+    promote_proposals_path(root, feature).map(|p| p.is_file())
+}
+
+/// Presence-only promote-proposals read (bbp-12) for every distinct
+/// `feature` name in `features` — the union [`read_snapshot`] builds from
+/// every place this module reads a feature name: `.bee/state.json`'s
+/// active feature, every `.bee/lanes/*.json` record, and every
+/// `.bee/cells/*.json` record. A name [`has_promote_proposals`] cannot
+/// check (fails validation) is simply absent from the returned map — the
+/// map's key set is exactly the set of features a path was actually built
+/// and checked for, which is what makes it the observable proof that a
+/// rejected name built none.
+fn read_promote_proposals<'a>(
+    root: &Path,
+    features: impl Iterator<Item = &'a str>,
+) -> std::collections::BTreeMap<String, bool> {
+    let mut out = std::collections::BTreeMap::new();
+    for feature in features {
+        if let Some(present) = has_promote_proposals(root, feature) {
+            out.entry(feature.to_string()).or_insert(present);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -4595,6 +4705,172 @@ mod tests {
         let serialized = serde_json::to_string(&snap).unwrap();
         assert!(!serialized.contains(&root_str), "absolute path leaked into the snapshot: {serialized}");
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- bbp-12: a feature name is validated before it is ever joined onto
+    // a filesystem path (D4, D9). Every rejection case below is asserted
+    // through `promote_proposals_path` returning `None` directly — no path
+    // built at all — rather than through any rendered output, per the
+    // guard this cell exists to prove: a test on rendered output alone
+    // would pass even if the lookup happened and only its result was
+    // hidden. ---
+
+    #[test]
+    fn validate_feature_name_rejects_dot_dot_traversal_shapes() {
+        let root = fresh_root("promote-guard-traversal");
+        assert!(promote_proposals_path(&root, "../../etc").is_none(), "a `../../etc` feature must build no path");
+        assert!(promote_proposals_path(&root, "..").is_none(), "a bare `..` feature must build no path");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_feature_name_rejects_a_forward_slash() {
+        let root = fresh_root("promote-guard-fslash");
+        assert!(promote_proposals_path(&root, "foo/bar").is_none(), "a feature containing `/` must build no path");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_feature_name_rejects_a_backslash() {
+        let root = fresh_root("promote-guard-bslash");
+        assert!(promote_proposals_path(&root, "foo\\bar").is_none(), "a feature containing `\\` must build no path");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_feature_name_rejects_an_absolute_posix_path() {
+        let root = fresh_root("promote-guard-posix-abs");
+        assert!(promote_proposals_path(&root, "/etc/passwd").is_none(), "an absolute POSIX-shaped feature must build no path");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_feature_name_rejects_a_windows_drive_prefixed_path() {
+        let root = fresh_root("promote-guard-win-abs");
+        assert!(
+            promote_proposals_path(&root, "C:\\Users\\someone\\.ssh").is_none(),
+            "a Windows drive-prefixed feature (backslash form) must build no path"
+        );
+        assert!(
+            promote_proposals_path(&root, "C:/Users/someone/.ssh").is_none(),
+            "a Windows drive-prefixed feature (forward-slash form) must build no path"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_feature_name_rejects_a_leading_dot_name() {
+        let root = fresh_root("promote-guard-dotfile");
+        assert!(promote_proposals_path(&root, ".hidden").is_none(), "a dotfile-shaped feature must build no path");
+        assert!(promote_proposals_path(&root, ".").is_none(), "a bare `.` feature must build no path");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_feature_name_rejects_an_empty_string() {
+        let root = fresh_root("promote-guard-empty");
+        assert!(promote_proposals_path(&root, "").is_none(), "an empty feature name must build no path");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_feature_name_rejects_a_control_character() {
+        let root = fresh_root("promote-guard-control");
+        let embedded_nul = "feat\u{0}ure";
+        assert!(promote_proposals_path(&root, embedded_nul).is_none(), "an embedded NUL must build no path");
+        let bare_control = "\u{7}"; // BEL — a control character with no separator or dot shape of its own
+        assert!(promote_proposals_path(&root, bare_control).is_none(), "a bare control character must build no path");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_feature_name_accepts_an_ordinary_slug() {
+        let root = fresh_root("promote-guard-ok-slug");
+        let path = promote_proposals_path(&root, "demo").expect("an ordinary slug must build a path");
+        assert_eq!(path, root.join("docs").join("history").join("demo").join("promote-proposals.md"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn validate_feature_name_accepts_a_slug_with_hyphens_and_digits() {
+        let root = fresh_root("promote-guard-ok-slug2");
+        let path =
+            promote_proposals_path(&root, "bee-board-pm-12").expect("a hyphenated, digited slug must build a path");
+        assert_eq!(
+            path,
+            root.join("docs").join("history").join("bee-board-pm-12").join("promote-proposals.md")
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn has_promote_proposals_reports_presence_and_absence_never_a_rejected_lookup() {
+        let root = fresh_root("promote-presence");
+        write(&root, "docs/history/demo/promote-proposals.md", "a proposal body that must never be read");
+        assert_eq!(has_promote_proposals(&root, "demo"), Some(true));
+        assert_eq!(has_promote_proposals(&root, "no-such-feature"), Some(false));
+        assert_eq!(
+            has_promote_proposals(&root, "../../etc"),
+            None,
+            "a rejected name must never be looked up, not even reported as absent"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn promote_proposals_present_and_absent_reported_correctly_end_to_end() {
+        let root = fresh_root("promote-e2e");
+        write(&root, "docs/history/has-proposals/promote-proposals.md", "pending proposal");
+        write(&root, ".bee/state.json", r#"{"feature":"has-proposals","phase":"swarming"}"#);
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("a", "no-proposals", "capped", Some("2026-01-01T00:00:00Z"), Some("2026-01-02T00:00:00Z")),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.promote_proposals.get("has-proposals"), Some(&true), "{:?}", snap.promote_proposals);
+        assert_eq!(snap.promote_proposals.get("no-proposals"), Some(&false), "{:?}", snap.promote_proposals);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn traversal_shaped_cell_feature_builds_no_path_outside_the_project() {
+        let root = fresh_root("promote-security-cell");
+        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "../../etc", "open", None, None));
+
+        let snap = read_snapshot(&root);
+        assert!(
+            !snap.promote_proposals.contains_key("../../etc"),
+            "a traversal-shaped cell feature must build and check no path — the map's key set IS the built path set: {:?}",
+            snap.promote_proposals
+        );
+        assert!(
+            snap.read_errors.is_empty(),
+            "a strange feature name is not a store error: {:?}",
+            snap.read_errors
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn traversal_shaped_state_feature_builds_no_path_outside_the_project() {
+        let root = fresh_root("promote-security-state");
+        write(&root, ".bee/state.json", r#"{"feature":"../../etc","phase":"swarming"}"#);
+
+        let snap = read_snapshot(&root);
+        assert!(
+            !snap.promote_proposals.contains_key("../../etc"),
+            "a traversal-shaped state.json feature must build and check no path — the map's key set IS the built path set: {:?}",
+            snap.promote_proposals
+        );
+        assert!(
+            snap.read_errors.is_empty(),
+            "a strange feature name is not a store error: {:?}",
+            snap.read_errors
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 }
