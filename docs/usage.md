@@ -54,7 +54,9 @@ ssh -L 7700:localhost:7700 user@ubuntu-host
 # then open http://localhost:7700 in your laptop's browser
 ```
 
-Alternatively, expose it on the LAN (less secure — no auth):
+Alternatively, expose it on the LAN (less secure — everything except the
+agent terminal is unauthenticated, so anyone who can reach the port can read
+every indexed file and each project's path):
 ```bash
 mdview serve --host 0.0.0.0
 # then browse http://<server-ip>:7700 from another machine on the network
