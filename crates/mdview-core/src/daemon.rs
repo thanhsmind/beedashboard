@@ -6,9 +6,19 @@ use crate::config::{self, write_atomic};
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// Bound on the TCP connect step of `health_check`. `TcpStream::connect` has
+/// no connect timeout of its own (only the read/write timeouts set after a
+/// connection is established) — on a host/network that silently drops
+/// packets to a dead port instead of answering with an immediate RST, that
+/// connect call blocks indefinitely. This is what made `mdview stop`/
+/// `restart` hang against a stale lock naming a dead port: the process kill
+/// itself is fast, but the orphaned-daemon check re-probes the port via
+/// `running_daemon()` → `health_check()`, and that probe never returned.
+const HEALTH_CHECK_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonInfo {
@@ -77,7 +87,14 @@ pub fn health_check(host: &str, port: u16) -> bool {
     } else {
         host
     };
-    let Ok(mut stream) = TcpStream::connect(format!("{connect_host}:{port}")) else {
+    let Some(addr) = format!("{connect_host}:{port}")
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+    else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, HEALTH_CHECK_CONNECT_TIMEOUT) else {
         return false;
     };
     stream
@@ -117,6 +134,27 @@ mod tests {
     fn health_check_false_on_dead_port() {
         // Nothing listening on this port → false, no panic.
         assert!(!health_check("127.0.0.1", 59_999));
+    }
+
+    #[test]
+    fn health_check_returns_promptly_on_a_dead_port() {
+        // Root-cause regression: `TcpStream::connect` had no connect timeout
+        // (only the read/write timeouts set after a connection is
+        // established), so on a network that drops rather than actively
+        // refuses packets to a dead port, the connect call blocked
+        // indefinitely — this is what made `mdview stop`/`restart` hang
+        // against a stale lock naming a dead port (see cli.rs's
+        // `stop_daemon`, and the e2e reproduction in
+        // crates/mdview/tests/e2e_stop_stale_lock.rs). Bound well above the
+        // 500ms connect timeout to keep this from being flaky under load.
+        let start = std::time::Instant::now();
+        assert!(!health_check("127.0.0.1", 59_998));
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "health_check took {:?} against a dead port, expected it to be \
+             bounded by its connect timeout",
+            start.elapsed()
+        );
     }
 
     #[test]

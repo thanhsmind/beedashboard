@@ -403,6 +403,17 @@ fn cmd_unregister(id: &str) -> Result<()> {
 /// when a lock existed, or `None` when no daemon was recorded.
 fn stop_daemon() -> Option<(u32, bool)> {
     let info = runtime::read_lock()?;
+    // Confirm the lock's host:port actually answers as an mdview daemon
+    // BEFORE sending a kill signal by pid. A stale lock's pid may since have
+    // been recycled by an unrelated live process; killing by pid alone,
+    // without this check, would signal that unrelated process even though
+    // it is not the daemon the lock once named. A lock whose port doesn't
+    // answer is stale by definition (same test `running_daemon()` uses
+    // everywhere else) — nothing to kill, so just clear it.
+    if runtime::running_daemon().is_none() {
+        runtime::remove_lock();
+        return Some((info.pid, false));
+    }
     #[cfg(unix)]
     let ok = std::process::Command::new("kill")
         .arg(info.pid.to_string())
