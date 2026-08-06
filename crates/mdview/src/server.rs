@@ -10751,4 +10751,304 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
     }
+
+    // ── bbp-17: the board holds up on a phone, in both themes, and from the
+    // keyboard. Everything below reads the rendered board body (or, for the
+    // theme pair, `views::APP_CSS` directly) rather than asserting on any
+    // browser layout engine this suite does not have. ──────────────────────
+
+    /// The board's own inline `<style>` block — everything between the first
+    /// `<style>` and its matching `</style>`, so a scan below never mistakes
+    /// an unrelated width (e.g. the topbar's fixed icon-button footprint in
+    /// `app.css`, loaded by `<link>`, never inlined) for something the board
+    /// itself declared.
+    fn board_style_block(body: &str) -> &str {
+        let start = body.find("<style>").expect("board body must carry its inline <style> block");
+        let end = body[start..].find("</style>").expect("the inline <style> block must close");
+        &body[start..start + end]
+    }
+
+    /// The largest `NNpx` value found anywhere in `css` — the responsive
+    /// probe's "no fixed width wide enough to force a 375px page to scroll"
+    /// half. Written by hand (no `regex` crate in this dependency tree) as a
+    /// simple backward digit-walk from every `px` occurrence. A line naming
+    /// `@media` is skipped: a breakpoint condition names the width a rule
+    /// switches AT, never a box the page renders that wide — the narrow-
+    /// screen rule above is exactly what makes that width safe to name.
+    fn max_px_value(css: &str) -> u32 {
+        let css = css
+            .lines()
+            .filter(|line| !line.contains("@media"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let css = css.as_str();
+        // Byte-level scan (never a `&str` slice at an arbitrary offset): this
+        // CSS carries non-ASCII characters (an em dash in a doc comment), and
+        // slicing at an offset that lands inside one of those multi-byte
+        // characters would panic rather than simply fail to match "px".
+        let bytes = css.as_bytes();
+        let mut max = 0u32;
+        let mut i = 0usize;
+        while i + 1 < bytes.len() {
+            if bytes[i] == b'p' && bytes[i + 1] == b'x' {
+                let mut j = i;
+                while j > 0 && bytes[j - 1].is_ascii_digit() {
+                    j -= 1;
+                }
+                if j < i {
+                    if let Ok(n) = std::str::from_utf8(&bytes[j..i]).unwrap().parse::<u32>() {
+                        max = max.max(n);
+                    }
+                }
+            }
+            i += 1;
+        }
+        max
+    }
+
+    /// Every `fg-chip fg-chip--<tone>` span's visible text content, in
+    /// document order — the colour probe's raw material. A tone chip with
+    /// nothing but whitespace between its tags would be exactly the
+    /// colour-alone defect the must-have forbids.
+    fn chip_texts(body: &str) -> Vec<String> {
+        const MARK: &str = "class=\"fg-chip fg-chip--";
+        let mut out = Vec::new();
+        let mut rest = body;
+        while let Some(idx) = rest.find(MARK) {
+            let after = &rest[idx..];
+            let Some(gt) = after.find('>') else { break };
+            let after_tag = &after[gt + 1..];
+            let Some(close) = after_tag.find("</span>") else { break };
+            out.push(after_tag[..close].to_string());
+            rest = &after_tag[close + "</span>".len()..];
+        }
+        out
+    }
+
+    /// (responsive) The board declares a narrow-screen rule that collapses
+    /// every multi-column grid it defines to one column, and no fixed pixel
+    /// width in the board's own stylesheet is wide enough to force a 375px
+    /// page to scroll sideways (every `minmax(...)` track floor here is
+    /// under 375, and the narrow-screen rule replaces them with `1fr`
+    /// below it regardless).
+    #[tokio::test]
+    async fn board_declares_narrow_screen_grid_collapse_and_no_wide_fixed_widths() {
+        let root = fresh_root("responsive-collapse");
+        write(&root, ".bee/cells/a.json", &cell_json("r1", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "responsive-collapse");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let style = board_style_block(&body);
+
+        assert!(
+            style.contains("@media (max-width:"),
+            "the board must declare a narrow-screen breakpoint: {style}"
+        );
+        for grid_class in [
+            ".bee-stats",
+            ".bee-now-grid",
+            ".bee-phase-board__cols",
+            ".bee-velocity__lists",
+            ".bee-panels",
+            ".bee-done-grid",
+            ".bee-stepper",
+        ] {
+            assert!(
+                style.contains(grid_class),
+                "the narrow-screen rule must name {grid_class} among the grids it collapses: {style}"
+            );
+        }
+        assert!(
+            style.contains("grid-template-columns: 1fr"),
+            "the narrow-screen rule must collapse to a single column: {style}"
+        );
+
+        let widest = max_px_value(style);
+        assert!(
+            widest < 375,
+            "the board's own stylesheet must declare no fixed pixel width \u{2265} 375 (found {widest}px): {style}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (responsive) The one genuinely wide container on the board — the
+    /// by-phase board's column row, which can grow past a phone's width
+    /// with enough phases in flight — scrolls inside itself rather than
+    /// ever pushing the page wider.
+    #[tokio::test]
+    async fn board_wide_phase_columns_container_scrolls_within_itself() {
+        let root = fresh_root("responsive-overflow");
+        write(&root, ".bee/cells/a.json", &cell_json("r1", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "responsive-overflow");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let style = board_style_block(&body);
+
+        assert!(
+            style.contains(".bee-phase-board__cols") && style.contains("overflow-x: auto"),
+            "the phase board's wide column row must carry its own overflow rule: {style}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (theme) `.bee/`'s dark-scheme rules are present in the shared
+    /// stylesheet under BOTH the theme-agnostic axis (`html[data-scheme=
+    /// "dark"]`, `contract.css`) and the atelier-specific one
+    /// (`html[data-theme="atelier"][data-scheme="dark"]`, `atelier.css`) —
+    /// and neither is gated behind a `prefers-color-scheme` media query
+    /// anywhere in the bundle. That absence is the "beats the OS in both
+    /// directions" guarantee made structural rather than incidental: the
+    /// no-flash head script (`views::layout`) always resolves the saved
+    /// choice (or, absent one, the OS match) to one definite `data-scheme`
+    /// value before paint, and since no CSS in the bundle ever reads
+    /// `prefers-color-scheme` on its own, that resolved attribute is the
+    /// *only* thing either scheme's colours ever key off — an explicit
+    /// `dark` choice renders dark under an OS-light preference exactly as
+    /// it renders dark under OS-dark, and the same holds for an explicit
+    /// `light` choice under OS-dark. Covering only one direction (e.g.
+    /// asserting the dark rule exists but never checking that nothing lets
+    /// the OS preference leak in on its own) is the half-fix this test
+    /// exists to close.
+    #[test]
+    fn dark_scheme_rules_present_with_no_os_media_query_to_override_them() {
+        let css = views::APP_CSS;
+        assert!(
+            css.contains("html[data-scheme=\"dark\"]"),
+            "the theme-agnostic dark-scheme axis must be present in the bundle"
+        );
+        assert!(
+            css.contains("html[data-theme=\"atelier\"][data-scheme=\"dark\"]"),
+            "the atelier theme's own dark-scheme override must be present in the bundle"
+        );
+        assert!(
+            !css.contains("prefers-color-scheme"),
+            "no rule in the bundle may key its colours off prefers-color-scheme directly — \
+             the explicit data-scheme attribute (set once, before paint, by the no-flash \
+             script) must be the only thing either scheme's colours ever read, or an \
+             explicit choice could stop beating the OS preference in one direction"
+        );
+    }
+
+    /// (theme) The board's own rendered page carries the explicit
+    /// `data-theme="atelier"` attribute and the no-flash script that always
+    /// resolves to one definite `data-scheme` value (never leaving it
+    /// unset for a CSS media query to fill in) — the per-page half of the
+    /// same guarantee the stylesheet test above proves for the CSS itself.
+    #[tokio::test]
+    async fn board_page_carries_explicit_theme_attribute_and_no_flash_script() {
+        let root = fresh_root("theme-attribute");
+        write(&root, ".bee/cells/a.json", &cell_json("t1", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "theme-attribute");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains(r#"data-theme="atelier""#),
+            "the board page must carry the explicit atelier theme attribute: {body}"
+        );
+        assert!(
+            body.contains("setAttribute('data-scheme'"),
+            "the board page must carry the no-flash script that always resolves an explicit \
+             data-scheme value before paint: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (colour) Every severity/state chip the board renders carries a word
+    /// alongside its tone class — never a bare colour with no text a
+    /// colour-blind reader could fall back on. The fixture trips several
+    /// different tones at once (a stuck cell's Critical attention item, a
+    /// recorded gate-bypass Warning, plus the neutral "Needs attention"
+    /// count chip) so this is not just proving the one tone the happiest
+    /// fixture would hit.
+    #[tokio::test]
+    async fn board_severity_and_state_chips_always_carry_a_word_not_color_alone() {
+        let root = fresh_root("colour-chips");
+        write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
+        write(&root, ".bee/cells/a.json", &cell_json("stuck1", "blocked", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "colour-chips");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        let chips = chip_texts(&body);
+        assert!(
+            chips.len() >= 3,
+            "fixture must trip several tone chips to be a real probe, found {}: {body}",
+            chips.len()
+        );
+        for text in &chips {
+            assert!(
+                !text.trim().is_empty(),
+                "a fg-chip carried no text alongside its colour: {body}"
+            );
+        }
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (keyboard) The finished-work disclosure is a native `<details>`/
+    /// `<summary>` pair — reachable by Tab and operable with Enter/Space by
+    /// the browser's own default behaviour, never a click-only `<div>` that
+    /// would need a hand-rolled keyup handler to be operable at all — and
+    /// the board's own stylesheet gives that `<summary>` a visible focus
+    /// style, since the shared design system's generic focus-visible rule
+    /// only covers a `summary` nested inside `.fg-acc`, which this one is
+    /// not.
+    #[tokio::test]
+    async fn board_finished_disclosure_is_native_and_carries_a_visible_focus_style() {
+        let root = fresh_root("keyboard-disclosure");
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &timed_cell_json(
+                "k1",
+                "keyboard-disclosure-feature",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "keyboard-disclosure");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("<details class=\"bee-done-details\">")
+                && body.contains("<summary class=\"bee-done-summary\">"),
+            "the finished-work disclosure must be a native details/summary pair: {body}"
+        );
+        assert!(
+            !body.contains("<div class=\"bee-done-summary\""),
+            "the disclosure must never be a click-only div standing in for summary: {body}"
+        );
+
+        let style = board_style_block(&body);
+        assert!(
+            style.contains(".bee-done-summary:focus-visible"),
+            "the board must give the finished-work summary its own visible focus style, \
+             since the shared .fg-acc summary rule does not reach it: {style}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 }

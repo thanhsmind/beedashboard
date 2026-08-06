@@ -672,16 +672,16 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 <style>
 .bee-finished {{ margin-bottom: var(--space-4); }}
 .bee-phase-board {{ margin-bottom: var(--space-4); }}
-.bee-phase-board__cols {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); }}
+.bee-phase-board__cols {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); overflow-x: auto; }}
 .bee-phase-col__list {{ display: flex; flex-direction: column; gap: var(--space-2); }}
 .bee-phase-card {{ display: flex; flex-direction: column; }}
 .bee-done-summary {{ cursor: pointer; list-style: none; padding: var(--space-2) 0; font-weight: var(--weight-strong); color: var(--color-text); }}
 .bee-done-summary::-webkit-details-marker {{ display: none; }}
 .bee-done-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-2); padding-top: var(--space-2); }}
-.bee-done-line {{ display: block; color: var(--color-text-muted); font-size: var(--type-caption-size); text-decoration: none; padding: var(--space-1) 0; border-bottom: var(--border-width-hairline) solid var(--color-border); }}
+.bee-done-line {{ display: block; color: var(--color-text-muted); font-size: var(--type-caption-size); text-decoration: none; padding: var(--space-1) 0; border-bottom: var(--border-width-hairline) solid var(--color-border); overflow-wrap: anywhere; }}
 .bee-done-line:hover {{ color: var(--color-action); }}
 .bee-cell {{ padding: var(--space-2); gap: var(--space-1); }}
-.bee-cell .fg-card__title {{ font-size: var(--type-body-sm-size); }}
+.bee-cell .fg-card__title {{ font-size: var(--type-body-sm-size); overflow-wrap: anywhere; }}
 .bee-cell__meta {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }}
 .bee-velocity {{ margin-bottom: var(--space-4); }}
 .bee-velocity__head {{ margin: 0 0 var(--space-3) 0; }}
@@ -716,6 +716,23 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 .bee-attention__item--danger {{ border-color: var(--color-danger); background: var(--color-danger-tint); }}
 .bee-attention__item--warning {{ border-color: var(--color-warning); background: var(--color-warning-tint); }}
 .bee-attention__action {{ font-style: italic; }}
+.bee-done-summary:focus-visible {{ outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }}
+/* Narrow-screen pass (bbp-17): every multi-column grid this board declares
+   collapses to one column below this breakpoint (matches the sidebar
+   breakpoint in app.css) so a phone never needs the page itself to scroll
+   sideways — a genuinely wide container (the phase board's columns) keeps
+   its own `overflow-x` above instead of forcing the page wider. */
+@media (max-width: 700px) {{
+  .bee-stats,
+  .bee-now-grid,
+  .bee-phase-board__cols,
+  .bee-velocity__lists,
+  .bee-panels,
+  .bee-done-grid,
+  .bee-stepper {{
+    grid-template-columns: 1fr;
+  }}
+}}
 </style>
 <main class="fg-page">
   {top}
