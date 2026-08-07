@@ -238,6 +238,13 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .term-controls__row { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .term-keys { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .term-keys button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
+/* D5: the four screen-moving arrows sit directly under `.term-controls`
+   (`.term-controls > .term-keys`, not `.term-controls__row .term-keys` —
+   that reaches the named keys instead) and are pressed repeatedly while
+   reading a screen, often with a thumb, so they get a real 44px target with
+   the glyph at body size. The named keys beside them (Enter, Esc, Tab) are
+   pressed occasionally and deliberately and keep the smaller box above. */
+.term-controls > .term-keys button { min-width: 44px; min-height: 44px; font-size: var(--type-body-size); }
 /* terminal-scroll-2: the pair of scroll buttons ("Load older" / "Live")
    share `.term-keys button`'s own look — same padding, border, radius,
    background — rather than inventing a second button style beside it. */
@@ -3234,6 +3241,38 @@ mod tests {
         let html = terminal_create_controls("proj-1", &["<script>alert(1)</script>".to_string()]);
         assert!(!html.contains("<script>alert(1)</script>"), "{html}");
         assert!(html.contains("&lt;script&gt;"), "{html}");
+    }
+
+    /// D5 (terminal-pane-scope): the four screen-moving arrows sit in
+    /// `.term-controls > .term-keys`, pressed repeatedly while reading a
+    /// screen, often with a thumb — they get a 44px minimum box with the
+    /// glyph at body size. The named keys beside them
+    /// (`.term-controls__row .term-keys`), the scroll pair (`.term-scroll`)
+    /// and the reply buttons (`.term-reply__send`/`.term-reply__stage`)
+    /// carry no such rule.
+    #[test]
+    fn terminal_arrow_keys_get_a_larger_minimum_box_than_the_named_keys_row() {
+        let project = sample_project();
+        let html = terminal_page(&project, &[], &[]);
+        assert!(
+            html.contains(
+                ".term-controls > .term-keys button { min-width: 44px; min-height: 44px; font-size: var(--type-body-size); }"
+            ),
+            "the arrow group must carry a 44px minimum box at body-size type: {html}"
+        );
+        assert!(
+            !html.contains(".term-controls__row .term-keys button { min-width: 44px")
+                && !html.contains(".term-controls__row > .term-keys button { min-width: 44px"),
+            "the named-key row must carry no such rule: {html}"
+        );
+        assert!(
+            !html.contains(".term-scroll button { min-width: 44px") && !html.contains(".term-scroll { min-width: 44px"),
+            "the scroll pair must carry no such rule: {html}"
+        );
+        assert!(
+            !html.contains(".term-reply__send { min-width: 44px") && !html.contains(".term-reply__stage { min-width: 44px"),
+            "the reply buttons must carry no such rule: {html}"
+        );
     }
 
     /// toa-4 (D9): the settings page offers the Unassigned group's own
