@@ -24,14 +24,15 @@ implementation. Code entry points are listed in `reading-map.md`.
 
 - A registered project's page → a "Terminal" tab, always present, alongside
   the existing tabs, whether or not the terminal has ever been switched on.
-- Opening the Terminal tab → lists every coding agent herdr is running whose
-  working directory sits under this project's root, each with its
-  live-polled screen and a control to reply, plus a control to start a new
-  agent.
-- Opening the "Transcript" tab beside it → the same set of agents, each
-  showing its own activity log instead of a screen.
-- An agent whose working directory sits outside every registered project's
-  root → not listed on any project's tab; instead a card on the project list
+- Opening the Terminal tab → a strip naming every session herdr is running
+  in this project's folder, one entry each, and beneath it the one session
+  that entry selects: its live-polled screen and a control to reply, plus a
+  control to start a new agent. Each strip entry is its own address, so a
+  single session can be opened, sent, or bookmarked on its own.
+- Opening the "Transcript" tab beside it → the same strip over the same
+  sessions, the selected one showing its activity log instead of a screen.
+- A session whose folder sits outside every registered project's root → not
+  listed on any project's tab; instead a card on the project list
   page, "Unassigned agents," opens a page listing exactly those agents. The
   card itself carries no agent name and no working directory — it is a bare
   presence marker, shown only while both the terminal switch and the
@@ -46,8 +47,9 @@ implementation. Code entry points are listed in `reading-map.md`.
 
 | # | Element | Meaning | Values |
 |---|---|---|---|
-| 1 | Agent | One coding agent herdr is running, addressed by its own id | id, working directory (via its pane), status, current screen |
-| 2 | Pane | The addressable session an agent runs inside; every listed agent has exactly one, but a pane can exist with no agent record attached (a plain shell) — see Open Gaps for what that means today | id, working directory |
+| 1 | Agent | One coding agent herdr is running, addressed by its own id | id, folder (via its pane), status, current screen |
+| 2 | Pane | The addressable session, listed whether or not an agent runs inside it: every agent has exactly one, and a session opened with no agent started in it is listed too, as a shell | id, workspace and tab it sits in, launch folder, live folder, status, an agent when one is attached |
+| 2a | Status | What a listed session is doing, shown as a named dot on its entry | working, blocked, done, idle, unknown, or shell for a session with no agent; the first three each read as their own colour, the rest as the quiet one |
 | 3 | Screen | The agent's recent terminal contents, rendered with colour | a snapshot redrawn on each poll, not a live feed; a bounded tail of the pane's own scrollback rather than only the rows currently on screen, so a plain shell shows work that has already scrolled past, while an agent that redraws a full-screen interface has no scrollback to give and shows exactly its current frame; shown at the full height of one pane frame with its lines unwrapped, the box scrolling in both directions rather than re-flowing the frame |
 | 4 | Transcript | The agent's own activity log, read directly rather than through herdr | a gap-free running record of the agent's activity, independent of the screen poll; a fresh agent with nothing written yet reports that plainly rather than showing an empty log; if the record is found truncated or rewritten under the reader, the next read shows a visible divider rather than jumping silently; a single poll returns only a bounded number of lines, and when a poll has more than that bound, its oldest lines are marked as lost rather than silently dropped |
 | 5 | Terminal switch | The one switch standing between anyone who can reach the daemon and the terminal, transcript, and agent-creation family — there is no credential behind it | on / off, off by default |
@@ -63,12 +65,18 @@ implementation. Code entry points are listed in `reading-map.md`.
 
 - **Triggers:** opening a registered project's Terminal tab while the
   terminal switch is on.
-- **What it shows:** every agent whose working directory sits under this
-  project's root, each with its screen rendered as coloured text and a
-  control to reply. An agent belonging to a different project, or to none,
-  never appears here.
-- **Afterwards:** the operator sees exactly the agents that belong to this
-  project.
+- **What it shows:** a strip naming every session in this project's folder —
+  each entry carrying the workspace and tab it sits in and its status dot —
+  and beneath it exactly one of them: its screen rendered as coloured text
+  and a control to reply. Sessions with no agent are named as shells and are
+  listed like any other. A session belonging to a different project, or to
+  none, never appears here.
+- **Which one is shown:** the entry the address names. Opening the tab
+  without naming one shows the session the operator is currently focused on
+  when it belongs to this project, and otherwise the first in the strip, so
+  the tab always opens on something.
+- **Afterwards:** the operator sees exactly the sessions that belong to this
+  project, and has an address for each one on its own.
 
 ### Reaching a pane's older output
 
@@ -123,10 +131,15 @@ implementation. Code entry points are listed in `reading-map.md`.
 
 - **Triggers:** opening a registered project's Transcript tab while the
   terminal switch is on.
-- **What it shows:** the same set of agents as the Terminal tab, each showing
-  its own session log instead of a screen. An agent that has not written
+- **What it shows:** the same strip of sessions as the Terminal tab, the
+  selected one showing its own session log instead of a screen, and the same
+  rule picking it when the address names none. A session that has not written
   anything yet reports plainly that no transcript is available yet, rather
-  than showing an empty frame that could be mistaken for "caught up."
+  than showing an empty frame that could be mistaken for "caught up." A
+  session claimed by this project through its live folder rather than its
+  launch folder reads its log from that live folder, which is why one can
+  legitimately report nothing while the same session's log is full on the
+  project it was launched in.
 - **Afterwards:** the operator can see what an agent did even for output that
   has since scrolled off or been cleared — something the polled screen alone
   would lose. The screen and the transcript answer different questions and
@@ -294,15 +307,29 @@ operates mdview every time the network path to its port changes.
 
 ## Business Rules
 
-- **Project scoping (D2).** An agent's working directory decides which
-  project, if any, lists it; an agent under no registered project's root
-  appears only in the Unassigned group, never silently on some other
-  project's tab. This boundary is enforced on every action that names a
-  pane — viewing its screen, sending text, sending keys, reading its
-  transcript, listing it, and choosing where a new agent starts — never only
-  on listing and creation. It refuses a working directory that escapes the
-  project's root either by walking up through parent directories or by
-  following a symbolic link out of it.
+- **Project scoping (D2).** A session's folder decides which project, if
+  any, lists it, and a session carries two: the folder it was launched in
+  and the folder its foreground work is in right now. Either one inside the
+  project's root claims the session; the launch folder is asked first, so a
+  session already claimed by the project it started in never moves. A
+  session whose foreground work has walked into another registered project
+  is listed by that project too — being claimed twice is allowed, and each
+  project answers for it under its own boundary. The live folder is only
+  ever consulted on a machine that reports one.
+  This boundary is enforced on every action that names a session — viewing
+  its screen, sending text, sending keys, reading its transcript, listing
+  it, and choosing where a new agent starts — never only on listing and
+  creation. Both folders are put through the identical check: either one
+  that escapes the project's root, by walking up through parent directories
+  or by following a symbolic link out of it, is refused.
+- **Being listed is being reachable.** The same list that decides what the
+  operator sees is what decides what may be read from and typed into. So
+  every widening of it is a widening of reach: a shell session inside the
+  project's folder, invisible before, is now fully readable and writable by
+  anyone who can open the page, and so is a session that has merely walked
+  its foreground work into the folder. The terminal has no credential of its
+  own (see The terminal switch), so the switch and this boundary are the
+  whole of what stands there.
 - **Nothing lost (D5).** An agent whose working directory is outside every
   registered project is never dropped from view — it always appears, in the
   Unassigned group, gated by the terminal switch and the group's own switch
@@ -321,15 +348,14 @@ operates mdview every time the network path to its port changes.
   redrawn on each poll; the transcript is the agent's own gap-free log. They
   are kept as two tabs rather than one, because collapsing them loses
   whichever one isn't currently showing.
-- **An agent is not its pane.** "Agent" is what the operator sees and picks —
-  a coding agent herdr is running. "Pane" is the session it runs inside.
-  Every agent has exactly one pane, but the reverse does not hold: a plain
-  shell opened with no agent started in it is a pane with no agent record,
-  and today it is invisible to the operator once created — not listed on any
-  project's tab, not in the Unassigned group, addressable by nothing the
-  Terminal tab exposes. Whether that gap should be closed by showing
-  agentless panes too, or by treating "Unassigned"/D5 as being about panes
-  rather than agents throughout, is open — see Open Gaps.
+- **An agent is not its pane.** "Agent" is the coding agent herdr is
+  running; "pane" is the session it runs inside. Every agent has exactly one
+  pane, but the reverse does not hold — a plain shell opened with no agent
+  started in it is a pane with no agent. The project's own list is about
+  panes, so a shell in the project's folder is listed like anything else,
+  named as a shell rather than borrowing an agent's words. The Unassigned
+  group is still about agents only, so a shell outside every registered
+  project remains invisible — see Open Gaps.
 
 ## Edge Cases Settled
 
@@ -339,21 +365,28 @@ operates mdview every time the network path to its port changes.
   script-readable reason. Neither is a blank or typeless response.
 - Herdr not reachable: every affected view degrades to the named "herdr is
   not running" state rather than an error page or a blank screen.
-- An agent whose working directory is outside every registered project: it
-  is never dropped — it appears in the Unassigned group instead.
+- An agent whose folder is outside every registered project: it is never
+  dropped — it appears in the Unassigned group instead.
+- A session reporting neither folder: excluded from every project's list, and
+  every action naming it is refused.
+- A session named in an address but not in this project's list: the ordinary
+  not-found page, and the answer never repeats the id or folder it refused.
+- A project with no sessions at all: its own named empty state, not a
+  not-found.
 - An agent with no transcript written yet: answered as a named, successful
   "nothing yet" state, never as an empty list indistinguishable from "caught
   up, nothing new."
 
 ## Open Gaps
 
-- **A plain shell is created but not addressable afterward.** D5's wording
-  says "panes"; herdr keeps agents and panes as independent lists, and both
-  the project listing and the Unassigned group iterate agents only. A plain
-  shell started through the creation control therefore never becomes visible
-  or reachable anywhere in the terminal surface once it exists. This is the
-  user's call, not something this spec resolves — recorded as an outstanding
-  question in `docs/history/agent-terminal/CONTEXT.md`.
+- **A plain shell outside every project is still not addressable.** The
+  project's own list now covers shells, so one inside a registered folder is
+  visible and reachable. The Unassigned group is not: it still lists agents
+  only, so a shell under no registered project appears nowhere. D5's wording
+  says "panes", so the group is narrower than its own decision. This was left
+  deliberately: widening that group would expose every shell on the machine
+  through a surface that carries no containment check of its own. Closing it
+  properly is the user's call.
 - Confirmation against a real, running herdr (rather than a test double) is
   a manual check at UAT, not something automated coverage certifies.
 - Mobile-specific layout for this surface, carried over as an idea from
@@ -366,13 +399,19 @@ No settled screenshot captured yet.
 ## Pointers (implementation)
 
 - `crates/mdview/src/server.rs` — the routes themselves (`/p/:id/_terminal`,
-  `/p/:id/_transcript`, their screen/input/keys/create children, and the
-  `/_terminal/unassigned` family), each gated behind `terminal_family_enabled`
+  `/p/:id/_transcript`, their per-pane `pane/:pane_id` pages, their
+  screen/input/keys/create children, and the `/_terminal/unassigned` family),
+  each gated behind `terminal_family_enabled`
   alone (`unassigned_group_enabled` too, for the Unassigned family) — there is
   no authentication extractor left anywhere in this file; `project_panes`
-  (agents joined to their pane's cwd, filtered by the D2 boundary) is what
-  makes a plain shell invisible to listing and to every pane-scoped action
-  (`project_and_verify_pane_in_boundary`, `project_pane_cwd_in_boundary`);
+  iterates `snapshot.panes` and accepts a pane whose `cwd` validates against
+  the D2 boundary, falling back to `foreground_cwd` when `cwd` is absent or
+  refused, joining the agent afterwards by `pane_id` — it is the single
+  membership decision behind every pane-scoped action
+  (`project_and_verify_pane_in_boundary`, `project_pane_cwd_in_boundary`),
+  and the path it returns is the validated one, which is what keeps a
+  transcript read inside the root; `unassigned_panes` subtracts that set but
+  keeps its own agent-only output loop, so it can only ever shrink;
   `CreatePaneBody`/`CreateAgentBody` are the (empty / preset-label-only)
   request shapes a creation call actually sends; `update_terminal_config` is
   the one route that saves the switches plus the notify destination/credential,
@@ -385,9 +424,11 @@ No settled screenshot captured yet.
   its socket (or named pipe on Windows).
 - `crates/mdview/src/supervisor.rs`, `crates/mdview/src/notify/` — the two
   opt-in background duties.
-- `crates/mdview/src/views.rs` — the tab pages, screen/transcript rendering,
-  the herdr-down state's wording, and `project_list_page`'s presence-only
-  Unassigned card.
+- `crates/mdview/src/views.rs` — the tab pages, the pane tab strip and its
+  per-pane hrefs, the `<workspace> · <tab>` identity and the `.fg-status`
+  pill that carries a session's status, screen/transcript rendering, the
+  44px arrow target (`.term-controls > .term-keys button`), the herdr-down
+  state's wording, and `project_list_page`'s presence-only Unassigned card.
 - `crates/mdview-core/src/config.rs` — the D7 switches and the agent-create
   presets in `Config`; `masked_notify_credential`/`save_notify_credential`
   keep the notify credential write-only.
