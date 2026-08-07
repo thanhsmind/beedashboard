@@ -28,15 +28,17 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
   }} catch (e) {{}}
 }})();
 </script>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="{css_url}">
 <link rel="stylesheet" href="/highlight.css">
 {head_extra}
 </head>
 <body>
 {body}
-<script src="/static/app.js"></script>
+<script src="{js_url}"></script>
 </body>
-</html>"#
+</html>"#,
+        css_url = app_css_url(),
+        js_url = app_js_url(),
     )
 }
 
@@ -2916,6 +2918,27 @@ pub const APP_CSS: &str = concat!(
     include_str!("../assets/app.css"),
 );
 pub const APP_JS: &str = include_str!("../assets/app.js");
+
+/// Cache-busting fingerprints for the two stylesheet/script URLs the layout
+/// emits. Both assets are served `no-cache`, which asks a browser to
+/// revalidate but leaves it free to keep serving what it already has while it
+/// does — and with no validator on the response there is nothing for it to
+/// revalidate against, so a stale copy could survive a plain reload. A URL
+/// carrying the content's own hash cannot: change the file and the URL is a
+/// different URL, which no cache has an entry for.
+fn asset_fingerprint(content: &str) -> String {
+    format!("{:x}", mdview_core::ansi::revision_of(content))
+}
+
+/// `/static/app.css?v=…` — the stylesheet URL with its fingerprint.
+pub fn app_css_url() -> String {
+    format!("/static/app.css?v={}", asset_fingerprint(APP_CSS))
+}
+
+/// `/static/app.js?v=…` — the script URL with its fingerprint.
+pub fn app_js_url() -> String {
+    format!("/static/app.js?v={}", asset_fingerprint(APP_JS))
+}
 /// Vendored Mermaid (self-contained UMD build) served at /static/mermaid.min.js
 /// so diagrams render without a CDN. Only loaded on pages that contain a diagram.
 pub const MERMAID_JS: &str = include_str!("../assets/mermaid.min.js");
@@ -2924,6 +2947,34 @@ pub const MERMAID_JS: &str = include_str!("../assets/mermaid.min.js");
 mod tests {
     use super::*;
     use mdview_core::bee::{BeeApprovedGates, BeeGateRevocations};
+
+    /// Every page's stylesheet and script URL carries the asset's own content
+    /// fingerprint, so an edit to either lands on a browser that has the old
+    /// one cached: the URL itself changes, and no cache holds an entry for a
+    /// URL it has never seen. Without this a reload could keep serving the
+    /// stale copy — `no-cache` asks for revalidation, but the responses carry
+    /// no validator to revalidate against.
+    #[test]
+    fn asset_urls_carry_a_content_fingerprint() {
+        let page = layout("t", "", "<p>body</p>");
+        let css = app_css_url();
+        let js = app_js_url();
+        assert!(css.starts_with("/static/app.css?v="), "{css}");
+        assert!(js.starts_with("/static/app.js?v="), "{js}");
+        assert_ne!(
+            css.split("v=").nth(1),
+            js.split("v=").nth(1),
+            "two different assets must not fingerprint alike: {css} vs {js}"
+        );
+        assert!(page.contains(&format!("href=\"{css}\"")), "{page}");
+        assert!(page.contains(&format!("src=\"{js}\"")), "{page}");
+        // A changed asset must produce a changed URL — the whole point.
+        assert_ne!(
+            asset_fingerprint("a"),
+            asset_fingerprint("b"),
+            "different content must fingerprint differently"
+        );
+    }
 
     /// (regression, bbp-7 — the live defect, view-level) A gate that is
     /// currently approved renders its step as done, whatever
