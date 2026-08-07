@@ -38,12 +38,6 @@ async-trait.workspace = true
 interprocess.workspace = true
 rand.workspace = true
 
-# Constant-time token comparison in terminal_auth.rs (agent-terminal-7): a
-# hand-rolled XOR loop has no compiler barrier against being optimized into
-# an early-exit, which would reopen the timing leak the comparison exists
-# to close.
-subtle = "2.6"
-
 # Telegram notification transport (agent-terminal-17, D1/D7): rustls instead
 # of native TLS keeps the build self-contained (no system OpenSSL). Serde's
 # json feature is already pulled in via serde_json above; requested again

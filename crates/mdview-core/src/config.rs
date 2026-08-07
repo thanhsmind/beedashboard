@@ -74,6 +74,19 @@ pub struct TerminalConfig {
     /// D7: Telegram notification on agent status change. mdview makes no
     /// outbound call while this is off.
     pub notify_enabled: bool,
+    /// toa-4 (D9): the Unassigned group — panes that live outside every
+    /// registered project's root. This group has no containment check of
+    /// its own; before terminal-open-access removed the terminal's session,
+    /// that session was the only thing authorizing it (`server.rs`'s
+    /// `unassigned_panes` doc comment). With no session left to lean on,
+    /// this switch is a second, deliberate gate on top of `enabled` above —
+    /// both must be on for the group's routes to answer, so turning off
+    /// `enabled` alone still closes this group, and turning this switch on
+    /// while `enabled` is off opens nothing. `#[derive(Default)]` on this
+    /// struct gives it `false`, matching a config that has never mentioned
+    /// it — the same "off unless the owner made a deliberate act" rule
+    /// every other switch in this section follows.
+    pub unassigned_enabled: bool,
     /// D8/P4: operator-authored agent-create presets, keyed by label — the
     /// terminal page's creation controls
     /// (`crates/mdview/src/views.rs::terminal_create_controls`) offer
@@ -435,6 +448,7 @@ mod tests {
         assert!(!c.terminal.enabled);
         assert!(!c.terminal.supervisor_enabled);
         assert!(!c.terminal.notify_enabled);
+        assert!(!c.terminal.unassigned_enabled);
 
         // Round-trips through TOML with no token anywhere in the section.
         let dir = std::env::temp_dir().join(format!("mdview-cfg-terminal-{}", std::process::id()));
@@ -447,6 +461,28 @@ mod tests {
         assert!(!loaded.terminal.enabled);
         assert!(!loaded.terminal.supervisor_enabled);
         assert!(!loaded.terminal.notify_enabled);
+        assert!(!loaded.terminal.unassigned_enabled);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unassigned_switch_defaults_off_when_the_key_is_absent_from_the_file() {
+        // toa-4 (D9): the shipped-default test above only proves the
+        // switch is off in a file *this build* wrote (which always
+        // includes the key, since `#[serde(default)]` doesn't suppress
+        // serialization). The truth that matters is stronger: an
+        // *existing* install's config.toml — hand-authored or written by a
+        // build that predates this switch entirely — has never heard of
+        // `unassigned_enabled`, and loading it must still resolve to off,
+        // not fail to parse and not silently read as on.
+        let dir = std::env::temp_dir().join(format!("mdview-cfg-unassigned-absent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        std::fs::write(&p, "[terminal]\nenabled = true\nsupervisor_enabled = true\n").unwrap();
+        let loaded = Config::load_from(&p);
+        assert!(loaded.terminal.enabled);
+        assert!(loaded.terminal.supervisor_enabled);
+        assert!(!loaded.terminal.unassigned_enabled);
         std::fs::remove_dir_all(&dir).ok();
     }
 

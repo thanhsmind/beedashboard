@@ -267,9 +267,14 @@ async fn index_page(State(st): State<AppState>) -> Response {
                 })
                 .collect();
             // D5/D4: presence only, never contents — this unauthenticated
-            // route reads only the D7 switch (no herdr call, no session), so
-            // it can never learn whether any pane is actually unassigned.
-            let unassigned_visible = terminal_family_enabled(&st);
+            // route reads only the D7 and, per toa-4/D9, the group's own
+            // switch (no herdr call, no session), so it can never learn
+            // whether any pane is actually unassigned. toa-4: once the
+            // group is off by policy — its own switch, not merely an empty
+            // pane list — this marker itself becomes a disclosure ("this
+            // machine has a host-wide pane group configured"), so it must
+            // track both switches, not the family switch alone.
+            let unassigned_visible = terminal_family_enabled(&st) && unassigned_group_enabled(&st);
             Html(views::project_list_page(&with_counts, unassigned_visible)).into_response()
         }
         Err(e) => internal_error(&e.to_string()),
@@ -383,6 +388,14 @@ struct TerminalConfigJson {
     supervisor_enabled: bool,
     #[serde(default)]
     notify_enabled: bool,
+    /// toa-4 (D9): the Unassigned group's own switch, ANDed with `enabled`
+    /// above at every unassigned route (`unassigned_group_enabled`) —
+    /// turning this on alone opens nothing while `enabled` stays off.
+    /// `#[serde(default)]` matches the other switches on this struct: a
+    /// hand-built or partial JSON body that omits this key is refused
+    /// safely (reads as off) rather than with a hard parse error.
+    #[serde(default)]
+    unassigned_enabled: bool,
     /// D7/D9 notification destination — a plain (non-secret) field, see
     /// `TerminalConfig::notify_chat_id`. Only overwrites the stored value
     /// when non-blank, matching every other optional field on this form
@@ -416,12 +429,20 @@ struct TerminalConfigJson {
 /// never answers — so the browser refuses to send it cross-origin at all.
 /// `assets/app.js` submits the settings page's terminal form as JSON via
 /// `fetch` for exactly this reason.
+///
+/// toa-4 (D9): `form.unassigned_enabled` is saved the same unconditional
+/// way as the other three switches — a body that omits the key is not
+/// "leave it alone", it is "off" (`TerminalConfigJson`'s `#[serde(default)]`
+/// doc). That fail-closed reading is deliberate for this switch: it is the
+/// gate on every herdr pane on the host that lives outside a registered
+/// project, so an ambiguous or partial write must never be read as "on".
 async fn update_terminal_config(State(st): State<AppState>, Json(form): Json<TerminalConfigJson>) -> Response {
     let config_path = mdview_core::config::config_path_override(st.config_data_dir.as_deref());
     let mut cfg = mdview_core::Config::load_from(&config_path);
     cfg.terminal.enabled = form.enabled;
     cfg.terminal.supervisor_enabled = form.supervisor_enabled;
     cfg.terminal.notify_enabled = form.notify_enabled;
+    cfg.terminal.unassigned_enabled = form.unassigned_enabled;
     if let Some(dest) = form
         .notify_chat_id
         .as_deref()
@@ -755,6 +776,26 @@ fn terminal_family_enabled(st: &AppState) -> bool {
         st.config_data_dir.as_deref(),
     ));
     cfg.terminal.enabled
+}
+
+/// toa-4 (D9): the Unassigned group's own gate, checked in addition to
+/// `terminal_family_enabled` above, never instead of it. This group reaches
+/// every herdr pane on the host that is not inside a registered project's
+/// root — unrelated repositories, root shells, other people's agents — and
+/// it has no containment check of its own (`unassigned_panes`'s doc
+/// comment): before D1 removed the terminal's session, that session was
+/// what authorized it. With no session left, turning this switch on is the
+/// deliberate act D9 requires, and turning off the family switch alone
+/// (`enabled`) still closes this group even if this switch stays on — the
+/// two are ANDed, not substitutes for one another. `cfg.terminal
+/// .unassigned_enabled` defaults to `false` (`TerminalConfig`'s
+/// `#[derive(Default)]`), so a config that has never mentioned this key
+/// reads as off, not merely the shipped default file.
+fn unassigned_group_enabled(st: &AppState) -> bool {
+    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+        st.config_data_dir.as_deref(),
+    ));
+    cfg.terminal.unassigned_enabled
 }
 
 /// D12's disabled answer for a terminal **page** route (`terminal_page`,
@@ -1369,13 +1410,15 @@ fn project_panes(
 /// agent-terminal-11: a project whose own boundary fails to construct used
 /// to contribute nothing to `assigned`, which meant *that project's own*
 /// panes fell through and rendered here as if they belonged to no project —
-/// the exact widening this group's session gate is the last line of defense
-/// against (per P6, there is no second containment check for this group; the
-/// gate is what authorizes). There is no way to tell, without a working
-/// boundary, which of the project's real panes those were — so the whole
-/// group fails closed to empty rather than guess, the same "fail closed to
-/// zero, not a crash and not a laxer check" rule `terminal_page` already
-/// applies to a single unconstructible project.
+/// the exact widening this group's own gate is the last line of defense
+/// against (per P6, there is no second containment check for this group;
+/// toa-4/D9's `unassigned_enabled` switch, checked by every caller of this
+/// function, is what authorizes it now that D1 removed the session that
+/// used to). There is no way to tell, without a working boundary, which of
+/// the project's real panes those were — so the whole group fails closed to
+/// empty rather than guess, the same "fail closed to zero, not a crash and
+/// not a laxer check" rule `terminal_page` already applies to a single
+/// unconstructible project.
 ///
 /// A pane's raw, unvalidated cwd is used for display here (or left empty if
 /// herdr never reported one) — never resolved through any `Boundary`, since
@@ -1425,9 +1468,10 @@ fn unassigned_panes(
         .collect()
 }
 
-/// `GET /_terminal/unassigned` (D5/D6/D12) — the cross-project pane list.
-/// Guarded identically to `terminal_page`: the D7 enabled switch (D12: the
-/// ordinary not-found page when off) — every registered project's own
+/// `GET /_terminal/unassigned` (D5/D6/D9/D12) — the cross-project pane
+/// list. Guarded by both the D7 family switch and, per toa-4/D9, the
+/// group's own `unassigned_group_enabled` switch (D12: the ordinary
+/// not-found page when either is off) — every registered project's own
 /// boundary check happens inside `unassigned_panes`, not here. A silent
 /// herdr socket renders the same D6 remedy `terminal_page` uses.
 ///
@@ -1438,7 +1482,7 @@ fn unassigned_panes(
 /// registry renders the group empty, the same as `unassigned_panes` failing
 /// closed on an unconstructable project boundary.
 async fn unassigned_terminal_page(State(st): State<AppState>) -> Response {
-    if !terminal_family_enabled(&st) {
+    if !terminal_family_enabled(&st) || !unassigned_group_enabled(&st) {
         return terminal_disabled_page();
     }
     let Ok(projects) = st.engine.list_projects() else {
@@ -1483,12 +1527,13 @@ async fn verify_pane_is_unassigned(st: &AppState, pane_id: &str) -> std::result:
     Ok(())
 }
 
-/// `GET /_terminal/unassigned/:pane_id/screen` (D5/D6/D12) — one unassigned
-/// pane's current screen, the same shape `terminal_screen` returns for a
-/// project's own pane. Guarded identically: the D7 switch (D12: a reasoned
-/// JSON 404 when off), then `verify_pane_is_unassigned`.
+/// `GET /_terminal/unassigned/:pane_id/screen` (D5/D6/D9/D12) — one
+/// unassigned pane's current screen, the same shape `terminal_screen`
+/// returns for a project's own pane. Guarded identically: the D7 switch
+/// and, per toa-4/D9, the group's own switch (D12: a reasoned JSON 404
+/// when either is off), then `verify_pane_is_unassigned`.
 async fn unassigned_terminal_screen(State(st): State<AppState>, Path(pane_id): Path<String>) -> Response {
-    if !terminal_family_enabled(&st) {
+    if !terminal_family_enabled(&st) || !unassigned_group_enabled(&st) {
         return terminal_disabled_json_404();
     }
     if let Err(refusal) = verify_pane_is_unassigned(&st, &pane_id).await {
@@ -1504,16 +1549,17 @@ async fn unassigned_terminal_screen(State(st): State<AppState>, Path(pane_id): P
     }
 }
 
-/// `POST /_terminal/unassigned/:pane_id/input` (D3/D5) — the Unassigned
+/// `POST /_terminal/unassigned/:pane_id/input` (D3/D5/D9) — the Unassigned
 /// group's write path from agent-terminal-9: free-text reply, same
 /// `ReplyBody { text, submit }` shape and the same send≠submit semantics as
-/// `terminal_input`. Guarded identically, via `verify_pane_is_unassigned`.
+/// `terminal_input`. Guarded identically, plus toa-4/D9's own group switch,
+/// via `verify_pane_is_unassigned`.
 async fn unassigned_terminal_input(
     State(st): State<AppState>,
     Path(pane_id): Path<String>,
     Json(body): Json<ReplyBody>,
 ) -> Response {
-    if !terminal_family_enabled(&st) {
+    if !terminal_family_enabled(&st) || !unassigned_group_enabled(&st) {
         return terminal_disabled_json_404();
     }
     if let Err(refusal) = verify_pane_is_unassigned(&st, &pane_id).await {
@@ -1526,16 +1572,16 @@ async fn unassigned_terminal_input(
     }
 }
 
-/// `POST /_terminal/unassigned/:pane_id/keys` (D3/D5) — the Unassigned
+/// `POST /_terminal/unassigned/:pane_id/keys` (D3/D5/D9) — the Unassigned
 /// group's other write path from agent-terminal-9: named key presses, same
-/// `KeysBody { keys }` shape as `terminal_keys`. Guarded identically, via
-/// `verify_pane_is_unassigned`.
+/// `KeysBody { keys }` shape as `terminal_keys`. Guarded identically, plus
+/// toa-4/D9's own group switch, via `verify_pane_is_unassigned`.
 async fn unassigned_terminal_keys(
     State(st): State<AppState>,
     Path(pane_id): Path<String>,
     Json(body): Json<KeysBody>,
 ) -> Response {
-    if !terminal_family_enabled(&st) {
+    if !terminal_family_enabled(&st) || !unassigned_group_enabled(&st) {
         return terminal_disabled_json_404();
     }
     if body.keys.len() > MAX_KEYS_PER_REQUEST {
@@ -5912,7 +5958,7 @@ mod bee_route_tests {
             .uri("/api/config")
             .header("content-type", "application/x-www-form-urlencoded")
             .body(Body::from(
-                "port=58312&enabled=on&supervisor_enabled=on&notify_enabled=on",
+                "port=58312&enabled=on&supervisor_enabled=on&notify_enabled=on&unassigned_enabled=on",
             ))
             .unwrap();
         let resp = router(st).oneshot(req).await.unwrap();
@@ -5931,6 +5977,10 @@ mod bee_route_tests {
         assert!(
             !saved.terminal.notify_enabled,
             "POST /api/config flipped the notify switch"
+        );
+        assert!(
+            !saved.terminal.unassigned_enabled,
+            "POST /api/config flipped the toa-4 (D9) Unassigned group switch"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -5957,7 +6007,8 @@ mod bee_route_tests {
                         serde_json::json!({
                             "enabled": true,
                             "supervisor_enabled": true,
-                            "notify_enabled": true
+                            "notify_enabled": true,
+                            "unassigned_enabled": true
                         })
                         .to_string(),
                     ))
@@ -5975,6 +6026,7 @@ mod bee_route_tests {
         assert!(saved.terminal.enabled);
         assert!(saved.terminal.supervisor_enabled);
         assert!(saved.terminal.notify_enabled);
+        assert!(saved.terminal.unassigned_enabled);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6519,6 +6571,7 @@ mod bee_route_tests {
         assert_eq!(json["terminal"]["enabled"], serde_json::json!(false));
         assert_eq!(json["terminal"]["supervisor_enabled"], serde_json::json!(false));
         assert_eq!(json["terminal"]["notify_enabled"], serde_json::json!(false));
+        assert_eq!(json["terminal"]["unassigned_enabled"], serde_json::json!(false));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6568,6 +6621,17 @@ mod bee_route_tests {
     fn enable_terminal(dir: &Path) {
         let mut cfg = Config::load_from(&dir.join("config.toml"));
         cfg.terminal.enabled = true;
+        cfg.save_to(&dir.join("config.toml")).unwrap();
+    }
+
+    /// toa-4 (D9): writes `dir/config.toml` with the Unassigned group's own
+    /// switch on, leaving whatever `terminal.enabled` already is untouched.
+    /// The two switches are ANDed (`unassigned_group_enabled`'s doc) — a
+    /// test that wants the group's routes to actually run must call
+    /// `enable_terminal` too, in either order.
+    fn enable_unassigned_group(dir: &Path) {
+        let mut cfg = Config::load_from(&dir.join("config.toml"));
+        cfg.terminal.unassigned_enabled = true;
         cfg.save_to(&dir.join("config.toml")).unwrap();
     }
 
@@ -6852,6 +6916,10 @@ mod bee_route_tests {
     async fn every_terminal_route_answers_with_no_cookie_and_no_token_present() {
         let dir = fresh_root("terminal-no-cookie-happy-path");
         enable_terminal(&dir);
+        // toa-4 (D9): the Unassigned assertions below need their own switch
+        // too, or they exercise the disabled response rather than the real,
+        // no-auth logic this test is proving.
+        enable_unassigned_group(&dir);
         let root = fresh_root("terminal-no-cookie-happy-path-project");
         let st = build_state_with_dir(&dir);
         let project = register(&st, &root, "no-cookie-happy-path");
@@ -8233,6 +8301,91 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// toa-4 (D9), the truth this cell exists to prove: the Unassigned
+    /// group's own switch is ANDed with the D7 family switch (`enabled`),
+    /// never a substitute for it and never substituted by it. Every one of
+    /// the group's four routes — page and the three data routes — answers
+    /// not-found unless BOTH switches are on; turning on `terminal.enabled`
+    /// alone (the switch every install already knows) must not be read as
+    /// turning on a group that reaches every herdr pane on the host.
+    #[tokio::test]
+    async fn unassigned_group_answers_not_found_unless_both_its_switches_are_on() {
+        async fn assert_all_not_found(app: &Router, label: &str) {
+            let page = app.clone().oneshot(unassigned_req(None)).await.unwrap();
+            assert_eq!(page.status(), StatusCode::NOT_FOUND, "{label}: page route");
+            let screen = app
+                .clone()
+                .oneshot(unassigned_screen_req("no-such-pane", None))
+                .await
+                .unwrap();
+            assert_eq!(screen.status(), StatusCode::NOT_FOUND, "{label}: screen route");
+            let input = app
+                .clone()
+                .oneshot(unassigned_input_req("no-such-pane", "hi", true, None))
+                .await
+                .unwrap();
+            assert_eq!(input.status(), StatusCode::NOT_FOUND, "{label}: input route");
+            let keys = app
+                .clone()
+                .oneshot(unassigned_keys_req("no-such-pane", &["enter"], None))
+                .await
+                .unwrap();
+            assert_eq!(keys.status(), StatusCode::NOT_FOUND, "{label}: keys route");
+        }
+
+        // Neither switch: the default a fresh install and an install that
+        // has never heard of this switch both start from.
+        let dir_neither = fresh_root("unassigned-both-switches-neither");
+        let app_neither = router(build_state_with_dir(&dir_neither));
+        assert_all_not_found(&app_neither, "neither switch").await;
+        std::fs::remove_dir_all(&dir_neither).ok();
+
+        // The family switch on, the group's own switch still off — the
+        // case D9 exists for. An owner who only ever turned on
+        // `terminal.enabled` must not have silently opened this group.
+        let dir_family_only = fresh_root("unassigned-both-switches-family-only");
+        enable_terminal(&dir_family_only);
+        let app_family_only = router(build_state_with_dir(&dir_family_only));
+        assert_all_not_found(&app_family_only, "family switch only").await;
+        std::fs::remove_dir_all(&dir_family_only).ok();
+
+        // The group's own switch on, the family switch off — the group is
+        // still part of the terminal family; its own switch does not
+        // resurrect it while the family itself is off.
+        let dir_group_only = fresh_root("unassigned-both-switches-group-only");
+        enable_unassigned_group(&dir_group_only);
+        let app_group_only = router(build_state_with_dir(&dir_group_only));
+        assert_all_not_found(&app_group_only, "group switch only").await;
+        std::fs::remove_dir_all(&dir_group_only).ok();
+
+        // Both on: the group answers for real — the page route succeeds,
+        // and a data route reaches its own real logic (a pane-not-found
+        // refusal naming the pane, not the disabled shape naming the
+        // switch), proving both switches together restore the group to
+        // exactly how it behaves in the rest of this module's coverage.
+        let dir_both = fresh_root("unassigned-both-switches-both");
+        enable_terminal(&dir_both);
+        enable_unassigned_group(&dir_both);
+        let app_both = router(build_state_with_dir(&dir_both));
+        let page_both = app_both.clone().oneshot(unassigned_req(None)).await.unwrap();
+        assert_eq!(
+            page_both.status(),
+            StatusCode::OK,
+            "both switches on: the page route must answer"
+        );
+        let screen_both = app_both
+            .oneshot(unassigned_screen_req("no-such-pane", None))
+            .await
+            .unwrap();
+        assert_eq!(screen_both.status(), StatusCode::NOT_FOUND);
+        let screen_both_body = body_string(screen_both).await;
+        assert!(
+            screen_both_body.contains("pane not found"),
+            "both switches on: expected the real pane-not-found refusal, not the disabled reason: {screen_both_body}"
+        );
+        std::fs::remove_dir_all(&dir_both).ok();
+    }
+
     /// The central D5 partition truth, both directions in one snapshot: a
     /// pane whose cwd sits under a registered project's root is listed on
     /// that project's own `/p/:id/_terminal` and never on
@@ -8247,6 +8400,7 @@ mod bee_route_tests {
 
         let dir = fresh_root("unassigned-partition-data");
         enable_terminal(&dir);
+        enable_unassigned_group(&dir); // toa-4 (D9): needed for the group's routes to run.
         let scratch = fresh_root("unassigned-partition-scratch");
         let project_root = scratch.join("owned-project");
         let stray_root = scratch.join("stray-agent-cwd");
@@ -8353,10 +8507,24 @@ mod bee_route_tests {
             "the home page must render exactly as before when the terminal switch is off: {body_off}"
         );
 
-        // Switch on: the presence marker appears, but the pane's own name
-        // and cwd never do — this route takes no session and makes no herdr
-        // call, so it structurally cannot leak them.
+        // toa-4 (D9): the family switch on, the group's own switch still
+        // off — the marker must stay absent. Turning on `terminal.enabled`
+        // alone must never be read as turning on the Unassigned group.
         enable_terminal(&dir);
+        let mut st_family_only = build_state_with_dir(&dir);
+        st_family_only.herdr = fake.clone();
+        let resp_family_only = get(router(st_family_only), "/").await;
+        assert_eq!(resp_family_only.status(), StatusCode::OK);
+        let body_family_only = body_string(resp_family_only).await;
+        assert!(
+            !body_family_only.contains("Unassigned") && !body_family_only.contains("unassigned"),
+            "the family switch alone must not surface the Unassigned group's presence marker: {body_family_only}"
+        );
+
+        // Both switches on: the presence marker appears, but the pane's own
+        // name and cwd never do — this route takes no session and makes no
+        // herdr call, so it structurally cannot leak them.
+        enable_unassigned_group(&dir);
         let mut st_on = build_state_with_dir(&dir);
         st_on.herdr = fake;
         let resp_on = get(router(st_on), "/").await;
@@ -8364,7 +8532,7 @@ mod bee_route_tests {
         let body_on = body_string(resp_on).await;
         assert!(
             body_on.contains("Unassigned agents"),
-            "the group's presence marker is missing once the switch is on: {body_on}"
+            "the group's presence marker is missing once both switches are on: {body_on}"
         );
         assert!(
             !body_on.contains(&stray.name),
@@ -8391,6 +8559,7 @@ mod bee_route_tests {
 
         let dir = fresh_root("unassigned-write-paths");
         enable_terminal(&dir);
+        enable_unassigned_group(&dir); // toa-4 (D9): needed for the group's routes to run.
         let scratch = fresh_root("unassigned-write-paths-scratch");
         let project_root = scratch.join("owned");
         let stray_root = scratch.join("stray");
@@ -8570,6 +8739,7 @@ mod bee_route_tests {
 
         let dir = fresh_root("unassigned-boundary-unconstructable");
         enable_terminal(&dir);
+        enable_unassigned_group(&dir); // toa-4 (D9): needed for the group's routes to run.
         let scratch = fresh_root("unassigned-boundary-unconstructable-scratch");
         let stray_root = scratch.join("stray");
         std::fs::create_dir_all(&stray_root).unwrap();
@@ -8665,6 +8835,7 @@ mod bee_route_tests {
     async fn unassigned_keys_request_exceeding_the_bound_is_refused_without_reaching_herdr() {
         let dir = fresh_root("unassigned-keys-bound");
         enable_terminal(&dir);
+        enable_unassigned_group(&dir); // toa-4 (D9): needed for the group's routes to run.
         let scratch = fresh_root("unassigned-keys-bound-scratch");
         let stray_root = scratch.join("stray");
         std::fs::create_dir_all(&stray_root).unwrap();

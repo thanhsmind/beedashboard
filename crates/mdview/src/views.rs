@@ -41,12 +41,15 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
 }
 
 /// `unassigned_visible` is D5/D4's presence marker, never contents: `true`
-/// exactly when the D7 `terminal.enabled` switch is on (checked with no
+/// exactly when both the D7 `terminal.enabled` switch and, per toa-4/D9,
+/// the group's own `unassigned_enabled` switch are on (checked with no
 /// herdr call and no session, so this unauthenticated page never learns
 /// whether any pane is actually unassigned) — renders a link to
-/// `/_terminal/unassigned`, whose own route is gated like every other
-/// terminal route. `false` (the default) renders this page byte-identical
-/// to how it looked before this feature existed.
+/// `/_terminal/unassigned`, whose own route is gated identically. `false`
+/// (the default for either switch) renders this page byte-identical to how
+/// it looked before this feature existed — the group being off by policy
+/// rather than by an empty pane list means this marker must disappear too,
+/// not just the panes it would have listed.
 pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool) -> String {
     let listing = if projects.is_empty() {
         "<p class=\"fg-empty\">Chưa có project nào. Đăng ký: <code>mdview register &lt;dir&gt;</code> hoặc gọi MCP <code>mdview_view_file</code>.</p>".to_string()
@@ -2783,6 +2786,8 @@ pub fn settings_page(
       <label class="fg-check"><input type="checkbox" name="enabled" {term_enabled}><span class="fg-check__text">Enable the terminal</span></label>
       <label class="fg-check"><input type="checkbox" name="supervisor_enabled" {term_supervisor}><span class="fg-check__text">Keep herdr running (supervisor)</span></label>
       <label class="fg-check"><input type="checkbox" name="notify_enabled" {term_notify}><span class="fg-check__text">Notify on agent status change</span></label>
+      <label class="fg-check"><input type="checkbox" name="unassigned_enabled" {term_unassigned}><span class="fg-check__text">Show unassigned agent panes</span></label>
+      <span class="fg-field__hint">Off by default. Turning this on makes every agent pane on this machine readable and writable through the browser, including ones outside any project mdview knows about — unrelated repositories, root shells, other people's agents. It has no boundary check of its own.</span>
     </fieldset>
     <fieldset><legend>Telegram notification</legend>
       <div class="fg-field">
@@ -2817,6 +2822,7 @@ pub fn settings_page(
         term_enabled = checked(cfg.terminal.enabled),
         term_supervisor = checked(cfg.terminal.supervisor_enabled),
         term_notify = checked(cfg.terminal.notify_enabled),
+        term_unassigned = checked(cfg.terminal.unassigned_enabled),
         notify_chat_id = esc(cfg.terminal.notify_chat_id.as_deref().unwrap_or("")),
         notify_credential_hint = notify_credential_hint,
         notify_credential_placeholder = esc(&notify_credential_placeholder),
@@ -3090,5 +3096,37 @@ mod tests {
         let html = terminal_create_controls("proj-1", &["<script>alert(1)</script>".to_string()]);
         assert!(!html.contains("<script>alert(1)</script>"), "{html}");
         assert!(html.contains("&lt;script&gt;"), "{html}");
+    }
+
+    /// toa-4 (D9): the settings page offers the Unassigned group's own
+    /// switch, reflects the stored config value (unchecked by default,
+    /// checked once turned on), and states plainly — not softened — what
+    /// turning it on opens: every agent pane on this machine, including
+    /// ones outside any project, readable and writable through the
+    /// browser.
+    #[test]
+    fn settings_page_offers_the_unassigned_switch_with_plain_wording_and_reflects_its_value() {
+        let cfg_off = Config::default();
+        let html_off = settings_page(&cfg_off, false, false, NotifyCredentialView::NotConfigured);
+        assert!(
+            html_off.contains(r#"name="unassigned_enabled""#),
+            "the settings page must offer the Unassigned group's own switch: {html_off}"
+        );
+        assert!(
+            !html_off.contains(r#"name="unassigned_enabled" checked"#),
+            "the switch must render unchecked when the stored config is off: {html_off}"
+        );
+        assert!(
+            html_off.contains("every agent pane on this machine") && html_off.contains("readable and writable"),
+            "the switch's own wording must say plainly what turning it on opens, not softened: {html_off}"
+        );
+
+        let mut cfg_on = Config::default();
+        cfg_on.terminal.unassigned_enabled = true;
+        let html_on = settings_page(&cfg_on, false, false, NotifyCredentialView::NotConfigured);
+        assert!(
+            html_on.contains(r#"name="unassigned_enabled" checked"#),
+            "the switch must render checked once the stored config is on: {html_on}"
+        );
     }
 }
