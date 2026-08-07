@@ -808,6 +808,55 @@ pre.mermaid.zoomable:focus-within .mermaid-controls {
 .ansi-bg-bright-cyan { background-color: var(--color-info); }
 .ansi-bg-bright-white { background-color: var(--color-text); }
 
+/* ── The pane screen is its own dark surface ─────────────────────
+   The theme-token aliases above exist so a screen stays readable
+   whichever scheme the page is in. `.term-screen` opts out of that
+   premise: it paints a fixed dark terminal surface of its own, so the
+   page's scheme no longer decides what is legible inside it — the
+   sixteen colours below do, and they are the literal terminal palette
+   an operator expects to recognise. This is the one place the rule
+   above ("never redefine one of these as a literal colour") is
+   deliberately set aside, and only because the surface underneath is
+   itself fixed. Everywhere else outside `.term-screen`, the aliases
+   still rule.
+   The 256-colour block further down needs no such override — those are
+   already literal xterm colours, chosen against a dark terminal to
+   begin with. */
+.term-screen .ansi-fg-black { color: #3f4451; }
+.term-screen .ansi-fg-red { color: #e05561; }
+.term-screen .ansi-fg-green { color: #8cc265; }
+.term-screen .ansi-fg-yellow { color: #d18f52; }
+.term-screen .ansi-fg-blue { color: #4aa5f0; }
+.term-screen .ansi-fg-magenta { color: #c162de; }
+.term-screen .ansi-fg-cyan { color: #42b3c2; }
+.term-screen .ansi-fg-white { color: #d7dae0; }
+.term-screen .ansi-fg-bright-black { color: #4f5666; }
+.term-screen .ansi-fg-bright-red { color: #ff616e; }
+.term-screen .ansi-fg-bright-green { color: #a5e075; }
+.term-screen .ansi-fg-bright-yellow { color: #f0a45d; }
+.term-screen .ansi-fg-bright-blue { color: #4dc4ff; }
+.term-screen .ansi-fg-bright-magenta { color: #de73ff; }
+.term-screen .ansi-fg-bright-cyan { color: #4cd1e0; }
+.term-screen .ansi-fg-bright-white { color: #e6e6e6; }
+.term-screen .ansi-bg-black { background-color: #3f4451; }
+.term-screen .ansi-bg-red { background-color: #e05561; }
+.term-screen .ansi-bg-green { background-color: #8cc265; }
+.term-screen .ansi-bg-yellow { background-color: #d18f52; }
+.term-screen .ansi-bg-blue { background-color: #4aa5f0; }
+.term-screen .ansi-bg-magenta { background-color: #c162de; }
+.term-screen .ansi-bg-cyan { background-color: #42b3c2; }
+.term-screen .ansi-bg-white { background-color: #d7dae0; }
+.term-screen .ansi-bg-bright-black { background-color: #4f5666; }
+.term-screen .ansi-bg-bright-red { background-color: #ff616e; }
+.term-screen .ansi-bg-bright-green { background-color: #a5e075; }
+.term-screen .ansi-bg-bright-yellow { background-color: #f0a45d; }
+.term-screen .ansi-bg-bright-blue { background-color: #4dc4ff; }
+.term-screen .ansi-bg-bright-magenta { background-color: #de73ff; }
+.term-screen .ansi-bg-bright-cyan { background-color: #4cd1e0; }
+.term-screen .ansi-bg-bright-white { background-color: #e6e6e6; }
+/* Reverse video against the screen's own surface, not the page's. */
+.term-screen .ansi-inverse { color: #1c1f26; background-color: #d7dae0; }
+
 /* xterm 256-colour palette (indices 16-231: the 6x6x6 colour cube;
    232-255: the grayscale ramp). Indices 0-15 are never generated here —
    `ansi.rs` maps a 256-mode index below 16 onto the theme-aware classes
