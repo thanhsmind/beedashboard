@@ -458,10 +458,16 @@ async fn login_terminal(State(st): State<AppState>, Form(form): Form<LoginForm>)
 }
 
 #[derive(serde::Deserialize, Default)]
-struct TerminalConfigForm {
-    enabled: Option<String>,
-    supervisor_enabled: Option<String>,
-    notify_enabled: Option<String>,
+struct TerminalConfigJson {
+    /// D10: JSON booleans, not a checkbox's presence/absence — the client
+    /// (`assets/app.js`) always sends all three, `#[serde(default)]` only
+    /// guards a hand-built or partial body against a hard parse error.
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    supervisor_enabled: bool,
+    #[serde(default)]
+    notify_enabled: bool,
     /// D7/D9 notification destination — a plain (non-secret) field, see
     /// `TerminalConfig::notify_chat_id`. Only overwrites the stored value
     /// when non-blank, matching every other optional field on this form
@@ -482,15 +488,25 @@ struct TerminalConfigForm {
 /// see `SettingsForm`) can never touch them. toa-1 (D1): this route no
 /// longer requires a live terminal session to reach — it never gated
 /// `terminal_family_enabled` either, since it must stay reachable to turn
-/// the switch back on (see `terminal_family_enabled`'s doc). D10 (a JSON
-/// body only, closing the cross-site form-submission gap this leaves) is
-/// the next cell.
-async fn update_terminal_config(State(st): State<AppState>, Form(form): Form<TerminalConfigForm>) -> Response {
+/// the switch back on (see `terminal_family_enabled`'s doc).
+///
+/// D10: the body must be JSON. `Json<TerminalConfigJson>` rejects anything
+/// else — including an `application/x-www-form-urlencoded` submission —
+/// before this function body ever runs, so a form-encoded POST changes no
+/// switch. That matters because a form-encoded POST is a CORS *simple*
+/// request: no preflight, and this server has no CORS layer, so with D1's
+/// session gone, any page the owner happens to have open could otherwise
+/// submit one cross-site carrying the owner's own Cloudflare Access cookie.
+/// A JSON body is not a simple request — it forces a preflight this server
+/// never answers — so the browser refuses to send it cross-origin at all.
+/// `assets/app.js` submits the settings page's terminal form as JSON via
+/// `fetch` for exactly this reason.
+async fn update_terminal_config(State(st): State<AppState>, Json(form): Json<TerminalConfigJson>) -> Response {
     let config_path = mdview_core::config::config_path_override(st.config_data_dir.as_deref());
     let mut cfg = mdview_core::Config::load_from(&config_path);
-    cfg.terminal.enabled = form.enabled.is_some();
-    cfg.terminal.supervisor_enabled = form.supervisor_enabled.is_some();
-    cfg.terminal.notify_enabled = form.notify_enabled.is_some();
+    cfg.terminal.enabled = form.enabled;
+    cfg.terminal.supervisor_enabled = form.supervisor_enabled;
+    cfg.terminal.notify_enabled = form.notify_enabled;
     if let Some(dest) = form
         .notify_chat_id
         .as_deref()
@@ -6011,11 +6027,12 @@ mod bee_route_tests {
     }
 
     /// toa-1 (D1): the switches can be changed by any request that reaches
-    /// `POST /api/terminal-config` — no cookie, no token. D10 (a JSON body
-    /// only, closing the cross-site form-submission gap this leaves) is the
-    /// next cell.
+    /// `POST /api/terminal-config` — no cookie, no token. D10: the only
+    /// admission fee left is a JSON body — this is the "happy" proof that a
+    /// JSON POST sets every switch exactly as the old form submission did,
+    /// including the redirect the settings page relies on.
     #[tokio::test]
-    async fn terminal_switches_are_reachable_with_no_cookie_and_no_token() {
+    async fn a_json_post_sets_every_switch_with_no_cookie_and_no_token() {
         let dir = fresh_root("terminal-switches-open");
         let st = build_state_with_dir(&dir);
         let app = router(st);
@@ -6025,8 +6042,15 @@ mod bee_route_tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/terminal-config")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("enabled=on&supervisor_enabled=on&notify_enabled=on"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "enabled": true,
+                            "supervisor_enabled": true,
+                            "notify_enabled": true
+                        })
+                        .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -6041,6 +6065,151 @@ mod bee_route_tests {
         assert!(saved.terminal.enabled);
         assert!(saved.terminal.supervisor_enabled);
         assert!(saved.terminal.notify_enabled);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D10, the security proof this cell exists for: a form-encoded POST —
+    /// a CORS *simple* request, sendable cross-site with no preflight and
+    /// no CORS layer on this server — must change no switch. The assertion
+    /// is on the stored config, not the response status, per
+    /// `docs/history/learnings/20260805-toothless-security-assertions.md`:
+    /// a status-code-only check would stay green even if the extractor
+    /// rejected the request but the handler had already run.
+    #[tokio::test]
+    async fn a_form_encoded_post_to_terminal_config_changes_no_switch() {
+        let dir = fresh_root("terminal-config-form-refused");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let _resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/terminal-config")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("enabled=on&supervisor_enabled=on&notify_enabled=on"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let saved = Config::load_from(&dir.join("config.toml"));
+        assert!(
+            !saved.terminal.enabled,
+            "a form-encoded POST turned the terminal switch on"
+        );
+        assert!(
+            !saved.terminal.supervisor_enabled,
+            "a form-encoded POST turned the supervisor switch on"
+        );
+        assert!(
+            !saved.terminal.notify_enabled,
+            "a form-encoded POST turned the notify switch on"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D10, edge: a JSON body carrying a field the server does not
+    /// recognize is handled without changing the switches or fields the
+    /// request also carries — an unknown key is silently ignored (no
+    /// `#[serde(deny_unknown_fields)]`), never a rejection.
+    #[tokio::test]
+    async fn a_json_post_with_an_unknown_field_leaves_the_recognized_fields_correct() {
+        let dir = fresh_root("terminal-config-unknown-field");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/terminal-config")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "enabled": true,
+                            "totally_unknown_field": "surprise",
+                            "notify_chat_id": "12345"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_redirection(),
+            "an unknown field must not make the whole request fail, got {}",
+            resp.status()
+        );
+
+        let saved = Config::load_from(&dir.join("config.toml"));
+        assert!(saved.terminal.enabled, "the recognized switch was not set");
+        assert!(
+            !saved.terminal.supervisor_enabled,
+            "an unrelated switch changed because of the unknown field"
+        );
+        assert!(
+            !saved.terminal.notify_enabled,
+            "an unrelated switch changed because of the unknown field"
+        );
+        assert_eq!(saved.terminal.notify_chat_id.as_deref(), Some("12345"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D10/D4, edge: an empty `notify_telegram_token` field leaves whatever
+    /// credential is already on disk alone — a blank JSON string must mean
+    /// the same "leave it alone" the blank form field always meant, never
+    /// "clear it".
+    #[tokio::test]
+    async fn a_json_post_with_an_empty_credential_field_leaves_the_stored_credential_alone() {
+        let dir = fresh_root("terminal-config-empty-cred");
+        let st = build_state_with_dir(&dir);
+        let app = router(st.clone());
+        let cred_path = mdview_core::config::notify_credential_path_override(Some(&dir));
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/terminal-config")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "notify_telegram_token": "keep-me" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(first.status().is_redirection());
+        assert_eq!(
+            mdview_core::config::load_notify_credential(&cred_path).as_deref(),
+            Some("keep-me")
+        );
+
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/terminal-config")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "notify_telegram_token": "" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(second.status().is_redirection());
+        assert_eq!(
+            mdview_core::config::load_notify_credential(&cred_path).as_deref(),
+            Some("keep-me"),
+            "an empty credential field must leave the stored credential alone, not clear it"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6066,8 +6235,15 @@ mod bee_route_tests {
         let on_req = Request::builder()
             .method("POST")
             .uri("/api/terminal-config")
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(Body::from("enabled=on&supervisor_enabled=on&notify_enabled=on"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "enabled": true,
+                    "supervisor_enabled": true,
+                    "notify_enabled": true
+                })
+                .to_string(),
+            ))
             .unwrap();
         let resp = app.clone().oneshot(on_req).await.unwrap();
         assert!(resp.status().is_redirection());
@@ -6085,8 +6261,8 @@ mod bee_route_tests {
         let off_req = Request::builder()
             .method("POST")
             .uri("/api/terminal-config")
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(Body::from("enabled=on"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::json!({ "enabled": true }).to_string()))
             .unwrap();
         let resp = app.oneshot(off_req).await.unwrap();
         assert!(resp.status().is_redirection());
@@ -6199,8 +6375,14 @@ mod bee_route_tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/terminal-config")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("notify_chat_id=12345&notify_telegram_token=secret-bot-token"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "notify_chat_id": "12345",
+                            "notify_telegram_token": "secret-bot-token"
+                        })
+                        .to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -6276,11 +6458,12 @@ mod bee_route_tests {
         let req = Request::builder()
             .method("POST")
             .uri("/api/terminal-config")
-            .header("content-type", "application/x-www-form-urlencoded")
+            .header(header::CONTENT_TYPE, "application/json")
             .header(header::COOKIE, cookie)
-            .body(Body::from(format!(
-                "notify_chat_id=555&notify_telegram_token={secret}"
-            )))
+            .body(Body::from(
+                serde_json::json!({ "notify_chat_id": "555", "notify_telegram_token": secret })
+                    .to_string(),
+            ))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert!(resp.status().is_redirection());
@@ -6310,11 +6493,12 @@ mod bee_route_tests {
         let req = Request::builder()
             .method("POST")
             .uri("/api/terminal-config")
-            .header("content-type", "application/x-www-form-urlencoded")
+            .header(header::CONTENT_TYPE, "application/json")
             .header(header::COOKIE, cookie)
-            .body(Body::from(format!(
-                "notify_chat_id=555&notify_telegram_token={secret}"
-            )))
+            .body(Body::from(
+                serde_json::json!({ "notify_chat_id": "555", "notify_telegram_token": secret })
+                    .to_string(),
+            ))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert!(resp.status().is_redirection());
@@ -6367,9 +6551,11 @@ mod bee_route_tests {
         let req = Request::builder()
             .method("POST")
             .uri("/api/terminal-config")
-            .header("content-type", "application/x-www-form-urlencoded")
+            .header(header::CONTENT_TYPE, "application/json")
             .header(header::COOKIE, cookie)
-            .body(Body::from(format!("notify_telegram_token={secret}")))
+            .body(Body::from(
+                serde_json::json!({ "notify_telegram_token": secret }).to_string(),
+            ))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
 
@@ -6916,8 +7102,8 @@ mod bee_route_tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/terminal-config")
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("enabled=on"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::json!({ "enabled": true }).to_string()))
                     .unwrap(),
             )
             .await

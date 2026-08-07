@@ -2833,7 +2833,7 @@ pub fn settings_page(
       <button type="submit" class="fg-btn fg-btn--primary">Sign in</button>
     </fieldset>
   </form>
-  <form class="fg-settings" method="post" action="/api/terminal-config">
+  <form class="fg-settings" id="terminal-config-form" method="post" action="/api/terminal-config">
     <fieldset><legend>Terminal <span class="fg-chip fg-chip--neutral">token required</span></legend>
       <label class="fg-check"><input type="checkbox" name="enabled" {term_enabled}><span class="fg-check__text">Enable the terminal</span></label>
       <label class="fg-check"><input type="checkbox" name="supervisor_enabled" {term_supervisor}><span class="fg-check__text">Keep herdr running (supervisor)</span></label>

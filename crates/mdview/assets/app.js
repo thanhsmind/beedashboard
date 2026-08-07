@@ -348,6 +348,43 @@
     });
   })();
 
+  // Terminal settings (Settings page, `/api/terminal-config`): D10 requires
+  // a JSON body — a plain form POST is a CORS *simple* request (no
+  // preflight, no CORS layer on this server), so a page the owner happens
+  // to have open could otherwise flip the switches or overwrite the notify
+  // credential cross-site using the owner's own Cloudflare Access cookie.
+  // JSON forces a preflight this server never answers, closing that gap. A
+  // plain HTML `<form>` cannot send JSON, so this intercepts the submit and
+  // sends the same field values via `fetch` instead — the controls and the
+  // redirect the page lands on are otherwise unchanged from the form this
+  // replaces.
+  (function () {
+    var form = document.getElementById("terminal-config-form");
+    if (!form) return;
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var body = {
+        enabled: form.enabled.checked,
+        supervisor_enabled: form.supervisor_enabled.checked,
+        notify_enabled: form.notify_enabled.checked,
+        notify_chat_id: form.notify_chat_id.value,
+        notify_telegram_token: form.notify_telegram_token.value,
+      };
+      fetch(form.action, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+        .then(function (res) {
+          window.location.href = res.url || "/settings";
+        })
+        .catch(function () {
+          window.location.href = "/settings";
+        });
+    });
+  })();
+
   // Mobile sidebar drawer: the file-tree sidebar is hidden at narrow widths,
   // so the topbar hamburger toggles it open as an overlay (with a backdrop).
   (function () {
