@@ -795,7 +795,13 @@
     // decides the size — screen width divided by that many columns. Below
     // FONT_MIN_PX the text stops being readable, so the box keeps its
     // horizontal scrollbar for that case rather than shrinking into a smear.
-    var FONT_MIN_PX = 6;
+    // The floor is a readability floor, not a "how small can it go" one. Set
+    // at 6px it was never reached on a desktop and always reached on a phone,
+    // where a hundred-column frame cannot fit a phone's width at any size a
+    // person can read — so every phone got the smallest type instead of the
+    // wrapping that was meant to rescue it. 10px is about as small as a
+    // monospace screen stays legible on a handset; below that the frame wraps.
+    var FONT_MIN_PX = 10;
     var FONT_MAX_PX = 13;
 
     function fitScreenFont(el) {
