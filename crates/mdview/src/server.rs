@@ -10,9 +10,9 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Form, Path, Query, State,
     },
-    http::{header, HeaderMap, StatusCode},
+    http::{header, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{any, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use mdview_core::indexer::now_rfc3339;
@@ -202,26 +202,17 @@ fn router(state: AppState) -> Router {
         .route("/api/projects", get(api_projects))
         .route("/settings", get(settings_page_handler))
         .route("/api/config", get(api_config).post(update_config))
-        // agent-terminal-11: was mounted with `.post(...)`, the same
-        // method-mismatch-oracle gap every other route in this family
-        // closes with `any(...)` + `MethodGate<Post>` — a `GET` here used
-        // to answer `405 Allow: POST`, distinguishable from an unrouted
-        // path without ever checking a session or a token.
-        .route("/settings/terminal/token", any(rotate_terminal_token))
+        // toa-1 (D5/D11): the method-mismatch-oracle this family used to
+        // close with `any(...)` + `MethodGate` existed only to keep an
+        // unauthenticated `GET` from confirming the route existed via a
+        // `405`. With no authentication left to protect (D1), that disguise
+        // is gone — every route below is mounted with its one true method,
+        // same as any other route in this router.
+        .route("/settings/terminal/token", post(rotate_terminal_token))
         // agent-terminal-8: the only route that ever turns a presented token
-        // into a session — see `login_terminal`. `any(...)` + `MethodGate<Post>`
-        // (inside the handler) for the same method-mismatch-oracle reason as
-        // every other route in this family: `.post(...)` would let an
-        // unauthenticated `GET` here answer `405 Allow: POST` instead of the
-        // same opaque 404 an unrouted path returns.
-        .route("/settings/terminal/login", any(login_terminal))
-        // Carry-over from agent-terminal-4: mounted with `.post(...)` before
-        // `MethodGate` existed, which let a `GET` here answer `405 Allow:
-        // POST` — distinguishable from an unrouted path without a token ever
-        // being checked. `any(...)` + `MethodGate<Post>` (inside the
-        // handler) closes that oracle the same way every other gated
-        // terminal route does.
-        .route("/api/terminal-config", any(update_terminal_config))
+        // into a session — see `login_terminal`.
+        .route("/settings/terminal/login", post(login_terminal))
+        .route("/api/terminal-config", post(update_terminal_config))
         .route("/api/projects/:id/unregister", post(unregister_project))
         .route("/static/app.css", get(css_asset))
         .route("/static/app.js", get(js_asset))
@@ -234,57 +225,50 @@ fn router(state: AppState) -> Router {
         .route("/p/:id/_bee", get(bee_board))
         .route("/p/:id/_bee/cell/:cell_id", get(bee_cell_detail))
         .route("/p/:id/_bee/feature/:feature", get(bee_feature_detail))
-        // Gated (D4): `any(...)` + `MethodGate<Get>` inside the handler, not
-        // `.get(...)`, for the same method-mismatch-oracle reason as above.
-        .route("/p/:id/_terminal", any(terminal_page))
+        // Gated (D4/D7/D12): `terminal_family_enabled` is the only check
+        // left in front of this route.
+        .route("/p/:id/_terminal", get(terminal_page))
         // agent-terminal-16 (D9): the Transcript tab — a second tab beside
-        // Terminal, not a toggle inside its frame. Same gate shape as the
-        // page above (`any(...)` + `MethodGate<Get>` inside the handler).
-        .route("/p/:id/_transcript", any(transcript_page))
-        // agent-terminal-6: one pane's polled screen, same gate shape as the
-        // page above (`any(...)` + `MethodGate<Get>` inside the handler).
-        .route("/p/:id/_terminal/:pane_id/screen", any(terminal_screen))
+        // Terminal, not a toggle inside its frame.
+        .route("/p/:id/_transcript", get(transcript_page))
+        // agent-terminal-6: one pane's polled screen.
+        .route("/p/:id/_terminal/:pane_id/screen", get(terminal_screen))
         // agent-terminal-16 (D9): the gap-free activity channel beside the
-        // screen above — same gate shape, same D2 containment boundary,
-        // applied via `project_pane_cwd_in_boundary` rather than
+        // screen above — same D2 containment boundary, applied via
+        // `project_pane_cwd_in_boundary` rather than
         // `project_and_verify_pane_in_boundary` since this route needs the
         // pane's own cwd value, not just a membership check.
-        .route("/p/:id/_terminal/:pane_id/transcript", any(terminal_transcript))
+        .route("/p/:id/_terminal/:pane_id/transcript", get(terminal_transcript))
         // agent-terminal-9 (D3): the write side — free text and named keys
-        // into a pane. Same `any(...)` + `MethodGate<Post>` shape as every
-        // other gated terminal route, never `.post(...)`.
-        .route("/p/:id/_terminal/:pane_id/input", any(terminal_input))
-        .route("/p/:id/_terminal/:pane_id/keys", any(terminal_keys))
+        // into a pane.
+        .route("/p/:id/_terminal/:pane_id/input", post(terminal_input))
+        .route("/p/:id/_terminal/:pane_id/keys", post(terminal_keys))
         // agent-terminal-13 (D8/P4): start a new pane or agent in this
-        // project. Same `any(...)` + `MethodGate<Post>` shape as every
-        // other gated terminal route, never `.post(...)` — and the same D2
-        // containment boundary the routes above use, applied to the
-        // destination workspace's own anchor rather than an already-listed
-        // pane id, so a session can never start a process in a project it
-        // is not looking at.
-        .route("/p/:id/_terminal/create/pane", any(terminal_create_pane))
-        .route("/p/:id/_terminal/create/agent", any(terminal_create_agent))
+        // project — the same D2 containment boundary the routes above use,
+        // applied to the destination workspace's own anchor rather than an
+        // already-listed pane id, so a request can never start a process in
+        // a project it is not looking at.
+        .route("/p/:id/_terminal/create/pane", post(terminal_create_pane))
+        .route("/p/:id/_terminal/create/agent", post(terminal_create_agent))
         // agent-terminal-10 (D5): the Unassigned group — panes under no
         // registered project's root. Deliberately mounted outside `/p/:id/`
         // (never `/p/unassigned/...`): a registered project's own slug can
         // legitimately be the literal string "unassigned" (`slug_from_root`
         // has no reserved-word exclusion), so nesting this under the
         // project path shape would make that real project's own terminal
-        // route ambiguous with this group's route. Same `any(...)` +
-        // `MethodGate` shape as every other gated terminal route, never
-        // `.get(...)` / `.post(...)`.
-        .route("/_terminal/unassigned", any(unassigned_terminal_page))
+        // route ambiguous with this group's route.
+        .route("/_terminal/unassigned", get(unassigned_terminal_page))
         .route(
             "/_terminal/unassigned/:pane_id/screen",
-            any(unassigned_terminal_screen),
+            get(unassigned_terminal_screen),
         )
         .route(
             "/_terminal/unassigned/:pane_id/input",
-            any(unassigned_terminal_input),
+            post(unassigned_terminal_input),
         )
         .route(
             "/_terminal/unassigned/:pane_id/keys",
-            any(unassigned_terminal_keys),
+            post(unassigned_terminal_keys),
         )
         .route("/p/:id/*path", get(project_path))
         .with_state(state)
@@ -418,49 +402,20 @@ fn current_notify_credential_view(st: &AppState) -> views::NotifyCredentialView 
     }
 }
 
-/// POST /settings/terminal/token — generate (or rotate) the terminal token,
-/// per D10. Deliberately part of the ungated settings surface, not the
-/// terminal_auth-gated switch endpoint below: D4 gates the terminal routes,
-/// not settings, and CONTEXT.md's Known Risk is discharged by P2 (reveal
-/// once, mask forever after) rather than by adding a second auth layer here.
+/// POST /settings/terminal/token — generate (or rotate) the terminal token.
+/// toa-1 (D1): the terminal has no authentication of its own, so this route
+/// no longer gates rotation on a live session — it never required one to be
+/// *reached* (D4 leaves `/settings` itself unauthenticated), and the session
+/// check that used to guard *repeat* rotations went with the rest of D1.
+/// `terminal_auth` itself — the token file, `rotate()`, the reveal-once
+/// rendering (P2) — is untouched here; only the call site's session gate is
+/// removed. Deleting the module, this route, and the settings page's token
+/// controls entirely is the next cell.
 ///
 /// The response that performs the rotation is the one place the full token
 /// is ever rendered (P2) — every later `GET /settings` shows only its last
 /// four characters.
-///
-/// agent-terminal-8: this route no longer mints a session. It used to, on
-/// the reasoning that reaching the (already-unauthenticated) settings
-/// surface was itself sufficient proof — but that made
-/// `curl -X POST /settings/terminal/token` a complete, credential-free login
-/// bypass: a live session for the price of one POST, with `verify_and_mint`
-/// (the only real token check in the product) never in the loop. Rotation
-/// now only ever reveals the fresh token (P2); the caller logs in with it
-/// like anyone else, through `login_terminal` below — the only function in
-/// the product that ever mints a session from a presented credential.
-///
-/// Rotation itself is gated once a token exists: the very first call — no
-/// token file on disk yet — is left open, because that is the genuine
-/// first-run case setup depends on. Every later rotation requires the
-/// caller to already hold a live terminal session; without that, any LAN
-/// visitor could rotate at will and silently clear the legitimate user's
-/// session (P5's "rotation cuts live sessions" turned into a denial of
-/// service against a user who never asked to rotate). Gating on the current
-/// session also means a second device can log in with a token it already
-/// holds instead of being forced to rotate and kick the first device out —
-/// the multi-device flow D3 needs.
-async fn rotate_terminal_token(
-    _method: terminal_auth::MethodGate<terminal_auth::Post>,
-    State(st): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
-    if st.terminal_auth.is_configured() {
-        let has_session = terminal_auth::session_cookie(&headers)
-            .map(|sid| st.terminal_auth.session_valid(&sid))
-            .unwrap_or(false);
-        if !has_session {
-            return terminal_auth::opaque_404();
-        }
-    }
+async fn rotate_terminal_token(State(st): State<AppState>) -> Response {
     match st.terminal_auth.rotate() {
         Ok(full_token) => {
             let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
@@ -485,19 +440,13 @@ struct LoginForm {
     token: String,
 }
 
-/// POST /settings/terminal/login (agent-terminal-8) — the only place in the
-/// product a raw presented token is turned into a live session. Calls
-/// `TerminalAuth::verify_and_mint`, the only function that ever compares a
-/// presented token against the configured one; `None` (missing token file,
-/// wrong value, or empty) answers the same opaque 404 every other terminal
-/// auth failure does — never a 401/403 that would confirm the route exists.
-/// `Some(session_id)` sets the session cookie and sends the caller back to
-/// `/settings`, where the gated switches below now become reachable.
-async fn login_terminal(
-    _method: terminal_auth::MethodGate<terminal_auth::Post>,
-    State(st): State<AppState>,
-    Form(form): Form<LoginForm>,
-) -> Response {
+/// POST /settings/terminal/login — mints a `terminal_auth` session from a
+/// presented token, via `TerminalAuth::verify_and_mint`. toa-1 (D1): nothing
+/// in this file checks that session anymore — every terminal route below
+/// answers without one — so this route is now unreachable-by-purpose
+/// scaffolding, kept operating exactly as it always did so its removal (with
+/// the rest of `terminal_auth`) is the next cell's own, attributable change.
+async fn login_terminal(State(st): State<AppState>, Form(form): Form<LoginForm>) -> Response {
     match st.terminal_auth.verify_and_mint(&form.token) {
         Some(session_id) => (
             [(header::SET_COOKIE, terminal_auth::session_cookie_header(&session_id))],
@@ -528,19 +477,15 @@ struct TerminalConfigForm {
 
 /// POST /api/terminal-config — the D7 switches (terminal enable, herdr
 /// supervisor, Telegram notification). Per P3 this is deliberately its own
-/// route rather than a field on `SettingsForm`/`update_config`:
-/// `POST /api/config` is unauthenticated, so a supervisor switch reachable
-/// there would let any LAN visitor make mdview spawn a process. `AuthSession`
-/// requires a live terminal session (minted only by `login_terminal` above);
-/// on any auth failure the request never reaches this handler at all —
-/// `AuthSession`'s extractor short-circuits with the opaque 404 before the
-/// switches are read, let alone changed.
-async fn update_terminal_config(
-    _method: terminal_auth::MethodGate<terminal_auth::Post>,
-    State(st): State<AppState>,
-    _session: terminal_auth::AuthSession,
-    Form(form): Form<TerminalConfigForm>,
-) -> Response {
+/// route rather than a field on `SettingsForm`/`update_config`, so that a
+/// `POST /api/config` submission (whose form has no such fields at all —
+/// see `SettingsForm`) can never touch them. toa-1 (D1): this route no
+/// longer requires a live terminal session to reach — it never gated
+/// `terminal_family_enabled` either, since it must stay reachable to turn
+/// the switch back on (see `terminal_family_enabled`'s doc). D10 (a JSON
+/// body only, closing the cross-site form-submission gap this leaves) is
+/// the next cell.
+async fn update_terminal_config(State(st): State<AppState>, Form(form): Form<TerminalConfigForm>) -> Response {
     let config_path = mdview_core::config::config_path_override(st.config_data_dir.as_deref());
     let mut cfg = mdview_core::Config::load_from(&config_path);
     cfg.terminal.enabled = form.enabled.is_some();
@@ -787,33 +732,18 @@ async fn bee_cell_detail(
     }
 }
 
-/// `GET /p/:id/_terminal` (D2/D4/D6) — the gated per-project pane list.
-/// `MethodGate<Get>` and `AuthSession` both run before this body ever
-/// executes: a wrong method or a missing/stale session never reaches the
-/// project lookup, let alone herdr — see the route table's comment on why
-/// this is mounted with `any(...)` rather than `.get(...)`. An unknown
-/// project id (a valid session, just the wrong id) still gets the ordinary
-/// `not_found` page, same as `bee_board` — that truth is about the *route*
-/// existing, not about any particular project id being valid.
+/// `GET /p/:id/_terminal` (D2/D6/D12) — the per-project pane list, open to
+/// anyone who reaches the daemon (D1). `terminal_family_enabled` is the only
+/// gate left: off, this answers with the ordinary not-found page, same as an
+/// unregistered project id below — that truth is about the *route* existing,
+/// not about any particular project id being valid.
 ///
 /// A silent or errored herdr socket renders the D6 remedy state — never a
 /// raw error, and never an empty pane list that would look identical to a
 /// project that genuinely has zero agents running.
-///
-/// Carried over from agent-terminal-5 (recorded deviation there): the D7
-/// `terminal.enabled` switch is documented as what makes panes and screens
-/// reachable, but until this cell only the token gate enforced anything —
-/// checked here, after the method/session extractors and before the project
-/// lookup, so a disabled switch answers exactly like an unrouted path even
-/// with a valid session (see `terminal_family_enabled`).
-async fn terminal_page(
-    _method: terminal_auth::MethodGate<terminal_auth::Get>,
-    _session: terminal_auth::AuthSession,
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn terminal_page(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_page();
     }
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
@@ -833,26 +763,20 @@ async fn terminal_page(
     }
 }
 
-/// `GET /p/:id/_transcript` (D2/D4/D6/D9) — the Transcript tab: the same
+/// `GET /p/:id/_transcript` (D2/D6/D9/D12) — the Transcript tab: the same
 /// project-scoped, D2 boundary-filtered pane list `terminal_page` builds,
 /// rendered with a transcript viewport per pane instead of a screen.
 /// `assets/app.js`'s transcript poller fills each one in from
 /// `terminal_transcript` below. Guarded and constructed identically to
-/// `terminal_page` — same `MethodGate<Get>` + `AuthSession` + D7 switch,
-/// same herdr snapshot + D2 boundary, same D6 herdr-down page — because
-/// listing *which* panes belong to this project still requires reaching
-/// herdr, even though the transcript content itself never does (D9: the
-/// transcript is the agent's own on-disk log, read directly, not through
-/// herdr). No creation controls here (D8 stays on the Terminal tab only);
-/// this tab is read-only.
-async fn transcript_page(
-    _method: terminal_auth::MethodGate<terminal_auth::Get>,
-    _session: terminal_auth::AuthSession,
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+/// `terminal_page` — same D7 switch, same herdr snapshot + D2 boundary, same
+/// D6 herdr-down page — because listing *which* panes belong to this project
+/// still requires reaching herdr, even though the transcript content itself
+/// never does (D9: the transcript is the agent's own on-disk log, read
+/// directly, not through herdr). No creation controls here (D8 stays on the
+/// Terminal tab only); this tab is read-only.
+async fn transcript_page(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_page();
     }
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
@@ -891,13 +815,39 @@ fn configured_preset_labels(st: &AppState) -> Vec<String> {
 /// route in the gated terminal family — `terminal_page` above and
 /// `terminal_screen` below — never on `/settings` or
 /// `POST /api/terminal-config`/`POST /settings/terminal/token`, which must
-/// stay reachable so the switch can be turned back on (per this cell's
-/// carried-over instruction).
+/// stay reachable so the switch can be turned back on. toa-1: this is now
+/// the *only* gate in front of the terminal family (D2) — the auth and
+/// method extractors that used to run ahead of it are gone (D1/D5).
 fn terminal_family_enabled(st: &AppState) -> bool {
     let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ));
     cfg.terminal.enabled
+}
+
+/// D12's disabled answer for a terminal **page** route (`terminal_page`,
+/// `transcript_page`, `unassigned_terminal_page`): mdview's ordinary
+/// not-found page — the same `not_found` helper every other page route in
+/// this file already answers with — never the typeless empty `404` the old
+/// `terminal_auth::opaque_404` gave, which is indistinguishable from an
+/// unrouted path and makes a browser download a file instead of showing a
+/// page (D2's struck "byte-identical to unrouted" rule).
+fn terminal_disabled_page() -> Response {
+    not_found("the agent terminal is disabled")
+}
+
+/// D12's disabled answer for a terminal **data** route the client polls
+/// (`terminal_screen`, `terminal_transcript`, `terminal_input`,
+/// `terminal_keys`, `terminal_create_pane`, `terminal_create_agent`, and
+/// their Unassigned-group siblings): a `404` carrying a JSON body naming the
+/// reason, so a poller reading `response.json()` gets a reason rather than
+/// an HTML page or a body it cannot parse.
+fn terminal_disabled_json_404() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "error": "the agent terminal is disabled" })),
+    )
+        .into_response()
 }
 
 /// The Telegram credentials to build a live notifier from — `Some((token,
@@ -937,22 +887,19 @@ const HERDR_DOWN_REMEDY: &str = "herdr is not running";
 /// rather than ever reaching the page. `revision` is unchanged; the client
 /// still compares it to skip a redundant repaint.
 ///
-/// Guarded exactly like `terminal_page`: `MethodGate<Get>` + `AuthSession`
-/// run before this body, then the D7 enabled switch, then the same D2
-/// containment boundary `terminal_page` uses — a pane id is only ever read
-/// if it is already present in this project's own boundary-filtered pane
-/// list, never trusted from the URL alone. A pane that existed when the
-/// page listed it but is gone by the time this fires (or was never in this
-/// project) gets the ordinary not-found page, distinct from herdr itself
-/// being unreachable.
+/// Guarded by the D7 enabled switch (D12: a reasoned JSON 404 when off),
+/// then the same D2 containment boundary `terminal_page` uses — a pane id is
+/// only ever read if it is already present in this project's own
+/// boundary-filtered pane list, never trusted from the URL alone. A pane
+/// that existed when the page listed it but is gone by the time this fires
+/// (or was never in this project) gets the ordinary not-found page, distinct
+/// from herdr itself being unreachable.
 async fn terminal_screen(
-    _method: terminal_auth::MethodGate<terminal_auth::Get>,
-    _session: terminal_auth::AuthSession,
     State(st): State<AppState>,
     Path((id, pane_id)): Path<(String, String)>,
 ) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_json_404();
     }
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
@@ -1065,14 +1012,14 @@ struct TranscriptQuery {
     cursor: Option<String>,
 }
 
-/// `GET /p/:id/_terminal/:pane_id/transcript?cursor=...` (D2/D4/D6/D9) — the
+/// `GET /p/:id/_terminal/:pane_id/transcript?cursor=...` (D2/D6/D9/D12) — the
 /// gap-free activity channel beside `terminal_screen`'s polled screen.
-/// Guarded identically: `MethodGate<Get>` + `AuthSession` run before this
-/// body, then the D7 enabled switch, then the same D2 containment boundary
-/// as every other pane-scoped route — via `project_pane_cwd_in_boundary`
-/// rather than `project_and_verify_pane_in_boundary`, since this route needs
-/// the pane's resolved cwd itself (this cell's own truth: a session viewing
-/// project A must never read an agent's transcript in project B).
+/// Guarded identically: the D7 enabled switch (D12: a reasoned JSON 404 when
+/// off), then the same D2 containment boundary as every other pane-scoped
+/// route — via `project_pane_cwd_in_boundary` rather than
+/// `project_and_verify_pane_in_boundary`, since this route needs the pane's
+/// resolved cwd itself (a request looking at project A must never read an
+/// agent's transcript in project B).
 ///
 /// `mdview_core::transcript`'s `parse_cursor` (agent-terminal-15) carries
 /// its own guard against a cursor escaping the per-cwd project directory —
@@ -1100,14 +1047,12 @@ struct TranscriptQuery {
 /// unreachable socket, and never an indistinguishable `lines: []`, which
 /// would read the same as "caught up, nothing new since the last poll".
 async fn terminal_transcript(
-    _method: terminal_auth::MethodGate<terminal_auth::Get>,
-    _session: terminal_auth::AuthSession,
     State(st): State<AppState>,
     Path((id, pane_id)): Path<(String, String)>,
     Query(q): Query<TranscriptQuery>,
 ) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_json_404();
     }
     let cwd = match project_pane_cwd_in_boundary(&st, &id, &pane_id).await {
         Ok(cwd) => cwd,
@@ -1171,18 +1116,16 @@ struct ReplyBody {
 /// both, only the second when `submit` is set), so `submit` absent leaves
 /// the text staged without ever being sent.
 ///
-/// Guarded exactly like `terminal_screen`: `MethodGate<Post>` + `AuthSession`
-/// run before this body, then the D7 enabled switch, then the same D2
-/// containment boundary via `project_and_verify_pane_in_boundary`.
+/// Guarded exactly like `terminal_screen`: the D7 enabled switch (D12: a
+/// reasoned JSON 404 when off), then the same D2 containment boundary via
+/// `project_and_verify_pane_in_boundary`.
 async fn terminal_input(
-    _method: terminal_auth::MethodGate<terminal_auth::Post>,
-    _session: terminal_auth::AuthSession,
     State(st): State<AppState>,
     Path((id, pane_id)): Path<(String, String)>,
     Json(body): Json<ReplyBody>,
 ) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_json_404();
     }
     if let Err(refusal) = project_and_verify_pane_in_boundary(&st, &id, &pane_id).await {
         return refusal;
@@ -1213,8 +1156,8 @@ const MAX_KEYS_PER_REQUEST: usize = 1000;
 
 /// The refusal `terminal_keys`/`unassigned_terminal_keys` give a request
 /// whose `keys` list exceeds `MAX_KEYS_PER_REQUEST` — a `400`, not the
-/// terminal family's opaque-404 (this is a validation failure on an already
-/// gated, already-authenticated request, not an auth refusal).
+/// terminal family's disabled-state `404` (this is a validation failure on
+/// an already-enabled route, not a disabled-switch refusal).
 fn keys_too_long_response(len: usize) -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -1230,14 +1173,12 @@ fn keys_too_long_response(len: usize) -> Response {
 /// keys, Enter, Escape, Tab, …). Modeled on herdr-go's `KeysBody { keys }`.
 /// Guarded identically to `terminal_input`.
 async fn terminal_keys(
-    _method: terminal_auth::MethodGate<terminal_auth::Post>,
-    _session: terminal_auth::AuthSession,
     State(st): State<AppState>,
     Path((id, pane_id)): Path<(String, String)>,
     Json(body): Json<KeysBody>,
 ) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_json_404();
     }
     if body.keys.len() > MAX_KEYS_PER_REQUEST {
         return keys_too_long_response(body.keys.len());
@@ -1321,9 +1262,9 @@ fn unknown_preset_response(label: &str) -> Response {
 /// Map a herdr port error onto the create routes' HTTP surface, mirroring
 /// herdr-go's own `herdr_error_response` (`herdr-go/src/web/create.rs`)
 /// exactly: a destination that no longer exists by the time herdr is
-/// actually called is `409` — never `404`, which stays reserved for the
-/// opaque unauthenticated answer `terminal_auth::opaque_404` gives — and
-/// everything else collapses to `502` carrying the message, the same
+/// actually called is `409` — never `404`, which stays reserved for a route
+/// that genuinely does not exist or a disabled terminal (`terminal_disabled_json_404`)
+/// — and everything else collapses to `502` carrying the message, the same
 /// "named remedy, never a raw error" rule `herdr_down_response` already
 /// applies elsewhere in this file.
 fn create_error_response(err: herdr::HerdrError) -> Response {
@@ -1348,23 +1289,20 @@ fn create_error_response(err: herdr::HerdrError) -> Response {
 /// destination `workspace_id` itself; here the URL's project id is the only
 /// destination input, and the workspace is resolved server-side by
 /// `project_creation_destination` against this project's own D2 containment
-/// boundary, so a session can never aim a creation at a workspace outside
+/// boundary, so a request can never aim a creation at a workspace outside
 /// the project it is looking at. The body is deliberately empty: a shell
 /// takes no command, and no `cwd`/`argv`/`env` field is declared to receive
 /// anything a client might try to send.
 ///
-/// Guarded exactly like every other gated terminal route: `MethodGate<Post>`
-/// + `AuthSession` run before this body, then the D7 enabled switch, then
-/// the project lookup.
+/// Guarded exactly like every other terminal route: the D7 enabled switch
+/// (D12: a reasoned JSON 404 when off), then the project lookup.
 async fn terminal_create_pane(
-    _method: terminal_auth::MethodGate<terminal_auth::Post>,
-    _session: terminal_auth::AuthSession,
     State(st): State<AppState>,
     Path(id): Path<String>,
     Json(_body): Json<CreatePaneBody>,
 ) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_json_404();
     }
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
@@ -1404,14 +1342,12 @@ async fn terminal_create_pane(
 /// process directory, an arbitrary folder this route must never let a
 /// request reach.
 async fn terminal_create_agent(
-    _method: terminal_auth::MethodGate<terminal_auth::Post>,
-    _session: terminal_auth::AuthSession,
     State(st): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<CreateAgentBody>,
 ) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_json_404();
     }
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
@@ -1556,12 +1492,11 @@ fn unassigned_panes(
         .collect()
 }
 
-/// `GET /_terminal/unassigned` (D5/D4/D6) — the gated cross-project pane
-/// list. Guarded identically to `terminal_page`: `MethodGate<Get>` +
-/// `AuthSession` run before this body (see the route table's comment on
-/// `any(...)` vs `.get(...)`), then the D7 enabled switch — every registered
-/// project's own boundary check happens inside `unassigned_panes`, not here.
-/// A silent herdr socket renders the same D6 remedy `terminal_page` uses.
+/// `GET /_terminal/unassigned` (D5/D6/D12) — the cross-project pane list.
+/// Guarded identically to `terminal_page`: the D7 enabled switch (D12: the
+/// ordinary not-found page when off) — every registered project's own
+/// boundary check happens inside `unassigned_panes`, not here. A silent
+/// herdr socket renders the same D6 remedy `terminal_page` uses.
 ///
 /// agent-terminal-11: a registry read failure used to fall through
 /// `unwrap_or_default()` to an empty project list, which made every pane in
@@ -1569,13 +1504,9 @@ fn unassigned_panes(
 /// project — read as unassigned. Fail closed instead: an unreadable
 /// registry renders the group empty, the same as `unassigned_panes` failing
 /// closed on an unconstructable project boundary.
-async fn unassigned_terminal_page(
-    _method: terminal_auth::MethodGate<terminal_auth::Get>,
-    _session: terminal_auth::AuthSession,
-    State(st): State<AppState>,
-) -> Response {
+async fn unassigned_terminal_page(State(st): State<AppState>) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_page();
     }
     let Ok(projects) = st.engine.list_projects() else {
         return Html(views::unassigned_terminal_page(&[])).into_response();
@@ -1619,18 +1550,13 @@ async fn verify_pane_is_unassigned(st: &AppState, pane_id: &str) -> std::result:
     Ok(())
 }
 
-/// `GET /_terminal/unassigned/:pane_id/screen` (D5/D4/D6) — one unassigned
+/// `GET /_terminal/unassigned/:pane_id/screen` (D5/D6/D12) — one unassigned
 /// pane's current screen, the same shape `terminal_screen` returns for a
-/// project's own pane. Guarded identically: `MethodGate<Get>` +
-/// `AuthSession`, then the D7 switch, then `verify_pane_is_unassigned`.
-async fn unassigned_terminal_screen(
-    _method: terminal_auth::MethodGate<terminal_auth::Get>,
-    _session: terminal_auth::AuthSession,
-    State(st): State<AppState>,
-    Path(pane_id): Path<String>,
-) -> Response {
+/// project's own pane. Guarded identically: the D7 switch (D12: a reasoned
+/// JSON 404 when off), then `verify_pane_is_unassigned`.
+async fn unassigned_terminal_screen(State(st): State<AppState>, Path(pane_id): Path<String>) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_json_404();
     }
     if let Err(refusal) = verify_pane_is_unassigned(&st, &pane_id).await {
         return refusal;
@@ -1645,19 +1571,17 @@ async fn unassigned_terminal_screen(
     }
 }
 
-/// `POST /_terminal/unassigned/:pane_id/input` (D3/D5/D4) — the Unassigned
+/// `POST /_terminal/unassigned/:pane_id/input` (D3/D5) — the Unassigned
 /// group's write path from agent-terminal-9: free-text reply, same
 /// `ReplyBody { text, submit }` shape and the same send≠submit semantics as
 /// `terminal_input`. Guarded identically, via `verify_pane_is_unassigned`.
 async fn unassigned_terminal_input(
-    _method: terminal_auth::MethodGate<terminal_auth::Post>,
-    _session: terminal_auth::AuthSession,
     State(st): State<AppState>,
     Path(pane_id): Path<String>,
     Json(body): Json<ReplyBody>,
 ) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_json_404();
     }
     if let Err(refusal) = verify_pane_is_unassigned(&st, &pane_id).await {
         return refusal;
@@ -1669,19 +1593,17 @@ async fn unassigned_terminal_input(
     }
 }
 
-/// `POST /_terminal/unassigned/:pane_id/keys` (D3/D5/D4) — the Unassigned
+/// `POST /_terminal/unassigned/:pane_id/keys` (D3/D5) — the Unassigned
 /// group's other write path from agent-terminal-9: named key presses, same
 /// `KeysBody { keys }` shape as `terminal_keys`. Guarded identically, via
 /// `verify_pane_is_unassigned`.
 async fn unassigned_terminal_keys(
-    _method: terminal_auth::MethodGate<terminal_auth::Post>,
-    _session: terminal_auth::AuthSession,
     State(st): State<AppState>,
     Path(pane_id): Path<String>,
     Json(body): Json<KeysBody>,
 ) -> Response {
     if !terminal_family_enabled(&st) {
-        return terminal_auth::opaque_404();
+        return terminal_disabled_json_404();
     }
     if body.keys.len() > MAX_KEYS_PER_REQUEST {
         return keys_too_long_response(body.keys.len());
@@ -6088,55 +6010,30 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// P3: the switches can be changed only by a request carrying a valid
-    /// terminal session — no session, and a stale/unknown session, both
-    /// leave every switch untouched; a session minted by rotation succeeds.
+    /// toa-1 (D1): the switches can be changed by any request that reaches
+    /// `POST /api/terminal-config` — no cookie, no token. D10 (a JSON body
+    /// only, closing the cross-site form-submission gap this leaves) is the
+    /// next cell.
     #[tokio::test]
-    async fn terminal_switches_require_a_valid_terminal_session() {
-        let dir = fresh_root("terminal-switches-gated");
+    async fn terminal_switches_are_reachable_with_no_cookie_and_no_token() {
+        let dir = fresh_root("terminal-switches-open");
         let st = build_state_with_dir(&dir);
-        let app = router(st.clone());
+        let app = router(st);
 
-        let switches_req = |cookie: Option<&str>| {
-            let mut b = Request::builder()
-                .method("POST")
-                .uri("/api/terminal-config")
-                .header("content-type", "application/x-www-form-urlencoded");
-            if let Some(c) = cookie {
-                b = b.header(header::COOKIE, c.to_string());
-            }
-            b.body(Body::from("enabled=on&supervisor_enabled=on&notify_enabled=on"))
-                .unwrap()
-        };
-
-        // No session at all.
-        let resp = app.clone().oneshot(switches_req(None)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        // An unknown/stale session cookie.
         let resp = app
-            .clone()
-            .oneshot(switches_req(Some("mdview_terminal_session=not-a-real-session")))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        let cfg_after_refusals = Config::load_from(&dir.join("config.toml"));
-        assert!(!cfg_after_refusals.terminal.enabled);
-        assert!(!cfg_after_refusals.terminal.supervisor_enabled);
-        assert!(!cfg_after_refusals.terminal.notify_enabled);
-
-        // A real session, obtained by generating the token then logging in
-        // with it, succeeds.
-        let (_full_token, cookie) = rotate_token(app.clone()).await;
-        let resp = app
-            .clone()
-            .oneshot(switches_req(Some(&cookie)))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/terminal-config")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("enabled=on&supervisor_enabled=on&notify_enabled=on"))
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert!(
             resp.status().is_redirection(),
-            "a valid terminal session could not save the switches, got {}",
+            "the switch endpoint must be reachable with no cookie and no token, got {}",
             resp.status()
         );
 
@@ -6162,7 +6059,6 @@ mod bee_route_tests {
         let dir = fresh_root("terminal-switches-live-tasks");
         let st = build_state_with_dir(&dir);
         let app = router(st.clone());
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         assert!(!st.terminal_background.supervisor_running());
         assert!(!st.terminal_background.notify_running());
@@ -6171,7 +6067,6 @@ mod bee_route_tests {
             .method("POST")
             .uri("/api/terminal-config")
             .header("content-type", "application/x-www-form-urlencoded")
-            .header(header::COOKIE, cookie.clone())
             .body(Body::from("enabled=on&supervisor_enabled=on&notify_enabled=on"))
             .unwrap();
         let resp = app.clone().oneshot(on_req).await.unwrap();
@@ -6191,7 +6086,6 @@ mod bee_route_tests {
             .method("POST")
             .uri("/api/terminal-config")
             .header("content-type", "application/x-www-form-urlencoded")
-            .header(header::COOKIE, cookie)
             .body(Body::from("enabled=on"))
             .unwrap();
         let resp = app.oneshot(off_req).await.unwrap();
@@ -6289,53 +6183,31 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The destination and credential the settings page's notification
-    /// section writes (D7/D9) sit behind the same P3 gate as the switches —
-    /// this cell extends `update_terminal_config`'s existing session check
-    /// to two more fields on the same endpoint rather than adding a second
-    /// one. Mirrors `terminal_switches_require_a_valid_terminal_session`.
+    /// toa-1 (D1): the destination and credential the settings page's
+    /// notification section writes are reachable through
+    /// `update_terminal_config` with no cookie and no token, same as the
+    /// switches above.
     #[tokio::test]
-    async fn notify_destination_and_credential_require_a_valid_terminal_session() {
-        let dir = fresh_root("terminal-notify-gated");
+    async fn notify_destination_and_credential_are_reachable_with_no_cookie_and_no_token() {
+        let dir = fresh_root("terminal-notify-open");
         let st = build_state_with_dir(&dir);
-        let app = router(st.clone());
+        let app = router(st);
         let cred_path = mdview_core::config::notify_credential_path_override(Some(&dir));
 
-        let notify_req = |cookie: Option<&str>| {
-            let mut b = Request::builder()
-                .method("POST")
-                .uri("/api/terminal-config")
-                .header("content-type", "application/x-www-form-urlencoded");
-            if let Some(c) = cookie {
-                b = b.header(header::COOKIE, c.to_string());
-            }
-            b.body(Body::from("notify_chat_id=12345&notify_telegram_token=secret-bot-token"))
-                .unwrap()
-        };
-
-        // No session at all.
-        let resp = app.clone().oneshot(notify_req(None)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        // An unknown/stale session cookie.
         let resp = app
-            .clone()
-            .oneshot(notify_req(Some("mdview_terminal_session=not-a-real-session")))
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/terminal-config")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("notify_chat_id=12345&notify_telegram_token=secret-bot-token"))
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        let cfg_after_refusals = Config::load_from(&dir.join("config.toml"));
-        assert_eq!(cfg_after_refusals.terminal.notify_chat_id, None);
-        assert_eq!(mdview_core::config::load_notify_credential(&cred_path), None);
-
-        // A real session, obtained the same way every other gated-switch
-        // test does, succeeds.
-        let (_full_token, cookie) = rotate_token(app.clone()).await;
-        let resp = app.clone().oneshot(notify_req(Some(&cookie))).await.unwrap();
         assert!(
             resp.status().is_redirection(),
-            "a valid terminal session could not save the notification settings, got {}",
+            "the notify fields must be reachable with no cookie and no token, got {}",
             resp.status()
         );
 
@@ -6663,142 +6535,43 @@ mod bee_route_tests {
         cfg.save_to(&dir.join("config.toml")).unwrap();
     }
 
-    /// Truth 1: "Without a terminal session the route returns an opaque
-    /// 404, identical to an unknown route" — both with no cookie at all and
-    /// with a stale/unknown one, and both compared byte-for-byte (status,
-    /// headers, body) against a path this router never mounts at all, the
-    /// same proof shape `terminal_auth`'s own generic test uses.
+    /// D11: a `GET` carrying switch values in its query string changes no
+    /// switch. Replaces `api_terminal_config_wrong_method_is_byte_identical_to_unrouted`
+    /// (D5/D12 struck the byte-identical-to-unrouted comparison, and D11
+    /// means this is no longer about hiding the route — `Form` reads the
+    /// query string on a `GET` in axum 0.7.9, `form.rs:85`/`raw_form.rs:41-42`
+    /// — so with the method gate gone, a route still mounted `any(...)` could
+    /// be driven by a plain navigation or an `<img src>`. `post(...)` alone
+    /// is what closes that, proven here.
     #[tokio::test]
-    async fn terminal_route_without_a_session_is_byte_identical_to_an_unrouted_path() {
-        let dir = fresh_root("terminal-no-session");
-        // Enable the terminal so this test isolates the session gate itself
-        // (the way its screen sibling,
-        // `terminal_screen_without_a_session_is_byte_identical_to_an_unrouted_path`,
-        // already does) — without this, the assertion would still pass on a
-        // route where `AuthSession` had been deleted entirely, since the
-        // disabled-switch check alone already answers 404.
-        enable_terminal(&dir);
-        let root = fresh_root("terminal-no-session-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "no-session");
-        let app = router(st);
-
-        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
-            let with_no_session = app
-                .clone()
-                .oneshot(terminal_req(&project.id, cookie))
-                .await
-                .unwrap();
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
-            assert_eq!(with_no_session.status(), unrouted.status());
-            assert_eq!(
-                with_no_session.headers(),
-                unrouted.headers(),
-                "an unauthenticated /_terminal request must carry no header an unrouted path wouldn't"
-            );
-            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
-            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(a, b, "an unauthenticated /_terminal body leaked something an unrouted path wouldn't");
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Truth 6 (the carry-over obligation): a wrong-method request to
-    /// `GET /p/:id/_terminal` (mounted via `any(...)` + `MethodGate<Get>`,
-    /// never `.get(...)`) is byte-identical to a path this router never
-    /// mounts, proven against the real router — not just the generic proof
-    /// in `terminal_auth.rs`.
-    #[tokio::test]
-    async fn terminal_route_wrong_method_is_byte_identical_to_unrouted() {
-        let dir = fresh_root("terminal-wrong-method");
-        let root = fresh_root("terminal-wrong-method-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "wrong-method");
-        let app = router(st);
-
-        let posted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/p/{}/_terminal", project.id))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
-        assert_eq!(posted.status(), unrouted.status());
-        assert_eq!(posted.headers(), unrouted.headers());
-        let a = posted.into_body().collect().await.unwrap().to_bytes();
-        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(a, b);
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Truth 6, the other half of the carry-over obligation: applied to
-    /// `POST /api/terminal-config` itself, now mounted with `any(...)` +
-    /// `MethodGate<Post>` instead of the old `.post(...)` this cell replaces.
-    #[tokio::test]
-    async fn api_terminal_config_wrong_method_is_byte_identical_to_unrouted() {
-        let dir = fresh_root("terminal-config-wrong-method");
+    async fn a_get_carrying_switch_values_in_its_query_changes_no_switch() {
+        let dir = fresh_root("terminal-config-get-query");
         let st = build_state_with_dir(&dir);
         let app = router(st);
 
-        let got = app
-            .clone()
+        let resp = app
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/api/terminal-config")
+                    .uri("/api/terminal-config?enabled=on&supervisor_enabled=on&notify_enabled=on")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        let unrouted = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "GET must never reach the switch handler at all"
+        );
 
-        assert_eq!(got.status(), StatusCode::NOT_FOUND);
-        assert_eq!(got.status(), unrouted.status());
-        assert_eq!(got.headers(), unrouted.headers());
-        let a = got.into_body().collect().await.unwrap().to_bytes();
-        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(a, b);
+        let saved = Config::load_from(&dir.join("config.toml"));
+        assert!(!saved.terminal.enabled, "a GET must never flip the enabled switch");
+        assert!(
+            !saved.terminal.supervisor_enabled,
+            "a GET must never flip the supervisor switch"
+        );
+        assert!(!saved.terminal.notify_enabled, "a GET must never flip the notify switch");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6991,145 +6764,133 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// agent-terminal-6, truth 2: "Without a terminal session the screen
-    /// endpoint returns an opaque 404" — the same byte-identical-to-unrouted
-    /// proof `terminal_route_without_a_session_is_byte_identical_to_an_unrouted_path`
-    /// uses for the page, applied to its screen sibling.
+    /// D12: with the D7 `terminal.enabled` switch off, `terminal_page`
+    /// answers with the ordinary not-found page and `terminal_screen`
+    /// answers with a reasoned JSON 404 — no cookie, no token, nothing but
+    /// the switch decides this.
     #[tokio::test]
-    async fn terminal_screen_without_a_session_is_byte_identical_to_an_unrouted_path() {
-        let dir = fresh_root("terminal-screen-no-session");
-        enable_terminal(&dir);
-        let root = fresh_root("terminal-screen-no-session-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "screen-no-session");
-        let app = router(st);
-
-        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
-            let with_no_session = app
-                .clone()
-                .oneshot(terminal_screen_req(&project.id, "w1:p1", cookie))
-                .await
-                .unwrap();
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
-            assert_eq!(with_no_session.status(), unrouted.status());
-            assert_eq!(with_no_session.headers(), unrouted.headers());
-            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
-            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(a, b);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// The screen route's own method-mismatch-oracle proof, mirroring
-    /// `terminal_route_wrong_method_is_byte_identical_to_unrouted` — mounted
-    /// with `any(...)` + `MethodGate<Get>`, never `.get(...)`.
-    #[tokio::test]
-    async fn terminal_screen_wrong_method_is_byte_identical_to_unrouted() {
-        let dir = fresh_root("terminal-screen-wrong-method");
-        enable_terminal(&dir);
-        let root = fresh_root("terminal-screen-wrong-method-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "screen-wrong-method");
-        let app = router(st);
-
-        let posted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/p/{}/_terminal/w1:p1/screen", project.id))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
-        assert_eq!(posted.status(), unrouted.status());
-        assert_eq!(posted.headers(), unrouted.headers());
-        let a = posted.into_body().collect().await.unwrap().to_bytes();
-        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(a, b);
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// The must-have this cell's carried-over deviation exists to close:
-    /// with the D7 `terminal.enabled` switch off, both `terminal_page` and
-    /// `terminal_screen` answer exactly as an unrouted path would — status,
-    /// headers and body — even with a session a valid rotation just minted.
-    #[tokio::test]
-    async fn terminal_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session() {
+    async fn terminal_family_disabled_answers_with_the_disabled_shapes() {
         let dir = fresh_root("terminal-family-disabled");
         // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
         let root = fresh_root("terminal-family-disabled-project");
         let st = build_state_with_dir(&dir);
         let project = register(&st, &root, "family-disabled");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
-        let unrouted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted_status = unrouted.status();
-        let unrouted_headers = unrouted.headers().clone();
-        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
-
-        let page = app
-            .clone()
-            .oneshot(terminal_req(&project.id, Some(&cookie)))
-            .await
-            .unwrap();
-        assert_eq!(page.status(), unrouted_status);
-        assert_eq!(page.headers(), &unrouted_headers);
-        let page_body = page.into_body().collect().await.unwrap().to_bytes();
+        let page = app.clone().oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(page.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            page_body, unrouted_body,
-            "the terminal page must be unreachable while the switch is off, even with a valid session"
+            page.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8",
+            "the disabled terminal page must answer the ordinary not-found page, not an empty body"
         );
+        let page_body = body_string(page).await;
+        assert!(!page_body.is_empty(), "a disabled terminal must never answer with nothing");
 
         let screen = app
-            .oneshot(terminal_screen_req(&project.id, "w1:p1", Some(&cookie)))
+            .oneshot(terminal_screen_req(&project.id, "w1:p1", None))
             .await
             .unwrap();
-        assert_eq!(screen.status(), unrouted_status);
-        assert_eq!(screen.headers(), &unrouted_headers);
-        let screen_body = screen.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(screen.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            screen_body, unrouted_body,
-            "the screen endpoint must be unreachable while the switch is off, even with a valid session"
+            screen.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "the disabled screen endpoint must answer JSON, not an empty body"
         );
+        let screen_body = body_string(screen).await;
+        assert!(
+            screen_body.contains("disabled"),
+            "the disabled screen endpoint must name the reason: {screen_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// D1's core happy-path truth: with the terminal enabled and no cookie
+    /// or token presented at all, every route in the family reaches its own
+    /// real logic — never the old auth refusal, whose signature was an
+    /// empty body regardless of status. A pane id this test never seeded
+    /// (`FakeHerdr::new()`'s default snapshot has none) still answers with a
+    /// real, non-empty "pane not found" — proof the request got *past* where
+    /// the auth extractors used to sit, not that every route happens to
+    /// answer `200`.
+    #[tokio::test]
+    async fn every_terminal_route_answers_with_no_cookie_and_no_token_present() {
+        let dir = fresh_root("terminal-no-cookie-happy-path");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-no-cookie-happy-path-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "no-cookie-happy-path");
+        let app = router(st);
+
+        async fn assert_reached_real_logic(app: Router, req: Request<Body>, label: &str) {
+            let resp = app.oneshot(req).await.unwrap();
+            let body = body_string(resp).await;
+            assert!(
+                !body.is_empty(),
+                "{label}: an empty body with no cookie means the old auth refusal is still gating this route"
+            );
+        }
+
+        assert_reached_real_logic(app.clone(), terminal_req(&project.id, None), "terminal_page").await;
+        assert_reached_real_logic(
+            app.clone(),
+            transcript_page_req(&project.id, None),
+            "transcript_page",
+        )
+        .await;
+        assert_reached_real_logic(
+            app.clone(),
+            terminal_screen_req(&project.id, "no-such-pane", None),
+            "terminal_screen",
+        )
+        .await;
+        assert_reached_real_logic(
+            app.clone(),
+            terminal_transcript_req(&project.id, "no-such-pane", None, None),
+            "terminal_transcript",
+        )
+        .await;
+        assert_reached_real_logic(
+            app.clone(),
+            terminal_input_req(&project.id, "no-such-pane", "hi", Some(true), None),
+            "terminal_input",
+        )
+        .await;
+        assert_reached_real_logic(
+            app.clone(),
+            terminal_keys_req(&project.id, "no-such-pane", &["enter"], None),
+            "terminal_keys",
+        )
+        .await;
+        assert_reached_real_logic(app.clone(), create_pane_req(&project.id, None), "terminal_create_pane")
+            .await;
+        assert_reached_real_logic(
+            app.clone(),
+            create_agent_req(&project.id, &serde_json::json!({ "preset": "unconfigured" }), None),
+            "terminal_create_agent",
+        )
+        .await;
+        assert_reached_real_logic(app.clone(), unassigned_req(None), "unassigned_terminal_page").await;
+        assert_reached_real_logic(
+            app.clone(),
+            unassigned_screen_req("no-such-pane", None),
+            "unassigned_terminal_screen",
+        )
+        .await;
+        assert_reached_real_logic(
+            app.clone(),
+            unassigned_input_req("no-such-pane", "hi", true, None),
+            "unassigned_terminal_input",
+        )
+        .await;
+        assert_reached_real_logic(
+            app,
+            unassigned_keys_req("no-such-pane", &["enter"], None),
+            "unassigned_terminal_keys",
+        )
+        .await;
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
@@ -7150,15 +6911,12 @@ mod bee_route_tests {
         let settings = get(app.clone(), "/settings").await;
         assert_eq!(settings.status(), StatusCode::OK);
 
-        let (_token, cookie) = rotate_token(app.clone()).await;
-
         let switch_resp = app
             .oneshot(
                 Request::builder()
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header("content-type", "application/x-www-form-urlencoded")
-                    .header(header::COOKIE, cookie)
                     .body(Body::from("enabled=on"))
                     .unwrap(),
             )
@@ -7456,226 +7214,47 @@ mod bee_route_tests {
             .into_owned()
     }
 
-    /// Truth: "Without a session, with a wrong method, and with the terminal
-    /// switch off, the transcript endpoint answers byte-identically to an
-    /// unrouted path" — the no-session third, proven the same
-    /// byte-identical-to-unrouted way `terminal_screen`'s own sibling test
-    /// does. Verified by temporarily deleting the `_session:
-    /// terminal_auth::AuthSession` extractor from `terminal_transcript` and
-    /// re-running this test: it went red (200, not 404) before the guard was
-    /// restored.
+    /// D12: with the D7 `terminal.enabled` switch off, the Transcript tab's
+    /// page answers with the ordinary not-found page and its data endpoint
+    /// answers with a reasoned JSON 404 — no cookie, no token, nothing but
+    /// the switch decides this.
     #[tokio::test]
-    async fn terminal_transcript_without_a_session_is_byte_identical_to_an_unrouted_path() {
-        let dir = fresh_root("transcript-no-session");
-        enable_terminal(&dir);
-        let root = fresh_root("transcript-no-session-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "transcript-no-session");
-        let app = router(st);
-
-        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
-            let with_no_session = app
-                .clone()
-                .oneshot(terminal_transcript_req(&project.id, "w1:p1", None, cookie))
-                .await
-                .unwrap();
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
-            assert_eq!(with_no_session.status(), unrouted.status());
-            assert_eq!(with_no_session.headers(), unrouted.headers());
-            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
-            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(a, b);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// The transcript endpoint's own method-mismatch-oracle proof, mirroring
-    /// `terminal_screen_wrong_method_is_byte_identical_to_unrouted` — mounted
-    /// with `any(...)` + `MethodGate<Get>`, never `.get(...)`. Carries no
-    /// session and no enabled switch, so on its own this does **not**
-    /// isolate `MethodGate`: `AuthSession`'s own rejection already answers
-    /// the same opaque 404 even with `MethodGate` deleted entirely — see
-    /// `terminal_transcript_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal`
-    /// below for the test that actually goes red on that guard alone
-    /// (the toothless-assertion shape this repo's own review found
-    /// elsewhere in this feature, `docs/history/learnings/
-    /// 20260805-toothless-security-assertions.md`).
-    #[tokio::test]
-    async fn terminal_transcript_wrong_method_is_byte_identical_to_unrouted() {
-        let dir = fresh_root("transcript-wrong-method");
-        let root = fresh_root("transcript-wrong-method-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "transcript-wrong-method");
-        let app = router(st);
-
-        let posted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/p/{}/_terminal/w1:p1/transcript", project.id))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
-        assert_eq!(posted.status(), unrouted.status());
-        assert_eq!(posted.headers(), unrouted.headers());
-        let a = posted.into_body().collect().await.unwrap().to_bytes();
-        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(a, b);
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Truth (the carried-over method-mismatch-oracle obligation, isolated,
-    /// mirroring `terminal_route_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal`):
-    /// at least one wrong-method test must fail if `MethodGate` were removed
-    /// while a valid session and an enabled terminal are already in place.
-    /// The test above carries no session and the switch off, so it would
-    /// still pass unchanged even with `MethodGate` deleted entirely —
-    /// `AuthSession`'s own rejection answers the same opaque 404 first,
-    /// without `MethodGate` ever mattering (confirmed: deleting only
-    /// `_method: MethodGate<Get>` there left it green). This test instead
-    /// posts against a *known, in-boundary* pane (`started.pane_id`) with a
-    /// freshly rotated session and the switch on — every other guard
-    /// satisfied — so `MethodGate` alone stands between the POST and the
-    /// handler body. Verified by temporarily deleting `_method:
-    /// MethodGate<Get>` from `terminal_transcript` and re-running this test:
-    /// it went red (`200`, the transcript's ordinary `available: false`
-    /// JSON, not `404`) before the guard was restored.
-    #[tokio::test]
-    async fn terminal_transcript_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal()
-    {
-        let dir = fresh_root("transcript-wrong-method-isolated");
-        enable_terminal(&dir);
-        let root = fresh_root("transcript-wrong-method-isolated-project");
-        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
-        let started = fake
-            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
-        let mut st = build_state_with_dir(&dir);
-        st.herdr = fake;
-        let project = register(&st, &root, "wrong-method-isolated");
-        let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
-
-        let posted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/p/{}/_terminal/{}/transcript", project.id, started.pane_id))
-                    .header(header::COOKIE, cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
-        assert_eq!(posted.status(), unrouted.status());
-        assert_eq!(posted.headers(), unrouted.headers());
-        let a = posted.into_body().collect().await.unwrap().to_bytes();
-        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(a, b);
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// The must-have's third leg: with the D7 `terminal.enabled` switch off,
-    /// both the Transcript tab's page and its data endpoint answer exactly
-    /// as an unrouted path would, even with a session a valid rotation just
-    /// minted — mirroring
-    /// `terminal_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session`.
-    /// Verified by temporarily deleting the `if !terminal_family_enabled(&st)`
-    /// check from `terminal_transcript` and re-running: it went red (200
-    /// `available: false`, not 404) before the guard was restored.
-    #[tokio::test]
-    async fn transcript_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session() {
+    async fn transcript_family_disabled_answers_with_the_disabled_shapes() {
         let dir = fresh_root("transcript-family-disabled");
         // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
         let root = fresh_root("transcript-family-disabled-project");
         let st = build_state_with_dir(&dir);
         let project = register(&st, &root, "transcript-family-disabled");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
-
-        let unrouted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted_status = unrouted.status();
-        let unrouted_headers = unrouted.headers().clone();
-        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
 
         let page = app
             .clone()
-            .oneshot(transcript_page_req(&project.id, Some(&cookie)))
+            .oneshot(transcript_page_req(&project.id, None))
             .await
             .unwrap();
-        assert_eq!(page.status(), unrouted_status);
-        assert_eq!(page.headers(), &unrouted_headers);
-        let page_body = page.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(page.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            page_body, unrouted_body,
-            "the Transcript tab must be unreachable while the switch is off, even with a valid session"
+            page.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8",
+            "the disabled Transcript tab must answer the ordinary not-found page, not an empty body"
         );
+        let page_body = body_string(page).await;
+        assert!(!page_body.is_empty(), "a disabled terminal must never answer with nothing");
 
         let data = app
-            .oneshot(terminal_transcript_req(&project.id, "w1:p1", None, Some(&cookie)))
+            .oneshot(terminal_transcript_req(&project.id, "w1:p1", None, None))
             .await
             .unwrap();
-        assert_eq!(data.status(), unrouted_status);
-        assert_eq!(data.headers(), &unrouted_headers);
-        let data_body = data.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(data.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            data_body, unrouted_body,
-            "the transcript endpoint must be unreachable while the switch is off, even with a valid session"
+            data.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "the disabled transcript endpoint must answer JSON, not an empty body"
+        );
+        let data_body = body_string(data).await;
+        assert!(
+            data_body.contains("disabled"),
+            "the disabled transcript endpoint must name the reason: {data_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -7925,122 +7504,6 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&transcript_root).ok();
-    }
-
-    /// Truth: "Without a session, the Transcript *page* route returns an
-    /// opaque 404, identical to an unknown route" — with the D7 switch
-    /// already ON, so this isolates the session gate itself rather than the
-    /// disabled-switch check (the trap this feature has already fallen into
-    /// three times: a no-session test with the switch left off passes on the
-    /// switch, not on `AuthSession` — see
-    /// `docs/history/learnings/20260805-toothless-security-assertions.md`).
-    /// Every other test that reaches `transcript_page`
-    /// (`transcript_page_renders_the_tab_and_a_viewport_per_pane`,
-    /// `transcript_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session`)
-    /// carries a valid cookie, so none of them would go red if
-    /// `_session: terminal_auth::AuthSession` were deleted from
-    /// `transcript_page` — this one does. Mirrors
-    /// `terminal_route_without_a_session_is_byte_identical_to_an_unrouted_path`
-    /// (the Terminal tab's own page-route sibling proof). Verified by
-    /// temporarily deleting `_session: terminal_auth::AuthSession` from
-    /// `transcript_page` and re-running: it went red (200, not 404) before
-    /// the guard was restored.
-    #[tokio::test]
-    async fn transcript_page_without_a_session_is_byte_identical_to_an_unrouted_path() {
-        let dir = fresh_root("transcript-page-no-session");
-        enable_terminal(&dir);
-        let root = fresh_root("transcript-page-no-session-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "transcript-page-no-session");
-        let app = router(st);
-
-        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
-            let with_no_session = app
-                .clone()
-                .oneshot(transcript_page_req(&project.id, cookie))
-                .await
-                .unwrap();
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
-            assert_eq!(with_no_session.status(), unrouted.status());
-            assert_eq!(with_no_session.headers(), unrouted.headers());
-            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
-            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(a, b);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Truth (the carried-over method-mismatch-oracle obligation, isolated,
-    /// mirroring
-    /// `terminal_route_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal`):
-    /// at least one wrong-method test against the Transcript *page* route
-    /// must fail if `MethodGate` were removed from `transcript_page` while a
-    /// valid session and an enabled terminal are already in place. A
-    /// no-session/switch-off wrong-method test would still pass unchanged
-    /// even with `MethodGate` deleted entirely, since `AuthSession`'s own
-    /// rejection (or the disabled switch) answers the same opaque 404 first
-    /// without `MethodGate` ever mattering — this test instead POSTs with a
-    /// freshly rotated session and the switch on, so `MethodGate` alone
-    /// stands between the POST and the handler body. Verified by temporarily
-    /// deleting `_method: terminal_auth::MethodGate<terminal_auth::Get>` from
-    /// `transcript_page` and re-running this test: it went red (200, the
-    /// rendered Transcript page, not 404) before the guard was restored.
-    #[tokio::test]
-    async fn transcript_page_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal()
-    {
-        let dir = fresh_root("transcript-page-wrong-method-isolated");
-        enable_terminal(&dir);
-        let root = fresh_root("transcript-page-wrong-method-isolated-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "transcript-page-wrong-method-isolated");
-        let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
-
-        let posted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/p/{}/_transcript", project.id))
-                    .header(header::COOKIE, cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
-        assert_eq!(posted.status(), unrouted.status());
-        assert_eq!(posted.headers(), unrouted.headers());
-        let a = posted.into_body().collect().await.unwrap().to_bytes();
-        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(a, b);
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// Truth: "The Transcript tab is a separate tab from Terminal on a
@@ -8533,164 +7996,50 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// agent-terminal-9, truth: "Without a terminal session, and with the
-    /// terminal switch off, both write endpoints answer byte-identically to
-    /// an unrouted path" — the no-session half, mirroring
-    /// `terminal_screen_without_a_session_is_byte_identical_to_an_unrouted_path`
-    /// for both `/input` and `/keys`.
+    /// D12: with the D7 `terminal.enabled` switch off, both write endpoints
+    /// answer with the family's reasoned JSON 404 — no cookie, no token,
+    /// nothing but the switch decides this.
     #[tokio::test]
-    async fn terminal_write_routes_without_a_session_are_byte_identical_to_an_unrouted_path() {
-        let dir = fresh_root("terminal-write-no-session");
-        enable_terminal(&dir);
-        let root = fresh_root("terminal-write-no-session-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "write-no-session");
-        let app = router(st);
-
-        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            let unrouted_status = unrouted.status();
-            let unrouted_headers = unrouted.headers().clone();
-            let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
-
-            let input = app
-                .clone()
-                .oneshot(terminal_input_req(&project.id, "w1:p1", "hi", Some(true), cookie))
-                .await
-                .unwrap();
-            assert_eq!(input.status(), unrouted_status);
-            assert_eq!(input.headers(), &unrouted_headers);
-            let input_body = input.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(input_body, unrouted_body);
-
-            let keys = app
-                .clone()
-                .oneshot(terminal_keys_req(&project.id, "w1:p1", &["enter"], cookie))
-                .await
-                .unwrap();
-            assert_eq!(keys.status(), unrouted_status);
-            assert_eq!(keys.headers(), &unrouted_headers);
-            let keys_body = keys.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(keys_body, unrouted_body);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// The other half of the same truth: with a valid session but the D7
-    /// `terminal.enabled` switch off, both write endpoints still answer
-    /// exactly as an unrouted path would — mirroring
-    /// `terminal_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session`.
-    #[tokio::test]
-    async fn terminal_write_routes_disabled_are_byte_identical_to_unrouted_even_with_a_valid_session()
-    {
+    async fn terminal_write_routes_disabled_answer_with_a_reasoned_json_404() {
         let dir = fresh_root("terminal-write-disabled");
         // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
         let root = fresh_root("terminal-write-disabled-project");
         let st = build_state_with_dir(&dir);
         let project = register(&st, &root, "write-disabled");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
-
-        let unrouted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted_status = unrouted.status();
-        let unrouted_headers = unrouted.headers().clone();
-        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
 
         let input = app
             .clone()
-            .oneshot(terminal_input_req(&project.id, "w1:p1", "hi", Some(true), Some(&cookie)))
+            .oneshot(terminal_input_req(&project.id, "w1:p1", "hi", Some(true), None))
             .await
             .unwrap();
-        assert_eq!(input.status(), unrouted_status);
-        assert_eq!(input.headers(), &unrouted_headers);
-        let input_body = input.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(input.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            input_body, unrouted_body,
-            "the input endpoint must be unreachable while the switch is off, even with a valid session"
+            input.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "the disabled input endpoint must answer JSON, not an empty body"
+        );
+        let input_body = body_string(input).await;
+        assert!(
+            input_body.contains("disabled"),
+            "the disabled input endpoint must name the reason: {input_body}"
         );
 
         let keys = app
-            .oneshot(terminal_keys_req(&project.id, "w1:p1", &["enter"], Some(&cookie)))
+            .oneshot(terminal_keys_req(&project.id, "w1:p1", &["enter"], None))
             .await
             .unwrap();
-        assert_eq!(keys.status(), unrouted_status);
-        assert_eq!(keys.headers(), &unrouted_headers);
-        let keys_body = keys.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(keys.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            keys_body, unrouted_body,
-            "the keys endpoint must be unreachable while the switch is off, even with a valid session"
+            keys.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "the disabled keys endpoint must answer JSON, not an empty body"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// agent-terminal-9, truth: "A wrong-method request to either write
-    /// endpoint is byte-identical to an unrouted path" — mounted with
-    /// `any(...)` + `MethodGate<Post>`, never `.post(...)`, mirroring
-    /// `terminal_screen_wrong_method_is_byte_identical_to_unrouted`.
-    #[tokio::test]
-    async fn terminal_write_routes_wrong_method_are_byte_identical_to_unrouted() {
-        let dir = fresh_root("terminal-write-wrong-method");
-        enable_terminal(&dir);
-        let root = fresh_root("terminal-write-wrong-method-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "write-wrong-method");
-        let app = router(st);
-
-        for path_suffix in ["input", "keys"] {
-            let got = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("GET")
-                        .uri(format!("/p/{}/_terminal/w1:p1/{path_suffix}", project.id))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("GET")
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(got.status(), StatusCode::NOT_FOUND);
-            assert_eq!(got.status(), unrouted.status());
-            assert_eq!(got.headers(), unrouted.headers());
-            let a = got.into_body().collect().await.unwrap().to_bytes();
-            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(a, b);
-        }
+        let keys_body = body_string(keys).await;
+        assert!(
+            keys_body.contains("disabled"),
+            "the disabled keys endpoint must name the reason: {keys_body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
@@ -8755,194 +8104,6 @@ mod bee_route_tests {
                 );
             }
         }
-    }
-
-    /// agent-terminal-8, truth: "A request presenting no token, or a wrong
-    /// token, cannot obtain a terminal session by any route" — the login
-    /// half. Neither an unconfigured token nor a wrong one against a real,
-    /// already-generated one ever sets a session cookie; the real token
-    /// still works afterward, proving the failed attempts left nothing
-    /// corrupted.
-    #[tokio::test]
-    async fn login_with_a_wrong_or_missing_token_never_mints_a_session() {
-        let dir = fresh_root("terminal-login-wrong-token");
-        let st = build_state_with_dir(&dir);
-        let app = router(st);
-
-        async fn login(app: Router, token: &str) -> Response {
-            app.oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/settings/terminal/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from(format!("token={token}")))
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-        }
-
-        // No token has ever been generated yet — nothing can verify.
-        let resp = login(app.clone(), "whatever").await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        assert!(resp.headers().get(header::SET_COOKIE).is_none());
-
-        // A real token now exists (first-run rotation); a wrong guess still
-        // fails.
-        let (real_token, _cookie) = rotate_token(app.clone()).await;
-        let resp = login(app.clone(), "definitely-not-it").await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        assert!(resp.headers().get(header::SET_COOKIE).is_none());
-
-        // The real token still logs in, proving the refusals above changed
-        // nothing.
-        let resp = login(app, &real_token).await;
-        assert!(resp.status().is_redirection());
-        assert!(resp.headers().get(header::SET_COOKIE).is_some());
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// agent-terminal-8, truth: "Once a token exists, rotation requires the
-    /// current session; with no token file yet, first-run rotation is still
-    /// possible." Also proves `POST` to the rotation route never itself
-    /// returns a usable session cookie, at every stage.
-    #[tokio::test]
-    async fn rotation_needs_no_session_on_first_run_but_requires_one_after() {
-        let dir = fresh_root("terminal-rotation-auth");
-        let st = build_state_with_dir(&dir);
-        let app = router(st);
-
-        async fn rotate(app: Router, cookie: Option<&str>) -> Response {
-            let mut b = Request::builder()
-                .method("POST")
-                .uri("/settings/terminal/token");
-            if let Some(c) = cookie {
-                b = b.header(header::COOKIE, c.to_string());
-            }
-            app.oneshot(b.body(Body::empty()).unwrap()).await.unwrap()
-        }
-
-        // First-run: no token file on disk yet, so no session is required.
-        let first = rotate(app.clone(), None).await;
-        assert_eq!(first.status(), StatusCode::OK);
-        assert!(
-            first.headers().get(header::SET_COOKIE).is_none(),
-            "rotation must never itself set a session cookie"
-        );
-        let body = body_string(first).await;
-        let marker = "it will not be shown again: <code>";
-        let start = body.find(marker).unwrap() + marker.len();
-        let rest = &body[start..];
-        let end = rest.find("</code>").unwrap();
-        let token = rest[..end].to_string();
-
-        // A token now exists: rotating again with no session is refused —
-        // an unauthenticated visitor can no longer clear the real user's
-        // session by re-rotating.
-        let second = rotate(app.clone(), None).await;
-        assert_eq!(
-            second.status(),
-            StatusCode::NOT_FOUND,
-            "rotating an already-configured token with no session must be refused"
-        );
-
-        // Logging in with the current token, then rotating, succeeds — and
-        // still never sets a cookie of its own.
-        let login_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/settings/terminal/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from(format!("token={token}")))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let cookie = login_resp
-            .headers()
-            .get(header::SET_COOKIE)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string();
-
-        let third = rotate(app, Some(&cookie)).await;
-        assert_eq!(
-            third.status(),
-            StatusCode::OK,
-            "rotating with a live session must succeed"
-        );
-        assert!(third.headers().get(header::SET_COOKIE).is_none());
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// agent-terminal-8, truth: "A second device holding the token can sign
-    /// in without disturbing the first device's session." Login (unlike
-    /// rotation) never clears the session set — only a fresh rotation does
-    /// (P5) — so two devices presenting the same still-current token both
-    /// end up with their own live, independent sessions.
-    #[tokio::test]
-    async fn a_second_device_logging_in_does_not_disturb_the_first_devices_session() {
-        let dir = fresh_root("terminal-multi-device-login");
-        enable_terminal(&dir);
-        let root = fresh_root("terminal-multi-device-login-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "multi-device");
-        let app = router(st);
-
-        let (token, cookie_a) = rotate_token(app.clone()).await;
-
-        let login_b = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/settings/terminal/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from(format!("token={token}")))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(login_b.status().is_redirection());
-        let cookie_b = login_b
-            .headers()
-            .get(header::SET_COOKIE)
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string();
-        assert_ne!(cookie_a, cookie_b, "each login mints its own distinct session");
-
-        let resp_a = app
-            .clone()
-            .oneshot(terminal_req(&project.id, Some(&cookie_a)))
-            .await
-            .unwrap();
-        assert_eq!(
-            resp_a.status(),
-            StatusCode::OK,
-            "device A's session must survive device B logging in"
-        );
-
-        let resp_b = app
-            .oneshot(terminal_req(&project.id, Some(&cookie_b)))
-            .await
-            .unwrap();
-        assert_eq!(resp_b.status(), StatusCode::OK, "device B's own session must work too");
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// D6/agent-terminal-8, truth: "The Terminal tab is present on a
@@ -9025,113 +8186,31 @@ mod bee_route_tests {
         b.body(Body::from(body.to_string())).unwrap()
     }
 
-    /// Truth: "Without a terminal session, `/_terminal/unassigned` returns
-    /// an opaque 404, identical to an unknown route" — the group route's own
-    /// instance of the byte-identical-to-unrouted proof every other gated
-    /// terminal route already carries.
+    /// D12: with the D7 `terminal.enabled` switch off, `/_terminal/unassigned`
+    /// answers with mdview's ordinary not-found page — no cookie, no token,
+    /// nothing but the switch decides this. toa-1's deviation from the
+    /// plan's keep-list (recorded in this cell's outcome): the keep-list
+    /// names six disabled-state tests and omits this one, but it is the only
+    /// disabled-state coverage this feature has for the Unassigned group's
+    /// own *page* route (`unassigned_screen`/`unassigned_write` cover its
+    /// data routes) — retiring it would leave that page's D7 gate unproven.
     #[tokio::test]
-    async fn unassigned_route_without_a_session_is_byte_identical_to_an_unrouted_path() {
-        let dir = fresh_root("unassigned-no-session");
-        enable_terminal(&dir);
-        let st = build_state_with_dir(&dir);
-        let app = router(st);
-
-        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
-            let with_no_session = app.clone().oneshot(unassigned_req(cookie)).await.unwrap();
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
-            assert_eq!(with_no_session.status(), unrouted.status());
-            assert_eq!(with_no_session.headers(), unrouted.headers());
-            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
-            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(a, b);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Truth (the carry-over obligation, agent-terminal-10's own instance):
-    /// a wrong-method request to `/_terminal/unassigned` (mounted via
-    /// `any(...)` + `MethodGate<Get>`, never `.get(...)`) is byte-identical
-    /// to a path this router never mounts at all.
-    #[tokio::test]
-    async fn unassigned_route_wrong_method_is_byte_identical_to_unrouted() {
-        let dir = fresh_root("unassigned-wrong-method");
-        let st = build_state_with_dir(&dir);
-        let app = router(st);
-
-        let posted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/_terminal/unassigned")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
-        assert_eq!(posted.status(), unrouted.status());
-        assert_eq!(posted.headers(), unrouted.headers());
-        let a = posted.into_body().collect().await.unwrap().to_bytes();
-        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(a, b);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The must-have this cell shares with agent-terminal-6/8: with the D7
-    /// `terminal.enabled` switch off, `/_terminal/unassigned` answers
-    /// exactly as an unrouted path would — even with a session a valid
-    /// rotation just minted.
-    #[tokio::test]
-    async fn unassigned_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session() {
+    async fn unassigned_family_disabled_answers_with_the_ordinary_not_found_page() {
         let dir = fresh_root("unassigned-family-disabled");
         // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
         let st = build_state_with_dir(&dir);
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
-        let unrouted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let disabled = app.oneshot(unassigned_req(Some(&cookie))).await.unwrap();
+        let disabled = app.oneshot(unassigned_req(None)).await.unwrap();
 
         assert_eq!(disabled.status(), StatusCode::NOT_FOUND);
-        assert_eq!(disabled.status(), unrouted.status());
-        assert_eq!(disabled.headers(), unrouted.headers());
-        let a = disabled.into_body().collect().await.unwrap().to_bytes();
-        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(a, b);
+        assert_eq!(
+            disabled.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8",
+            "a disabled terminal must answer the ordinary not-found page, not an empty body"
+        );
+        let body = body_string(disabled).await;
+        assert!(!body.is_empty(), "a disabled terminal must never answer with nothing");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -9374,288 +8453,78 @@ mod bee_route_tests {
 
     // ---- agent-terminal-11: the Unassigned group's own guard tests ----
     //
-    // A semantic review found every request the suite made to the three
-    // unassigned routes (screen, input, keys) carried a valid cookie --
-    // removing `AuthSession` from any of the three failed nothing. These
-    // pin the same three truths (no-session, wrong-method, switch-off)
-    // their project-scoped equivalents already carry, proven the same
-    // byte-identical-to-unrouted way.
+    // toa-1 (D1/D7): the no-session and wrong-method tests these two routes
+    // used to carry are retired — their subject was the auth disguise, which
+    // is gone. The switch-off truth below is the only one that survives:
+    // it's the only coverage left that a disabled terminal actually refuses.
 
-    /// Truth: without a terminal session,
-    /// `/_terminal/unassigned/{pane}/screen` answers byte-identically to an
-    /// unrouted path -- mirroring
-    /// `terminal_screen_without_a_session_is_byte_identical_to_an_unrouted_path`.
-    /// Verified by temporarily deleting `_session: AuthSession` from
-    /// `unassigned_terminal_screen`: with no other guard in front of it, the
-    /// handler falls through to `verify_pane_is_unassigned`'s ordinary
-    /// `not_found("pane not found")` -- an HTML body, distinct from this
-    /// opaque empty-body 404 -- so this assertion goes red exactly as its
-    /// project-scoped sibling's does.
+    /// D12: with the D7 switch off, `/_terminal/unassigned/{pane}/screen`
+    /// answers with the family's reasoned JSON 404 — no cookie, no token,
+    /// nothing but the switch decides this.
     #[tokio::test]
-    async fn unassigned_screen_without_a_session_is_byte_identical_to_an_unrouted_path() {
-        let dir = fresh_root("unassigned-screen-no-session");
-        enable_terminal(&dir);
-        let st = build_state_with_dir(&dir);
-        let app = router(st);
-
-        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
-            let with_no_session = app
-                .clone()
-                .oneshot(unassigned_screen_req("w1:p1", cookie))
-                .await
-                .unwrap();
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(with_no_session.status(), StatusCode::NOT_FOUND);
-            assert_eq!(with_no_session.status(), unrouted.status());
-            assert_eq!(with_no_session.headers(), unrouted.headers());
-            let a = with_no_session.into_body().collect().await.unwrap().to_bytes();
-            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(a, b);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Truth: without a terminal session, both unassigned write routes
-    /// (`/input`, `/keys`) answer byte-identically to an unrouted path --
-    /// mirroring
-    /// `terminal_write_routes_without_a_session_are_byte_identical_to_an_unrouted_path`.
-    /// Verified the same way as the screen route above, for both
-    /// `unassigned_terminal_input` and `unassigned_terminal_keys`.
-    #[tokio::test]
-    async fn unassigned_write_routes_without_a_session_are_byte_identical_to_an_unrouted_path() {
-        let dir = fresh_root("unassigned-write-no-session");
-        enable_terminal(&dir);
-        let st = build_state_with_dir(&dir);
-        let app = router(st);
-
-        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            let unrouted_status = unrouted.status();
-            let unrouted_headers = unrouted.headers().clone();
-            let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
-
-            let input = app
-                .clone()
-                .oneshot(unassigned_input_req("w1:p1", "hi", true, cookie))
-                .await
-                .unwrap();
-            assert_eq!(input.status(), unrouted_status);
-            assert_eq!(input.headers(), &unrouted_headers);
-            let input_body = input.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(input_body, unrouted_body);
-
-            let keys = app
-                .clone()
-                .oneshot(unassigned_keys_req("w1:p1", &["enter"], cookie))
-                .await
-                .unwrap();
-            assert_eq!(keys.status(), unrouted_status);
-            assert_eq!(keys.headers(), &unrouted_headers);
-            let keys_body = keys.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(keys_body, unrouted_body);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Truth: a wrong-method request to `/_terminal/unassigned/{pane}/screen`
-    /// (mounted via `any(...)` + `MethodGate<Get>`, never `.get(...)`) is
-    /// byte-identical to an unrouted path -- mirroring
-    /// `terminal_screen_wrong_method_is_byte_identical_to_unrouted`.
-    #[tokio::test]
-    async fn unassigned_screen_wrong_method_is_byte_identical_to_unrouted() {
-        let dir = fresh_root("unassigned-screen-wrong-method");
-        let st = build_state_with_dir(&dir);
-        let app = router(st);
-
-        let posted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/_terminal/unassigned/w1:p1/screen")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
-        assert_eq!(posted.status(), unrouted.status());
-        assert_eq!(posted.headers(), unrouted.headers());
-        let a = posted.into_body().collect().await.unwrap().to_bytes();
-        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(a, b);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Truth: a wrong-method request to either unassigned write route is
-    /// byte-identical to an unrouted path -- mirroring
-    /// `terminal_write_routes_wrong_method_are_byte_identical_to_unrouted`.
-    #[tokio::test]
-    async fn unassigned_write_routes_wrong_method_are_byte_identical_to_unrouted() {
-        let dir = fresh_root("unassigned-write-wrong-method");
-        let st = build_state_with_dir(&dir);
-        let app = router(st);
-
-        for path_suffix in ["input", "keys"] {
-            let got = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("GET")
-                        .uri(format!("/_terminal/unassigned/w1:p1/{path_suffix}"))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("GET")
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(got.status(), StatusCode::NOT_FOUND);
-            assert_eq!(got.status(), unrouted.status());
-            assert_eq!(got.headers(), unrouted.headers());
-            let a = got.into_body().collect().await.unwrap().to_bytes();
-            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(a, b);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Truth: with a valid session but the D7 `terminal.enabled` switch off,
-    /// `/_terminal/unassigned/{pane}/screen` still answers exactly as an
-    /// unrouted path would -- mirroring
-    /// `terminal_family_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session`.
-    #[tokio::test]
-    async fn unassigned_screen_disabled_is_byte_identical_to_unrouted_even_with_a_valid_session() {
+    async fn unassigned_screen_disabled_answers_with_a_reasoned_json_404() {
         let dir = fresh_root("unassigned-screen-disabled");
         // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
         let st = build_state_with_dir(&dir);
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
-        let unrouted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted_status = unrouted.status();
-        let unrouted_headers = unrouted.headers().clone();
-        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
-
-        let screen = app
-            .oneshot(unassigned_screen_req("w1:p1", Some(&cookie)))
-            .await
-            .unwrap();
-        assert_eq!(screen.status(), unrouted_status);
-        assert_eq!(screen.headers(), &unrouted_headers);
-        let screen_body = screen.into_body().collect().await.unwrap().to_bytes();
+        let screen = app.oneshot(unassigned_screen_req("w1:p1", None)).await.unwrap();
+        assert_eq!(screen.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            screen_body, unrouted_body,
-            "the unassigned screen endpoint must be unreachable while the switch is off, even with a valid session"
+            screen.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "the disabled unassigned screen endpoint must answer JSON, not an empty body"
+        );
+        let body = body_string(screen).await;
+        assert!(
+            body.contains("disabled"),
+            "the disabled unassigned screen endpoint must name the reason: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Truth: with a valid session but the switch off, both unassigned write
-    /// routes still answer exactly as an unrouted path would -- mirroring
-    /// `terminal_write_routes_disabled_are_byte_identical_to_unrouted_even_with_a_valid_session`.
+    /// D12: with the switch off, both unassigned write routes answer with
+    /// the family's reasoned JSON 404 — no cookie, no token, nothing but the
+    /// switch decides this.
     #[tokio::test]
-    async fn unassigned_write_routes_disabled_are_byte_identical_to_unrouted_even_with_a_valid_session()
-    {
+    async fn unassigned_write_routes_disabled_answer_with_a_reasoned_json_404() {
         let dir = fresh_root("unassigned-write-disabled");
         // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
         let st = build_state_with_dir(&dir);
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
-
-        let unrouted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted_status = unrouted.status();
-        let unrouted_headers = unrouted.headers().clone();
-        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
 
         let input = app
             .clone()
-            .oneshot(unassigned_input_req("w1:p1", "hi", true, Some(&cookie)))
+            .oneshot(unassigned_input_req("w1:p1", "hi", true, None))
             .await
             .unwrap();
-        assert_eq!(input.status(), unrouted_status);
-        assert_eq!(input.headers(), &unrouted_headers);
-        let input_body = input.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(input.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            input_body, unrouted_body,
-            "the unassigned input endpoint must be unreachable while the switch is off, even with a valid session"
+            input.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "the disabled unassigned input endpoint must answer JSON, not an empty body"
+        );
+        let input_body = body_string(input).await;
+        assert!(
+            input_body.contains("disabled"),
+            "the disabled unassigned input endpoint must name the reason: {input_body}"
         );
 
         let keys = app
-            .oneshot(unassigned_keys_req("w1:p1", &["enter"], Some(&cookie)))
+            .oneshot(unassigned_keys_req("w1:p1", &["enter"], None))
             .await
             .unwrap();
-        assert_eq!(keys.status(), unrouted_status);
-        assert_eq!(keys.headers(), &unrouted_headers);
-        let keys_body = keys.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(keys.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            keys_body, unrouted_body,
-            "the unassigned keys endpoint must be unreachable while the switch is off, even with a valid session"
+            keys.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "the disabled unassigned keys endpoint must answer JSON, not an empty body"
+        );
+        let keys_body = body_string(keys).await;
+        assert!(
+            keys_body.contains("disabled"),
+            "the disabled unassigned keys endpoint must name the reason: {keys_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -9723,110 +8592,6 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&scratch).ok();
-    }
-
-    /// Truth (the carried-over method-mismatch-oracle obligation, isolated):
-    /// at least one wrong-method test must fail if `MethodGate` were removed
-    /// while a valid session and an enabled terminal are already in place.
-    /// Every other wrong-method test above runs with no session and the
-    /// switch off, so it would still pass unchanged even with `MethodGate`
-    /// deleted entirely -- `AuthSession`'s own rejection, or the
-    /// disabled-switch check, would answer the opaque 404 first, without
-    /// `MethodGate` ever mattering. Verified by temporarily deleting
-    /// `_method: MethodGate<Get>` from `terminal_page`: the POST then
-    /// reaches the handler body and (against the enabled switch, the
-    /// registered project, and the default available `FakeHerdr`) renders
-    /// `200 OK` with an empty pane list -- nothing like the unrouted path's
-    /// bare 404 -- so this assertion goes red.
-    #[tokio::test]
-    async fn terminal_route_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal()
-    {
-        let dir = fresh_root("terminal-wrong-method-isolated");
-        enable_terminal(&dir);
-        let root = fresh_root("terminal-wrong-method-isolated-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "wrong-method-isolated");
-        let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
-
-        let posted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/p/{}/_terminal", project.id))
-                    .header(header::COOKIE, cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(posted.status(), StatusCode::NOT_FOUND);
-        assert_eq!(posted.status(), unrouted.status());
-        assert_eq!(posted.headers(), unrouted.headers());
-        let a = posted.into_body().collect().await.unwrap().to_bytes();
-        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(a, b);
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Truth: the token-rotation route, now mounted with `any(...)` +
-    /// `MethodGate<Post>` instead of the `.post(...)` this cell replaces, is
-    /// unreachable by any method but `POST` -- mirroring
-    /// `api_terminal_config_wrong_method_is_byte_identical_to_unrouted`.
-    /// Verified by temporarily reverting the route table to
-    /// `.route("/settings/terminal/token", post(rotate_terminal_token))`: a
-    /// `GET` then answers `405 Allow: POST` instead of matching the unrouted
-    /// 404, and this assertion goes red.
-    #[tokio::test]
-    async fn rotate_terminal_token_wrong_method_is_byte_identical_to_unrouted() {
-        let dir = fresh_root("terminal-token-wrong-method");
-        let st = build_state_with_dir(&dir);
-        let app = router(st);
-
-        let got = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/settings/terminal/token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(got.status(), StatusCode::NOT_FOUND);
-        assert_eq!(got.status(), unrouted.status());
-        assert_eq!(got.headers(), unrouted.headers());
-        let a = got.into_body().collect().await.unwrap().to_bytes();
-        let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(a, b);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Truth (must-have): a single `/keys` request cannot queue an
@@ -10102,197 +8867,11 @@ mod bee_route_tests {
         b.body(Body::from(body.to_string())).unwrap()
     }
 
-    /// Truth: without a terminal session both create routes answer exactly
-    /// as an unrouted path would — mirroring
-    /// `terminal_write_routes_without_a_session_are_byte_identical_to_an_unrouted_path`.
+    /// D12: with the D7 switch off, both create routes answer with the
+    /// family's reasoned JSON 404 — no cookie, no token, nothing but the
+    /// switch decides this.
     #[tokio::test]
-    async fn terminal_create_routes_without_a_session_are_byte_identical_to_an_unrouted_path() {
-        let dir = fresh_root("terminal-create-no-session");
-        enable_terminal(&dir);
-        let root = fresh_root("terminal-create-no-session-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "create-no-session");
-        let app = router(st);
-
-        for cookie in [None, Some("mdview_terminal_session=not-a-real-session")] {
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            let unrouted_status = unrouted.status();
-            let unrouted_headers = unrouted.headers().clone();
-            let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
-
-            let pane = app
-                .clone()
-                .oneshot(create_pane_req(&project.id, cookie))
-                .await
-                .unwrap();
-            assert_eq!(pane.status(), unrouted_status);
-            assert_eq!(pane.headers(), &unrouted_headers);
-            let pane_body = pane.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(pane_body, unrouted_body);
-
-            let agent = app
-                .clone()
-                .oneshot(create_agent_req(
-                    &project.id,
-                    &serde_json::json!({ "preset": "Claude" }),
-                    cookie,
-                ))
-                .await
-                .unwrap();
-            assert_eq!(agent.status(), unrouted_status);
-            assert_eq!(agent.headers(), &unrouted_headers);
-            let agent_body = agent.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(agent_body, unrouted_body);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Truth: a wrong-method request to either create route is
-    /// byte-identical to an unrouted path — mounted with `any(...)` +
-    /// `MethodGate<Post>`, never `.post(...)`.
-    #[tokio::test]
-    async fn terminal_create_routes_wrong_method_are_byte_identical_to_unrouted() {
-        let dir = fresh_root("terminal-create-wrong-method");
-        enable_terminal(&dir);
-        let root = fresh_root("terminal-create-wrong-method-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "create-wrong-method");
-        let app = router(st);
-
-        for path_suffix in ["create/pane", "create/agent"] {
-            let got = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("GET")
-                        .uri(format!("/p/{}/_terminal/{path_suffix}", project.id))
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            let unrouted = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("GET")
-                        .uri("/this-path-was-never-routed")
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(got.status(), StatusCode::NOT_FOUND);
-            assert_eq!(got.status(), unrouted.status());
-            assert_eq!(got.headers(), unrouted.headers());
-            let a = got.into_body().collect().await.unwrap().to_bytes();
-            let b = unrouted.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(a, b);
-        }
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Truth (the carried-over method-mismatch-oracle obligation, isolated —
-    /// mirrors
-    /// `terminal_route_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal`):
-    /// `terminal_create_routes_wrong_method_are_byte_identical_to_unrouted`
-    /// above sends no session cookie at all, so it would still pass
-    /// unchanged even with `MethodGate` deleted from either creation
-    /// handler entirely — `AuthSession`'s own rejection refuses the request
-    /// first, without `MethodGate` ever mattering. Verified by temporarily
-    /// deleting `_method: MethodGate<Post>,` from `terminal_create_pane` and
-    /// (separately) from `terminal_create_agent`: a GET carrying the same
-    /// JSON body a real POST would send then reaches the handler body
-    /// (against a valid session, the enabled switch, and the registered
-    /// project) and renders `409` — the default `FakeHerdr`'s fixture
-    /// anchors resolve under no real project root, so
-    /// `destination_unresolved_response` fires — nothing like the unrouted
-    /// path's bare 404, so this assertion goes red. Verified both ways
-    /// (each guard deleted, tested, then restored) before capping.
-    #[tokio::test]
-    async fn terminal_create_routes_wrong_method_isolates_method_gate_with_a_valid_session_and_enabled_terminal()
-    {
-        let dir = fresh_root("terminal-create-wrong-method-isolated");
-        enable_terminal(&dir);
-        let root = fresh_root("terminal-create-wrong-method-isolated-project");
-        let st = build_state_with_dir(&dir);
-        let project = register(&st, &root, "create-wrong-method-isolated");
-        let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
-
-        let unrouted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted_status = unrouted.status();
-        let unrouted_headers = unrouted.headers().clone();
-        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
-
-        let pane = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!("/p/{}/_terminal/create/pane", project.id))
-                    .header(header::COOKIE, cookie.clone())
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(pane.status(), unrouted_status);
-        assert_eq!(pane.headers(), &unrouted_headers);
-        let pane_body = pane.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(pane_body, unrouted_body);
-
-        let agent = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri(format!("/p/{}/_terminal/create/agent", project.id))
-                    .header(header::COOKIE, cookie)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::json!({ "preset": "Claude" }).to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(agent.status(), unrouted_status);
-        assert_eq!(agent.headers(), &unrouted_headers);
-        let agent_body = agent.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(agent_body, unrouted_body);
-
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// Truth: with a valid session but the D7 switch off, both create
-    /// routes still answer exactly as an unrouted path would.
-    #[tokio::test]
-    async fn terminal_create_routes_disabled_are_byte_identical_to_unrouted_even_with_a_valid_session()
+    async fn terminal_create_routes_disabled_answer_with_a_reasoned_json_404()
     {
         let dir = fresh_root("terminal-create-disabled");
         // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
@@ -10300,50 +8879,42 @@ mod bee_route_tests {
         let st = build_state_with_dir(&dir);
         let project = register(&st, &root, "create-disabled");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
-
-        let unrouted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/this-path-was-never-routed")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let unrouted_status = unrouted.status();
-        let unrouted_headers = unrouted.headers().clone();
-        let unrouted_body = unrouted.into_body().collect().await.unwrap().to_bytes();
 
         let pane = app
             .clone()
-            .oneshot(create_pane_req(&project.id, Some(&cookie)))
+            .oneshot(create_pane_req(&project.id, None))
             .await
             .unwrap();
-        assert_eq!(pane.status(), unrouted_status);
-        assert_eq!(pane.headers(), &unrouted_headers);
-        let pane_body = pane.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(pane.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            pane_body, unrouted_body,
-            "the pane-create endpoint must be unreachable while the switch is off, even with a valid session"
+            pane.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "the disabled pane-create endpoint must answer JSON, not an empty body"
+        );
+        let pane_body = body_string(pane).await;
+        assert!(
+            pane_body.contains("disabled"),
+            "the disabled pane-create endpoint must name the reason: {pane_body}"
         );
 
         let agent = app
             .oneshot(create_agent_req(
                 &project.id,
                 &serde_json::json!({ "preset": "Claude" }),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
-        assert_eq!(agent.status(), unrouted_status);
-        assert_eq!(agent.headers(), &unrouted_headers);
-        let agent_body = agent.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(agent.status(), StatusCode::NOT_FOUND);
         assert_eq!(
-            agent_body, unrouted_body,
-            "the agent-create endpoint must be unreachable while the switch is off, even with a valid session"
+            agent.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "the disabled agent-create endpoint must answer JSON, not an empty body"
+        );
+        let agent_body = body_string(agent).await;
+        assert!(
+            agent_body.contains("disabled"),
+            "the disabled agent-create endpoint must name the reason: {agent_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
