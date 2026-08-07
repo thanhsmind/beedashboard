@@ -166,6 +166,14 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .proj-tabs { display: flex; gap: var(--space-4); margin-bottom: var(--space-4); border-bottom: var(--border-width-hairline) solid var(--color-border); }
 .proj-tab { padding: var(--space-2) 0; color: var(--color-text-muted); text-decoration: none; border-bottom: 2px solid transparent; }
 .proj-tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
+/* terminal-pane-scope D4: the pane tab strip that picks which single pane
+   this page renders — herdr's own sidebar shape, one entry per pane, each a
+   plain link to that pane's own address. Wraps rather than scrolling
+   sideways: a project with many panes still needs every one reachable on a
+   handset. */
+.pane-strip { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
+.pane-strip__tab { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text-muted); text-decoration: none; background: var(--color-bg-subtle); }
+.pane-strip__tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
 /* Name, status, kind and working directory are one line of heading, not four
    stacked bands — the directory is the only part long enough to need room, so
    it takes what is left and clips with an ellipsis (the full path stays in
@@ -262,6 +270,43 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 /// presence never depends on either. `active` is `"overview"`, `"terminal"`
 /// or `"transcript"` (agent-terminal-16, D9: the Transcript tab sits beside
 /// Terminal, not inside its frame).
+/// terminal-pane-scope D4: one entry per pane in the project's own
+/// D2-boundary-filtered list, each an ordinary anchor to that pane's own
+/// address (`/p/:id/_terminal/pane/:pane_id` or
+/// `/p/:id/_transcript/pane/:pane_id` — `kind` picks which). Carries the
+/// same identity and status pill [`pane_cards`]/[`transcript_cards`] render
+/// on the card itself, so the strip reads the way herdr's own sidebar does.
+/// An empty `panes` list renders nothing — the page's own empty state
+/// (`pane_cards`/`transcript_cards`'s `empty_msg`) already says so, and an
+/// empty strip would say it twice. No JavaScript: these are links, and one
+/// pane per page means `assets/app.js` polls one screen instead of N.
+fn pane_strip(project_id: &str, kind: &str, panes: &[TerminalPaneView], selected: Option<&str>) -> String {
+    if panes.is_empty() {
+        return String::new();
+    }
+    let pid = esc(project_id);
+    let mut out = String::from(r#"<nav class="pane-strip" aria-label="Panes">"#);
+    for p in panes {
+        let cls = if selected == Some(p.pane_id.as_str()) {
+            "pane-strip__tab pane-strip__tab--active"
+        } else {
+            "pane-strip__tab"
+        };
+        out.push_str(&format!(
+            r#"<a class="{cls}" href="/p/{pid}/_{kind}/pane/{pane_id}"><span class="term-pane__id">{workspace} · {tab}</span> {status_pill}</a>"#,
+            cls = cls,
+            pid = pid,
+            kind = kind,
+            pane_id = esc(&p.pane_id),
+            workspace = esc(&p.workspace),
+            tab = esc(&p.tab),
+            status_pill = status_pill(&p.status),
+        ));
+    }
+    out.push_str("</nav>");
+    out
+}
+
 fn project_tabs(project_id: &str, active: &str) -> String {
     let id = esc(project_id);
     let cls = |key: &str| {
@@ -481,15 +526,28 @@ fn terminal_create_controls(project_id: &str, presets: &[String]) -> String {
     )
 }
 
-/// `GET /p/:id/_terminal` up state (D2/D6): the project-scoped pane list.
-/// Zero panes renders a named empty state, not a blank page — distinct
-/// wording from [`terminal_down_page`] so an empty list is never mistaken
-/// for herdr being unreachable, or the reverse. `presets` is the exact
-/// configured D8 preset label list (`mdview_core::config::AgentPreset`'s
-/// labels, in `Config.terminal.agent_presets` order) — this view never sees
-/// argv.
-pub fn terminal_page(project: &Project, panes: &[TerminalPaneView], presets: &[String]) -> String {
-    let rows = pane_cards(panes, "No agents are running under this project right now.");
+/// `GET /p/:id/_terminal` and `/p/:id/_terminal/pane/:pane_id` up state
+/// (D2/D4/D6): one pane's own page, chosen by `selected` from the pane strip
+/// (D4) rendered above it. `selected` is `None` only when `panes` is empty
+/// (the honest empty state, not a blank page) — a `Some` id not present in
+/// `panes` is the caller's authorization refusal (`server.rs`'s
+/// `terminal_page_inner`), never reached here. Distinct wording from
+/// [`terminal_down_page`] so an empty list is never mistaken for herdr being
+/// unreachable, or the reverse. `presets` is the exact configured D8 preset
+/// label list (`mdview_core::config::AgentPreset`'s labels, in
+/// `Config.terminal.agent_presets` order) — this view never sees argv.
+pub fn terminal_page(
+    project: &Project,
+    panes: &[TerminalPaneView],
+    selected: Option<&str>,
+    presets: &[String],
+) -> String {
+    let empty_msg = "No agents are running under this project right now.";
+    let rows = match selected.and_then(|pid| panes.iter().find(|p| p.pane_id == pid)) {
+        Some(pane) => pane_cards(std::slice::from_ref(pane), empty_msg),
+        None => pane_cards(&[], empty_msg),
+    };
+    let strip = pane_strip(&project.id, "terminal", panes, selected);
     // `data-project-id` lets `assets/app.js`'s screen poller build each
     // pane's `/p/:id/_terminal/:pane_id/screen` URL without threading the id
     // through every `.term-screen` element individually.
@@ -500,6 +558,7 @@ pub fn terminal_page(project: &Project, panes: &[TerminalPaneView], presets: &[S
   <h2 class="fg-pagehead__title">{name}</h2>
   {tabs}
   {create}
+  {strip}
   <div class="term-panes">{rows}</div>
 </main>"#,
         topbar = topbar(&format!(
@@ -511,6 +570,7 @@ pub fn terminal_page(project: &Project, panes: &[TerminalPaneView], presets: &[S
         name = esc(&project.name),
         tabs = project_tabs(&project.id, "terminal"),
         create = terminal_create_controls(&project.id, presets),
+        strip = strip,
         rows = rows,
     );
     layout(&format!("{} · terminal", project.name), "", &body)
@@ -548,17 +608,25 @@ fn transcript_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     out
 }
 
-/// `GET /p/:id/_transcript` up state (D9): the Transcript tab beside
-/// Terminal, not a toggle inside its frame — the same project-scoped,
-/// D2-boundary-filtered pane list `terminal_page` builds, rendered with a
-/// transcript viewport per pane instead of a screen. Zero panes renders the
-/// same wording `terminal_page` uses for the same reason (never mistaken for
-/// herdr being unreachable, see [`terminal_down_page`], which this tab's
-/// down state also reuses — listing which panes belong to this project
-/// still needs a herdr snapshot even though transcript content itself
-/// doesn't).
-pub fn transcript_page(project: &Project, panes: &[TerminalPaneView]) -> String {
-    let rows = transcript_cards(panes, "No agents are running under this project right now.");
+/// `GET /p/:id/_transcript` and `/p/:id/_transcript/pane/:pane_id` up state
+/// (D4/D9): the Transcript tab beside Terminal, not a toggle inside its
+/// frame — one pane's own page, chosen by `selected` from the same pane
+/// strip shape `terminal_page` renders, with a transcript viewport in place
+/// of a screen. `selected` is `None` only when `panes` is empty; a `Some` id
+/// not present in `panes` is the caller's authorization refusal
+/// (`server.rs`'s `transcript_page_inner`), never reached here. Zero panes
+/// renders the same wording `terminal_page` uses for the same reason (never
+/// mistaken for herdr being unreachable, see [`terminal_down_page`], which
+/// this tab's down state also reuses — listing which panes belong to this
+/// project still needs a herdr snapshot even though transcript content
+/// itself doesn't).
+pub fn transcript_page(project: &Project, panes: &[TerminalPaneView], selected: Option<&str>) -> String {
+    let empty_msg = "No agents are running under this project right now.";
+    let rows = match selected.and_then(|pid| panes.iter().find(|p| p.pane_id == pid)) {
+        Some(pane) => transcript_cards(std::slice::from_ref(pane), empty_msg),
+        None => transcript_cards(&[], empty_msg),
+    };
+    let strip = pane_strip(&project.id, "transcript", panes, selected);
     // `data-project-id` lets `assets/app.js`'s transcript poller build each
     // pane's `/p/:id/_terminal/:pane_id/transcript` URL, mirroring the
     // screen poller's own `data-project-id` use on `terminal_page`.
@@ -568,6 +636,7 @@ pub fn transcript_page(project: &Project, panes: &[TerminalPaneView]) -> String 
 <main class="fg-page" data-project-id="{pid}">
   <h2 class="fg-pagehead__title">{name}</h2>
   {tabs}
+  {strip}
   <div class="term-panes">{rows}</div>
 </main>"#,
         topbar = topbar(&format!(
@@ -578,6 +647,7 @@ pub fn transcript_page(project: &Project, panes: &[TerminalPaneView]) -> String 
         pid = esc(&project.id),
         name = esc(&project.name),
         tabs = project_tabs(&project.id, "transcript"),
+        strip = strip,
         rows = rows,
     );
     layout(&format!("{} · transcript", project.name), "", &body)
@@ -3242,7 +3312,7 @@ mod tests {
     fn terminal_page_lists_only_configured_preset_labels() {
         let project = sample_project();
         let presets = vec!["Claude".to_string(), "Codex".to_string()];
-        let html = terminal_page(&project, &[], &presets);
+        let html = terminal_page(&project, &[], None, &presets);
         assert!(html.contains(r#"data-preset="Claude">Claude</button>"#), "{html}");
         assert!(html.contains(r#"data-preset="Codex">Codex</button>"#), "{html}");
         assert!(!html.contains("data-preset=\"Aider\""), "an unconfigured label must never render: {html}");
@@ -3256,7 +3326,7 @@ mod tests {
     #[test]
     fn terminal_page_renders_no_preset_controls_when_none_configured() {
         let project = sample_project();
-        let html = terminal_page(&project, &[], &[]);
+        let html = terminal_page(&project, &[], None, &[]);
         // Checked as rendered HTML attribute shapes, not bare substrings:
         // `TERMINAL_CREATE_SCRIPT` itself contains the literal selector
         // `.term-create__agent[data-preset]` and `getAttribute("data-preset")`
@@ -3287,7 +3357,7 @@ mod tests {
     #[test]
     fn terminal_arrow_keys_get_a_larger_minimum_box_than_the_named_keys_row() {
         let project = sample_project();
-        let html = terminal_page(&project, &[], &[]);
+        let html = terminal_page(&project, &[], None, &[]);
         assert!(
             html.contains(
                 ".term-controls > .term-keys button { min-width: 44px; min-height: 44px; font-size: var(--type-body-size); }"
