@@ -797,48 +797,43 @@
     // horizontal scrollbar for that case rather than shrinking into a smear.
     var FONT_MIN_PX = 6;
     var FONT_MAX_PX = 13;
-    var charWidthPerPx = 0; // advance width of one monospace character, per 1px of font-size
-
-    function measureCharWidth(el) {
-      if (charWidthPerPx) return charWidthPerPx;
-      var probe = document.createElement("span");
-      probe.style.cssText =
-        "position:absolute;visibility:hidden;white-space:pre;font-size:100px;";
-      probe.style.fontFamily = window.getComputedStyle(el).fontFamily;
-      probe.textContent = "MMMMMMMMMM";
-      document.body.appendChild(probe);
-      charWidthPerPx = probe.getBoundingClientRect().width / 10 / 100;
-      document.body.removeChild(probe);
-      return charWidthPerPx;
-    }
 
     function fitScreenFont(el) {
-      var text = el.textContent || "";
-      var lines = text.split("\n");
-      var cols = 0;
-      for (var i = 0; i < lines.length; i++) {
-        if (lines[i].length > cols) cols = lines[i].length;
-      }
-      if (!cols) return;
+      // Measure the frame's real width rather than counting its characters:
+      // an emoji or a box-drawing glyph occupies two terminal cells while
+      // counting as one character, and a glyph the mono font lacks is drawn
+      // from a fallback of its own width — so any character-count estimate
+      // runs short and the frame overflows anyway. `scrollWidth` is what the
+      // browser actually laid out, and it is never wrong about it.
+      el.classList.remove("term-screen--wrapped"); // measure unwrapped, always
+      el.style.fontSize = FONT_MAX_PX + "px";
       var style = window.getComputedStyle(el);
       var padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
       var available = el.clientWidth - padding;
       if (available <= 0) return;
-      var perChar = measureCharWidth(el);
-      if (!perChar) return;
-      var size = available / (cols * perChar);
-      // Never magnify past the page's own body size — fitting is about
-      // rescuing a frame too wide to fit, not about zooming a narrow one up.
-      el.style.fontSize = Math.max(FONT_MIN_PX, Math.min(FONT_MAX_PX, size)) + "px";
-      // Below the floor the frame no longer fits at any readable size, so the
+      var size = FONT_MAX_PX;
+      // Shrink toward the fit, remeasuring: one pass lands close, and a
+      // couple more settle the rounding that sub-pixel glyph advances leave
+      // behind. Bail the moment it fits — the common wide-screen case never
+      // gets past the first check.
+      for (var pass = 0; pass < 4; pass++) {
+        var needed = el.scrollWidth - padding;
+        if (needed <= available) break;
+        size = size * (available / needed);
+        if (size < FONT_MIN_PX) {
+          size = FONT_MIN_PX;
+          el.style.fontSize = size + "px";
+          break;
+        }
+        el.style.fontSize = size + "px";
+      }
+      // At the floor the frame no longer fits at any readable size, so the
       // grid is already lost whatever we do. Wrapping is the cheapest way to
       // lose it: every character stays on screen and legible, at the cost of
       // the column alignment that narrow a screen could not have shown
       // anyway. Above the floor the grid is intact and stays untouched.
-      if (size < FONT_MIN_PX) {
+      if (size <= FONT_MIN_PX && el.scrollWidth - padding > available) {
         el.classList.add("term-screen--wrapped");
-      } else {
-        el.classList.remove("term-screen--wrapped");
       }
     }
 
