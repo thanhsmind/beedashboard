@@ -58,10 +58,16 @@
 //!   folded onto the theme-aware basic-16 classes instead (see
 //!   [`Color::from_256`]), since indices 0-15 of the 256-colour palette
 //!   *are* the sixteen basic colours by convention.
-//! - 24-bit truecolour (`38;2;r;g;b` / `48;2;r;g;b`) is parsed just far
-//!   enough to consume its parameters correctly (so the r/g/b numbers are
-//!   never misread as unrelated SGR codes) but is not rendered as an exact
-//!   colour — out of scope for this cell.
+//! - 24-bit truecolour (`38;2;r;g;b` / `48;2;r;g;b`) renders as its exact
+//!   colour — there is no CSS class for one of 16.7 million values, so it
+//!   is instead carried as an inline `style="color:#rrggbb"` /
+//!   `style="background-color:#rrggbb"` declaration on the span, built from
+//!   the three `u8` components (each clamped the same way the 256-colour
+//!   index is) and nothing else — no caller text ever reaches that
+//!   attribute, which is what keeps the "safe, escaped HTML" contract the
+//!   server documents at `server.rs:974-989` true. A run can carry both
+//!   classes and an inline style at once (e.g. `ansi-bold` alongside a
+//!   truecolour foreground); see [`flush_run`].
 //!
 //! ## Inverse (SGR 7)
 //!
@@ -133,23 +139,37 @@ pub fn revision_of(text: &str) -> u64 {
 }
 
 /// Escape a text run and wrap it in a `<span>` iff `style` carries any
-/// active class — escaping always happens first, regardless of which
-/// branch runs, so there is exactly one place text ever becomes HTML.
+/// active class or inline style — escaping always happens first, regardless
+/// of which branch runs, so there is exactly one place text ever becomes
+/// HTML. The `style` attribute (when present) carries only
+/// `color:#rrggbb`/`background-color:#rrggbb` built from `u8` components in
+/// [`Style::inline_style`] — never caller text — so it stays as safe to
+/// embed unescaped as the `class` attribute already was.
 fn flush_run(out: &mut String, text: &str, style: &Style) {
     if text.is_empty() {
         return;
     }
     let escaped = escape_html(text);
     let classes = style.classes();
-    if classes.is_empty() {
+    let inline_style = style.inline_style();
+    if classes.is_empty() && inline_style.is_empty() {
         out.push_str(&escaped);
-    } else {
-        out.push_str("<span class=\"");
-        out.push_str(&classes.join(" "));
-        out.push_str("\">");
-        out.push_str(&escaped);
-        out.push_str("</span>");
+        return;
     }
+    out.push_str("<span");
+    if !classes.is_empty() {
+        out.push_str(" class=\"");
+        out.push_str(&classes.join(" "));
+        out.push('"');
+    }
+    if !inline_style.is_empty() {
+        out.push_str(" style=\"");
+        out.push_str(&inline_style);
+        out.push('"');
+    }
+    out.push('>');
+    out.push_str(&escaped);
+    out.push_str("</span>");
 }
 
 /// HTML-escape text for safe embedding — the same four metacharacters
@@ -169,15 +189,19 @@ fn escape_html(s: &str) -> String {
     out
 }
 
-/// One basic ANSI colour (0-15: 0-7 normal, 8-15 bright) or a 256-palette
-/// index (16-255). Indices 0-15 reaching here via the 256-colour mode
-/// (`38;5;n` with `n < 16`) are folded onto `Basic` by [`Color::from_256`]
-/// so they stay theme-aware rather than falling back to a literal palette
-/// hex.
+/// One basic ANSI colour (0-15: 0-7 normal, 8-15 bright), a 256-palette
+/// index (16-255), or an exact 24-bit truecolour value. Indices 0-15
+/// reaching here via the 256-colour mode (`38;5;n` with `n < 16`) are folded
+/// onto `Basic` by [`Color::from_256`] so they stay theme-aware rather than
+/// falling back to a literal palette hex. `Rgb` has no CSS class of its own
+/// (there are 16.7 million of them) — it renders as an inline style instead
+/// (see [`Style::inline_style`]), so [`Color::class_suffix`] returns `None`
+/// for it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Color {
     Basic(u8),
     Indexed(u8),
+    Rgb(u8, u8, u8),
 }
 
 impl Color {
@@ -189,10 +213,11 @@ impl Color {
         }
     }
 
-    fn class_suffix(self) -> String {
+    fn class_suffix(self) -> Option<String> {
         match self {
-            Color::Basic(n) => BASIC_NAMES[n as usize].to_string(),
-            Color::Indexed(n) => format!("256-{n}"),
+            Color::Basic(n) => Some(BASIC_NAMES[n as usize].to_string()),
+            Color::Indexed(n) => Some(format!("256-{n}")),
+            Color::Rgb(_, _, _) => None,
         }
     }
 }
@@ -261,13 +286,35 @@ impl Style {
             classes.push("ansi-inverse".to_string());
         }
         let (fg, bg) = self.effective_fg_bg();
-        if let Some(c) = fg {
-            classes.push(format!("ansi-fg-{}", c.class_suffix()));
+        if let Some(suffix) = fg.and_then(Color::class_suffix) {
+            classes.push(format!("ansi-fg-{suffix}"));
         }
-        if let Some(c) = bg {
-            classes.push(format!("ansi-bg-{}", c.class_suffix()));
+        if let Some(suffix) = bg.and_then(Color::class_suffix) {
+            classes.push(format!("ansi-bg-{suffix}"));
         }
         classes
+    }
+
+    /// The inline `style` declaration for whichever of the effective
+    /// foreground/background is [`Color::Rgb`] — `""` when neither is (the
+    /// common case, still handled entirely by `classes()`). Only ever built
+    /// from the three `u8` components formatted as hex, joined by a literal
+    /// `;` when both sides are truecolour — no caller text ever reaches
+    /// this string, which is what keeps it safe to embed unescaped as an
+    /// HTML attribute (see [`flush_run`]).
+    fn inline_style(&self) -> String {
+        let (fg, bg) = self.effective_fg_bg();
+        let mut style = String::new();
+        if let Some(Color::Rgb(r, g, b)) = fg {
+            style.push_str(&format!("color:#{r:02x}{g:02x}{b:02x}"));
+        }
+        if let Some(Color::Rgb(r, g, b)) = bg {
+            if !style.is_empty() {
+                style.push(';');
+            }
+            style.push_str(&format!("background-color:#{r:02x}{g:02x}{b:02x}"));
+        }
+        style
     }
 }
 
@@ -462,11 +509,11 @@ fn apply_sgr(style: &mut Style, params: &[u32]) {
 
 /// Handles the tail of a `38;…`/`48;…` extended-colour run (the params
 /// *after* the leading 38/48 itself). `set` is called with the resolved
-/// colour (or `None`, for an unrendered truecolour value). Returns how many
-/// extra parameter slots were consumed (so the caller's index can skip past
-/// them), or `None` if the params are too short to be well-formed — the
-/// caller stops processing the rest of this SGR run rather than
-/// misinterpret a stray number as an unrelated code.
+/// colour. Returns how many extra parameter slots were consumed (so the
+/// caller's index can skip past them), or `None` if the params are too
+/// short to be well-formed — the caller stops processing the rest of this
+/// SGR run rather than misinterpret a stray number as an unrelated code (and
+/// `set` is never called in that case, so a malformed run changes nothing).
 fn apply_extended_color(rest: &[u32], mut set: impl FnMut(Option<Color>)) -> Option<usize> {
     match rest.first() {
         Some(5) => {
@@ -475,13 +522,13 @@ fn apply_extended_color(rest: &[u32], mut set: impl FnMut(Option<Color>)) -> Opt
             Some(2)
         }
         Some(2) => {
-            // 24-bit truecolour: consume "2;r;g;b" fully (so the r/g/b
-            // numbers are never misread as separate SGR codes) without
-            // rendering an exact colour — see the module doc.
-            rest.get(1)?;
-            rest.get(2)?;
-            rest.get(3)?;
-            set(None);
+            // 24-bit truecolour: "2;r;g;b" — each component clamped to a
+            // byte the same way the 256-colour index above is clamped,
+            // before it ever becomes part of the rendered colour.
+            let r = *rest.get(1)?;
+            let g = *rest.get(2)?;
+            let b = *rest.get(3)?;
+            set(Some(Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8)));
             Some(4)
         }
         _ => None,
@@ -579,12 +626,50 @@ mod tests {
     }
 
     #[test]
-    fn truecolor_params_are_consumed_without_corrupting_later_codes() {
+    fn truecolor_foreground_renders_and_a_following_code_still_parses() {
         // The embedded "0" in the RGB triplet must never be misread as SGR
-        // reset; bold set beforehand must survive past the truecolour run.
-        let html = to_html("\u{1b}[1;38;2;10;0;200mtext\u{1b}[0m");
-        assert!(html.contains("ansi-bold"), "{html}");
-        assert!(!html.contains("ansi-fg-"), "{html}"); // not rendered, but parsed safely
+        // reset; the parameter immediately after the triplet (underline)
+        // must still be read correctly, and the colour itself now renders
+        // as an inline style rather than being discarded.
+        let html = to_html("\u{1b}[38;2;10;0;200;4mtext\u{1b}[0m");
+        assert!(html.contains("color:#0a00c8"), "{html}");
+        assert!(html.contains("ansi-underline"), "{html}");
+        assert!(!html.contains("ansi-fg-"), "{html}"); // never a class -- 16.7M values
+    }
+
+    #[test]
+    fn truecolor_background_renders_exact_colour() {
+        let html = to_html("\u{1b}[48;2;1;2;3mtext\u{1b}[0m");
+        assert_eq!(html, "<span style=\"background-color:#010203\">text</span>");
+    }
+
+    #[test]
+    fn truecolor_foreground_under_inverse_renders_as_background() {
+        // fg=truecolour with inverse must render as the background inline
+        // style, not the foreground -- mirrors the indexed-colour swap in
+        // `inverse_swaps_which_role_an_explicit_colour_renders_in`.
+        let html = to_html("\u{1b}[38;2;5;6;7;7mtext\u{1b}[0m");
+        assert_eq!(
+            html,
+            "<span class=\"ansi-inverse\" style=\"background-color:#050607\">text</span>"
+        );
+    }
+
+    #[test]
+    fn truecolor_combined_with_bold_emits_both_class_and_style_on_one_span() {
+        let html = to_html("\u{1b}[1;38;2;255;0;128mtext\u{1b}[0m");
+        assert_eq!(html, "<span class=\"ansi-bold\" style=\"color:#ff0080\">text</span>");
+    }
+
+    #[test]
+    fn malformed_truecolor_with_too_few_components_does_not_corrupt_following_codes() {
+        // "38;2;9;1" is missing the blue component -- `apply_extended_color`
+        // returns `None` before ever calling `set`, so this SGR run is
+        // abandoned safely (apply_sgr's `break`) rather than misreading a
+        // stray number as an unrelated code. A later, well-formed SGR run
+        // must still parse correctly afterward.
+        let html = to_html("\u{1b}[38;2;9;1mtext\u{1b}[32mgreen\u{1b}[0m");
+        assert_eq!(html, "text<span class=\"ansi-fg-green\">green</span>");
     }
 
     // --- attributes ---
