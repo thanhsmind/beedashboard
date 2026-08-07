@@ -896,7 +896,11 @@ async fn terminal_screen(
     if !in_project {
         return not_found("pane not found");
     }
-    match st.herdr.read_pane(&pane_id, herdr::ReadSource::Visible, 0).await {
+    match st
+        .herdr
+        .read_pane(&pane_id, herdr::ReadSource::Recent, SCREEN_READ_LINES)
+        .await
+    {
         Ok(read) => {
             let revision = mdview_core::ansi::revision_of(&read.text);
             Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": revision }))
@@ -910,6 +914,16 @@ async fn terminal_screen(
         Err(_) => herdr_down_response(),
     }
 }
+
+/// How many lines of a pane the screen routes ask herdr for. `Recent` is
+/// herdr's own scrollback buffer, so a shell pane answers with its history
+/// (measured live: a shell with 423 lines of scrollback returns 200 here
+/// against 43 for `Visible`); an alt-screen agent keeps no scrollback of its
+/// own — `max_offset_from_bottom` is 0 — so it answers with exactly the same
+/// frame `Visible` gave, never less. 200 sits well under herdr's own 1000-line
+/// server-side cap (`SocketHerdr::read_pane`) and is what one screen box can
+/// hold without the poll growing unbounded.
+const SCREEN_READ_LINES: usize = 200;
 
 /// The JSON answer `terminal_screen` gives a poller while herdr is
 /// unreachable — a `502` (not `200` with empty text, which would be
@@ -1546,7 +1560,11 @@ async fn unassigned_terminal_screen(State(st): State<AppState>, Path(pane_id): P
     if let Err(refusal) = verify_pane_is_unassigned(&st, &pane_id).await {
         return refusal;
     }
-    match st.herdr.read_pane(&pane_id, herdr::ReadSource::Visible, 0).await {
+    match st
+        .herdr
+        .read_pane(&pane_id, herdr::ReadSource::Recent, SCREEN_READ_LINES)
+        .await
+    {
         Ok(read) => {
             let revision = mdview_core::ansi::revision_of(&read.text);
             Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": revision }))
@@ -7171,6 +7189,66 @@ mod bee_route_tests {
         assert_ne!(
             first_json["revision"], second_json["revision"],
             "changed output must report a different revision: {first_json} vs {second_json}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The screen route serves herdr's scrollback, not just the visible
+    /// frame: a pane with more history than fits on screen answers with the
+    /// older lines too, capped at [`SCREEN_READ_LINES`]. This failed against
+    /// the pre-change code, which asked for `Visible` and could only ever
+    /// return the one frame — the whole reason the box looked "limited".
+    #[tokio::test]
+    async fn terminal_screen_serves_scrollback_capped_at_the_read_limit() {
+        let dir = fresh_root("terminal-screen-scrollback");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-scrollback-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        // A pane whose scrollback runs well past both the visible frame and
+        // the read limit, every line individually identifiable.
+        let visible = "line 499";
+        let recent: String = (0..500)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fake.seed_scroll_pane(&started.pane_id, visible, &recent, None);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let project = register(&st, &root, "screen-scrollback");
+        let app = router(st);
+
+        let resp = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        let text = json["text"].as_str().unwrap();
+
+        assert_eq!(
+            text.lines().count(),
+            SCREEN_READ_LINES,
+            "the screen must carry exactly the requested tail: {text}"
+        );
+        // The oldest line still served, and the one just before it dropped —
+        // a tail of exactly SCREEN_READ_LINES out of 500.
+        assert!(
+            text.contains("line 300"),
+            "scrollback beyond the visible frame must be served: {text}"
+        );
+        assert!(
+            !text.contains("line 299"),
+            "the read must stop at the cap, not serve the whole buffer: {text}"
+        );
+        assert!(
+            text.contains("line 499"),
+            "the newest line must still be there: {text}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
