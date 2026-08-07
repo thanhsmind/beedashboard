@@ -179,6 +179,10 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    scrolls — that is what replaces wrapping when a line runs wider than the
    card. */
 .term-screen { margin-top: var(--space-2); padding: var(--space-2); background: #1c1f26; color: #d7dae0; border-radius: var(--radius-sm); white-space: pre; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.25; height: auto; overflow-x: auto; overflow-y: hidden; }
+/* Applied by `assets/app.js` only once the fit has bottomed out: at that
+   width no readable type size can hold the grid, so the lines wrap instead
+   of running off the side. */
+.term-screen--wrapped { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
 /* The controls read top to bottom in the order they are reached: the screen,
    then the two controls that move the screen, then the keys that drive the
    agent, then the box you write in with its own send row under it. The reply

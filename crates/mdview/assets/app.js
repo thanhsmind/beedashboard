@@ -830,6 +830,16 @@
       // Never magnify past the page's own body size — fitting is about
       // rescuing a frame too wide to fit, not about zooming a narrow one up.
       el.style.fontSize = Math.max(FONT_MIN_PX, Math.min(FONT_MAX_PX, size)) + "px";
+      // Below the floor the frame no longer fits at any readable size, so the
+      // grid is already lost whatever we do. Wrapping is the cheapest way to
+      // lose it: every character stays on screen and legible, at the cost of
+      // the column alignment that narrow a screen could not have shown
+      // anyway. Above the floor the grid is intact and stays untouched.
+      if (size < FONT_MIN_PX) {
+        el.classList.add("term-screen--wrapped");
+      } else {
+        el.classList.remove("term-screen--wrapped");
+      }
     }
 
     // One resize can change every pane's fit at once.
