@@ -213,19 +213,21 @@ pub fn project_home_page(project: &Project, entry: Option<&str>, bee: bool) -> S
 {tab_style}
 <main class="fg-page">
   <h2 class="fg-pagehead__title">{name}</h2>
-  {tabs}
   <div class="proj-cards">
     {bee_card}
     {docs_card}
   </div>
 </main>"#,
-        topbar = topbar(&format!(
-            "<span class=\"crumb\">{name}</span>",
-            name = esc(&project.name)
-        )),
+        topbar = topbar_full(
+            "",
+            &format!(
+                "<span class=\"crumb\">{name}</span>",
+                name = esc(&project.name)
+            ),
+            &project_tabs(&project.id, "overview"),
+        ),
         tab_style = PROJECT_TAB_STYLE,
         name = esc(&project.name),
-        tabs = project_tabs(&project.id, "overview"),
         bee_card = bee_card,
         docs_card = docs_card,
     );
@@ -236,15 +238,28 @@ pub fn project_home_page(project: &Project, entry: Option<&str>, bee: bool) -> S
 /// it (same precedent as `bee_board_page`'s own inline `<style>`), not added
 /// to `app.css`: this cell's declared files are `server.rs`/`views.rs` only.
 const PROJECT_TAB_STYLE: &str = r#"<style>
-.proj-tabs { display: flex; gap: var(--space-4); margin-bottom: var(--space-4); border-bottom: var(--border-width-hairline) solid var(--color-border); }
-.proj-tab { padding: var(--space-2) 0; color: var(--color-text-muted); text-decoration: none; border-bottom: 2px solid transparent; }
+/* The section nav rides in the top bar beside the brand rather than opening
+   a band of its own under it: it is three short links, and a full-width
+   bordered strip cost more vertical room on a handset than the links it
+   held. No bottom border here — the bar's own edge is the rule. */
+.proj-tabs { display: flex; flex-wrap: wrap; gap: var(--space-3); min-width: 0; }
+.proj-tab { padding: 0; color: var(--color-text-muted); text-decoration: none; border-bottom: 2px solid transparent; }
 .proj-tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
+/* A page whose subject is one live screen keeps its blocks close: the page
+   frame's default var(--space-5) rhythm is for reading, and here it only
+   pushed the screen down behind the fold. */
+.fg-page--tight { gap: var(--space-2); }
+/* The pane tabs and the control that makes a new pane are one row: picking
+   a pane and adding a pane are the same kind of move, and stacking them
+   spent a second band on one button. */
+.pane-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); min-width: 0; }
+.term-create { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-left: auto; }
 /* terminal-pane-scope D4: the pane tab strip that picks which single pane
    this page renders — herdr's own sidebar shape, one entry per pane, each a
    plain link to that pane's own address. Wraps rather than scrolling
    sideways: a project with many panes still needs every one reachable on a
    handset. */
-.pane-strip { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
+.pane-strip { display: flex; flex-wrap: wrap; gap: var(--space-2); min-width: 0; }
 .pane-strip__tab { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text-muted); text-decoration: none; background: var(--color-bg-subtle); }
 .pane-strip__tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
 .term-pane__meta { flex: 0 0 auto; color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
@@ -623,19 +638,20 @@ pub fn terminal_page(
     let body = format!(
         r#"{topbar}
 {tab_style}
-<main class="fg-page" data-project-id="{pid}">
-  {tabs}
-  {create}
-  {strip}
+<main class="fg-page fg-page--tight" data-project-id="{pid}">
+  <div class="pane-bar">{strip}{create}</div>
   <div class="term-panes">{rows}</div>
 </main>"#,
-        topbar = topbar(&format!(
-            "<span class=\"crumb\">{name} · terminal</span>",
-            name = esc(&project.name)
-        )),
+        topbar = topbar_full(
+            "",
+            &format!(
+                "<span class=\"crumb\">{name} · terminal</span>",
+                name = esc(&project.name)
+            ),
+            &project_tabs(&project.id, "terminal"),
+        ),
         tab_style = PROJECT_TAB_STYLE,
         pid = esc(&project.id),
-        tabs = project_tabs(&project.id, "terminal"),
         create = terminal_create_controls(&project.id, presets),
         strip = strip,
         rows = rows,
@@ -691,18 +707,20 @@ pub fn transcript_page(project: &Project, panes: &[TerminalPaneView], selected: 
     let body = format!(
         r#"{topbar}
 {tab_style}
-<main class="fg-page" data-project-id="{pid}">
-  {tabs}
-  {strip}
+<main class="fg-page fg-page--tight" data-project-id="{pid}">
+  <div class="pane-bar">{strip}</div>
   <div class="term-panes">{rows}</div>
 </main>"#,
-        topbar = topbar(&format!(
-            "<span class=\"crumb\">{name} · transcript</span>",
-            name = esc(&project.name)
-        )),
+        topbar = topbar_full(
+            "",
+            &format!(
+                "<span class=\"crumb\">{name} · transcript</span>",
+                name = esc(&project.name)
+            ),
+            &project_tabs(&project.id, "transcript"),
+        ),
         tab_style = PROJECT_TAB_STYLE,
         pid = esc(&project.id),
-        tabs = project_tabs(&project.id, "transcript"),
         strip = strip,
         rows = rows,
     );
@@ -874,19 +892,21 @@ pub fn terminal_down_page(project: &Project) -> String {
 {tab_style}
 <main class="fg-page">
   <h2 class="fg-pagehead__title">{name}</h2>
-  {tabs}
   <div class="fg-card term-pane">
     <div class="fg-card__title">herdr is not running</div>
     <div class="term-pane__meta">Start herdr, then reload this page — mdview does not start it for you unless the herdr supervisor is switched on in Settings.</div>
   </div>
 </main>"#,
-        topbar = topbar(&format!(
-            "<span class=\"crumb\">{name} · terminal</span>",
-            name = esc(&project.name)
-        )),
+        topbar = topbar_full(
+            "",
+            &format!(
+                "<span class=\"crumb\">{name} · terminal</span>",
+                name = esc(&project.name)
+            ),
+            &project_tabs(&project.id, "terminal"),
+        ),
         tab_style = PROJECT_TAB_STYLE,
         name = esc(&project.name),
-        tabs = project_tabs(&project.id, "terminal"),
     );
     layout(&format!("{} · terminal", project.name), "", &body)
 }
@@ -3374,6 +3394,36 @@ mod tests {
         assert!(!html.contains("data-preset=\"Aider\""), "an unconfigured label must never render: {html}");
         // The plain-shell control is unconditional — it needs no preset.
         assert!(html.contains(r#"<button type="button" class="term-create__pane">New shell</button>"#));
+    }
+
+    /// The section nav rides in the top bar, and the control that makes a
+    /// new pane shares the pane strip's own row — the two bands they used to
+    /// own between the bar and the screen are gone, which is the whole point
+    /// of moving them.
+    #[test]
+    fn terminal_page_puts_the_section_nav_in_the_bar_and_new_shell_on_the_pane_row() {
+        let project = sample_project();
+        let html = terminal_page(&project, &[], None, &[]);
+        let bar_start = html.find("<header class=\"topbar\">").expect("no top bar");
+        let bar_end = html.find("</header>").expect("unclosed top bar");
+        let bar = &html[bar_start..bar_end];
+        assert!(
+            bar.contains("class=\"proj-tabs\""),
+            "the section nav must ride in the top bar: {html}"
+        );
+        assert!(
+            !html[bar_end..].contains("class=\"proj-tabs\""),
+            "the section nav must not also open a band under the bar: {html}"
+        );
+        let row_start = html.find("class=\"pane-bar\"").expect("no pane row");
+        let row_end = html[row_start..]
+            .find("<div class=\"term-panes\">")
+            .map(|i| row_start + i)
+            .expect("no pane list after the pane row");
+        assert!(
+            html[row_start..row_end].contains("class=\"term-create__pane\""),
+            "New shell must share the pane strip's row: {html}"
+        );
     }
 
     /// agent-terminal-13, must-have: "with no presets configured, the
