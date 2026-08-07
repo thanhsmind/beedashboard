@@ -322,7 +322,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 /* One tight control block under the screen: the arrows on their own line,
    everything else on the next. The rows carry no margins of their own —
    stacked separately they drifted apart into three loose bands. */
-.term-controls { display: flex; flex-direction: column; gap: var(--space-1); margin-top: var(--space-2); }
+.term-controls { display: flex; flex-direction: column; gap: var(--space-1); margin-top: 0; }
 .term-controls__row { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .term-keys { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .term-keys button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
@@ -333,17 +333,20 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    the glyph at body size. The named keys beside them (Enter, Esc, Tab) are
    pressed occasionally and deliberately and keep the smaller box above. */
 .term-controls > .term-keys button { min-width: 44px; min-height: 44px; font-size: var(--type-body-size); }
-/* terminal-scroll-2: the pair of scroll buttons ("Load older" / "Live")
-   share `.term-keys button`'s own look — same padding, border, radius,
-   background — rather than inventing a second button style beside it. */
 /* The two screen-moving controls belong to the screen, not to the keys that
-   type into the pane, so they ride on the screen itself: centred on its
-   bottom edge, over its last lines rather than taking a row under them.
-   `sticky` keeps them reachable while a tall screen is scrolled past — the
-   pair a reader wants is the one for the screen they are looking at. */
+   type into the pane, so they ride on it: centred, wholly inside its lower
+   edge rather than straddling it. `sticky` keeps them reachable while a tall
+   screen is scrolled past — the pair a reader wants is the one for the
+   screen they are looking at. The negative pull is deeper than the pair's
+   own rendered height, which is what both lifts it clear of the edge and
+   gives back the flow row it would otherwise open above the keys. */
 .term-screen-wrap { position: relative; display: flow-root; }
-.term-scroll { position: sticky; bottom: var(--space-2); z-index: 2; display: flex; flex-wrap: wrap; gap: var(--space-1); width: max-content; margin: calc(-1 * var(--space-5)) auto 0; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-bg-subtle); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
-.term-scroll button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
+.term-scroll { position: sticky; bottom: var(--space-3); z-index: 2; display: flex; flex-wrap: wrap; gap: var(--space-2); width: max-content; margin: calc(-1 * var(--space-7)) auto 0; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-bg-subtle); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
+/* Bigger than the named keys beside the arrows: these are read at a glance
+   and pressed mid-scroll. Width comes from padding, never a `min-width` —
+   that 44px target is the arrows' own, and the pair keeps the smaller box
+   the touch-target rule reserves for everything else. */
+.term-scroll button { padding: var(--space-2) var(--space-4); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-body-sm-size); }
 .term-transcript { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
 .term-transcript__line { white-space: pre-wrap; word-break: break-word; }
 </style>"#;
