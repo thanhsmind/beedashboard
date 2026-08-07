@@ -1481,11 +1481,17 @@ fn project_panes(
                     .map(|a| a.kind.clone())
                     .unwrap_or_else(|| "shell".to_string()),
                 name: agent.map(|a| a.name.clone()).unwrap_or_default(),
+                // A shell row (no agent) admits its own status rather than
+                // borrowing an `AgentStatus` it does not have (D2/D3) — the
+                // card's status pill names it "shell" instead of reading
+                // blank, the same way `kind` already does.
                 status: agent
                     .map(|a| a.status.as_str().to_string())
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| "shell".to_string()),
                 title: agent.map(|a| a.title.clone()).unwrap_or_default(),
                 cwd: resolved.to_string_lossy().into_owned(),
+                workspace: snapshot.workspace_label_for_id(&pane.workspace_id),
+                tab: snapshot.tab_label_for_id(&pane.tab_id),
             })
         })
         .collect()
@@ -1561,6 +1567,8 @@ fn unassigned_panes(
                 status: agent.status.as_str().to_string(),
                 title: agent.title.clone(),
                 cwd,
+                workspace: snapshot.workspace_label_for(agent),
+                tab: snapshot.tab_label_for(agent),
             }
         })
         .collect()
@@ -11176,5 +11184,305 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    // ---- terminal-pane-scope cell 2: a card names its workspace, its tab,
+    // and a status that admits having no agent (D3) ----
+
+    /// Case 10 (D3): a card renders its workspace label and its tab label
+    /// together as its identity, on the Terminal tab and the Transcript tab
+    /// alike -- CONTEXT.md's own gap: "Today's card shows bare status text
+    /// with no workspace or tab identity."
+    #[tokio::test]
+    async fn terminal_and_transcript_cards_name_the_panes_workspace_and_tab() {
+        let dir = fresh_root("scope-identity-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-identity-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        fake.agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "identity");
+        let app = router(st);
+
+        let terminal_resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        assert_eq!(terminal_resp.status(), StatusCode::OK);
+        let terminal_body = body_string(terminal_resp).await;
+        assert!(
+            terminal_body.contains("frontend-app · main"),
+            "the terminal card must name its workspace and tab together: {terminal_body}"
+        );
+
+        let transcript_resp = app
+            .oneshot(transcript_page_req(&project.id, None))
+            .await
+            .unwrap();
+        assert_eq!(transcript_resp.status(), StatusCode::OK);
+        let transcript_body = body_string(transcript_resp).await;
+        assert!(
+            transcript_body.contains("frontend-app · main"),
+            "the transcript card must name its workspace and tab together: {transcript_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 10, continued (D3): a working, an idle, a done and a blocked
+    /// pane each render a status pill whose class differs from the other
+    /// three -- the six states this cell owns map onto `.fg-status`'s three
+    /// tone modifiers (`components.css:145-151`) with no CSS file touched.
+    #[tokio::test]
+    async fn terminal_page_renders_a_distinct_status_pill_class_per_status() {
+        let dir = fresh_root("scope-status-pill-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-status-pill-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let working = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&working.pane_id, herdr::AgentStatus::Working)
+            .await
+            .unwrap();
+        let idle = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&idle.pane_id, herdr::AgentStatus::Idle)
+            .await
+            .unwrap();
+        let done = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&done.pane_id, herdr::AgentStatus::Done)
+            .await
+            .unwrap();
+        let blocked = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&blocked.pane_id, herdr::AgentStatus::Blocked)
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "status-pill");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        let card = |pane_id: &str| -> String {
+            let start = body
+                .find(&format!("data-pane-id=\"{pane_id}\""))
+                .unwrap_or_else(|| panic!("no card for {pane_id}: {body}"));
+            let end = body[start..]
+                .find("</div>")
+                .map(|i| start + i)
+                .unwrap_or(body.len());
+            body[start..end].to_string()
+        };
+
+        assert!(
+            card(&working.pane_id).contains("class=\"fg-status fg-status--warn\""),
+            "working must render the warn pill: {body}"
+        );
+        assert!(
+            card(&blocked.pane_id).contains("class=\"fg-status fg-status--blocked\""),
+            "blocked must render the blocked pill: {body}"
+        );
+        assert!(
+            card(&done.pane_id).contains("class=\"fg-status fg-status--ready\""),
+            "done must render the ready pill: {body}"
+        );
+        let idle_card = card(&idle.pane_id);
+        assert!(
+            idle_card.contains("class=\"fg-status\">"),
+            "idle must render the neutral, unmodified pill: {body}"
+        );
+        assert!(
+            !idle_card.contains("fg-status--"),
+            "idle must not borrow another status's modifier: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 10, edge (D3): `AgentStatus::Unknown` -- any status value herdr
+    /// adds later that this app does not recognize (`wire.rs:27`) -- renders
+    /// the same neutral, unmodified `.fg-status` pill idle does, never
+    /// borrowing `--ready`/`--warn`/`--blocked` from a state it is not.
+    #[tokio::test]
+    async fn terminal_page_an_unknown_status_renders_the_neutral_pill() {
+        let dir = fresh_root("scope-status-unknown-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-status-unknown-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&started.pane_id, herdr::AgentStatus::Unknown)
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "status-unknown");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("class=\"fg-status\">"),
+            "an unknown status must render the neutral pill: {body}"
+        );
+        assert!(
+            !body.contains("fg-status--"),
+            "an unknown status must not borrow another state's colour: {body}"
+        );
+        assert!(
+            body.contains(">unknown<"),
+            "the pill's own text must still name the state: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 11 (D2/D3): a shell row (no agent) renders no agent kind and
+    /// claims no status it does not have -- both the meta text and the
+    /// status pill's own text read "shell" rather than either being blank
+    /// or borrowing `claude`/`codex`/an `AgentStatus`.
+    #[tokio::test]
+    async fn terminal_page_a_shell_row_names_itself_a_shell() {
+        let dir = fresh_root("scope-shell-identity-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-shell-identity-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "shell-identity");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let start = body
+            .find(&format!("data-pane-id=\"{}\"", created.pane_id))
+            .unwrap_or_else(|| panic!("no card for the shell pane: {body}"));
+        let end = body[start..]
+            .find("</div>")
+            .map(|i| start + i)
+            .unwrap_or(body.len());
+        let card = &body[start..end];
+
+        assert!(
+            card.contains("class=\"term-pane__meta\">shell<"),
+            "a shell row must name itself a shell, not an agent kind: {body}"
+        );
+        assert!(
+            !card.contains("claude") && !card.contains("codex"),
+            "a shell row must claim no agent kind: {body}"
+        );
+        assert!(
+            card.contains("class=\"fg-status\">") && card.contains(">shell<"),
+            "a shell row's status pill must name it a shell, not claim a status it doesn't have: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Regression (cell 2 must not touch any existing control): the reply
+    /// form, the key buttons and the scroll buttons stay on every terminal
+    /// card, including a shell row with no agent to reply to or send keys
+    /// at, and the Transcript tab still carries no `.term-screen` viewport.
+    #[tokio::test]
+    async fn terminal_and_transcript_cards_keep_every_existing_control_including_on_a_shell_row() {
+        let dir = fresh_root("scope-controls-survive-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-controls-survive-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let agent_pane = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let shell_pane = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "controls-survive");
+        let app = router(st);
+
+        let terminal_resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        assert_eq!(terminal_resp.status(), StatusCode::OK);
+        let terminal_body = body_string(terminal_resp).await;
+        for pane_id in [&agent_pane.pane_id, &shell_pane.pane_id] {
+            assert!(
+                terminal_body.contains(&format!("class=\"term-reply\" data-pane-id=\"{pane_id}\"")),
+                "the reply form must survive on every terminal card, including a shell row ({pane_id}): {terminal_body}"
+            );
+            assert!(
+                terminal_body.contains(&format!("class=\"term-keys\" data-pane-id=\"{pane_id}\"")),
+                "the key buttons must survive on every terminal card, including a shell row ({pane_id}): {terminal_body}"
+            );
+            assert!(
+                terminal_body.contains(&format!("class=\"term-scroll\" data-pane-id=\"{pane_id}\"")),
+                "the scroll buttons must survive on every terminal card, including a shell row ({pane_id}): {terminal_body}"
+            );
+        }
+
+        let transcript_resp = app
+            .oneshot(transcript_page_req(&project.id, None))
+            .await
+            .unwrap();
+        assert_eq!(transcript_resp.status(), StatusCode::OK);
+        let transcript_body = body_string(transcript_resp).await;
+        assert!(
+            !transcript_body.contains("class=\"term-screen\""),
+            "the transcript tab must still carry no screen element: {transcript_body}"
+        );
+        for pane_id in [&agent_pane.pane_id, &shell_pane.pane_id] {
+            assert!(
+                transcript_body.contains(&format!(
+                    "class=\"term-transcript\" data-pane-id=\"{pane_id}\""
+                )),
+                "every pane, including a shell row, must still get a transcript viewport ({pane_id}): {transcript_body}"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
     }
 }

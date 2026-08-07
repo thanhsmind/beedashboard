@@ -286,7 +286,13 @@ fn project_tabs(project_id: &str, active: &str) -> String {
 
 /// One agent already resolved against a project's D2 containment boundary
 /// (`server.rs::project_panes`) — plain display fields only, no herdr wire
-/// type crosses into this module.
+/// type crosses into this module. `workspace` and `tab` are the labels
+/// `Snapshot::workspace_label_for_id`/`tab_label_for_id` resolve (herdr's own
+/// sidebar reads a pane by the same two labels) — carried here rather than
+/// re-joined in this module, since only `server.rs` holds the snapshot.
+/// `status` admits a pane with no agent (terminal-pane-scope D2/D3): the
+/// caller sets it to `"shell"` rather than borrowing an `AgentStatus`
+/// vocabulary the row does not have.
 pub struct TerminalPaneView {
     pub pane_id: String,
     pub kind: String,
@@ -294,6 +300,30 @@ pub struct TerminalPaneView {
     pub status: String,
     pub title: String,
     pub cwd: String,
+    pub workspace: String,
+    pub tab: String,
+}
+
+/// D3's status pill: maps a [`TerminalPaneView::status`] value onto
+/// `.fg-status`'s three tone modifiers
+/// (`crates/mdview/assets/atelier/components.css:145-151`). `done` reads
+/// ready, `working` reads warn, `blocked` reads blocked; `idle`, `unknown`
+/// (`herdr::wire::AgentStatus::Unknown`) and `shell` (no agent at all) all
+/// keep the bare, unmodified `.fg-status` — the neutral dot — so a status a
+/// row does not have is never borrowed from another state's colour. The
+/// pill's own text always names the state, whichever it is.
+fn status_pill(status: &str) -> String {
+    let modifier = match status {
+        "done" => " fg-status--ready",
+        "working" => " fg-status--warn",
+        "blocked" => " fg-status--blocked",
+        _ => "",
+    };
+    format!(
+        r#"<span class="fg-status{modifier}"><span class="fg-status__dot"></span>{status}</span>"#,
+        modifier = modifier,
+        status = esc(status),
+    )
 }
 
 /// Shared by [`terminal_page`] and [`unassigned_terminal_page`]: one pane's
@@ -310,7 +340,7 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     for p in panes {
         out.push_str(&format!(
             r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
-  <div class="fg-card__title term-pane__head">{name} <span class="fg-chip fg-chip--neutral">{status}</span><span class="term-pane__meta">{kind}{title_sep}{title}</span><span class="term-pane__cwd" title="{cwd}">{cwd}</span></div>
+  <div class="fg-card__title term-pane__head"><span class="term-pane__id">{workspace} · {tab}</span> {name} {status_pill}<span class="term-pane__meta">{kind}{title_sep}{title}</span><span class="term-pane__cwd" title="{cwd}">{cwd}</span></div>
   <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
   <div class="term-controls">
     <div class="term-keys" data-pane-id="{pane_id}" aria-label="Move around {name}'s screen">
@@ -341,11 +371,13 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
 </div>"#,
             pane_id = esc(&p.pane_id),
             name = esc(&p.name),
-            status = esc(&p.status),
+            status_pill = status_pill(&p.status),
             kind = esc(&p.kind),
             title_sep = if p.title.is_empty() { "" } else { " · " },
             title = esc(&p.title),
             cwd = esc(&p.cwd),
+            workspace = esc(&p.workspace),
+            tab = esc(&p.tab),
         ));
     }
     out
@@ -499,16 +531,18 @@ fn transcript_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     for p in panes {
         out.push_str(&format!(
             r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
-  <div class="fg-card__title term-pane__head">{name} <span class="fg-chip fg-chip--neutral">{status}</span><span class="term-pane__meta">{kind}{title_sep}{title}</span><span class="term-pane__cwd" title="{cwd}">{cwd}</span></div>
+  <div class="fg-card__title term-pane__head"><span class="term-pane__id">{workspace} · {tab}</span> {name} {status_pill}<span class="term-pane__meta">{kind}{title_sep}{title}</span><span class="term-pane__cwd" title="{cwd}">{cwd}</span></div>
   <div class="term-transcript" data-pane-id="{pane_id}" aria-live="polite">Loading activity…</div>
 </div>"#,
             pane_id = esc(&p.pane_id),
             name = esc(&p.name),
-            status = esc(&p.status),
+            status_pill = status_pill(&p.status),
             kind = esc(&p.kind),
             title_sep = if p.title.is_empty() { "" } else { " · " },
             title = esc(&p.title),
             cwd = esc(&p.cwd),
+            workspace = esc(&p.workspace),
+            tab = esc(&p.tab),
         ));
     }
     out
