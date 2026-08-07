@@ -164,8 +164,13 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .proj-tabs { display: flex; gap: var(--space-4); margin-bottom: var(--space-4); border-bottom: var(--border-width-hairline) solid var(--color-border); }
 .proj-tab { padding: var(--space-2) 0; color: var(--color-text-muted); text-decoration: none; border-bottom: 2px solid transparent; }
 .proj-tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
-.term-pane__cwd { color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }
-.term-pane__meta { color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
+/* Name, status, kind and working directory are one line of heading, not four
+   stacked bands — the directory is the only part long enough to need room, so
+   it takes what is left and clips with an ellipsis (the full path stays in
+   its tooltip). */
+.term-pane__head { display: flex; align-items: baseline; flex-wrap: nowrap; gap: var(--space-2); min-width: 0; }
+.term-pane__cwd { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-subtle); font-size: var(--type-caption-size); }
+.term-pane__meta { flex: 0 0 auto; color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
 /* A pane's frame is a grid, not prose: `pre-wrap` + `word-break` re-flowed
    every long line and broke the box drawing of any TUI agent, and a fixed
    height cut the frame off behind an inner scrollbar. `pre` keeps the grid;
@@ -195,7 +200,9 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 /* terminal-scroll-2: the pair of scroll buttons ("Load older" / "Live")
    share `.term-keys button`'s own look — same padding, border, radius,
    background — rather than inventing a second button style beside it. */
-.term-scroll { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+/* The two screen-moving controls sit apart from the keys, at the right edge
+   of their row — a different kind of action from typing into the pane. */
+.term-scroll { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-left: auto; }
 .term-scroll button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
 .term-transcript { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
 .term-transcript__line { white-space: pre-wrap; word-break: break-word; }
@@ -255,9 +262,7 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     for p in panes {
         out.push_str(&format!(
             r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
-  <div class="fg-card__title">{name} <span class="fg-chip fg-chip--neutral">{status}</span></div>
-  <div class="term-pane__meta">{kind}{title_sep}{title}</div>
-  <div class="term-pane__cwd">{cwd}</div>
+  <div class="fg-card__title term-pane__head">{name} <span class="fg-chip fg-chip--neutral">{status}</span><span class="term-pane__meta">{kind}{title_sep}{title}</span><span class="term-pane__cwd" title="{cwd}">{cwd}</span></div>
   <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
   <div class="term-controls">
     <div class="term-keys" data-pane-id="{pane_id}" aria-label="Move around {name}'s screen">
@@ -267,14 +272,14 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
       <button type="button" data-key="right">→</button>
     </div>
     <div class="term-controls__row">
-      <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
-        <button type="button" data-scroll="older">Load older</button>
-        <button type="button" data-scroll="live">Back to live</button>
-      </div>
       <div class="term-keys" data-pane-id="{pane_id}" aria-label="Send a key to {name}">
         <button type="button" data-key="enter">Enter</button>
         <button type="button" data-key="escape">Esc</button>
         <button type="button" data-key="tab">Tab</button>
+      </div>
+      <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
+        <button type="button" data-scroll="older">Older</button>
+        <button type="button" data-scroll="live">Live</button>
       </div>
     </div>
   </div>
@@ -446,9 +451,7 @@ fn transcript_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     for p in panes {
         out.push_str(&format!(
             r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
-  <div class="fg-card__title">{name} <span class="fg-chip fg-chip--neutral">{status}</span></div>
-  <div class="term-pane__meta">{kind}{title_sep}{title}</div>
-  <div class="term-pane__cwd">{cwd}</div>
+  <div class="fg-card__title term-pane__head">{name} <span class="fg-chip fg-chip--neutral">{status}</span><span class="term-pane__meta">{kind}{title_sep}{title}</span><span class="term-pane__cwd" title="{cwd}">{cwd}</span></div>
   <div class="term-transcript" data-pane-id="{pane_id}" aria-live="polite">Loading activity…</div>
 </div>"#,
             pane_id = esc(&p.pane_id),
