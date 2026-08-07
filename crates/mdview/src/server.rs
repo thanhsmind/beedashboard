@@ -9263,6 +9263,82 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
+    /// The project list is rows, and a worktree is nested under the project
+    /// it branches from — whatever order the registry hands them back in. The
+    /// registry orders by last-seen, so the branch is registered FIRST here:
+    /// nesting that only worked when the parent happened to come first would
+    /// pass a weaker test and fail on the real page.
+    #[tokio::test]
+    async fn home_page_lists_projects_as_rows_with_each_worktree_under_its_parent() {
+        let dir = fresh_root("home-worktree-rows");
+        let st = build_state_with_dir(&dir);
+
+        // Registered deliberately out of order: branch, orphan branch, parent.
+        let branch_root = dir.join("demo--wt--alpha");
+        let orphan_root = dir.join("nowhere--wt--solo");
+        let parent_root = dir.join("demo");
+        for r in [&branch_root, &orphan_root, &parent_root] {
+            std::fs::create_dir_all(r).unwrap();
+        }
+        let branch = register(&st, &branch_root, "demo--wt--alpha");
+        let orphan = register(&st, &orphan_root, "nowhere--wt--solo");
+        let parent = register(&st, &parent_root, "demo");
+
+        let body = body_string(get(router(st), "/").await).await;
+
+        // Rows, not the old card grid.
+        assert!(
+            body.contains("<ul class=\"proj-list\">") && !body.contains("class=\"proj-card\""),
+            "the project list must render as rows: {body}"
+        );
+
+        let at = |id: &str| {
+            body.find(&format!("href=\"/p/{id}/\""))
+                .unwrap_or_else(|| panic!("{id} must be listed: {body}"))
+        };
+        // The parent leads its own branch even though the branch was seen first.
+        assert!(
+            at(&parent.id) < at(&branch.id),
+            "a worktree must follow the project it branches from: {body}"
+        );
+        // Every project appears exactly once — nesting must not duplicate a row.
+        assert_eq!(
+            body.matches(&format!("href=\"/p/{}/\"", branch.id)).count(),
+            1,
+            "a nested worktree must be listed once, not twice: {body}"
+        );
+
+        // The branch row is marked as one and shows only the branch's own name.
+        assert!(
+            body.contains("proj-row proj-row--branch"),
+            "a worktree row must be marked as a branch: {body}"
+        );
+        assert!(
+            body.contains("<span class=\"proj-row__name\">alpha</span>"),
+            "a branch row must show only the branch name, not the parent's: {body}"
+        );
+
+        // An orphan branch has no parent to nest under, so it keeps its full
+        // name at the top level rather than hiding under a row that is absent.
+        assert!(
+            body.contains("<span class=\"proj-row__name\">nowhere--wt--solo</span>"),
+            "a worktree whose parent is unregistered must keep its full name: {body}"
+        );
+        let orphan_row_open = body[..at(&orphan.id)]
+            .rfind("<li class=\"")
+            .expect("every row opens an <li>");
+        assert!(
+            body[orphan_row_open..at(&orphan.id)].contains("<li class=\"proj-row\">"),
+            "an orphan worktree must not be rendered as someone's branch: {body}"
+        );
+
+        // Unchanged rule: this page never carries a filesystem path.
+        assert!(
+            !body.contains(&dir.to_string_lossy().to_string()),
+            "the project list must not leak a filesystem path: {body}"
+        );
+    }
+
     /// D5/D4's core resolution, on the home page itself: an unauthenticated
     /// `GET /` must never reveal an unassigned agent's name or cwd, even
     /// though the group's presence marker is visible once the D7 switch is

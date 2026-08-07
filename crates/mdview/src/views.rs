@@ -52,32 +52,83 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
 /// it looked before this feature existed — the group being off by policy
 /// rather than by an empty pane list means this marker must disappear too,
 /// not just the panes it would have listed.
+/// Split a registered project id into the project it branches from and the
+/// branch's own name, when the id carries `bee worktree new`'s separator.
+/// `beedashboard--wt--agent-terminal` → `("beedashboard", "agent-terminal")`.
+/// Returns `None` for an ordinary project, and for a malformed id whose half
+/// on either side of the separator is empty — an id that names no parent, or
+/// names one but no branch, is treated as an ordinary project rather than
+/// nested under a row that would not be there.
+fn worktree_branch(id: &str) -> Option<(&str, &str)> {
+    let (parent, branch) = id.split_once("--wt--")?;
+    if parent.is_empty() || branch.is_empty() {
+        return None;
+    }
+    Some((parent, branch))
+}
+
 pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool) -> String {
     let listing = if projects.is_empty() {
         "<p class=\"fg-empty\">Chưa có project nào. Đăng ký: <code>mdview register &lt;dir&gt;</code> hoặc gọi MCP <code>mdview_view_file</code>.</p>".to_string()
     } else {
-        // Cards (not a table — cards read better on phones/tablets). Each card is
-        // a clickable link to the project plus a delete control that unregisters
-        // it. The filesystem path is deliberately omitted (unauthenticated page).
-        let mut cards = String::new();
-        for (p, count) in projects {
-            cards.push_str(&format!(
-                r#"<div class="proj-card">
-  <a class="fg-card proj-card__link" href="/p/{id}/">
-    <div class="fg-card__title">{name}</div>
-    <div class="fg-card__sub">{count} markdown files · <time class="proj-card__time" datetime="{seen}">{seen}</time></div>
+        // One row per project, not a grid of cards: a card's width was spent on
+        // air while the names — which is what the eye is actually scanning for —
+        // wrapped over three lines. Rows put every name on the same left edge.
+        // A worktree sits under the project it branches from rather than beside
+        // it as a peer, so a repo with three checkouts reads as one project with
+        // three branches instead of four unrelated entries. The filesystem path
+        // is deliberately omitted (unauthenticated page).
+        let registered: std::collections::HashSet<&str> =
+            projects.iter().map(|(p, _)| p.id.as_str()).collect();
+        // Order: every project that is not a branch keeps the order it arrived
+        // in, and each one is immediately followed by its own branches, in
+        // their own arrival order. A branch is never emitted twice and never
+        // emitted before its parent, whatever order the registry hands them in.
+        let mut ordered: Vec<(&(Project, usize), Option<&str>)> = Vec::new();
+        for entry in projects {
+            if worktree_branch(&entry.0.id)
+                .map(|(parent, _)| registered.contains(parent))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            ordered.push((entry, None));
+            for child in projects {
+                if let Some((parent, branch)) = worktree_branch(&child.0.id) {
+                    if parent == entry.0.id {
+                        ordered.push((child, Some(branch)));
+                    }
+                }
+            }
+        }
+        let mut rows = String::new();
+        for ((p, count), branch) in ordered {
+            // A worktree whose parent is not registered has nothing to nest
+            // under, so it stands on its own and keeps its full name — never
+            // hidden, and never indented under a row that is not there.
+            let (row_class, label) = match branch {
+                Some(branch) => ("proj-row proj-row--branch", branch.to_string()),
+                None => ("proj-row", p.name.clone()),
+            };
+            rows.push_str(&format!(
+                r#"<li class="{row_class}">
+  <a class="proj-row__link" href="/p/{id}/">
+    <span class="proj-row__name">{label}</span>
+    <span class="proj-row__meta">{count} markdown files · <time class="proj-row__time" datetime="{seen}">{seen}</time></span>
   </a>
-  <form class="proj-card__delete" method="post" action="/api/projects/{id}/unregister" data-project="{name}">
+  <form class="proj-row__delete" method="post" action="/api/projects/{id}/unregister" data-project="{name}">
     <button type="submit" class="proj-card__del" aria-label="Remove {name} from mdview" title="Remove from mdview">✕</button>
   </form>
-</div>"#,
+</li>"#,
+                row_class = row_class,
                 id = esc(&p.id),
+                label = esc(&label),
                 name = esc(&p.name),
                 count = count,
                 seen = esc(&p.last_seen_at),
             ));
         }
-        format!(r#"<div class="proj-cards">{cards}</div>"#, cards = cards)
+        format!(r#"<ul class="proj-list">{rows}</ul>"#, rows = rows)
     };
     // D5/D4: presence only — no agent name, no cwd, not even a count, ever
     // reaches this markup. The link's own route (`/_terminal/unassigned`)

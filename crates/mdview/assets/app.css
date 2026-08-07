@@ -122,6 +122,60 @@ main.fg-page {
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: var(--space-4);
 }
+/* The project list reads as rows, not tiles: every name starts on the same
+   left edge so the eye scans one column instead of eight boxes, and a
+   worktree is indented under the project it branches from with a rule down
+   its left, which is what makes the group visible without a header. */
+.proj-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: var(--border-width-hairline) solid var(--color-border);
+}
+.proj-row {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  border-bottom: var(--border-width-hairline) solid var(--color-border);
+}
+.proj-row__link {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) var(--space-7) var(--space-2) 0;
+  text-decoration: none;
+  color: inherit;
+}
+.proj-row__link:hover .proj-row__name {
+  text-decoration: underline;
+}
+.proj-row__name {
+  font-weight: var(--weight-semibold);
+}
+.proj-row__meta {
+  color: var(--color-text-subtle);
+  font-size: var(--type-caption-size);
+}
+.proj-row--branch .proj-row__link {
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--color-border);
+  margin-left: var(--space-2);
+}
+.proj-row--branch .proj-row__name {
+  font-weight: var(--weight-regular);
+  color: var(--color-text-muted);
+}
+.proj-row__delete {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  margin: 0;
+}
 .proj-card {
   position: relative;
   display: flex;
