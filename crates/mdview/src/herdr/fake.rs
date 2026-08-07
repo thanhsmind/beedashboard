@@ -376,6 +376,30 @@ impl FakeHerdr {
         Err(HerdrError::NoSuchPane(pane_id.to_string()))
     }
 
+    /// Test-only construction seam: overwrites `pane_id`'s own `cwd` and
+    /// `foreground_cwd` independently. `agent_start`/`tab_create` (and the
+    /// `pane()` fixture helper below) always set `foreground_cwd == cwd`,
+    /// which is the real, common shape but cannot express terminal-pane-scope's
+    /// D1 cases -- a pane whose two directories diverge, or where either is
+    /// absent entirely. This is the only seam that can, since nothing else
+    /// ever writes to either field after a pane is created.
+    pub async fn set_pane_dirs(
+        &self,
+        pane_id: &str,
+        cwd: Option<&str>,
+        foreground_cwd: Option<&str>,
+    ) -> Result<()> {
+        let mut snap = self.inner.snapshot.lock().await;
+        for p in &mut snap.panes {
+            if p.pane_id == pane_id {
+                p.cwd = cwd.map(str::to_string);
+                p.foreground_cwd = foreground_cwd.map(str::to_string);
+                return Ok(());
+            }
+        }
+        Err(HerdrError::NoSuchPane(pane_id.to_string()))
+    }
+
     fn ensure_up(&self) -> Result<()> {
         if self
             .inner

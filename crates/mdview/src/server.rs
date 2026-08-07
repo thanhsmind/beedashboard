@@ -1435,35 +1435,56 @@ async fn terminal_create_agent(
     }
 }
 
-/// Join each of the snapshot's agents to its own pane's working directory —
-/// `Agent` carries none directly (see `herdr::wire::Pane`'s doc: the folder
-/// lives on the *pane*, joined by `pane_id`) — and keep only the ones the D2
-/// containment boundary accepts under this project's root. The boundary does
-/// the actual decision (symlink resolution, component-wise containment,
-/// fail-closed on any ambiguity); this function only performs the join and
-/// discards anything the boundary refuses or that has no resolvable pane at
-/// all. `foreground_cwd` is not consulted here — `cwd` is the pane's own
-/// working directory, the literal quantity D2 names, and every panel this
-/// cell builds/tests sets it explicitly.
+/// terminal-pane-scope's D1/D2: membership is decided over `snapshot.panes`
+/// — the set this function is actually about — not `snapshot.agents`, since
+/// an agent is only a subset of the panes that legitimately belong to a
+/// project (agent-terminal's own D2 names it: "the herdr **panes** whose
+/// working directory sits under that project's `root_path`" — pane
+/// iteration was the decision's own wording all along). A pane qualifies
+/// when the D2 containment boundary accepts its `cwd`; when `cwd` is absent
+/// or the boundary refuses it, the boundary is tried again against
+/// `foreground_cwd`. `cwd` wins whenever both would validate: the path this
+/// function returns is not display-only — `project_pane_cwd_in_boundary`
+/// hands it to `read_activity`, and `mdview_core::transcript` uses it as the
+/// transcript directory selector, so preferring the live-but-volatile
+/// `foreground_cwd` would silently re-key an existing pane's transcript away
+/// from the directory it actually launched in. `foreground_cwd` is
+/// unix-only and always `None` elsewhere (`herdr::wire::Pane`'s doc), so
+/// this is a no-op on every other platform. The agent, if any, is then
+/// joined by `pane_id` — present, it carries today's
+/// `kind`/`name`/`status`/`title`; absent, the pane is a real shell row (D2)
+/// rather than an absence, with a `kind` that says so instead of borrowing
+/// an agent's vocabulary. The boundary itself does the actual decision
+/// (symlink resolution, component-wise containment, fail-closed on any
+/// ambiguity) for both directories alike.
 fn project_panes(
     snapshot: &herdr::Snapshot,
     boundary: &mdview_core::paths_boundary::Boundary,
 ) -> Vec<views::TerminalPaneView> {
     snapshot
-        .agents
+        .panes
         .iter()
-        .filter_map(|agent| {
-            let pane = snapshot.panes.iter().find(|p| p.pane_id == agent.pane_id)?;
-            let raw_cwd = pane.cwd.as_deref()?;
-            let resolved = boundary
-                .validate_existing(std::path::Path::new(raw_cwd))
-                .ok()?;
+        .filter_map(|pane| {
+            let resolved = pane
+                .cwd
+                .as_deref()
+                .and_then(|raw| boundary.validate_existing(std::path::Path::new(raw)).ok())
+                .or_else(|| {
+                    pane.foreground_cwd.as_deref().and_then(|raw| {
+                        boundary.validate_existing(std::path::Path::new(raw)).ok()
+                    })
+                })?;
+            let agent = snapshot.agents.iter().find(|a| a.pane_id == pane.pane_id);
             Some(views::TerminalPaneView {
-                pane_id: agent.pane_id.clone(),
-                kind: agent.kind.clone(),
-                name: agent.name.clone(),
-                status: agent.status.as_str().to_string(),
-                title: agent.title.clone(),
+                pane_id: pane.pane_id.clone(),
+                kind: agent
+                    .map(|a| a.kind.clone())
+                    .unwrap_or_else(|| "shell".to_string()),
+                name: agent.map(|a| a.name.clone()).unwrap_or_default(),
+                status: agent
+                    .map(|a| a.status.as_str().to_string())
+                    .unwrap_or_default(),
+                title: agent.map(|a| a.title.clone()).unwrap_or_default(),
                 cwd: resolved.to_string_lossy().into_owned(),
             })
         })
@@ -10602,5 +10623,558 @@ mod bee_route_tests {
         );
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---- terminal-pane-scope: project_panes over snapshot.panes, either
+    // directory, cwd first (D1/D2) ----
+    //
+    // Every assertion below is made on pane id, never on an agent name --
+    // a shell row has no name to assert on, so an agent-name-only assertion
+    // would be structurally blind to it.
+
+    /// Case 1 (D2): a pane inside the project root with no agent at all is
+    /// listed, as a shell row.
+    #[tokio::test]
+    async fn terminal_project_lists_a_pane_with_no_agent_as_a_shell_row() {
+        let dir = fresh_root("scope-shell-row");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-shell-row-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "shell-row");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("data-pane-id=\"{}\"", created.pane_id)),
+            "a pane with no agent must still be listed, as a shell row: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 2 (D1, `#[cfg(unix)]`), the worktree case measured in
+    /// CONTEXT.md: a pane whose `cwd` sits outside the project root but
+    /// whose `foreground_cwd` sits inside it is listed, and its screen
+    /// route answers rather than refusing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_project_lists_a_pane_matching_only_via_foreground_cwd() {
+        let dir = fresh_root("scope-fg-only-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-fg-only-scratch");
+        let root = scratch.join("project");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&outside.to_string_lossy()))
+            .await
+            .unwrap();
+        fake.set_pane_dirs(
+            &created.pane_id,
+            Some(&outside.to_string_lossy()),
+            Some(&root.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "fg-only");
+        let app = router(st);
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("data-pane-id=\"{}\"", created.pane_id)),
+            "a pane matching only via foreground_cwd must be listed: {body}"
+        );
+
+        let screen_resp = app
+            .oneshot(terminal_screen_req(&project.id, &created.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            screen_resp.status(),
+            StatusCode::OK,
+            "the screen route must answer for a pane matched via foreground_cwd, not refuse it"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Case 3 (D1, the mirror direction): a pane whose `cwd` sits inside the
+    /// project root but whose `foreground_cwd` sits outside it is listed --
+    /// `cwd` alone is enough, on every platform, since `cwd` is tried
+    /// first.
+    #[tokio::test]
+    async fn terminal_project_lists_a_pane_whose_foreground_cwd_is_outside_but_cwd_is_inside() {
+        let dir = fresh_root("scope-cwd-only-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-cwd-only-scratch");
+        let root = scratch.join("project");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+        fake.set_pane_dirs(
+            &created.pane_id,
+            Some(&root.to_string_lossy()),
+            Some(&outside.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "cwd-only");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("data-pane-id=\"{}\"", created.pane_id)),
+            "a pane whose cwd validates must be listed even though its foreground_cwd does not: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Case 4, the widening's outer edge: a pane where neither directory
+    /// resolves inside the project root stays excluded, and its screen,
+    /// input, and keys routes all still refuse it.
+    #[tokio::test]
+    async fn terminal_project_excludes_a_pane_matching_neither_directory() {
+        let dir = fresh_root("scope-neither-dir-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-neither-dir-scratch");
+        let root = scratch.join("project");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        // agent_start sets cwd == foreground_cwd, both outside the root.
+        let outside_agent = fake
+            .agent_start(
+                "w1",
+                Some(&outside.to_string_lossy()),
+                &["claude".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "neither-dir");
+        let app = router(st);
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&outside_agent.pane_id),
+            "a pane matching neither directory must never be listed: {body}"
+        );
+
+        let screen_resp = app
+            .clone()
+            .oneshot(terminal_screen_req(
+                &project.id,
+                &outside_agent.pane_id,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(screen_resp.status(), StatusCode::NOT_FOUND);
+
+        let input_resp = app
+            .clone()
+            .oneshot(terminal_input_req(
+                &project.id,
+                &outside_agent.pane_id,
+                "should never land",
+                Some(true),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(input_resp.status(), StatusCode::NOT_FOUND);
+
+        let keys_resp = app
+            .oneshot(terminal_keys_req(
+                &project.id,
+                &outside_agent.pane_id,
+                &["enter"],
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(keys_resp.status(), StatusCode::NOT_FOUND);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Case 5 (`#[cfg(unix)]`), the security edge that turns this feature
+    /// into a vulnerability if missed: a pane whose `foreground_cwd`
+    /// escapes the project root by a symlink is refused, exactly as a `cwd`
+    /// that does (`terminal_route_lists_only_panes_within_the_project_root_boundary`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_project_refuses_a_pane_whose_foreground_cwd_escapes_via_symlink() {
+        let dir = fresh_root("scope-fg-symlink-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-fg-symlink-scratch");
+        let root = scratch.join("project");
+        let escape_target = scratch.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&escape_target).unwrap();
+        let symlink_path = root.join("escape-link");
+        std::os::unix::fs::symlink(&escape_target, &symlink_path).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+        // cwd absent: only foreground_cwd is consulted, and its raw path
+        // sits under the root but resolves outside it.
+        fake.set_pane_dirs(
+            &created.pane_id,
+            None,
+            Some(&symlink_path.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "fg-symlink");
+        let app = router(st);
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&created.pane_id),
+            "a foreground_cwd that escapes the root by symlink must be refused, not listed: {body}"
+        );
+
+        let screen_resp = app
+            .oneshot(terminal_screen_req(&project.id, &created.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            screen_resp.status(),
+            StatusCode::NOT_FOUND,
+            "the screen route must refuse a pane whose only qualifying directory is a symlink escape"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Case 6, edge: a pane reporting neither `cwd` nor `foreground_cwd` is
+    /// excluded from the project's list.
+    #[tokio::test]
+    async fn terminal_project_excludes_a_pane_reporting_neither_directory() {
+        let dir = fresh_root("scope-no-dirs-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-no-dirs-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+        fake.set_pane_dirs(&created.pane_id, None, None)
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "no-dirs");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&created.pane_id),
+            "a pane reporting neither directory must never be listed: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 7 (regression), the standing gap this cell leaves unchanged and
+    /// pinned by pane id: a shell pane under no registered project is
+    /// absent from every registered project's own list AND absent from the
+    /// Unassigned group, since `unassigned_panes`' own output loop stays
+    /// agent-only (`unassigned_panes`'s doc; inverting it too would newly
+    /// expose every shell pane on the host through routes with no
+    /// containment check of their own).
+    #[tokio::test]
+    async fn terminal_project_scope_shell_pane_under_no_project_is_invisible_everywhere() {
+        let dir = fresh_root("scope-orphan-shell-data");
+        enable_terminal(&dir);
+        enable_unassigned_group(&dir);
+        let scratch = fresh_root("scope-orphan-shell-scratch");
+        let owned_root = scratch.join("owned");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&owned_root).unwrap();
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let stray = fake
+            .tab_create("w1", Some(&stray_root.to_string_lossy()))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &owned_root, "orphan-shell-owner");
+        let app = router(st);
+
+        let project_resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        let project_body = body_string(project_resp).await;
+        assert!(
+            !project_body.contains(&stray.pane_id),
+            "the stray shell pane must not leak into an unrelated project's own list: {project_body}"
+        );
+
+        let unassigned_resp = app.oneshot(unassigned_req(None)).await.unwrap();
+        assert_eq!(unassigned_resp.status(), StatusCode::OK);
+        let unassigned_body = body_string(unassigned_resp).await;
+        assert!(
+            !unassigned_body.contains(&stray.pane_id),
+            "a shell pane under no registered project is the standing, pinned gap -- it must \
+             stay invisible to the Unassigned group too, not newly appear there: {unassigned_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Case 8 (`#[cfg(unix)]`): the precedence rule that keeps an existing
+    /// pane's transcript from silently re-keying. A pane matched only via
+    /// `foreground_cwd` keys its transcript read on that matched path,
+    /// answering `available: false` when nothing has been written there
+    /// (the honest empty state, not an error) -- and a pane whose `cwd`
+    /// validates keys its transcript on `cwd`, even when `foreground_cwd`
+    /// also validates.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_transcript_keys_on_cwd_first_and_on_foreground_cwd_only_when_cwd_does_not_validate(
+    ) {
+        let dir = fresh_root("scope-transcript-precedence-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-transcript-precedence-scratch");
+        let root = scratch.join("project");
+        let outside = scratch.join("outside");
+        let inner_cwd = root.join("launched-here");
+        let inner_fg = root.join("live-here");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&inner_cwd).unwrap();
+        std::fs::create_dir_all(&inner_fg).unwrap();
+        let transcript_root = fresh_root("scope-transcript-precedence-claude");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+
+        // Sub-case: matched only via foreground_cwd -- nothing is ever
+        // written at that path, so the transcript route must answer
+        // available:false rather than 404 (membership already passed).
+        let fg_only = fake
+            .tab_create("w1", Some(&outside.to_string_lossy()))
+            .await
+            .unwrap();
+        fake.set_pane_dirs(
+            &fg_only.pane_id,
+            Some(&outside.to_string_lossy()),
+            Some(&inner_fg.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+
+        // Sub-case: both directories validate -- the transcript is written
+        // only at the cwd path, proving cwd wins the precedence.
+        let both_match = fake
+            .tab_create("w1", Some(&inner_cwd.to_string_lossy()))
+            .await
+            .unwrap();
+        fake.set_pane_dirs(
+            &both_match.pane_id,
+            Some(&inner_cwd.to_string_lossy()),
+            Some(&inner_fg.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+        let cwd_canonical = canonical_cwd(&inner_cwd);
+        write_transcript(
+            &transcript_root,
+            &cwd_canonical,
+            "s1",
+            "{\"type\":\"user\",\"message\":{\"content\":\"launched here\"}}\n",
+        );
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        st.transcript_root = Some(transcript_root.clone());
+        let project = register(&st, &root, "transcript-precedence");
+        let app = router(st);
+
+        let fg_resp = app
+            .clone()
+            .oneshot(terminal_transcript_req(
+                &project.id,
+                &fg_only.pane_id,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(fg_resp.status(), StatusCode::OK);
+        let fg_json: serde_json::Value = serde_json::from_str(&body_string(fg_resp).await).unwrap();
+        assert_eq!(
+            fg_json["available"],
+            serde_json::json!(false),
+            "a pane matched only via foreground_cwd, with nothing written there, must answer \
+             the honest empty state: {fg_json}"
+        );
+
+        let both_resp = app
+            .oneshot(terminal_transcript_req(
+                &project.id,
+                &both_match.pane_id,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(both_resp.status(), StatusCode::OK);
+        let both_json: serde_json::Value =
+            serde_json::from_str(&body_string(both_resp).await).unwrap();
+        assert_eq!(
+            both_json["available"],
+            serde_json::json!(true),
+            "a pane whose cwd validates must key its transcript on cwd, even though \
+             foreground_cwd also validates: {both_json}"
+        );
+        let lines: Vec<String> = both_json["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(lines, vec!["» launched here".to_string()], "{both_json}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+        std::fs::remove_dir_all(&transcript_root).ok();
+    }
+
+    /// Case 9 (D1): a pane can legitimately qualify for two registered
+    /// projects at once (a parent repo and its worktree) -- it is listed by
+    /// both, and each project's own screen route serves it under its own
+    /// boundary, not by borrowing the other's.
+    #[tokio::test]
+    async fn terminal_project_a_pane_qualifying_for_two_projects_is_listed_by_both() {
+        let dir = fresh_root("scope-two-projects-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-two-projects-scratch");
+        let parent_root = scratch.join("parent");
+        let child_root = parent_root.join("child-worktree");
+        std::fs::create_dir_all(&child_root).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let shared = fake
+            .agent_start(
+                "w1",
+                Some(&child_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let parent = register(&st, &parent_root, "two-projects-parent");
+        let child = register(&st, &child_root, "two-projects-child");
+        let app = router(st);
+
+        let parent_resp = app
+            .clone()
+            .oneshot(terminal_req(&parent.id, None))
+            .await
+            .unwrap();
+        let parent_body = body_string(parent_resp).await;
+        assert!(
+            parent_body.contains(&format!("data-pane-id=\"{}\"", shared.pane_id)),
+            "the shared pane is missing from the parent project's own list: {parent_body}"
+        );
+
+        let child_resp = app
+            .clone()
+            .oneshot(terminal_req(&child.id, None))
+            .await
+            .unwrap();
+        let child_body = body_string(child_resp).await;
+        assert!(
+            child_body.contains(&format!("data-pane-id=\"{}\"", shared.pane_id)),
+            "the shared pane is missing from the child project's own list: {child_body}"
+        );
+
+        let parent_screen = app
+            .clone()
+            .oneshot(terminal_screen_req(&parent.id, &shared.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(parent_screen.status(), StatusCode::OK);
+
+        let child_screen = app
+            .oneshot(terminal_screen_req(&child.id, &shared.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(child_screen.status(), StatusCode::OK);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
     }
 }
