@@ -174,11 +174,17 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    scrolls — that is what replaces wrapping when a line runs wider than the
    card. */
 .term-screen { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); white-space: pre; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.25; height: auto; overflow-x: auto; overflow-y: hidden; }
-/* The buttons sit at the top edge rather than stretching, now that the
-   reply box is a multi-line field whose height the operator controls. */
-.term-reply { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-2); }
-.term-reply__text { flex: 1; min-width: 0; padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.35; background: var(--color-bg); color: var(--color-text); resize: vertical; }
-.term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; }
+/* The controls read top to bottom in the order they are reached: the screen,
+   then the two controls that move the screen, then the keys that drive the
+   agent, then the box you write in with its own send row under it. The reply
+   box owns the full width — squeezing it beside two buttons left barely a
+   phone's worth of room for the one field an operator actually types into. */
+.term-reply { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
+.term-reply__text { width: 100%; min-width: 0; box-sizing: border-box; padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.35; background: var(--color-bg); color: var(--color-text); resize: vertical; }
+.term-reply__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
+.term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-3); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; }
+/* Send is the primary of the pair — Stage beside it stays the quiet one. */
+.term-reply__send { background: var(--color-action); border-color: var(--color-action); color: var(--color-bg); font-weight: var(--weight-semibold); }
 .term-keys { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
 .term-keys button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
 /* terminal-scroll-2: the pair of scroll buttons ("Load older" / "Live")
@@ -248,11 +254,10 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
   <div class="term-pane__meta">{kind}{title_sep}{title}</div>
   <div class="term-pane__cwd">{cwd}</div>
   <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
-  <form class="term-reply" data-pane-id="{pane_id}">
-    <textarea class="term-reply__text" rows="3" placeholder="Type a reply… (Ctrl+Enter to send)" aria-label="Reply to {name}" autocomplete="off"></textarea>
-    <button type="submit" class="term-reply__send">Send</button>
-    <button type="button" class="term-reply__stage">Stage</button>
-  </form>
+  <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
+    <button type="button" data-scroll="older">Load older</button>
+    <button type="button" data-scroll="live">Back to live</button>
+  </div>
   <div class="term-keys" data-pane-id="{pane_id}" aria-label="Send a key to {name}">
     <button type="button" data-key="up">↑</button>
     <button type="button" data-key="down">↓</button>
@@ -262,10 +267,13 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     <button type="button" data-key="escape">Esc</button>
     <button type="button" data-key="tab">Tab</button>
   </div>
-  <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
-    <button type="button" data-scroll="older">Load older</button>
-    <button type="button" data-scroll="live">Back to live</button>
-  </div>
+  <form class="term-reply" data-pane-id="{pane_id}">
+    <textarea class="term-reply__text" rows="3" placeholder="Type a reply… (Ctrl+Enter to send)" aria-label="Reply to {name}" autocomplete="off"></textarea>
+    <div class="term-reply__actions">
+      <button type="button" class="term-reply__stage">Stage</button>
+      <button type="submit" class="term-reply__send">Send</button>
+    </div>
+  </form>
 </div>"#,
             pane_id = esc(&p.pane_id),
             name = esc(&p.name),

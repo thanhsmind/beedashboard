@@ -789,6 +789,54 @@
       return historyPages ? url + "?history=" + historyPages : url;
     }
 
+    // A pane's frame is a fixed grid: wrapping it destroys the box drawing, so
+    // the only honest way to fit a wide frame on a narrow screen is to make
+    // the type smaller, not to re-flow it. After each repaint the widest line
+    // decides the size — screen width divided by that many columns. Below
+    // FONT_MIN_PX the text stops being readable, so the box keeps its
+    // horizontal scrollbar for that case rather than shrinking into a smear.
+    var FONT_MIN_PX = 6;
+    var FONT_MAX_PX = 13;
+    var charWidthPerPx = 0; // advance width of one monospace character, per 1px of font-size
+
+    function measureCharWidth(el) {
+      if (charWidthPerPx) return charWidthPerPx;
+      var probe = document.createElement("span");
+      probe.style.cssText =
+        "position:absolute;visibility:hidden;white-space:pre;font-size:100px;";
+      probe.style.fontFamily = window.getComputedStyle(el).fontFamily;
+      probe.textContent = "MMMMMMMMMM";
+      document.body.appendChild(probe);
+      charWidthPerPx = probe.getBoundingClientRect().width / 10 / 100;
+      document.body.removeChild(probe);
+      return charWidthPerPx;
+    }
+
+    function fitScreenFont(el) {
+      var text = el.textContent || "";
+      var lines = text.split("\n");
+      var cols = 0;
+      for (var i = 0; i < lines.length; i++) {
+        if (lines[i].length > cols) cols = lines[i].length;
+      }
+      if (!cols) return;
+      var style = window.getComputedStyle(el);
+      var padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+      var available = el.clientWidth - padding;
+      if (available <= 0) return;
+      var perChar = measureCharWidth(el);
+      if (!perChar) return;
+      var size = available / (cols * perChar);
+      // Never magnify past the page's own body size — fitting is about
+      // rescuing a frame too wide to fit, not about zooming a narrow one up.
+      el.style.fontSize = Math.max(FONT_MIN_PX, Math.min(FONT_MAX_PX, size)) + "px";
+    }
+
+    // One resize can change every pane's fit at once.
+    window.addEventListener("resize", function () {
+      screens.forEach(fitScreenFont);
+    });
+
     function pollOne(el) {
       var paneId = el.getAttribute("data-pane-id");
       if (viewingHistory[paneId]) return; // the operator is reading history; leave it alone
@@ -807,6 +855,7 @@
           // `body.text` is safe, pre-escaped ANSI-translated HTML — see the
           // doc comment above this IIFE.
           el.innerHTML = body.text;
+          fitScreenFont(el);
         })
         .catch(function () {
           el.textContent = HERDR_DOWN_TEXT;
@@ -858,6 +907,7 @@
               historyDepth = requestedDepth;
               lastRevision[paneId] = body.revision;
               screenEl.innerHTML = body.text;
+              fitScreenFont(screenEl);
             })
             .catch(function () {});
         });

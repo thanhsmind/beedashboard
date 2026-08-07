@@ -8713,6 +8713,20 @@ mod bee_route_tests {
             !body.contains("<input type=\"text\" class=\"term-reply__text\""),
             "the single-line reply field must be gone: {body}"
         );
+        // The card reads in the order an operator reaches it: the screen, the
+        // two controls that move the screen, the keys that drive the agent,
+        // then the box they write in — with its send row under it, not
+        // squeezed beside it.
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("missing {needle}: {body}"));
+        let screen = at("class=\"term-screen\"");
+        let scroll = at("class=\"term-scroll\"");
+        let keys = at("class=\"term-keys\"");
+        let reply = at("class=\"term-reply\"");
+        let actions = at("class=\"term-reply__actions\"");
+        assert!(
+            screen < scroll && scroll < keys && keys < reply && reply < actions,
+            "pane controls out of order (screen {screen}, scroll {scroll}, keys {keys}, reply {reply}, actions {actions}): {body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
