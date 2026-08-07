@@ -8,7 +8,6 @@ mod notify;
 mod runtime;
 mod server;
 mod supervisor;
-mod terminal_auth;
 mod views;
 mod watch;
 mod watcher;

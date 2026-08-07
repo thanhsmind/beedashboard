@@ -59,12 +59,9 @@ pub struct SearchConfig {
 }
 
 /// The D7 opt-in switches for the agent terminal surface, all off until the
-/// user turns them on from the settings page. The terminal token itself is
-/// deliberately **not** a field here (P1, `mdview/src/terminal_auth.rs`):
-/// `Config` is serialized whole and unauthenticated by `GET /api/config`, so
-/// anything stored inside it is one request away regardless of what the
-/// settings HTML masks. `#[derive(Default)]` gives every switch `false`,
-/// matching a config that has never seen this section.
+/// user turns them on from the settings page. `#[derive(Default)]` gives
+/// every switch `false`, matching a config that has never seen this
+/// section.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
@@ -119,10 +116,10 @@ impl Default for ServerConfig {
             port: 7700,
             // Bind all interfaces by default so the viewer is reachable from
             // other devices on the LAN (and from a browser when the daemon runs
-            // on a remote host). The server has no auth outside the agent
-            // terminal family's token gate (D4, `crates/mdview/src/terminal_auth.rs`) —
-            // every other route, including this one, stays open; `serve()`
-            // prints a non-loopback exposure warning at startup.
+            // on a remote host). The server has no auth at all (terminal-open-access
+            // D1 removed the agent terminal's own token gate, its last one) —
+            // every route stays open; `serve()` prints a non-loopback exposure
+            // warning at startup.
             host: "0.0.0.0".into(),
             hostname: None,
             open_browser_on_start: false,
@@ -210,17 +207,16 @@ pub fn notify_store_path_override(override_dir: Option<&Path>) -> PathBuf {
 }
 
 /// File name for the Telegram bot token, written beside `config.toml` in the
-/// same data directory `crates/mdview/src/terminal_auth.rs`'s own token file
-/// uses, for the same reason (P1's rule, extended to this second secret):
-/// `Config` is serialized whole and unauthenticated by `GET /api/config`, so
-/// a credential stored inside it would be one request away regardless of
-/// what the settings HTML masks. A distinct file from `terminal.token` —
-/// saving one never disturbs the other.
+/// same data directory (P1's rule, extended to this second secret): `Config`
+/// is serialized whole and unauthenticated by `GET /api/config`, so a
+/// credential stored inside it would be one request away regardless of what
+/// the settings HTML masks. A distinct file from the agent terminal's own
+/// (now-unused) `terminal.token` — saving one never disturbs the other.
 const NOTIFY_CREDENTIAL_FILE_NAME: &str = "telegram.token";
 
 /// `<data_dir>/telegram.token`, or `override_dir/telegram.token` when given
-/// — mirrors `config_path_override`/`terminal_auth::token_path_override` so
-/// a route-level test never touches the real `~/.mdview`.
+/// — mirrors `config_path_override` so a route-level test never touches the
+/// real `~/.mdview`.
 pub fn notify_credential_path_override(override_dir: Option<&Path>) -> PathBuf {
     resolve_data_dir(override_dir).join(NOTIFY_CREDENTIAL_FILE_NAME)
 }
@@ -230,22 +226,18 @@ pub fn notify_credential_path_override(override_dir: Option<&Path>) -> PathBuf {
 /// already there), owner-only permissions where the platform supports them
 /// (unix `0600`), then `rename`d over the target — so the target path is
 /// always either the previous complete file or the new one, never a partial
-/// write, and a failed write never touches it at all. Mirrors
-/// `terminal_auth::write_token_file`'s shape — the mechanism this repeats
-/// for a second secret rather than inventing a new one — duplicated rather
-/// than shared because that module lives in the `mdview` binary crate and
-/// this one must stay reachable from `mdview-core`, which the settings
-/// route (`crates/mdview/src/server.rs`) and the notify reconciler
-/// (`crates/mdview/src/main.rs`) both depend on.
+/// write, and a failed write never touches it at all. Lives in
+/// `mdview-core` rather than the `mdview` binary crate because both the
+/// settings route (`crates/mdview/src/server.rs`) and the notify reconciler
+/// (`crates/mdview/src/main.rs`) must reach it.
 ///
-/// The temp file's name carries fresh randomness (agent-terminal-21),
-/// exactly as `terminal_auth::write_token_file`'s does from a slice of the
-/// token it is writing — never `std::process::id()` alone. A fixed,
-/// pid-only name is stable for the life of the process, so `create_new`
-/// makes the *second* call in that process (or a call racing another
-/// thread's save, or a call after a previous crash left its temp file
-/// behind before the rename landed) collide on the exact same path and fail
-/// permanently, silently, while a caller that discards the `Result` (as
+/// The temp file's name carries fresh randomness (agent-terminal-21) rather
+/// than `std::process::id()` alone. A fixed, pid-only name is stable for the
+/// life of the process, so `create_new` makes the *second* call in that
+/// process (or a call racing another thread's save, or a call after a
+/// previous crash left its temp file behind before the rename landed)
+/// collide on the exact same path and fail permanently, silently, while a
+/// caller that discards the `Result` (as
 /// `crates/mdview/src/server.rs::update_terminal_config` does today) goes
 /// on to report success anyway. A fresh random suffix on every call makes
 /// that collision astronomically unlikely instead.
@@ -274,10 +266,8 @@ pub fn save_notify_credential(path: &Path, secret: &str) -> Result<()> {
     result
 }
 
-/// 8 hex characters of fresh randomness — the same width
-/// `terminal_auth::write_token_file` derives from a slice of the token it
-/// writes, reused here via a dedicated generator because this call has no
-/// token of its own to slice.
+/// 8 hex characters of fresh randomness, generated directly since this call
+/// has no token of its own to slice a suffix from.
 fn random_temp_suffix() -> String {
     use rand::RngCore;
     let mut bytes = [0u8; 4];
@@ -670,10 +660,11 @@ mod tests {
         );
     }
 
-    /// Defect (4): the identical mechanism next door
-    /// (`crates/mdview/src/terminal_auth.rs::token_file_is_created_owner_only_on_unix`)
-    /// carries this assertion; the credential file had none. Catches a
-    /// regression that drops the owner-only mode.
+    /// Defect (4): originally added because the identical mechanism next
+    /// door — the agent terminal's own token file, removed with
+    /// `terminal_auth` (toa-3, D1) — carried this assertion and the
+    /// credential file had none. Catches a regression that drops the
+    /// owner-only mode.
     #[cfg(unix)]
     #[test]
     fn credential_file_is_created_owner_only_on_unix() {

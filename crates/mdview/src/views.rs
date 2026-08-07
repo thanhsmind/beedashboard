@@ -2655,29 +2655,12 @@ fn highlight_excerpt(excerpt: &str) -> String {
         .replace("&lt;/mark&gt;", "</mark>")
 }
 
-/// What the settings page's Terminal section renders for the token (D10).
-/// Per P2 [`TerminalTokenView::Full`] is built exclusively from the direct
-/// response of the rotate action — no other call site is allowed to
-/// reconstruct it from a stored plaintext, because there is no stored
-/// plaintext to read: `terminal_auth::TerminalAuth::rotate` is the only
-/// function anywhere that ever returns the full value.
-pub enum TerminalTokenView {
-    /// No token has ever been generated.
-    NotGenerated,
-    /// The last four characters of the configured token — every render
-    /// except the one that just generated or rotated it.
-    Masked(String),
-    /// The token in full. Rendered exactly once, in the response of the
-    /// rotate action itself.
-    Full(String),
-}
-
 /// What the settings page's notification section renders for the Telegram
-/// credential (agent-terminal-18). Unlike [`TerminalTokenView`] there is no
-/// `Full` variant at all: this credential is never rendered back in full,
-/// not even once — the form that sets it (`/api/terminal-config`) is
-/// write-only for this field, so this is the *only* view any response ever
-/// carries, including the one immediately after a save.
+/// credential (agent-terminal-18). There is no `Full` variant at all: this
+/// credential is never rendered back in full, not even once — the form
+/// that sets it (`/api/terminal-config`) is write-only for this field, so
+/// this is the *only* view any response ever carries, including the one
+/// immediately after a save.
 pub enum NotifyCredentialView {
     /// No credential has ever been saved.
     NotConfigured,
@@ -2689,7 +2672,6 @@ pub fn settings_page(
     cfg: &Config,
     saved: bool,
     notify_credential_save_failed: bool,
-    token_view: TerminalTokenView,
     notify_credential_view: NotifyCredentialView,
 ) -> String {
     // agent-terminal-24: checked first, so a failed credential save is never
@@ -2709,30 +2691,9 @@ pub fn settings_page(
     let sel = |v: &str, opt: &str| if v == opt { "selected" } else { "" };
     let excludes = cfg.indexing.exclude_patterns.join("\n");
 
-    let (token_banner, token_button_label) = match token_view {
-        TerminalTokenView::NotGenerated => (
-            "<p class=\"fg-field__hint\">No terminal token yet — generate one to switch the terminal on.</p>".to_string(),
-            "Generate token",
-        ),
-        TerminalTokenView::Masked(masked) => (
-            format!(
-                "<p class=\"fg-field__hint\">Token: <code>{masked}</code></p>",
-                masked = esc(&masked)
-            ),
-            "Rotate token",
-        ),
-        TerminalTokenView::Full(full) => (
-            format!(
-                "<div class=\"fg-banner fg-banner--success\"><span class=\"fg-banner__dot\"></span><span class=\"fg-banner__body\">Token generated — copy it now, it will not be shown again: <code>{full}</code></span></div>",
-                full = esc(&full)
-            ),
-            "Rotate token",
-        ),
-    };
-
-    // D7/D9: the notification credential is never rendered back in full
-    // (unlike the terminal token above) — see `NotifyCredentialView`'s own
-    // doc comment for why there is no `Full` variant to match here at all.
+    // D7/D9: the notification credential is never rendered back in full —
+    // see `NotifyCredentialView`'s own doc comment for why there is no
+    // `Full` variant to match here at all.
     let (notify_credential_hint, notify_credential_placeholder) = match notify_credential_view {
         NotifyCredentialView::NotConfigured => (
             "No Telegram bot token saved yet.".to_string(),
@@ -2817,30 +2778,13 @@ pub fn settings_page(
     </fieldset>
     <button type="submit" class="fg-btn fg-btn--primary">Save</button>
   </form>
-  <form class="fg-settings" method="post" action="/settings/terminal/token">
-    <fieldset><legend>Terminal token</legend>
-      {token_banner}
-      <button type="submit" class="fg-btn">{token_button_label}</button>
-    </fieldset>
-  </form>
-  <form class="fg-settings" method="post" action="/settings/terminal/login">
-    <fieldset><legend>Terminal sign-in</legend>
-      <div class="fg-field">
-        <label class="fg-field__label">Token</label>
-        <input class="fg-input" type="password" name="token" autocomplete="off" placeholder="Paste the terminal token">
-      </div>
-      <span class="fg-field__hint">Needed once per device/browser — signing in starts a session that lasts until the token is next rotated.</span>
-      <button type="submit" class="fg-btn fg-btn--primary">Sign in</button>
-    </fieldset>
-  </form>
   <form class="fg-settings" id="terminal-config-form" method="post" action="/api/terminal-config">
-    <fieldset><legend>Terminal <span class="fg-chip fg-chip--neutral">token required</span></legend>
+    <fieldset><legend>Terminal</legend>
       <label class="fg-check"><input type="checkbox" name="enabled" {term_enabled}><span class="fg-check__text">Enable the terminal</span></label>
       <label class="fg-check"><input type="checkbox" name="supervisor_enabled" {term_supervisor}><span class="fg-check__text">Keep herdr running (supervisor)</span></label>
       <label class="fg-check"><input type="checkbox" name="notify_enabled" {term_notify}><span class="fg-check__text">Notify on agent status change</span></label>
-      <span class="fg-field__hint">Requires a valid terminal session to save — sign in above with the token first.</span>
     </fieldset>
-    <fieldset><legend>Telegram notification <span class="fg-chip fg-chip--neutral">token required</span></legend>
+    <fieldset><legend>Telegram notification</legend>
       <div class="fg-field">
         <label class="fg-field__label">Chat id</label>
         <input class="fg-input" name="notify_chat_id" value="{notify_chat_id}">
@@ -2870,8 +2814,6 @@ pub fn settings_page(
         maxmb = cfg.indexing.max_file_size_mb,
         excludes = esc(&excludes),
         mcp_on = checked(cfg.mcp.enabled),
-        token_banner = token_banner,
-        token_button_label = token_button_label,
         term_enabled = checked(cfg.terminal.enabled),
         term_supervisor = checked(cfg.terminal.supervisor_enabled),
         term_notify = checked(cfg.terminal.notify_enabled),

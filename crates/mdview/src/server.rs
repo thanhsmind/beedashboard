@@ -2,7 +2,6 @@
 
 use crate::herdr::{self, Herdr};
 use crate::runtime::{self, DaemonInfo};
-use crate::terminal_auth::{self, HasTerminalAuth, TerminalAuth};
 use crate::views;
 use anyhow::Result;
 use axum::{
@@ -34,13 +33,6 @@ pub struct AppState {
     /// at a temp dir instead of the developer's real `~/.mdview`. `None` in
     /// production — those routes then resolve exactly where they always did.
     pub config_data_dir: Option<PathBuf>,
-    /// The terminal auth mechanism (agent-terminal-3): token file + live
-    /// session set. Constructed once per `AppState` so the in-memory session
-    /// set survives across requests; a route test that overrides
-    /// `config_data_dir` must construct this with the same directory
-    /// (`TerminalAuth::new(Some(dir))`), or it will resolve the token at the
-    /// real `~/.mdview` instead of the test's scratch dir.
-    pub terminal_auth: TerminalAuth,
     /// The herdr client (agent-terminal-2): a real `SocketHerdr` in
     /// production, a `FakeHerdr` in every test — `Arc<dyn Herdr>` so a route
     /// test can swap in a socket-free double without touching this field's
@@ -58,8 +50,8 @@ pub struct AppState {
     /// D7's live background manager (agent-terminal-18): reconciled against
     /// the D7 switches at startup and on every `update_terminal_config`
     /// write, so flipping a switch takes effect without a restart. One
-    /// instance per `AppState`, shared (via its own internal `Arc`-free
-    /// interior mutability) across every clone the way `terminal_auth` is.
+    /// instance per `AppState`, shared via its own internal `Arc`-free
+    /// interior mutability across every clone.
     pub terminal_background: Arc<crate::TerminalBackground>,
     /// The D7/D9 notification outbox (agent-terminal-17): opened once at
     /// startup — in-memory for every route test, so no test ever touches
@@ -67,12 +59,6 @@ pub struct AppState {
     /// `terminal_background` on every reconcile rather than reopened per
     /// toggle.
     pub notify_store: Arc<mdview_core::notify_store::NotifyStore>,
-}
-
-impl HasTerminalAuth for AppState {
-    fn terminal_auth(&self) -> &TerminalAuth {
-        &self.terminal_auth
-    }
 }
 
 /// D7/D9 outbox (agent-terminal-22): the only code path that ever reads or
@@ -125,7 +111,6 @@ pub async fn serve() -> Result<()> {
         reload_tx: reload_tx.clone(),
         highlight_css,
         config_data_dir: None,
-        terminal_auth: TerminalAuth::new(None),
         herdr: Arc::new(herdr::socket::SocketHerdr::new(herdr_socket_path)),
         transcript_root: None,
         terminal_background: Arc::new(crate::TerminalBackground::new()),
@@ -173,10 +158,9 @@ pub async fn serve() -> Result<()> {
     if !is_loopback_host(&cfg.host) {
         eprintln!(
             "warning: mdview is bound to a non-loopback address ({}) and has NO \
-             authentication outside the agent terminal, transcript and \
-             agent-creation routes — anyone who can reach this port can read \
-             every indexed file and each project's filesystem path. Bind \
-             127.0.0.1 unless you intend LAN exposure.",
+             authentication at all — anyone who can reach this port can read \
+             every indexed file, each project's filesystem path, and drive the \
+             agent terminal. Bind 127.0.0.1 unless you intend LAN exposure.",
             cfg.host
         );
     }
@@ -203,15 +187,13 @@ fn router(state: AppState) -> Router {
         .route("/settings", get(settings_page_handler))
         .route("/api/config", get(api_config).post(update_config))
         // toa-1 (D5/D11): the method-mismatch-oracle this family used to
-        // close with `any(...)` + `MethodGate` existed only to keep an
-        // unauthenticated `GET` from confirming the route existed via a
-        // `405`. With no authentication left to protect (D1), that disguise
-        // is gone — every route below is mounted with its one true method,
-        // same as any other route in this router.
-        .route("/settings/terminal/token", post(rotate_terminal_token))
-        // agent-terminal-8: the only route that ever turns a presented token
-        // into a session — see `login_terminal`.
-        .route("/settings/terminal/login", post(login_terminal))
+        // close with an extra method-checking extractor existed only to
+        // keep an unauthenticated `GET` from confirming the route existed
+        // via a `405`. With no authentication left to protect (D1), that
+        // disguise is gone — every route below is mounted with its one
+        // true method, same as any other route in this router. toa-3: the
+        // login and rotation routes this family used to carry are gone
+        // entirely (D1) — nothing was ever gated on them but themselves.
         .route("/api/terminal-config", post(update_terminal_config))
         .route("/api/projects/:id/unregister", post(unregister_project))
         .route("/static/app.css", get(css_asset))
@@ -365,95 +347,28 @@ async fn settings_page_handler(State(st): State<AppState>, Query(flag): Query<Sa
     let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ));
-    let token_view = current_token_view(&st);
     let notify_credential_view = current_notify_credential_view(&st);
     Html(views::settings_page(
         &cfg,
         flag.saved.is_some(),
         flag.notify_error.is_some(),
-        token_view,
         notify_credential_view,
     ))
     .into_response()
 }
 
-/// The token state `settings_page` renders on every ordinary render — masked
-/// to the last four characters, or "never generated". This is the *only*
-/// path GET /settings uses; the full value is rendered exclusively from the
-/// direct response of `rotate_terminal_token`, never reconstructed here (P2).
-fn current_token_view(st: &AppState) -> views::TerminalTokenView {
-    match st.terminal_auth.masked() {
-        Some(masked) => views::TerminalTokenView::Masked(masked),
-        None => views::TerminalTokenView::NotGenerated,
-    }
-}
-
 /// The Telegram credential state `settings_page` renders — masked to the
-/// last four characters, or "never saved". Unlike [`current_token_view`]
-/// there is no reveal-once counterpart anywhere in this module: this is the
-/// only view of the credential any response ever carries, including the one
-/// immediately after `update_terminal_config` saves it.
+/// last four characters, or "never saved". This is the only view of the
+/// credential any response ever carries, including the one immediately
+/// after `update_terminal_config` saves it — there is no reveal-once
+/// counterpart anywhere in this file (that mechanism belonged to the
+/// terminal token, removed with `terminal_auth`, toa-3, D1).
 fn current_notify_credential_view(st: &AppState) -> views::NotifyCredentialView {
     let cred_path =
         mdview_core::config::notify_credential_path_override(st.config_data_dir.as_deref());
     match mdview_core::config::masked_notify_credential(&cred_path) {
         Some(masked) => views::NotifyCredentialView::Masked(masked),
         None => views::NotifyCredentialView::NotConfigured,
-    }
-}
-
-/// POST /settings/terminal/token — generate (or rotate) the terminal token.
-/// toa-1 (D1): the terminal has no authentication of its own, so this route
-/// no longer gates rotation on a live session — it never required one to be
-/// *reached* (D4 leaves `/settings` itself unauthenticated), and the session
-/// check that used to guard *repeat* rotations went with the rest of D1.
-/// `terminal_auth` itself — the token file, `rotate()`, the reveal-once
-/// rendering (P2) — is untouched here; only the call site's session gate is
-/// removed. Deleting the module, this route, and the settings page's token
-/// controls entirely is the next cell.
-///
-/// The response that performs the rotation is the one place the full token
-/// is ever rendered (P2) — every later `GET /settings` shows only its last
-/// four characters.
-async fn rotate_terminal_token(State(st): State<AppState>) -> Response {
-    match st.terminal_auth.rotate() {
-        Ok(full_token) => {
-            let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
-                st.config_data_dir.as_deref(),
-            ));
-            let notify_credential_view = current_notify_credential_view(&st);
-            let html = views::settings_page(
-                &cfg,
-                false,
-                false,
-                views::TerminalTokenView::Full(full_token),
-                notify_credential_view,
-            );
-            Html(html).into_response()
-        }
-        Err(e) => internal_error(&e.to_string()),
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct LoginForm {
-    token: String,
-}
-
-/// POST /settings/terminal/login — mints a `terminal_auth` session from a
-/// presented token, via `TerminalAuth::verify_and_mint`. toa-1 (D1): nothing
-/// in this file checks that session anymore — every terminal route below
-/// answers without one — so this route is now unreachable-by-purpose
-/// scaffolding, kept operating exactly as it always did so its removal (with
-/// the rest of `terminal_auth`) is the next cell's own, attributable change.
-async fn login_terminal(State(st): State<AppState>, Form(form): Form<LoginForm>) -> Response {
-    match st.terminal_auth.verify_and_mint(&form.token) {
-        Some(session_id) => (
-            [(header::SET_COOKIE, terminal_auth::session_cookie_header(&session_id))],
-            Redirect::to("/settings"),
-        )
-            .into_response(),
-        None => terminal_auth::opaque_404(),
     }
 }
 
@@ -830,10 +745,11 @@ fn configured_preset_labels(st: &AppState) -> Vec<String> {
 /// so a route test never touches the real `~/.mdview`. Checked on every
 /// route in the gated terminal family — `terminal_page` above and
 /// `terminal_screen` below — never on `/settings` or
-/// `POST /api/terminal-config`/`POST /settings/terminal/token`, which must
-/// stay reachable so the switch can be turned back on. toa-1: this is now
-/// the *only* gate in front of the terminal family (D2) — the auth and
-/// method extractors that used to run ahead of it are gone (D1/D5).
+/// `POST /api/terminal-config`, which must stay reachable so the switch can
+/// be turned back on. toa-1/toa-3: this is now the *only* gate in front of
+/// the terminal family (D2) — the auth and method extractors that used to
+/// run ahead of it, and the login/rotation routes that minted and checked
+/// them, are gone (D1/D5).
 fn terminal_family_enabled(st: &AppState) -> bool {
     let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
         st.config_data_dir.as_deref(),
@@ -844,10 +760,11 @@ fn terminal_family_enabled(st: &AppState) -> bool {
 /// D12's disabled answer for a terminal **page** route (`terminal_page`,
 /// `transcript_page`, `unassigned_terminal_page`): mdview's ordinary
 /// not-found page — the same `not_found` helper every other page route in
-/// this file already answers with — never the typeless empty `404` the old
-/// `terminal_auth::opaque_404` gave, which is indistinguishable from an
-/// unrouted path and makes a browser download a file instead of showing a
-/// page (D2's struck "byte-identical to unrouted" rule).
+/// this file already answers with — never the typeless empty `404` the old,
+/// now-removed `terminal_auth` module's opaque 404 gave, which was
+/// indistinguishable from an unrouted path and made a browser download a
+/// file instead of showing a page (D2's struck "byte-identical to unrouted"
+/// rule).
 fn terminal_disabled_page() -> Response {
     not_found("the agent terminal is disabled")
 }
@@ -2310,7 +2227,6 @@ mod bee_route_tests {
             reload_tx,
             highlight_css: Arc::new(String::new()),
             config_data_dir: None,
-            terminal_auth: TerminalAuth::new(None),
             // A fresh FakeHerdr per state — no route test ever reaches a
             // real herdr socket. Tests that need specific panes replace this
             // with their own `FakeHerdr` (see the `terminal_route_*` tests
@@ -2320,8 +2236,8 @@ mod bee_route_tests {
             // transcript tests set this explicitly (see
             // `transcript_root_dir` below).
             transcript_root: None,
-            // A fresh manager per state, mirroring `terminal_auth` above —
-            // no route test shares live background tasks across states.
+            // A fresh manager per state — no route test shares live
+            // background tasks across states.
             terminal_background: Arc::new(crate::TerminalBackground::new()),
             // In-memory outbox — no route test ever touches a real sqlite
             // file for this.
@@ -2331,15 +2247,13 @@ mod bee_route_tests {
         }
     }
 
-    /// `build_state()` plus both `config_data_dir` and `terminal_auth`
-    /// pointed at the same scratch `dir` — the token file lives beside
-    /// `config.toml` (see `terminal_auth::token_path_override`), so a test
-    /// that only overrides one of the two silently reads/writes the token at
-    /// the real `~/.mdview` instead of its scratch dir.
+    /// `build_state()` plus `config_data_dir` pointed at the scratch `dir`
+    /// — every settings/terminal route resolves `config.toml` and the
+    /// notify credential file through this override, so a test that leaves
+    /// it unset would silently read/write the real `~/.mdview` instead.
     fn build_state_with_dir(dir: &Path) -> AppState {
         let mut st = build_state();
         st.config_data_dir = Some(dir.to_path_buf());
-        st.terminal_auth = TerminalAuth::new(Some(dir.to_path_buf()));
         st
     }
 
@@ -5925,66 +5839,62 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// D10/P1: the token is generated on the settings page but never lives in
-    /// `Config`, so `GET /api/config` must never carry it — before or after
-    /// generation (agent-terminal-4, E2).
+    // toa-3 (D7): `api_config_never_contains_the_token_value_before_or_after_generation`
+    // (D10/P1) and `settings_page_reveals_the_token_in_full_once_then_masks_it`
+    // (P2) are retired, not re-expressed — their whole subject was the
+    // terminal token's generation and reveal-once rendering, and D1 removes
+    // that token, its rotation route, and every render of it along with
+    // `terminal_auth`. There is no value left for either test to assert
+    // never leaks or never shows twice.
+
+    /// D1/toa-3: the login route, the rotation route, and every token
+    /// control the settings page used to render are gone — not disabled,
+    /// not hidden, gone. The settings page has no terminal token section at
+    /// all (the "honest empty" this cell's own must-haves name), and both
+    /// routes answer with mdview's ordinary unrouted response now that
+    /// nothing mounts them.
     #[tokio::test]
-    async fn api_config_never_contains_the_token_value_before_or_after_generation() {
-        let dir = fresh_root("terminal-token-not-in-api-config");
+    async fn settings_page_carries_no_terminal_token_controls_and_the_routes_are_gone() {
+        let dir = fresh_root("terminal-token-controls-removed");
         let st = build_state_with_dir(&dir);
+        let app = router(st);
 
-        let resp = get(router(st.clone()), "/api/config").await;
-        let body_before = body_string(resp).await;
-        assert!(
-            !body_before.to_lowercase().contains("token"),
-            "GET /api/config mentioned a token before one was ever generated: {body_before}"
-        );
-
-        let (full_token, _cookie) = rotate_token(router(st.clone())).await;
-
-        let resp = get(router(st), "/api/config").await;
-        let body_after = body_string(resp).await;
-        assert!(
-            !body_after.contains(&full_token),
-            "GET /api/config leaked the generated token value: {body_after}"
-        );
-        assert!(
-            !body_after.to_lowercase().contains("token"),
-            "GET /api/config gained a token-shaped field after generation: {body_after}"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// P2: the settings page shows the token in full only in the response
-    /// that generated or rotated it; every later render shows only its last
-    /// four characters.
-    #[tokio::test]
-    async fn settings_page_reveals_the_token_in_full_once_then_masks_it() {
-        let dir = fresh_root("terminal-token-reveal-once");
-        let st = build_state_with_dir(&dir);
-
-        let (full_token, cookie) = rotate_token(router(st.clone())).await;
-        assert_eq!(full_token.len(), 64, "unexpected token shape: {full_token}");
-        let last_four = &full_token[full_token.len() - 4..];
-
-        // A second settings render (any request, session or not) must never
-        // carry the full value again — only its last four characters.
-        let resp = get(router(st.clone()), "/settings").await;
+        let resp = get(app.clone(), "/settings").await;
+        assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
-        assert!(
-            !body.contains(&full_token),
-            "a second /settings render leaked the full token: {body}"
-        );
-        assert!(
-            body.contains(last_four),
-            "a second /settings render dropped the masked token entirely: {body}"
-        );
+        for needle in [
+            "/settings/terminal/token",
+            "/settings/terminal/login",
+            "Terminal token",
+            "Terminal sign-in",
+            "Generate token",
+            "Rotate token",
+            "Sign in",
+        ] {
+            assert!(
+                !body.contains(needle),
+                "/settings still carries a terminal token control ({needle:?}): {body}"
+            );
+        }
 
-        // The session obtained by logging in with the just-revealed token is
-        // real and usable, proving the masking above isn't hiding a second
-        // reveal path through it either.
-        assert!(!cookie.is_empty());
+        for uri in ["/settings/terminal/token", "/settings/terminal/login"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{uri} must no longer be routed at all"
+            );
+        }
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -6442,24 +6352,21 @@ mod bee_route_tests {
     }
 
     /// The credential must never appear on `GET /api/config`, before or
-    /// after it is saved — mirrors
-    /// `api_config_never_contains_the_token_value_before_or_after_generation`,
-    /// against the real submitted secret value rather than a hardcoded
-    /// guess (a leak assertion must be written against the value that would
-    /// leak — `docs/history/learnings/20260805-toothless-security-assertions.md`).
+    /// after it is saved, checked against the real submitted secret value
+    /// rather than a hardcoded guess (a leak assertion must be written
+    /// against the value that would leak —
+    /// `docs/history/learnings/20260805-toothless-security-assertions.md`).
     #[tokio::test]
     async fn api_config_never_contains_the_notify_credential() {
         let dir = fresh_root("terminal-notify-cred-not-in-api-config");
         let st = build_state_with_dir(&dir);
         let app = router(st.clone());
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let secret = "unique-telegram-secret-98765";
         let req = Request::builder()
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
-            .header(header::COOKIE, cookie)
             .body(Body::from(
                 serde_json::json!({ "notify_chat_id": "555", "notify_telegram_token": secret })
                     .to_string(),
@@ -6478,8 +6385,7 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Unlike the terminal token's documented reveal-once (P2), the
-    /// credential has no reveal path at all — every render, including
+    /// The credential has no reveal path at all — every render, including
     /// `/settings` immediately after the save that set it, carries at most
     /// its last four characters.
     #[tokio::test]
@@ -6487,14 +6393,12 @@ mod bee_route_tests {
         let dir = fresh_root("terminal-notify-cred-never-full");
         let st = build_state_with_dir(&dir);
         let app = router(st.clone());
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let secret = "never-shown-in-full-abcd";
         let req = Request::builder()
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
-            .header(header::COOKIE, cookie)
             .body(Body::from(
                 serde_json::json!({ "notify_chat_id": "555", "notify_telegram_token": secret })
                     .to_string(),
@@ -6537,7 +6441,6 @@ mod bee_route_tests {
         let dir = fresh_root("terminal-notify-cred-save-fails");
         let st = build_state_with_dir(&dir);
         let app = router(st.clone());
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let cred_path = mdview_core::config::notify_credential_path_override(Some(&dir));
         let cred_dir = cred_path.parent().unwrap();
@@ -6552,7 +6455,6 @@ mod bee_route_tests {
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
-            .header(header::COOKIE, cookie)
             .body(Body::from(
                 serde_json::json!({ "notify_telegram_token": secret }).to_string(),
             ))
@@ -6621,70 +6523,18 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// POSTs `/settings/terminal/token` (a genuine first-run rotation — no
-    /// token file exists yet on a fresh scratch dir, so it needs no session),
-    /// reads the full token revealed in that one response (P2), then POSTs
-    /// `/settings/terminal/login` with it to obtain a real session cookie
-    /// through the only function that ever mints one from a presented
-    /// credential (`TerminalAuth::verify_and_mint`). Rotation itself no
-    /// longer mints a session (agent-terminal-8) — this rotate-then-login
-    /// shape is the shared setup every gated-switch test needs to get past
-    /// the gate, and it doubles as the regression guard: if any future
-    /// change makes the rotate response mint a session again, this helper
-    /// would stop needing the login POST at all rather than catching it.
-    async fn rotate_token(app: Router) -> (String, String) {
-        let rotate_resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/settings/terminal/token")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(rotate_resp.status(), StatusCode::OK);
-        assert!(
-            rotate_resp.headers().get(header::SET_COOKIE).is_none(),
-            "rotation must never itself set a session cookie"
-        );
-        let body = body_string(rotate_resp).await;
-        let marker = "it will not be shown again: <code>";
-        let start = body.find(marker).expect("full token banner missing") + marker.len();
-        let rest = &body[start..];
-        let end = rest.find("</code>").expect("full token banner unterminated");
-        let token = rest[..end].to_string();
+    // toa-3 (D7): `rotate_token` is retired along with the login and
+    // rotation routes it drove — there is no credential left to obtain and
+    // nothing left that checks one. The `*_req` helpers below keep their
+    // `cookie: Option<&str>` shape (every call site now passes `None`)
+    // rather than a further signature rewrite; D1's own coverage
+    // (`every_terminal_route_answers_with_no_cookie_and_no_token_present`)
+    // is the proof that carrying a cookie was never required.
 
-        let login_resp = app
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/settings/terminal/login")
-                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from(format!("token={token}")))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            login_resp.status().is_redirection(),
-            "login with the just-rotated token must succeed, got {}",
-            login_resp.status()
-        );
-        let set_cookie = login_resp
-            .headers()
-            .get(header::SET_COOKIE)
-            .expect("login response must set the terminal session cookie")
-            .to_str()
-            .unwrap()
-            .to_string();
-        let cookie = set_cookie.split(';').next().unwrap().to_string();
-        (token, cookie)
-    }
-
-    /// A GET request to `/p/{id}/_terminal`, optionally carrying the given
-    /// session cookie value (e.g. the one `rotate_token` returns).
+    /// A GET request to `/p/{id}/_terminal`, optionally carrying a session
+    /// cookie value — every caller now passes `None` (D1: no route checks
+    /// one), the parameter stays only so a future regression could still be
+    /// probed by passing `Some`.
     fn terminal_req(id: &str, cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
             .uri(format!("/p/{id}/_terminal"))
@@ -6772,10 +6622,9 @@ mod bee_route_tests {
         enable_terminal(&dir);
         let st = build_state_with_dir(&dir);
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
-            .oneshot(terminal_req("no-such-project", Some(&cookie)))
+            .oneshot(terminal_req("no-such-project", None))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -6825,10 +6674,9 @@ mod bee_route_tests {
         st.herdr = fake;
         let project = register(&st, &root, "herdr-down");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
-            .oneshot(terminal_req(&project.id, Some(&cookie)))
+            .oneshot(terminal_req(&project.id, None))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -6911,11 +6759,10 @@ mod bee_route_tests {
         let project_a = register(&st, &root_a, "project-a");
         let project_b = register(&st, &root_b, "project-b");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp_a = app
             .clone()
-            .oneshot(terminal_req(&project_a.id, Some(&cookie)))
+            .oneshot(terminal_req(&project_a.id, None))
             .await
             .unwrap();
         assert_eq!(resp_a.status(), StatusCode::OK);
@@ -6933,7 +6780,7 @@ mod bee_route_tests {
         );
 
         let resp_b = app
-            .oneshot(terminal_req(&project_b.id, Some(&cookie)))
+            .oneshot(terminal_req(&project_b.id, None))
             .await
             .unwrap();
         let body_b = body_string(resp_b).await;
@@ -7147,10 +6994,9 @@ mod bee_route_tests {
         st.herdr = fake;
         let project_a = register(&st, &root_a, "project-a-screen");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
-            .oneshot(terminal_screen_req(&project_a.id, &outside_agent.pane_id, Some(&cookie)))
+            .oneshot(terminal_screen_req(&project_a.id, &outside_agent.pane_id, None))
             .await
             .unwrap();
         assert_eq!(
@@ -7182,10 +7028,9 @@ mod bee_route_tests {
         st.herdr = fake;
         let project = register(&st, &root, "screen-unknown-pane");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
-            .oneshot(terminal_screen_req(&project.id, "no-such-pane", Some(&cookie)))
+            .oneshot(terminal_screen_req(&project.id, "no-such-pane", None))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -7221,10 +7066,9 @@ mod bee_route_tests {
         st.herdr = fake;
         let project = register(&st, &root, "screen-utf8");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
-            .oneshot(terminal_screen_req(&project.id, &started.pane_id, Some(&cookie)))
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -7261,10 +7105,9 @@ mod bee_route_tests {
         st.herdr = fake;
         let project = register(&st, &root, "screen-ansi");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
-            .oneshot(terminal_screen_req(&project.id, &started.pane_id, Some(&cookie)))
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -7303,10 +7146,9 @@ mod bee_route_tests {
         st.herdr = fake;
         let project = register(&st, &root, "screen-herdr-down");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
-            .oneshot(terminal_screen_req(&project.id, "w1:p1", Some(&cookie)))
+            .oneshot(terminal_screen_req(&project.id, "w1:p1", None))
             .await
             .unwrap();
         assert!(
@@ -7474,14 +7316,13 @@ mod bee_route_tests {
         st.herdr = fake;
         let project_a = register(&st, &root_a, "project-a-transcript");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
             .oneshot(terminal_transcript_req(
                 &project_a.id,
                 &outside_agent.pane_id,
                 None,
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -7519,10 +7360,9 @@ mod bee_route_tests {
         st.transcript_root = Some(transcript_root.clone());
         let project = register(&st, &root, "transcript-not-available");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
-            .oneshot(terminal_transcript_req(&project.id, &started.pane_id, None, Some(&cookie)))
+            .oneshot(terminal_transcript_req(&project.id, &started.pane_id, None, None))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -7565,12 +7405,11 @@ mod bee_route_tests {
         st.transcript_root = Some(transcript_root.clone());
         let project = register(&st, &root, "transcript-cursor");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         // Opening read: backfills the tail.
         let open_resp = app
             .clone()
-            .oneshot(terminal_transcript_req(&project.id, &started.pane_id, None, Some(&cookie)))
+            .oneshot(terminal_transcript_req(&project.id, &started.pane_id, None, None))
             .await
             .unwrap();
         assert_eq!(open_resp.status(), StatusCode::OK);
@@ -7604,7 +7443,7 @@ mod bee_route_tests {
                 &project.id,
                 &started.pane_id,
                 Some(&cursor1),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -7631,7 +7470,7 @@ mod bee_route_tests {
                 &project.id,
                 &started.pane_id,
                 Some(&cursor2),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -7674,14 +7513,13 @@ mod bee_route_tests {
         st.transcript_root = Some(transcript_root.clone());
         let project = register(&st, &root, "transcript-bad-cursor");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
             .oneshot(terminal_transcript_req(
                 &project.id,
                 &started.pane_id,
                 Some("../../etc/passwd.jsonl:0"),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -7710,10 +7548,9 @@ mod bee_route_tests {
         st.herdr = fake;
         let project = register(&st, &root, "transcript-page-render");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
-            .oneshot(transcript_page_req(&project.id, Some(&cookie)))
+            .oneshot(transcript_page_req(&project.id, None))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -7970,7 +7807,6 @@ mod bee_route_tests {
         st.herdr = fake;
         let project = register(&st, &root, "input-stage");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
             .clone()
@@ -7979,7 +7815,7 @@ mod bee_route_tests {
                 &started.pane_id,
                 "draft reply",
                 None,
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -7988,7 +7824,7 @@ mod bee_route_tests {
         assert!(ok_body.contains("\"ok\":true"), "{ok_body}");
 
         let screen_resp = app
-            .oneshot(terminal_screen_req(&project.id, &started.pane_id, Some(&cookie)))
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
             .await
             .unwrap();
         let body = body_string(screen_resp).await;
@@ -8025,7 +7861,6 @@ mod bee_route_tests {
         st.herdr = fake;
         let project = register(&st, &root, "input-submit");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
             .clone()
@@ -8034,14 +7869,14 @@ mod bee_route_tests {
                 &started.pane_id,
                 "go ahead",
                 Some(true),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
         let screen_resp = app
-            .oneshot(terminal_screen_req(&project.id, &started.pane_id, Some(&cookie)))
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
             .await
             .unwrap();
         let body = body_string(screen_resp).await;
@@ -8075,7 +7910,6 @@ mod bee_route_tests {
         st.herdr = fake;
         let project = register(&st, &root, "keys-reach");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
             .clone()
@@ -8083,14 +7917,14 @@ mod bee_route_tests {
                 &project.id,
                 &started.pane_id,
                 &["down", "enter"],
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
         let screen_resp = app
-            .oneshot(terminal_screen_req(&project.id, &started.pane_id, Some(&cookie)))
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
             .await
             .unwrap();
         let body = body_string(screen_resp).await;
@@ -8136,7 +7970,6 @@ mod bee_route_tests {
         st.herdr = fake.clone();
         let project_a = register(&st, &root_a, "project-a-write");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let input_resp = app
             .clone()
@@ -8145,7 +7978,7 @@ mod bee_route_tests {
                 &outside_agent.pane_id,
                 "should never land",
                 Some(true),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -8158,7 +7991,7 @@ mod bee_route_tests {
                 &project_a.id,
                 &outside_agent.pane_id,
                 &["enter"],
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -8250,10 +8083,9 @@ mod bee_route_tests {
         st.herdr = fake;
         let project = register(&st, &root, "reply-bar-render");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
-            .oneshot(terminal_req(&project.id, Some(&cookie)))
+            .oneshot(terminal_req(&project.id, None))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -8437,11 +8269,10 @@ mod bee_route_tests {
         let engine = st.engine.clone();
         let projects_before = engine.list_projects().unwrap();
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let unassigned_resp = app
             .clone()
-            .oneshot(unassigned_req(Some(&cookie)))
+            .oneshot(unassigned_req(None))
             .await
             .unwrap();
         assert_eq!(unassigned_resp.status(), StatusCode::OK);
@@ -8457,7 +8288,7 @@ mod bee_route_tests {
 
         let project_resp = app
             .clone()
-            .oneshot(terminal_req(&project.id, Some(&cookie)))
+            .oneshot(terminal_req(&project.id, None))
             .await
             .unwrap();
         let project_body = body_string(project_resp).await;
@@ -8580,12 +8411,11 @@ mod bee_route_tests {
         st.herdr = fake;
         register(&st, &project_root, "owned");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         // Screen read reaches the stray pane.
         let screen_resp = app
             .clone()
-            .oneshot(unassigned_screen_req(&stray.pane_id, Some(&cookie)))
+            .oneshot(unassigned_screen_req(&stray.pane_id, None))
             .await
             .unwrap();
         assert_eq!(screen_resp.status(), StatusCode::OK);
@@ -8594,7 +8424,7 @@ mod bee_route_tests {
         // to this group.
         let owned_screen_resp = app
             .clone()
-            .oneshot(unassigned_screen_req(&owned.pane_id, Some(&cookie)))
+            .oneshot(unassigned_screen_req(&owned.pane_id, None))
             .await
             .unwrap();
         assert_eq!(owned_screen_resp.status(), StatusCode::NOT_FOUND);
@@ -8602,7 +8432,7 @@ mod bee_route_tests {
         // Free-text input reaches the stray pane and is readable back.
         let input_resp = app
             .clone()
-            .oneshot(unassigned_input_req(&stray.pane_id, "hello stray", true, Some(&cookie)))
+            .oneshot(unassigned_input_req(&stray.pane_id, "hello stray", true, None))
             .await
             .unwrap();
         assert_eq!(input_resp.status(), StatusCode::OK);
@@ -8611,7 +8441,7 @@ mod bee_route_tests {
 
         let after_input = app
             .clone()
-            .oneshot(unassigned_screen_req(&stray.pane_id, Some(&cookie)))
+            .oneshot(unassigned_screen_req(&stray.pane_id, None))
             .await
             .unwrap();
         let after_input_body = body_string(after_input).await;
@@ -8620,7 +8450,7 @@ mod bee_route_tests {
         // Named keys reach the stray pane.
         let keys_resp = app
             .clone()
-            .oneshot(unassigned_keys_req(&stray.pane_id, &["enter"], Some(&cookie)))
+            .oneshot(unassigned_keys_req(&stray.pane_id, &["enter"], None))
             .await
             .unwrap();
         assert_eq!(keys_resp.status(), StatusCode::OK);
@@ -8628,7 +8458,7 @@ mod bee_route_tests {
         // Input refuses the owned pane too — the write paths honor the same
         // partition the read path and the listing page do.
         let owned_input_resp = app
-            .oneshot(unassigned_input_req(&owned.pane_id, "should never land", true, Some(&cookie)))
+            .oneshot(unassigned_input_req(&owned.pane_id, "should never land", true, None))
             .await
             .unwrap();
         assert_eq!(owned_input_resp.status(), StatusCode::NOT_FOUND);
@@ -8765,9 +8595,8 @@ mod bee_route_tests {
             "sanity: canonicalize falls back to the literal path when it doesn't exist"
         );
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
-        let resp = app.oneshot(unassigned_req(Some(&cookie))).await.unwrap();
+        let resp = app.oneshot(unassigned_req(None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
@@ -8800,7 +8629,6 @@ mod bee_route_tests {
         st.herdr = fake.clone();
         let project = register(&st, &root, "keys-bound");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let too_many: Vec<&str> = std::iter::repeat("enter")
             .take(MAX_KEYS_PER_REQUEST + 1)
@@ -8810,7 +8638,7 @@ mod bee_route_tests {
                 &project.id,
                 &started.pane_id,
                 &too_many,
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -8850,13 +8678,12 @@ mod bee_route_tests {
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake.clone();
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let too_many: Vec<&str> = std::iter::repeat("enter")
             .take(MAX_KEYS_PER_REQUEST + 1)
             .collect();
         let resp = app
-            .oneshot(unassigned_keys_req(&stray.pane_id, &too_many, Some(&cookie)))
+            .oneshot(unassigned_keys_req(&stray.pane_id, &too_many, None))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -9124,7 +8951,6 @@ mod bee_route_tests {
         st.herdr = herdr.clone();
         let project = register(&st, &root, "create-unknown-preset");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         // No presets configured at all.
         let resp = app
@@ -9132,7 +8958,7 @@ mod bee_route_tests {
             .oneshot(create_agent_req(
                 &project.id,
                 &serde_json::json!({ "preset": "Claude" }),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -9144,7 +8970,7 @@ mod bee_route_tests {
             .oneshot(create_agent_req(
                 &project.id,
                 &serde_json::json!({ "preset": "Codex" }),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -9173,11 +8999,10 @@ mod bee_route_tests {
         let st = build_state_with_dir(&dir);
         let project = register(&st, &root, "create-unresolved");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let pane = app
             .clone()
-            .oneshot(create_pane_req(&project.id, Some(&cookie)))
+            .oneshot(create_pane_req(&project.id, None))
             .await
             .unwrap();
         assert_eq!(pane.status(), StatusCode::CONFLICT);
@@ -9186,7 +9011,7 @@ mod bee_route_tests {
             .oneshot(create_agent_req(
                 &project.id,
                 &serde_json::json!({ "preset": "Claude" }),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -9215,11 +9040,10 @@ mod bee_route_tests {
         st.herdr = herdr.clone();
         let project_a = register(&st, &root_a, "create-boundary-a");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let pane = app
             .clone()
-            .oneshot(create_pane_req(&project_a.id, Some(&cookie)))
+            .oneshot(create_pane_req(&project_a.id, None))
             .await
             .unwrap();
         assert_eq!(pane.status(), StatusCode::CONFLICT);
@@ -9228,7 +9052,7 @@ mod bee_route_tests {
             .oneshot(create_agent_req(
                 &project_a.id,
                 &serde_json::json!({ "preset": "Claude" }),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -9261,11 +9085,10 @@ mod bee_route_tests {
         st.herdr = fake;
         let project = register(&st, &root, "create-herdr-down");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let pane = app
             .clone()
-            .oneshot(create_pane_req(&project.id, Some(&cookie)))
+            .oneshot(create_pane_req(&project.id, None))
             .await
             .unwrap();
         assert_eq!(pane.status(), StatusCode::BAD_GATEWAY);
@@ -9274,7 +9097,7 @@ mod bee_route_tests {
             .oneshot(create_agent_req(
                 &project.id,
                 &serde_json::json!({ "preset": "Claude" }),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -9319,10 +9142,9 @@ mod bee_route_tests {
         st.herdr = conflict_herdr;
         let project = register(&st, &root, "create-error-mapping");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let pane = app
-            .oneshot(create_pane_req(&project.id, Some(&cookie)))
+            .oneshot(create_pane_req(&project.id, None))
             .await
             .unwrap();
         assert_eq!(
@@ -9347,13 +9169,12 @@ mod bee_route_tests {
         st2.herdr = other_herdr;
         let project2 = register(&st2, &root2, "create-error-mapping-2");
         let app2 = router(st2);
-        let (_token2, cookie2) = rotate_token(app2.clone()).await;
 
         let agent = app2
             .oneshot(create_agent_req(
                 &project2.id,
                 &serde_json::json!({ "preset": "Claude" }),
-                Some(&cookie2),
+                None,
             ))
             .await
             .unwrap();
@@ -9385,10 +9206,9 @@ mod bee_route_tests {
         st.herdr = herdr.clone();
         let project = register(&st, &root, "create-pane-ok");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
-            .oneshot(create_pane_req(&project.id, Some(&cookie)))
+            .oneshot(create_pane_req(&project.id, None))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -9422,13 +9242,12 @@ mod bee_route_tests {
         st.herdr = herdr.clone();
         let project = register(&st, &root, "create-agent-ok");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
             .oneshot(create_agent_req(
                 &project.id,
                 &serde_json::json!({ "preset": "Claude" }),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
@@ -9469,7 +9288,6 @@ mod bee_route_tests {
         st.herdr = herdr.clone();
         let project = register(&st, &root, "create-agent-extra-argv");
         let app = router(st);
-        let (_token, cookie) = rotate_token(app.clone()).await;
 
         let resp = app
             .oneshot(create_agent_req(
@@ -9480,7 +9298,7 @@ mod bee_route_tests {
                     "env": { "EVIL": "1" },
                     "cwd": "/etc",
                 }),
-                Some(&cookie),
+                None,
             ))
             .await
             .unwrap();
