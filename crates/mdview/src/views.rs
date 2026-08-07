@@ -555,7 +555,6 @@ pub fn terminal_page(
         r#"{topbar}
 {tab_style}
 <main class="fg-page" data-project-id="{pid}">
-  <h2 class="fg-pagehead__title">{name}</h2>
   {tabs}
   {create}
   {strip}
@@ -567,7 +566,6 @@ pub fn terminal_page(
         )),
         tab_style = PROJECT_TAB_STYLE,
         pid = esc(&project.id),
-        name = esc(&project.name),
         tabs = project_tabs(&project.id, "terminal"),
         create = terminal_create_controls(&project.id, presets),
         strip = strip,
@@ -634,7 +632,6 @@ pub fn transcript_page(project: &Project, panes: &[TerminalPaneView], selected: 
         r#"{topbar}
 {tab_style}
 <main class="fg-page" data-project-id="{pid}">
-  <h2 class="fg-pagehead__title">{name}</h2>
   {tabs}
   {strip}
   <div class="term-panes">{rows}</div>
@@ -645,7 +642,6 @@ pub fn transcript_page(project: &Project, panes: &[TerminalPaneView], selected: 
         )),
         tab_style = PROJECT_TAB_STYLE,
         pid = esc(&project.id),
-        name = esc(&project.name),
         tabs = project_tabs(&project.id, "transcript"),
         strip = strip,
         rows = rows,
