@@ -815,7 +815,18 @@
       el.style.fontSize = FONT_MAX_PX + "px";
       var style = window.getComputedStyle(el);
       var padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
-      var available = el.clientWidth - padding;
+      // The box's own width is not a safe ceiling on its own: if anything
+      // above it has already been pushed wider than the window, the box
+      // inherits that width, the frame looks like it fits, and the sideways
+      // scroll shows up on the page instead. The window is the one width
+      // nothing can be wider than, so it caps the measurement.
+      var parent = el.parentElement;
+      var ceiling = Math.min(
+        el.clientWidth,
+        parent ? parent.clientWidth : el.clientWidth,
+        document.documentElement.clientWidth
+      );
+      var available = ceiling - padding;
       if (available <= 0) return;
       var size = FONT_MAX_PX;
       // Shrink toward the fit, remeasuring: one pass lands close, and a

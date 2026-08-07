@@ -180,7 +180,13 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    readable without a second scroll inside the page. Only the horizontal axis
    scrolls — that is what replaces wrapping when a line runs wider than the
    card. */
-.term-screen { margin-top: var(--space-2); padding: var(--space-2); background: #1c1f26; color: #d7dae0; border-radius: var(--radius-sm); white-space: pre; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.25; height: auto; overflow-x: auto; overflow-y: hidden; }
+/* Nothing in this card may grow the page sideways. A `pre` of unwrapped
+   terminal lines has an enormous min-content width, and every ancestor that
+   defaults to `min-width: auto` would happily take it — so the chain from the
+   card down is pinned to its container, and the screen scrolls inside itself
+   instead of pushing the page out. */
+.term-panes, .term-pane, .term-controls, .term-controls__row, .term-reply { min-width: 0; max-width: 100%; }
+.term-screen { margin-top: var(--space-2); padding: var(--space-2); background: #1c1f26; color: #d7dae0; border-radius: var(--radius-sm); white-space: pre; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.25; height: auto; min-width: 0; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
 /* Applied by `assets/app.js` only once the fit has bottomed out: at that
    width no readable type size can hold the grid, so the lines wrap instead
    of running off the side. */
