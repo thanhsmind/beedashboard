@@ -1,7 +1,7 @@
 ---
 area: settings
-updated: 2026-08-06
-sources: [mdview-hostname-doctor-fix, hostname-port-truth, ui-polish-settings-sidebar, agent-terminal]
+updated: 2026-08-07
+sources: [mdview-hostname-doctor-fix, hostname-port-truth, ui-polish-settings-sidebar, agent-terminal, terminal-open-access]
 decisions: [07c1ac9f, bcfcf737]
 coverage: partial
 ---
@@ -9,21 +9,15 @@ coverage: partial
 # Spec: Settings
 
 The single place to view and change mdview's local configuration: server
-binding, the renderer theme, indexing behavior, and the MCP integration. There
-is one operator (whoever runs mdview on their own machine) and no
-authentication on this page or any other route outside the agent terminal
-family — anyone who can reach the settings page can view or change every
-other setting on it. The one exception: `/settings` is also where the agent
-terminal's access token is generated and rotated — presenting that token is
-the only way past the gate on the terminal, transcript, and agent-creation
-routes (see the Agent terminal spec). The very first time, before any token
-has ever been generated, issuing it is open to anyone who can reach the
-page, since there is nothing yet to prove possession of; every later
-rotation instead requires a session under the token being replaced, so an
-unauthenticated visitor can never silently invalidate a token already in
-use. Each generation or rotation reveals the full token exactly once, at
-that moment — every later view of the settings page shows only its last few
-characters.
+binding, the renderer theme, indexing behavior, the MCP integration, and
+every switch the agent terminal depends on. There is one operator (whoever
+runs mdview on their own machine) and no authentication anywhere in mdview,
+this page included (see the Agent terminal spec) — anyone who can reach the
+settings page can view or change every setting on it, with no field carved
+out behind a session or a login. That is true of the terminal's own
+switches too: enabling the terminal, keeping herdr running, notifying on
+status change, showing unassigned agent panes, and the notify destination
+and credential are ordinary settings like any other on this page.
 
 ## Entry Points & Triggers
 
@@ -62,11 +56,12 @@ characters.
 | 9 | Exclude patterns | Folder/file name patterns the indexer never scans | one pattern per line; blank lines and surrounding whitespace are dropped | no | `.git`, `node_modules`, `.venv`, `target`, `dist` |
 | 10 | MCP enabled | Whether the agent-integration tool is available | on / off | no | on |
 | 11 | MCP transport | How an agent's MCP client talks to mdview | `stdio` · `http` | no (an unrecognized value is ignored, keeping the previous value) | `stdio` |
-| 12 | Terminal access token | The credential generated on this page that unlocks the terminal, transcript, and agent-creation routes (see the Agent terminal spec) | opaque generated value, shown in full only at the moment it is generated or rotated; every later view shows only its last few characters | no (there is nothing to type — a control generates or rotates it) | none until first generated |
+| 12 | Enable the terminal | Whether the agent terminal, transcript, and agent-creation routes answer at all (see the Agent terminal spec) | on / off | no | off |
 | 13 | Keep herdr running | Opt-in duty: mdview keeps the herdr process alive on the operator's behalf | on / off | no | off |
 | 14 | Notify on status change | Opt-in duty: mdview sends a notification message when a watched agent's status changes | on / off | no (also needs a destination and a credential configured below to actually send anything) | off |
-| 15 | Notify destination | Where a status-change notification is delivered | destination address/identifier, or left blank | no | blank (unset) |
-| 16 | Notify credential | The secret used to authenticate that notification delivery | any value, or left blank; write-only — never shown again once saved, only a masked hint | no | blank (unset) |
+| 15 | Show unassigned agent panes | Whether the terminal's Unassigned group — every herdr pane on the host outside any registered project's root — is reachable at all | on / off | no | off |
+| 16 | Notify destination | Where a status-change notification is delivered | destination address/identifier, or left blank | no | blank (unset) |
+| 17 | Notify credential | The secret used to authenticate that notification delivery | any value, or left blank; write-only — never shown again once saved, only a masked hint | no | blank (unset) |
 
 ## Behaviors & Operations
 
@@ -110,14 +105,13 @@ characters.
 
 Not applicable in the role sense — there is exactly one actor (the local
 operator running mdview) and no login; anything reachable at the bound
-Host/Port can view and change nearly every setting on this page. The one
-carve-out: turning Keep herdr running or Notify on status change on or off,
-and changing Notify destination or Notify credential, each require an
-existing agent-terminal session first — reaching the settings page is not
-enough for those four fields, unlike every other setting listed here (see
-the Agent terminal spec). The only other party is a consuming system: an MCP
-client (e.g. Claude Code) that receives Display hostname's effect
-indirectly, as part of the URL returned by the Agent integration area.
+Host/Port can view and change every setting on this page, with no field
+carved out — enabling the terminal, keeping herdr running, notifying on
+status change, showing unassigned agent panes, and the notify destination
+and credential included (see the Agent terminal spec). The only other party
+is a consuming system: an MCP client (e.g. Claude Code) that receives
+Display hostname's effect indirectly, as part of the URL returned by the
+Agent integration area.
 
 ## Business Rules
 

@@ -367,6 +367,7 @@
         enabled: form.enabled.checked,
         supervisor_enabled: form.supervisor_enabled.checked,
         notify_enabled: form.notify_enabled.checked,
+        unassigned_enabled: form.unassigned_enabled.checked,
         notify_chat_id: form.notify_chat_id.value,
         notify_telegram_token: form.notify_telegram_token.value,
       };
@@ -850,13 +851,14 @@
   // leaving the last-good content on screen forever while silently
   // re-sending the same cursor — indistinguishable from an idle agent. A
   // named state now always replaces the viewport's own message area,
-  // distinguishing a session that is no longer valid (the transcript route
-  // answers an opaque 404 for that, same as every other terminal-family
-  // guard failure — D4) from a transient failure (a non-404 error status,
-  // or the request failing outright), so the operator knows a session
-  // needs re-establishing on Settings rather than the transcript itself
-  // being stuck. Recovering (any next successful, parsed response) clears
-  // the named state without disturbing lines already appended.
+  // distinguishing "this pane is gone" (the transcript route answers a
+  // reasoned JSON 404 when the terminal is switched off, the project is
+  // gone, or the pane no longer exists — no session guard is left to fail)
+  // from a transient failure (a non-404 error status, or the request
+  // failing outright), so the operator knows to check the pane and the
+  // Settings switch rather than assume the transcript itself is stuck.
+  // Recovering (any next successful, parsed response) clears the named
+  // state without disturbing lines already appended.
   (function () {
     var main = document.querySelector("main.fg-page[data-project-id]");
     if (!main) return;
@@ -866,7 +868,7 @@
 
     var POLL_MS = 1500;
     var NO_TRANSCRIPT_TEXT = "No transcript yet for this pane.";
-    var SESSION_EXPIRED_TEXT = "Session expired — sign in again on the Settings page to keep watching.";
+    var SESSION_EXPIRED_TEXT = "This pane is no longer reachable — it may have been removed, or the terminal switched off in Settings.";
     var TRANSCRIPT_ERROR_TEXT = "Couldn't reach the transcript — retrying…";
     var cursors = {}; // pane id -> cursor to resume from on the next poll
     var started = {}; // pane id -> the viewport's placeholder has been cleared
@@ -923,9 +925,9 @@
           // tick land before the body finishes parsing, refetch with the
           // same cursor, and append the same records twice.
           if (res.status === 404) {
-            // The transcript route's session/method/switch guards all answer
-            // the same opaque 404 (D4) — from the client the one meaningful
-            // read of a 404 here is "this session no longer authenticates".
+            // The transcript route has no session to fail — a 404 here means
+            // the terminal switch is off, the project is gone, or this pane
+            // no longer exists.
             showState(el, paneId, SESSION_EXPIRED_TEXT);
             return null;
           }

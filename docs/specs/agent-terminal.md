@@ -1,7 +1,7 @@
 ---
 area: agent-terminal
-updated: 2026-08-06
-sources: [agent-terminal]
+updated: 2026-08-07
+sources: [agent-terminal, terminal-open-access]
 decisions: [D1, D2, D3, D4, D5, D6, D7, D8, D9, D10]
 coverage: partial
 ---
@@ -34,11 +34,13 @@ implementation. Code entry points are listed in `reading-map.md`.
   root → not listed on any project's tab; instead a card on the project list
   page, "Unassigned agents," opens a page listing exactly those agents. The
   card itself carries no agent name and no working directory — it is a bare
-  presence marker, visible before anyone has signed in (see Business Rules).
-- The settings page → where the terminal's access token is generated and
-  rotated, and where the two background duties are switched on, alongside
-  every other, unrelated mdview setting. Reaching the page itself never
-  requires signing in — see Actors & Access for exactly which parts of it do.
+  presence marker, shown only while both the terminal switch and the
+  Unassigned group's own switch are on (see Business Rules); with either
+  off, the card does not appear at all.
+- The settings page → where the terminal switch, the Unassigned group's own
+  switch, and the two background duties are turned on, alongside every
+  other, unrelated mdview setting — see Actors & Access for what this
+  surface's safety now rests on.
 
 ## Data Dictionary
 
@@ -48,18 +50,19 @@ implementation. Code entry points are listed in `reading-map.md`.
 | 2 | Pane | The addressable session an agent runs inside; every listed agent has exactly one, but a pane can exist with no agent record attached (a plain shell) — see Open Gaps for what that means today | id, working directory |
 | 3 | Screen | The agent's current visible terminal contents, rendered with colour | a snapshot redrawn on each poll, not a live feed |
 | 4 | Transcript | The agent's own activity log, read directly rather than through herdr | a gap-free running record of the agent's activity, independent of the screen poll; a fresh agent with nothing written yet reports that plainly rather than showing an empty log; if the record is found truncated or rewritten under the reader, the next read shows a visible divider rather than jumping silently; a single poll returns only a bounded number of lines, and when a poll has more than that bound, its oldest lines are marked as lost rather than silently dropped |
-| 5 | Access token | The one credential that unlocks the terminal, transcript, and agent-creation family | generated/rotated on the settings page; shown in full exactly once, at the moment it is generated or rotated — every later view of the settings page shows only its last few characters |
-| 6 | Unassigned agents | Agents whose working directory is outside every registered project's root | listed on their own page, gated the same as any project's agents |
-| 7 | Keep herdr running | Opt-in duty: mdview keeps the herdr process alive on the operator's behalf | on / off, off by default |
-| 8 | Notify on status change | Opt-in duty: mdview sends a notification message when a watched agent's status changes | on / off, off by default; needs a destination and a credential configured separately |
-| 9 | Notify credential | The secret used to send that notification message | write-only: once saved, it is never shown again in full — only a masked hint — and it never appears in any viewed or exported configuration; if a save fails, the operator is told it failed — it is never reported as saved |
+| 5 | Terminal switch | The one switch standing between anyone who can reach the daemon and the terminal, transcript, and agent-creation family — there is no credential behind it | on / off, off by default |
+| 6 | Unassigned agents | Agents whose working directory is outside every registered project's root | listed on their own page, reachable only while both the terminal switch and this group's own switch (below) are on |
+| 7 | Unassigned group switch | The Unassigned group's own switch, separate from the terminal switch above — turning the terminal switch on alone does not open this group | on / off, off by default |
+| 8 | Keep herdr running | Opt-in duty: mdview keeps the herdr process alive on the operator's behalf | on / off, off by default |
+| 9 | Notify on status change | Opt-in duty: mdview sends a notification message when a watched agent's status changes | on / off, off by default; needs a destination and a credential configured separately |
+| 10 | Notify credential | The secret used to send that notification message | write-only: once saved, it is never shown again in full — only a masked hint — and it never appears in any viewed or exported configuration; if a save fails, the operator is told it failed — it is never reported as saved |
 
 ## Behaviors & Operations
 
 ### Viewing the terminal
 
-- **Triggers:** opening a registered project's Terminal tab with a valid
-  session.
+- **Triggers:** opening a registered project's Terminal tab while the
+  terminal switch is on.
 - **What it shows:** every agent whose working directory sits under this
   project's root, each with its screen rendered as coloured text and a
   control to reply. An agent belonging to a different project, or to none,
@@ -71,7 +74,7 @@ implementation. Code entry points are listed in `reading-map.md`.
 
 - **Triggers:** typing free text, sending a named key (for example Enter, an
   arrow key, Ctrl+C), or reading the current screen or the transcript, from
-  a listed agent's pane, with a valid session.
+  a listed agent's pane, while the terminal switch is on.
 - **What it does:** typed text can be staged into the agent's pane without
   being sent — submitting it (pressing Enter) is a separate act the operator
   chooses explicitly; a named key is sent immediately. Every one of these
@@ -103,8 +106,8 @@ implementation. Code entry points are listed in `reading-map.md`.
 
 ### Viewing the transcript
 
-- **Triggers:** opening a registered project's Transcript tab with a valid
-  session.
+- **Triggers:** opening a registered project's Transcript tab while the
+  terminal switch is on.
 - **What it shows:** the same set of agents as the Terminal tab, each showing
   its own session log instead of a screen. An agent that has not written
   anything yet reports plainly that no transcript is available yet, rather
@@ -114,41 +117,105 @@ implementation. Code entry points are listed in `reading-map.md`.
   would lose. The screen and the transcript answer different questions and
   are kept as separate tabs rather than merged into one.
 
-### Unlocking the terminal (the token boundary)
+### The terminal switch
 
-- **Triggers:** presenting the access token on the settings page.
-- **What it does:** presenting the correct token starts a session; every
-  terminal, transcript, and agent-creation request is refused unless it
-  carries a valid session for the token currently in effect. Rotating the
-  token requires a session under the token being replaced — except the very
-  first time, before any token has ever been generated, when rotation is
-  open, since there is nothing yet to prove possession of.
+The terminal has **no authentication of its own** — no token, no session, no
+login, no cookie. The switch below is the only thing standing between it and
+anyone who can reach the daemon.
+
+- **Triggers:** the "Enable the terminal" switch on the settings page, on or
+  off.
+- **What it does:** on, every terminal, transcript, and agent-creation route
+  answers normally to anyone who can reach the daemon. Off, every one of
+  those routes is refused.
 - **What's gated:** the Terminal tab and its screen, sending text and keys,
-  the Transcript tab, starting a new agent, and the Unassigned agents page
-  and its contents — every action listed above, not only viewing and
-  creating.
+  the Transcript tab, and starting a new agent — every action listed above.
+  The Unassigned agents page and its contents need this switch **and** their
+  own switch below both on; either alone leaves the group closed.
 - **What's not gated (unchanged by this feature):** every other page in
   mdview — the project list, a project's markdown pages, search, the
   settings page itself, and the plain status/configuration views all remain
   reachable to anyone who can reach the server, exactly as before this
   feature. The project list in particular reveals no agent name and no
-  working directory to a visitor who has never signed in; opening it, or
-  opening the Unassigned agents page's presence marker, never adds anything
-  to the registered project list either. A request that lacks a valid
-  session for a gated action is answered exactly as an address that was
-  never used at all would be — and attempting the wrong kind of request
-  against a gated address (for example, fetching as a page a link that only
-  accepts a submission) gets that identical answer too; nothing distinguishes
-  a wrong or missing token, a wrong kind of request, and a page that was
-  never there.
-- **Protecting the stored token:** the token file is written owner-only and
-  atomically — a temporary file is created and swapped into place in one
-  step, so no reader ever sees a partially written file. On Windows, where
-  owner-only file protection cannot be applied, that unprotected state is
-  surfaced as something the operator can query, rather than failing
-  silently.
-- **Afterwards:** rotating the token immediately ends every session that was
-  signed in under the previous one.
+  working directory to any visitor; opening it, or opening the Unassigned
+  agents page's presence marker, never adds anything to the registered
+  project list either.
+- **Off answers:** a page route (the Terminal tab, the Transcript tab, the
+  Unassigned agents page) gets mdview's ordinary not-found page — the same
+  page an unregistered project id gets, never a blank or typeless response.
+  A route the client polls for data (a pane's screen or transcript, sending
+  input, starting a pane) gets a not-found answer carrying a plain reason a
+  script can read, so the client's own pollers get a reason rather than a
+  page or an unreadable body.
+- **The Unassigned group's own switch:** this group reaches every herdr pane
+  on the host that sits outside every registered project's root —
+  unrelated repositories, root shells, other people's agents — and has no
+  boundary check of its own the way a project's panes do. It stays off until
+  an operator deliberately turns it on; turning the terminal switch on alone
+  never opens it.
+- **How the switches are changed:** the settings page submits the terminal
+  switches (and the notify destination and credential) as a request a page
+  the operator merely has open elsewhere cannot forge — unlike an ordinary
+  form submission, which a browser will send cross-site without the operator
+  noticing, carrying whatever this daemon already trusts about that browser.
+  With no authentication of its own, an ordinary form here would let any
+  page the operator happens to be viewing flip these switches or overwrite
+  the notify credential on their behalf; this one cannot be triggered that
+  way.
+- **The condition this rests on.** Nothing above proves who is asking — the
+  terminal's safety depends entirely on the daemon's port being unreachable
+  except through an authenticating front door placed in front of it (a
+  reverse proxy, a VPN, a firewall rule — mdview provides none of these
+  itself). If that front door is ever removed or misconfigured so the port
+  becomes directly reachable, the terminal is unauthenticated remote code
+  execution for anyone who can reach it: they can read and drive every
+  running agent, start new ones, and — if the Unassigned switch is also on —
+  read and drive every pane on the host. The terminal switch and the
+  Unassigned switch are policy for an operator who already trusts everyone
+  who can reach the port; neither is a substitute for that front door.
+- **Afterwards:** turning the switch off immediately closes every gated
+  route; turning it back on immediately reopens them — there is no
+  credential to regenerate or session to re-establish either way.
+
+### Guards that are not authentication
+
+None of the guards below were touched by removing the terminal's
+authentication, and each still holds:
+
+- **Containment.** A pane outside a project's own root is refused on every
+  action that names one — viewing, replying, reading its transcript, listing
+  it (see Business Rules, Project scoping).
+- **Creation-destination containment.** Starting a new pane or agent resolves
+  its working directory automatically from this project's own boundary; a
+  request can never name or influence the destination directly.
+- **Fail-closed on an unconstructable boundary.** If a project's own
+  containment boundary cannot be built at all, every action that needs it
+  refuses cleanly — an empty pane list or a refused creation, never a crash
+  and never a laxer check that lets something through.
+- **Pane ids are never trusted from the URL.** A pane id named in a request
+  is checked against the panes herdr actually reports for this project; an
+  id for a real pane belonging to a different project, or to none, is
+  refused exactly like one that does not exist.
+- **Operator-authored argv only.** Starting a preset agent names only the
+  preset's label; the command that actually runs is whatever an operator
+  configured for that label in advance, and an unrecognized label is refused
+  before herdr is ever called.
+- **The input is bound.** A single request can carry only so many key
+  presses; a request over that bound is refused before it reaches herdr.
+- **Staged, not sent.** Typed text lands in the pane's composer without being
+  submitted; sending it (pressing Enter) is a separate, explicit act.
+- **Output is escaped before it becomes markup.** A pane's screen is
+  translated into safe HTML — nothing in it is interpreted as markup, however
+  it got onto that screen.
+- **Named remedies, not raw errors.** A failure names what happened and, where
+  there is one, the fix — never a bare stack trace, an internal path, or an
+  unexplained status.
+- **Typed text and named keys are never logged.** Nothing an operator types
+  into a pane, or any key name sent to one, appears in this surface's own
+  logging.
+- **The notify credential stays write-only at rest.** Once saved, it is never
+  read back into a page or an exported configuration — only a masked hint,
+  and a failed save is reported as failed, never as saved.
 
 ### When herdr is not running
 
@@ -173,28 +240,42 @@ implementation. Code entry points are listed in `reading-map.md`.
   exported configuration). Off by default; mdview makes no outbound call
   until this is turned on.
 - Both duties, together with the notification destination and credential,
-  are switched on and changed from the settings page — but doing so requires
-  a live terminal session, unlike every other setting on that same page (see
-  Actors & Access). They take effect immediately without a restart.
+  are switched on and changed from the settings page, the same as every
+  other setting on that same page (see Actors & Access) — no separate
+  session or credential is needed to reach them. They take effect
+  immediately without a restart.
 
 ## Actors & Access
 
-One local operator per install, same as the rest of mdview. Unlike every
-other surface in mdview, the terminal, transcript, and agent-creation family
-is gated: reaching any of it requires the session that presenting the access
-token establishes (see the token boundary above).
+One local operator per install, same as the rest of mdview. The terminal,
+transcript, and agent-creation family carries **no authentication of its
+own** — no token, no session, no login, no cookie. Reaching any of it
+requires only that the terminal switch (and, for the Unassigned group, its
+own switch too) is on — the same single condition that gates every route in
+this family, described in full under "The terminal switch" above.
 
-The settings page that hosts the token is itself unauthenticated, like the
-rest of mdview outside this family — reaching it is enough to view or change
-every ordinary setting (server binding, theme, indexing, and so on), and,
-once a token exists, to attempt signing in with it. But three things reached
-from that same page are carved out and require an existing session before
-they take effect: turning "keep herdr running" or "notify on status change"
-on or off, and changing the notification destination or credential.
-Reaching those through the ordinary, unauthenticated settings path would let
-any visitor on the network make mdview start a process or begin sending
-notifications on the operator's behalf — the one danger D4's gate exists to
-close. Everything else on the settings page stays as open as it always was.
+The settings page that hosts these switches is itself unauthenticated, like
+every other page in mdview — reaching it is enough to view or change every
+setting on it, this family's switches, the notify destination, and the
+notify credential included. Nothing on that page is carved out behind a
+session any more; see the Settings spec.
+
+**This surface's safety rests entirely on something outside mdview.**
+mdview proves nothing about who is asking. Whoever can reach the daemon's
+port can drive this family exactly as the operator can, the moment the
+terminal switch is on. What keeps that from being anyone on the internet, or
+anyone on the operator's network, is a front door placed in front of the
+port that does authenticate — a reverse proxy with its own login, a VPN, a
+firewall rule restricting reachability to the operator's own machine — none
+of which mdview provides. If that front door is ever removed, disabled, or
+misconfigured so the port becomes reachable without it, the terminal is
+unauthenticated remote code execution for anyone who reaches it: they can
+read and drive every agent running under every registered project, start
+new ones, and, if the Unassigned switch is also on, read and drive every
+pane on the host, not only ones belonging to a registered project. This is
+not a residual risk to be hardened later — it is the condition the entire
+surface is built to run under, and it must be re-verified by whoever
+operates mdview every time the network path to its port changes.
 
 ## Business Rules
 
@@ -209,18 +290,18 @@ close. Everything else on the settings page stays as open as it always was.
   following a symbolic link out of it.
 - **Nothing lost (D5).** An agent whose working directory is outside every
   registered project is never dropped from view — it always appears, in the
-  Unassigned group, behind the same gate as everything else. The registered
-  project list is never changed by any of this: listing, or even opening, an
-  agent never adds its project to the registry.
+  Unassigned group, gated by the terminal switch and the group's own switch
+  together. The registered project list is never changed by any of this:
+  listing, or even opening, an agent never adds its project to the registry.
 - **Tab always present (D6).** The Terminal tab (and Transcript tab) render
   on every registered project's page whether or not the terminal has ever
   been switched on or herdr is reachable; a missing herdr is a named state,
   never a hidden tab.
-- **Off until switched on (D7).** The terminal family, the "keep herdr
-  running" duty, and the "notify on status change" duty are each
-  independently off until an operator turns them on from the settings page;
-  none of them changes mdview's behavior for an install that never visits
-  that page.
+- **Off until switched on (D7).** The terminal switch, the Unassigned
+  group's own switch, the "keep herdr running" duty, and the "notify on
+  status change" duty are each independently off until an operator turns
+  them on from the settings page; none of them changes mdview's behavior for
+  an install that never visits that page.
 - **Screen vs. transcript (D9).** The screen is a periodic, coloured snapshot
   redrawn on each poll; the transcript is the agent's own gap-free log. They
   are kept as two tabs rather than one, because collapsing them loses
@@ -237,8 +318,10 @@ close. Everything else on the settings page stays as open as it always was.
 
 ## Edge Cases Settled
 
-- Terminal switched off: the tab answers exactly as an address that was
-  never used would, even for a visitor who already holds a valid session.
+- Terminal switched off: a page route (the Terminal tab, the Transcript tab,
+  the Unassigned agents page) answers with mdview's ordinary not-found page;
+  a route the client polls for data answers not-found with a plain,
+  script-readable reason. Neither is a blank or typeless response.
 - Herdr not reachable: every affected view degrades to the named "herdr is
   not running" state rather than an error page or a blank screen.
 - An agent whose working directory is outside every registered project: it
@@ -269,19 +352,20 @@ No settled screenshot captured yet.
 
 - `crates/mdview/src/server.rs` — the routes themselves (`/p/:id/_terminal`,
   `/p/:id/_transcript`, their screen/input/keys/create children, and the
-  `/_terminal/unassigned` family), each gated behind `AuthSession` and the
-  terminal-enabled switch before it does anything else; `project_panes`
+  `/_terminal/unassigned` family), each gated behind `terminal_family_enabled`
+  alone (`unassigned_group_enabled` too, for the Unassigned family) — there is
+  no authentication extractor left anywhere in this file; `project_panes`
   (agents joined to their pane's cwd, filtered by the D2 boundary) is what
   makes a plain shell invisible to listing and to every pane-scoped action
   (`project_and_verify_pane_in_boundary`, `project_pane_cwd_in_boundary`);
   `CreatePaneBody`/`CreateAgentBody` are the (empty / preset-label-only)
   request shapes a creation call actually sends; `update_terminal_config` is
-  the one route that gates the D7 switches plus the notify destination/credential
-  behind `AuthSession`, distinct from the unauthenticated `/api/config`.
-- `crates/mdview/src/terminal_auth.rs` — the token/session mechanism: token
-  storage, reveal-once rotation (`rotate_terminal_token`, gated once
-  `is_configured()`), and `MethodGate`/`opaque_404`, the shared answer a
-  failed session or a mismatched request kind gets.
+  the one route that saves the switches plus the notify destination/credential,
+  reachable with no gate at all so it stays available to turn the terminal
+  switch back on — its body must be JSON, never a form (see "How the switches
+  are changed" above); `terminal_disabled_page`/`terminal_disabled_json_404`
+  are the two disabled-state answers, for page routes and polled data routes
+  respectively.
 - `crates/mdview/src/herdr/` — the client that talks to a running herdr over
   its socket (or named pipe on Windows).
 - `crates/mdview/src/supervisor.rs`, `crates/mdview/src/notify/` — the two

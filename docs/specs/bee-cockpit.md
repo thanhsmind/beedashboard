@@ -325,9 +325,9 @@ that check.
 
 ### It renders nothing that identifies a filesystem outside the project
 
-This surface carries no authentication of its own — like every mdview route outside
-the agent terminal family (see the Agent terminal spec) — and can be bound to a
-non-loopback address. bee's store is full of absolute paths — the files a cell touches,
+This surface carries no authentication of its own — nothing in mdview does, including
+the agent terminal (see the Agent terminal spec) — and can be bound to a non-loopback
+address. bee's store is full of absolute paths — the files a cell touches,
 a worker's identity, a session's transcript, a workspace root. **None of them may reach
 the page.** A field that is itself entirely a path is rendered relative to the project
 root, or dropped.

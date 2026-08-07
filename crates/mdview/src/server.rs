@@ -7810,6 +7810,64 @@ mod bee_route_tests {
         );
     }
 
+    /// toa-5: a field the settings page renders inside `terminal-config-form`
+    /// but the JS submit handler's `fetch` body omits is a control the route
+    /// accepts but the browser can never actually flip — exactly the defect
+    /// `unassigned_enabled` had until this cell (the checkbox rendered,
+    /// toggled, and did nothing on save, because the JSON body sent never
+    /// carried the key). This proof reads every `name="..."` the form
+    /// actually renders straight out of the rendered HTML — not a hand-kept
+    /// list that could drift from the form — and requires the handler to
+    /// read each one (`form.<name>.checked` or `form.<name>.value`), so a
+    /// field added to one side and forgotten on the other fails here instead
+    /// of only silently in a browser.
+    #[test]
+    fn terminal_config_form_submission_carries_every_switch_the_page_renders() {
+        let cfg = Config::default();
+        let html = views::settings_page(&cfg, false, false, views::NotifyCredentialView::NotConfigured);
+        let form_start = html
+            .find(r#"id="terminal-config-form""#)
+            .expect("the terminal settings form must exist on the settings page");
+        let form_end = html[form_start..]
+            .find("</form>")
+            .map(|i| form_start + i)
+            .expect("the terminal settings form must close");
+        let form_html = &html[form_start..form_end];
+
+        let mut field_names = Vec::new();
+        let mut rest = form_html;
+        while let Some(idx) = rest.find(r#"name=""#) {
+            let after = &rest[idx + 6..];
+            let end = after.find('"').expect("a name attribute must close");
+            field_names.push(after[..end].to_string());
+            rest = &after[end..];
+        }
+        assert!(
+            !field_names.is_empty(),
+            "the terminal settings form must render at least one named field: {form_html}"
+        );
+
+        let js = views::APP_JS;
+        let handler_start = js
+            .find(r#"var form = document.getElementById("terminal-config-form");"#)
+            .expect("the terminal config submit handler must exist in assets/app.js");
+        let handler_end = js[handler_start..]
+            .find("})();")
+            .map(|i| handler_start + i)
+            .expect("the submit handler's IIFE must close");
+        let handler = &js[handler_start..handler_end];
+
+        for name in &field_names {
+            assert!(
+                handler.contains(&format!("form.{name}.")),
+                "the settings page renders a `{name}` field but the JSON submit handler \
+                 never reads it (expected `form.{name}.checked` or `form.{name}.value`), so \
+                 that control cannot actually flip the switch even though the route accepts \
+                 it: {handler}"
+            );
+        }
+    }
+
     /// A POST request to `/p/{id}/_terminal/{pane_id}/input` carrying a JSON
     /// `{ "text": ..., "submit": ... }` body (the `submit` key omitted
     /// entirely when `submit` is `None`, proving the real absent-flag case —
