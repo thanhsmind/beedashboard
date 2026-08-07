@@ -771,6 +771,17 @@ fn configured_preset_labels(st: &AppState) -> Vec<String> {
 /// the terminal family (D2) — the auth and method extractors that used to
 /// run ahead of it, and the login/rotation routes that minted and checked
 /// them, are gone (D1/D5).
+/// The operator's configured display hostname, if any — the same
+/// `server.hostname` the settings page writes. `None` leaves a doc link
+/// same-origin, which is what the terminal page itself is served from.
+fn configured_hostname(st: &AppState) -> Option<String> {
+    mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+        st.config_data_dir.as_deref(),
+    ))
+    .server
+    .hostname
+}
+
 fn terminal_family_enabled(st: &AppState) -> bool {
     let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
         st.config_data_dir.as_deref(),
@@ -941,8 +952,15 @@ async fn terminal_screen(
     match read {
         Ok(read) => {
             let revision = mdview_core::ansi::revision_of(&read.text);
-            Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": revision }))
-                .into_response()
+            // An agent names its own documents constantly; every one of them
+            // is a page this same server renders, so the names become links
+            // to it. Applied over the translated HTML, never the raw screen —
+            // the translation is what made the text safe to embed.
+            let html = mdview_core::doc_links::linkify_docs(
+                &mdview_core::ansi::to_html(&read.text),
+                &mdview_core::doc_links::link_base(&id, configured_hostname(&st).as_deref()),
+            );
+            Json(json!({ "text": html, "revision": revision })).into_response()
         }
         Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
         // Any other herdr failure (socket gone, protocol mismatch, a
@@ -7242,6 +7260,53 @@ mod bee_route_tests {
         assert_ne!(
             first_json["revision"], second_json["revision"],
             "changed output must report a different revision: {first_json} vs {second_json}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A document path an agent printed comes back as a link into this same
+    /// project, opening in its own tab — the screen naming a spec is one
+    /// click from the spec. Only markdown under `docs/` qualifies: mdview
+    /// renders markdown, so a directory or an image would link to a page that
+    /// does not exist.
+    #[tokio::test]
+    async fn terminal_screen_links_the_doc_paths_an_agent_printed() {
+        let dir = fresh_root("terminal-screen-doc-links");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-doc-links-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let screen = "wrote docs/specs/agent-terminal.md and docs/assets/logo.png\n";
+        fake.seed_scroll_pane(&started.pane_id, screen, screen, None);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let project = register(&st, &root, "screen-doc-links");
+        let app = router(st);
+
+        let resp = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        let text = json["text"].as_str().unwrap();
+
+        assert!(
+            text.contains(&format!(
+                r#"href="/p/{}/docs/specs/agent-terminal.md""#,
+                project.id
+            )),
+            "the markdown path must link into this project: {text}"
+        );
+        assert!(text.contains(r#"target="_blank""#), "{text}");
+        assert!(
+            !text.contains("logo.png\""),
+            "a non-markdown path must not become a link: {text}"
         );
 
         std::fs::remove_dir_all(&dir).ok();

@@ -8,6 +8,7 @@ pub mod ansi;
 pub mod bee;
 pub mod config;
 pub mod daemon;
+pub mod doc_links;
 pub mod domain;
 pub mod engine;
 pub mod error;

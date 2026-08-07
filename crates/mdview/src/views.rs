@@ -198,6 +198,11 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    width no readable type size can hold the grid, so the lines wrap instead
    of running off the side. */
 .term-screen--wrapped { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
+/* A document path an agent printed, now clickable. It keeps whatever colour
+   the surrounding ANSI run gave it — recolouring would lose information the
+   agent meant to convey — and says it is a link by underlining. */
+.term-doc-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.term-doc-link:hover { text-decoration-thickness: 2px; }
 /* Below this width the answer is the same whatever the measurement says: no
    readable type size fits a terminal frame on a handset, so the lines wrap.
    Stated in CSS rather than left to the script, because a page whose script
