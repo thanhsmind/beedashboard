@@ -777,13 +777,21 @@
     var POLL_MS = 1500;
     var HERDR_DOWN_TEXT = "herdr is not running";
     var lastRevision = {}; // pane id -> last-rendered revision
+    // terminal-scroll-2: true while this pane's "Load older" button owns the
+    // viewport — pollOne below must never overwrite that history view with
+    // the next live-tail repaint before the operator has looked at it and
+    // pressed "Live" (or clicked "Load older" again). Cleared only by the
+    // "Live" button's handler further down.
+    var viewingHistory = {}; // pane id -> true while showing history, not live
 
-    function screenUrl(paneId) {
-      return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/screen";
+    function screenUrl(paneId, historyPages) {
+      var url = "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/screen";
+      return historyPages ? url + "?history=" + historyPages : url;
     }
 
     function pollOne(el) {
       var paneId = el.getAttribute("data-pane-id");
+      if (viewingHistory[paneId]) return; // the operator is reading history; leave it alone
       fetch(screenUrl(paneId), { credentials: "same-origin" })
         .then(function (res) {
           if (!res.ok) {
@@ -811,6 +819,58 @@
 
     pollAll();
     setInterval(pollAll, POLL_MS);
+
+    // Scroll-history buttons (terminal-scroll-2, `herdr/pane_scroller.rs`):
+    // "Load older" raises this pane's own running depth by one — the server
+    // keeps no scroll depth between requests (every `?history=` call always
+    // restores to live before answering), so reaching further back than the
+    // last press means asking for one more hop than last time, which is what
+    // this per-pane counter tracks. The response is applied unconditionally,
+    // never gated behind `lastRevision`'s dedupe above: a history read's
+    // revision can coincide with whatever this pane last polled live, and
+    // that coincidence must never be read as "nothing changed, skip the
+    // repaint" the way a genuine live-poll tick would.
+    //
+    // "Live" is a pure client action, not a fetch: the server already
+    // restored the pane to its live view at the end of the previous history
+    // request, so there is nothing left to ask for. It only clears the
+    // depth and the pause flag above, and scrolls the box back to the
+    // bottom — the regular poller resumes on its own next tick.
+    Array.prototype.slice.call(document.querySelectorAll(".term-scroll[data-pane-id]")).forEach(function (group) {
+      var paneId = group.getAttribute("data-pane-id");
+      var card = group.closest(".term-pane");
+      var screenEl = card ? card.querySelector(".term-screen[data-pane-id]") : null;
+      if (!screenEl) return;
+      var olderBtn = group.querySelector('[data-scroll="older"]');
+      var liveBtn = group.querySelector('[data-scroll="live"]');
+      var historyDepth = 0; // 0 = live; how many PageUp-hops back this pane's last press reached
+
+      if (olderBtn) {
+        olderBtn.addEventListener("click", function () {
+          viewingHistory[paneId] = true; // pause the poller before the round trip, not after
+          var requestedDepth = historyDepth + 1;
+          fetch(screenUrl(paneId, requestedDepth), { credentials: "same-origin" })
+            .then(function (res) {
+              return res.ok ? res.json() : null;
+            })
+            .then(function (body) {
+              if (!body) return;
+              historyDepth = requestedDepth;
+              lastRevision[paneId] = body.revision;
+              screenEl.innerHTML = body.text;
+            })
+            .catch(function () {});
+        });
+      }
+
+      if (liveBtn) {
+        liveBtn.addEventListener("click", function () {
+          viewingHistory[paneId] = false;
+          historyDepth = 0;
+          screenEl.scrollTop = screenEl.scrollHeight;
+        });
+      }
+    });
   })();
 
   // Transcript poll (agent-terminal-16, D9): each pane's `.term-transcript`

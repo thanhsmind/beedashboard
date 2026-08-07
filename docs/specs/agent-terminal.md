@@ -70,6 +70,21 @@ implementation. Code entry points are listed in `reading-map.md`.
 - **Afterwards:** the operator sees exactly the agents that belong to this
   project.
 
+### Reaching a pane's older output
+
+- **Triggers:** pressing a listed agent's "load older" control while the
+  terminal switch is on.
+- **What it does:** each press reaches one step further back than the
+  previous press reached — there is nothing an operator needs to remember or
+  repeat between presses, the surface itself tracks how far back this pane
+  has gone and asks for one more step each time. While an operator is
+  looking at older output this way, the pane's normal live refresh stops
+  updating that view, so it is never overwritten out from under them.
+- **Afterwards:** pressing the paired "back to live" control returns the
+  pane to its current live view and lets the normal refresh resume; nothing
+  about the pane's connection, or the operator's ability to reply, is
+  affected by having stepped back first.
+
 ### Replying to an agent
 
 - **Triggers:** typing free text, sending a named key (for example Enter, an
@@ -339,12 +354,6 @@ operates mdview every time the network path to its port changes.
   or reachable anywhere in the terminal surface once it exists. This is the
   user's call, not something this spec resolves — recorded as an outstanding
   question in `docs/history/agent-terminal/CONTEXT.md`.
-- **The operator cannot scroll a pane from the dashboard.** herdr accepts no
-  page-key name and offers no way to move a pane's own viewport; sending the
-  raw escape a terminal would use leaves the pane's scroll position untouched.
-  The screen box therefore scrolls itself over whatever tail herdr hands
-  back, which is as far back as this surface can see. Reaching further would
-  need herdr to grow the capability first.
 - Confirmation against a real, running herdr (rather than a test double) is
   a manual check at UAT, not something automated coverage certifies.
 - Mobile-specific layout for this surface, carried over as an idea from

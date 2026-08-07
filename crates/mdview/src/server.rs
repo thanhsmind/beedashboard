@@ -850,6 +850,32 @@ fn telegram_credentials(
 /// identically to whatever surfaces them.
 const HERDR_DOWN_REMEDY: &str = "herdr is not running";
 
+/// Shared by `terminal_screen` and `unassigned_terminal_screen` — mirrors
+/// herdr-go's own `ScreenQuery` (`herdr-go/src/web/screen.rs`). Presence
+/// requests older pane content via `PaneScroller::read_history`
+/// (`herdr/pane_scroller.rs`) instead of the routes' existing default
+/// live-view read; absent leaves today's behavior byte-for-byte unchanged.
+/// The value doubles as the cumulative depth (PageUp-hops back from the live
+/// bottom) this one call goes before always restoring to live — the gateway
+/// keeps no scroll depth of its own between requests, so the client sends
+/// one more than its last request to go further back than last time
+/// (`assets/app.js`'s own running per-pane counter). A present-but-non-
+/// numeric value falls back to one hop rather than erroring, matching
+/// herdr-go's own fallback for callers that only ever checked presence.
+#[derive(serde::Deserialize, Default)]
+struct ScreenQuery {
+    #[serde(default)]
+    history: Option<String>,
+}
+
+/// Parses `ScreenQuery::history` into a PageUp-hop count for
+/// `PaneScroller::read_history` — non-numeric falls back to 1, and the
+/// result is always clamped to at least 1 (mirrors herdr-go's own
+/// `.parse::<usize>().unwrap_or(1).max(1)`).
+fn history_pages(history: &str) -> usize {
+    history.parse::<usize>().unwrap_or(1).max(1)
+}
+
 /// `GET /p/:id/_terminal/:pane_id/screen` (D2/D3/D4/D6) — one pane's current
 /// screen, polled by the client in `assets/app.js`. Modeled on herdr-go's
 /// `ScreenBody { text, revision }` (`herdr-go/src/web/screen.rs`), but the
@@ -877,6 +903,7 @@ const HERDR_DOWN_REMEDY: &str = "herdr is not running";
 async fn terminal_screen(
     State(st): State<AppState>,
     Path((id, pane_id)): Path<(String, String)>,
+    Query(query): Query<ScreenQuery>,
 ) -> Response {
     if !terminal_family_enabled(&st) {
         return terminal_disabled_json_404();
@@ -896,11 +923,17 @@ async fn terminal_screen(
     if !in_project {
         return not_found("pane not found");
     }
-    match st
-        .herdr
-        .read_pane(&pane_id, herdr::ReadSource::Recent, SCREEN_READ_LINES)
-        .await
-    {
+    let read = if let Some(history) = &query.history {
+        let scroller = herdr::pane_scroller::PaneScroller::new(st.herdr.as_ref());
+        scroller.read_history(&pane_id, history_pages(history)).await
+    } else {
+        // Unchanged default behavior: today's existing read, named
+        // explicitly.
+        st.herdr
+            .read_pane(&pane_id, herdr::ReadSource::Recent, SCREEN_READ_LINES)
+            .await
+    };
+    match read {
         Ok(read) => {
             let revision = mdview_core::ansi::revision_of(&read.text);
             Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": revision }))
@@ -1553,18 +1586,28 @@ async fn verify_pane_is_unassigned(st: &AppState, pane_id: &str) -> std::result:
 /// returns for a project's own pane. Guarded identically: the D7 switch
 /// and, per toa-4/D9, the group's own switch (D12: a reasoned JSON 404
 /// when either is off), then `verify_pane_is_unassigned`.
-async fn unassigned_terminal_screen(State(st): State<AppState>, Path(pane_id): Path<String>) -> Response {
+async fn unassigned_terminal_screen(
+    State(st): State<AppState>,
+    Path(pane_id): Path<String>,
+    Query(query): Query<ScreenQuery>,
+) -> Response {
     if !terminal_family_enabled(&st) || !unassigned_group_enabled(&st) {
         return terminal_disabled_json_404();
     }
     if let Err(refusal) = verify_pane_is_unassigned(&st, &pane_id).await {
         return refusal;
     }
-    match st
-        .herdr
-        .read_pane(&pane_id, herdr::ReadSource::Recent, SCREEN_READ_LINES)
-        .await
-    {
+    let read = if let Some(history) = &query.history {
+        let scroller = herdr::pane_scroller::PaneScroller::new(st.herdr.as_ref());
+        scroller.read_history(&pane_id, history_pages(history)).await
+    } else {
+        // Unchanged default behavior: today's existing read, named
+        // explicitly.
+        st.herdr
+            .read_pane(&pane_id, herdr::ReadSource::Recent, SCREEN_READ_LINES)
+            .await
+    };
+    match read {
         Ok(read) => {
             let revision = mdview_core::ansi::revision_of(&read.text);
             Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": revision }))
@@ -7518,6 +7561,111 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// terminal-scroll-2: with no `?history` query, `terminal_screen` must
+    /// take exactly today's path — the plain `ReadSource::Recent` read,
+    /// never `PaneScroller::read_history` — proven here by the fake's
+    /// `sent_text_log` staying empty (`PaneScroller` is the only thing that
+    /// ever calls `send_text`, see `pane_scroller.rs`'s own doc comment).
+    #[tokio::test]
+    async fn terminal_screen_without_history_param_never_touches_pane_scroller() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminal-screen-no-history");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-no-history-project");
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let text = "live frame\n❯ ";
+        fake.seed_scroll_pane(&started.pane_id, text, text, Some("older frame\n❯ "));
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let project = register(&st, &root, "screen-no-history");
+        let app = router(st);
+
+        let resp = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["text"], serde_json::json!(mdview_core::ansi::to_html(text)), "{body}");
+        assert!(
+            fake.sent_text_log(&started.pane_id).await.is_empty(),
+            "an absent history param must never route through PaneScroller"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// terminal-scroll-2: `?history=2` must route through
+    /// `PaneScroller::read_history` with 2 pages — proven both by the
+    /// content returned (the 2nd escape page, not the 1st or live) and by
+    /// the fake's `sent_text_log` recording exactly two `PAGE_UP` hops then
+    /// one `RESTORE_BOTTOM`, mirroring `pane_scroller.rs`'s own
+    /// `pages_gt_1_hops_back_further_than_a_single_pageup` unit test at the
+    /// HTTP layer.
+    #[tokio::test]
+    async fn terminal_screen_history_param_sends_two_pageups_then_restores() {
+        use crate::herdr::fake::FakeHerdr;
+        use crate::herdr::pane_scroller::{PAGE_UP, RESTORE_BOTTOM};
+
+        let dir = fresh_root("terminal-screen-history-2");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-history-2-project");
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let live_bottom = "page0 (live)\n❯ ";
+        fake.seed_scroll_pane(
+            &started.pane_id,
+            live_bottom,
+            live_bottom,
+            Some("page1 further back\npage0 (live)\n❯ "),
+        );
+        fake.push_escape_page(
+            &started.pane_id,
+            "page2 even further back\npage1 further back\npage0 (live)\n❯ ",
+        );
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let project = register(&st, &root, "screen-history-2");
+        let app = router(st);
+
+        let resp = app
+            .oneshot(Request::builder()
+                .uri(format!("/p/{}/_terminal/{}/screen?history=2", project.id, started.pane_id))
+                .method("GET")
+                .body(Body::empty())
+                .unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let text = json["text"].as_str().unwrap();
+        assert!(
+            text.contains("page2 even further back"),
+            "history=2 should land 2 hops back, not just 1: {text}"
+        );
+        assert_eq!(
+            fake.sent_text_log(&started.pane_id).await,
+            vec![PAGE_UP.to_string(), PAGE_UP.to_string(), RESTORE_BOTTOM.to_string()],
+            "two PageUp hops then one restore-to-bottom, in that order"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// agent-terminal-6, truth: "herdr going silent between polls surfaces
     /// the named remedy rather than a blank screen" — the server-side half:
     /// a silent socket never answers the poll with `2xx`, and the body
@@ -9076,6 +9224,112 @@ mod bee_route_tests {
         assert_ne!(
             first_json["revision"], second_json["revision"],
             "changed unassigned pane output must report a different revision: {first_json} vs {second_json}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// terminal-scroll-2: the Unassigned group's screen route gets the same
+    /// `?history` branching as `terminal_screen` — with no `history` param,
+    /// it must stay on today's plain `ReadSource::Recent` read, never
+    /// `PaneScroller::read_history`, proven by an empty `sent_text_log`.
+    #[tokio::test]
+    async fn unassigned_terminal_screen_without_history_param_never_touches_pane_scroller() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("unassigned-screen-no-history");
+        enable_terminal(&dir);
+        enable_unassigned_group(&dir);
+        let scratch = fresh_root("unassigned-screen-no-history-scratch");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let stray = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let text = "unassigned live frame";
+        fake.seed_scroll_pane(&stray.pane_id, text, text, Some("unassigned older frame"));
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let app = router(st);
+
+        let resp = app
+            .oneshot(unassigned_screen_req(&stray.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["text"], serde_json::json!(mdview_core::ansi::to_html(text)), "{body}");
+        assert!(
+            fake.sent_text_log(&stray.pane_id).await.is_empty(),
+            "an absent history param must never route through PaneScroller"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// terminal-scroll-2: `?history=2` against the Unassigned group's screen
+    /// route must route through `PaneScroller::read_history` with 2 pages —
+    /// same proof shape as `terminal_screen_history_param_sends_two_pageups_then_restores`.
+    #[tokio::test]
+    async fn unassigned_terminal_screen_history_param_sends_two_pageups_then_restores() {
+        use crate::herdr::fake::FakeHerdr;
+        use crate::herdr::pane_scroller::{PAGE_UP, RESTORE_BOTTOM};
+
+        let dir = fresh_root("unassigned-screen-history-2");
+        enable_terminal(&dir);
+        enable_unassigned_group(&dir);
+        let scratch = fresh_root("unassigned-screen-history-2-scratch");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let stray = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let live_bottom = "page0 (live)\n❯ ";
+        fake.seed_scroll_pane(
+            &stray.pane_id,
+            live_bottom,
+            live_bottom,
+            Some("page1 further back\npage0 (live)\n❯ "),
+        );
+        fake.push_escape_page(
+            &stray.pane_id,
+            "page2 even further back\npage1 further back\npage0 (live)\n❯ ",
+        );
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let app = router(st);
+
+        let resp = app
+            .oneshot(Request::builder()
+                .uri(format!("/_terminal/unassigned/{}/screen?history=2", stray.pane_id))
+                .method("GET")
+                .body(Body::empty())
+                .unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let text = json["text"].as_str().unwrap();
+        assert!(
+            text.contains("page2 even further back"),
+            "history=2 should land 2 hops back, not just 1: {text}"
+        );
+        assert_eq!(
+            fake.sent_text_log(&stray.pane_id).await,
+            vec![PAGE_UP.to_string(), PAGE_UP.to_string(), RESTORE_BOTTOM.to_string()],
+            "two PageUp hops then one restore-to-bottom, in that order"
         );
 
         std::fs::remove_dir_all(&dir).ok();
