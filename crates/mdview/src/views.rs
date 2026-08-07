@@ -167,13 +167,13 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .term-pane__cwd { color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }
 .term-pane__meta { color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
 /* A pane's frame is a grid, not prose: `pre-wrap` + `word-break` re-flowed
-   every long line and broke the box drawing of any TUI agent, and the 24em
-   cap cut a real 43-row pane roughly in half. `pre` keeps the grid,
-   `overflow: auto` gives the box scrollbars on both axes (the horizontal one
-   is what replaces wrapping), and the height is one full frame: 43 rows x the
-   1.25 line-height = 53.75em. Scrollback longer than the frame scrolls
-   inside the box. */
-.term-screen { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); white-space: pre; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.25; height: 53.75em; overflow: auto; }
+   every long line and broke the box drawing of any TUI agent, and a fixed
+   height cut the frame off behind an inner scrollbar. `pre` keeps the grid;
+   the box takes its height from its own content, so the whole screen is
+   readable without a second scroll inside the page. Only the horizontal axis
+   scrolls — that is what replaces wrapping when a line runs wider than the
+   card. */
+.term-screen { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); white-space: pre; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.25; height: auto; overflow-x: auto; overflow-y: hidden; }
 .term-reply { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
 .term-reply__text { flex: 1; min-width: 0; padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); background: var(--color-bg); color: var(--color-text); }
 .term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; }
