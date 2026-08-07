@@ -186,6 +186,13 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    card down is pinned to its container, and the screen scrolls inside itself
    instead of pushing the page out. */
 .term-panes, .term-pane, .term-controls, .term-controls__row, .term-reply { min-width: 0; max-width: 100%; }
+/* A pane sheds the card chrome it used to sit in: the border, the padding and
+   the raised surface only framed a frame, and on a narrow screen that inset
+   was width the terminal itself needed. The screen's own dark box is the
+   card now. */
+.term-pane { border: none; background: transparent; box-shadow: none; padding: 0; gap: var(--space-2); }
+/* With no card edges left to separate them, panes need their own spacing. */
+.term-panes { display: flex; flex-direction: column; gap: var(--space-5); }
 .term-screen { margin-top: var(--space-2); padding: var(--space-2); background: #1c1f26; color: #d7dae0; border-radius: var(--radius-sm); white-space: pre; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.25; height: auto; min-width: 0; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
 /* Applied by `assets/app.js` only once the fit has bottomed out: at that
    width no readable type size can hold the grid, so the lines wrap instead
