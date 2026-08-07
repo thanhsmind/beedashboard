@@ -210,9 +210,18 @@ fn router(state: AppState) -> Router {
         // Gated (D4/D7/D12): `terminal_family_enabled` is the only check
         // left in front of this route.
         .route("/p/:id/_terminal", get(terminal_page))
+        // terminal-pane-scope D4: one pane's own page, chosen from the pane
+        // strip `terminal_page` renders. The literal `pane/` segment is
+        // deliberate — without it, a pane id equal to the literal string
+        // `create` would shadow `/p/:id/_terminal/create/pane` and
+        // `/create/agent` below.
+        .route("/p/:id/_terminal/pane/:pane_id", get(terminal_page_for_pane))
         // agent-terminal-16 (D9): the Transcript tab — a second tab beside
         // Terminal, not a toggle inside its frame.
         .route("/p/:id/_transcript", get(transcript_page))
+        // terminal-pane-scope D4: the Transcript tab's own per-pane page,
+        // mirroring `terminal_page_for_pane` above.
+        .route("/p/:id/_transcript/pane/:pane_id", get(transcript_page_for_pane))
         // agent-terminal-6: one pane's polled screen.
         .route("/p/:id/_terminal/:pane_id/screen", get(terminal_screen))
         // agent-terminal-16 (D9): the gap-free activity channel beside the
@@ -684,16 +693,45 @@ async fn bee_cell_detail(
     }
 }
 
-/// `GET /p/:id/_terminal` (D2/D6/D12) — the per-project pane list, open to
-/// anyone who reaches the daemon (D1). `terminal_family_enabled` is the only
-/// gate left: off, this answers with the ordinary not-found page, same as an
-/// unregistered project id below — that truth is about the *route* existing,
-/// not about any particular project id being valid.
+/// terminal-pane-scope D4: which pane a bare `/_terminal` or `/_transcript`
+/// request opens, since the page now renders exactly one. The snapshot's
+/// global `focused_pane_id` when that pane is one of this project's own
+/// (`panes`); otherwise the first pane in this project's own list order —
+/// never a different project's focus, and never a pane this project's own
+/// D2 boundary did not already accept. `None` only when `panes` is empty,
+/// which is the honest empty state, not a redirect to a pane that does not
+/// exist.
+fn default_pane_id(panes: &[views::TerminalPaneView], focused_pane_id: Option<&str>) -> Option<String> {
+    if let Some(focused) = focused_pane_id {
+        if panes.iter().any(|p| p.pane_id == focused) {
+            return Some(focused.to_string());
+        }
+    }
+    panes.first().map(|p| p.pane_id.clone())
+}
+
+/// `GET /p/:id/_terminal` and `GET /p/:id/_terminal/pane/:pane_id` (D2/D4/D6/
+/// D12) — one pane's own page, open to anyone who reaches the daemon (D1).
+/// `terminal_family_enabled` is the only gate left: off, this answers with
+/// the ordinary not-found page, same as an unregistered project id below —
+/// that truth is about the *route* existing, not about any particular
+/// project id being valid.
 ///
 /// A silent or errored herdr socket renders the D6 remedy state — never a
 /// raw error, and never an empty pane list that would look identical to a
 /// project that genuinely has zero agents running.
-async fn terminal_page(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+///
+/// `requested_pane_id` is `None` for the bare route (`terminal_page`, which
+/// falls back through [`default_pane_id`]) and `Some` for the pane-scoped
+/// route (`terminal_page_for_pane`) — a pane id absent from this project's
+/// own D2 boundary-filtered list answers the ordinary not-found page, the
+/// same refusal `terminal_screen` makes, and never names the pane it
+/// refused.
+async fn terminal_page_inner(
+    st: AppState,
+    id: String,
+    requested_pane_id: Option<String>,
+) -> Response {
     if !terminal_family_enabled(&st) {
         return terminal_disabled_page();
     }
@@ -709,24 +747,50 @@ async fn terminal_page(State(st): State<AppState>, Path(id): Path<String>) -> Re
             let panes = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
                 .map(|boundary| project_panes(&snapshot, &boundary))
                 .unwrap_or_default();
-            Html(views::terminal_page(&project, &panes, &presets)).into_response()
+            let selected = match requested_pane_id {
+                Some(pane_id) => {
+                    if !panes.iter().any(|p| p.pane_id == pane_id) {
+                        return not_found("pane not found");
+                    }
+                    Some(pane_id)
+                }
+                None => default_pane_id(&panes, snapshot.focused_pane_id.as_deref()),
+            };
+            Html(views::terminal_page(&project, &panes, selected.as_deref(), &presets)).into_response()
         }
         Err(_) => Html(views::terminal_down_page(&project)).into_response(),
     }
 }
 
-/// `GET /p/:id/_transcript` (D2/D6/D9/D12) — the Transcript tab: the same
-/// project-scoped, D2 boundary-filtered pane list `terminal_page` builds,
-/// rendered with a transcript viewport per pane instead of a screen.
-/// `assets/app.js`'s transcript poller fills each one in from
-/// `terminal_transcript` below. Guarded and constructed identically to
-/// `terminal_page` — same D7 switch, same herdr snapshot + D2 boundary, same
-/// D6 herdr-down page — because listing *which* panes belong to this project
-/// still requires reaching herdr, even though the transcript content itself
-/// never does (D9: the transcript is the agent's own on-disk log, read
-/// directly, not through herdr). No creation controls here (D8 stays on the
-/// Terminal tab only); this tab is read-only.
-async fn transcript_page(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+async fn terminal_page(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    terminal_page_inner(st, id, None).await
+}
+
+async fn terminal_page_for_pane(
+    State(st): State<AppState>,
+    Path((id, pane_id)): Path<(String, String)>,
+) -> Response {
+    terminal_page_inner(st, id, Some(pane_id)).await
+}
+
+/// `GET /p/:id/_transcript` and `GET /p/:id/_transcript/pane/:pane_id`
+/// (D2/D4/D6/D9/D12) — the Transcript tab: the same per-pane page shape
+/// `terminal_page_inner` renders, with a transcript viewport per selected
+/// pane instead of a screen. `assets/app.js`'s transcript poller fills it in
+/// from `terminal_transcript` below. Guarded and constructed identically to
+/// `terminal_page_inner` — same D7 switch, same herdr snapshot + D2
+/// boundary, same D6 herdr-down page, same pane selection and the same
+/// not-found refusal for a pane outside this project — because listing
+/// *which* panes belong to this project still requires reaching herdr, even
+/// though the transcript content itself never does (D9: the transcript is
+/// the agent's own on-disk log, read directly, not through herdr). No
+/// creation controls here (D8 stays on the Terminal tab only); this tab is
+/// read-only.
+async fn transcript_page_inner(
+    st: AppState,
+    id: String,
+    requested_pane_id: Option<String>,
+) -> Response {
     if !terminal_family_enabled(&st) {
         return terminal_disabled_page();
     }
@@ -738,10 +802,30 @@ async fn transcript_page(State(st): State<AppState>, Path(id): Path<String>) -> 
             let panes = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
                 .map(|boundary| project_panes(&snapshot, &boundary))
                 .unwrap_or_default();
-            Html(views::transcript_page(&project, &panes)).into_response()
+            let selected = match requested_pane_id {
+                Some(pane_id) => {
+                    if !panes.iter().any(|p| p.pane_id == pane_id) {
+                        return not_found("pane not found");
+                    }
+                    Some(pane_id)
+                }
+                None => default_pane_id(&panes, snapshot.focused_pane_id.as_deref()),
+            };
+            Html(views::transcript_page(&project, &panes, selected.as_deref())).into_response()
         }
         Err(_) => Html(views::terminal_down_page(&project)).into_response(),
     }
+}
+
+async fn transcript_page(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    transcript_page_inner(st, id, None).await
+}
+
+async fn transcript_page_for_pane(
+    State(st): State<AppState>,
+    Path((id, pane_id)): Path<(String, String)>,
+) -> Response {
+    transcript_page_inner(st, id, Some(pane_id)).await
 }
 
 /// The configured D8 preset **labels** only — read the same injectable
@@ -1435,36 +1519,63 @@ async fn terminal_create_agent(
     }
 }
 
-/// Join each of the snapshot's agents to its own pane's working directory —
-/// `Agent` carries none directly (see `herdr::wire::Pane`'s doc: the folder
-/// lives on the *pane*, joined by `pane_id`) — and keep only the ones the D2
-/// containment boundary accepts under this project's root. The boundary does
-/// the actual decision (symlink resolution, component-wise containment,
-/// fail-closed on any ambiguity); this function only performs the join and
-/// discards anything the boundary refuses or that has no resolvable pane at
-/// all. `foreground_cwd` is not consulted here — `cwd` is the pane's own
-/// working directory, the literal quantity D2 names, and every panel this
-/// cell builds/tests sets it explicitly.
+/// terminal-pane-scope's D1/D2: membership is decided over `snapshot.panes`
+/// — the set this function is actually about — not `snapshot.agents`, since
+/// an agent is only a subset of the panes that legitimately belong to a
+/// project (agent-terminal's own D2 names it: "the herdr **panes** whose
+/// working directory sits under that project's `root_path`" — pane
+/// iteration was the decision's own wording all along). A pane qualifies
+/// when the D2 containment boundary accepts its `cwd`; when `cwd` is absent
+/// or the boundary refuses it, the boundary is tried again against
+/// `foreground_cwd`. `cwd` wins whenever both would validate: the path this
+/// function returns is not display-only — `project_pane_cwd_in_boundary`
+/// hands it to `read_activity`, and `mdview_core::transcript` uses it as the
+/// transcript directory selector, so preferring the live-but-volatile
+/// `foreground_cwd` would silently re-key an existing pane's transcript away
+/// from the directory it actually launched in. `foreground_cwd` is
+/// unix-only and always `None` elsewhere (`herdr::wire::Pane`'s doc), so
+/// this is a no-op on every other platform. The agent, if any, is then
+/// joined by `pane_id` — present, it carries today's
+/// `kind`/`name`/`status`/`title`; absent, the pane is a real shell row (D2)
+/// rather than an absence, with a `kind` that says so instead of borrowing
+/// an agent's vocabulary. The boundary itself does the actual decision
+/// (symlink resolution, component-wise containment, fail-closed on any
+/// ambiguity) for both directories alike.
 fn project_panes(
     snapshot: &herdr::Snapshot,
     boundary: &mdview_core::paths_boundary::Boundary,
 ) -> Vec<views::TerminalPaneView> {
     snapshot
-        .agents
+        .panes
         .iter()
-        .filter_map(|agent| {
-            let pane = snapshot.panes.iter().find(|p| p.pane_id == agent.pane_id)?;
-            let raw_cwd = pane.cwd.as_deref()?;
-            let resolved = boundary
-                .validate_existing(std::path::Path::new(raw_cwd))
-                .ok()?;
+        .filter_map(|pane| {
+            let resolved = pane
+                .cwd
+                .as_deref()
+                .and_then(|raw| boundary.validate_existing(std::path::Path::new(raw)).ok())
+                .or_else(|| {
+                    pane.foreground_cwd.as_deref().and_then(|raw| {
+                        boundary.validate_existing(std::path::Path::new(raw)).ok()
+                    })
+                })?;
+            let agent = snapshot.agents.iter().find(|a| a.pane_id == pane.pane_id);
             Some(views::TerminalPaneView {
-                pane_id: agent.pane_id.clone(),
-                kind: agent.kind.clone(),
-                name: agent.name.clone(),
-                status: agent.status.as_str().to_string(),
-                title: agent.title.clone(),
+                pane_id: pane.pane_id.clone(),
+                kind: agent
+                    .map(|a| a.kind.clone())
+                    .unwrap_or_else(|| "shell".to_string()),
+                name: agent.map(|a| a.name.clone()).unwrap_or_default(),
+                // A shell row (no agent) admits its own status rather than
+                // borrowing an `AgentStatus` it does not have (D2/D3) — the
+                // card's status pill names it "shell" instead of reading
+                // blank, the same way `kind` already does.
+                status: agent
+                    .map(|a| a.status.as_str().to_string())
+                    .unwrap_or_else(|| "shell".to_string()),
+                title: agent.map(|a| a.title.clone()).unwrap_or_default(),
                 cwd: resolved.to_string_lossy().into_owned(),
+                workspace: snapshot.workspace_label_for_id(&pane.workspace_id),
+                tab: snapshot.tab_label_for_id(&pane.tab_id),
             })
         })
         .collect()
@@ -1540,6 +1651,8 @@ fn unassigned_panes(
                 status: agent.status.as_str().to_string(),
                 title: agent.title.clone(),
                 cwd,
+                workspace: snapshot.workspace_label_for(agent),
+                tab: snapshot.tab_label_for(agent),
             }
         })
         .collect()
@@ -6695,6 +6808,19 @@ mod bee_route_tests {
         b.body(Body::empty()).unwrap()
     }
 
+    /// terminal-pane-scope D4: a GET to one pane's own terminal page —
+    /// `/p/{id}/_terminal/pane/{pane_id}` — the pane-scoped sibling of
+    /// `terminal_req` above.
+    fn terminal_pane_req(id: &str, pane_id: &str, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .uri(format!("/p/{id}/_terminal/pane/{pane_id}"))
+            .method("GET");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
     /// A GET request to `/p/{id}/_terminal/{pane_id}/screen`, optionally
     /// carrying the given session cookie value — the screen sibling of
     /// `terminal_req` above.
@@ -6866,6 +6992,12 @@ mod bee_route_tests {
     /// join runs the boundary's real symlink-resolving check, never a text
     /// prefix comparison). A fifth pane under a second, unrelated project's
     /// root proves cross-project isolation in the same request.
+    ///
+    /// terminal-pane-scope D4: `terminal_page` now renders exactly one
+    /// pane's full card, so membership here is read off the pane strip's own
+    /// per-pane hrefs (`/p/:id/_terminal/pane/:pane_id`) rather than off an
+    /// agent name appearing in a card — the strip lists every pane the D2
+    /// boundary accepted, whichever one is the page's own selected card.
     #[cfg(unix)]
     #[tokio::test]
     async fn terminal_route_lists_only_panes_within_the_project_root_boundary() {
@@ -6928,16 +7060,26 @@ mod bee_route_tests {
             .unwrap();
         assert_eq!(resp_a.status(), StatusCode::OK);
         let body_a = body_string(resp_a).await;
-        assert!(body_a.contains(&at_root.name), "root pane missing: {body_a}");
-        assert!(body_a.contains(&below_agent.name), "below-root pane missing: {body_a}");
-        assert!(!body_a.contains(&above.name), "above-root pane leaked in: {body_a}");
+        let strip_href = |project_id: &str, pane_id: &str| format!("/p/{project_id}/_terminal/pane/{pane_id}");
         assert!(
-            !body_a.contains(&via_symlink.name),
-            "symlink-escape pane leaked in: {body_a}"
+            body_a.contains(&strip_href(&project_a.id, &at_root.pane_id)),
+            "root pane missing from the strip: {body_a}"
         );
         assert!(
-            !body_a.contains(&other_project.name),
-            "project-b's pane leaked into project-a's list: {body_a}"
+            body_a.contains(&strip_href(&project_a.id, &below_agent.pane_id)),
+            "below-root pane missing from the strip: {body_a}"
+        );
+        assert!(
+            !body_a.contains(&strip_href(&project_a.id, &above.pane_id)),
+            "above-root pane leaked into the strip: {body_a}"
+        );
+        assert!(
+            !body_a.contains(&strip_href(&project_a.id, &via_symlink.pane_id)),
+            "symlink-escape pane leaked into the strip: {body_a}"
+        );
+        assert!(
+            !body_a.contains(&strip_href(&project_a.id, &other_project.pane_id)),
+            "project-b's pane leaked into project-a's strip: {body_a}"
         );
 
         let resp_b = app
@@ -6946,12 +7088,12 @@ mod bee_route_tests {
             .unwrap();
         let body_b = body_string(resp_b).await;
         assert!(
-            body_b.contains(&other_project.name),
-            "project-b's own pane missing from its own list: {body_b}"
+            body_b.contains(&strip_href(&project_b.id, &other_project.pane_id)),
+            "project-b's own pane missing from its own strip: {body_b}"
         );
         assert!(
-            !body_b.contains(&at_root.name),
-            "project-a's pane leaked into project-b's list: {body_b}"
+            !body_b.contains(&strip_href(&project_b.id, &at_root.pane_id)),
+            "project-a's pane leaked into project-b's strip: {body_b}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -7787,6 +7929,19 @@ mod bee_route_tests {
     fn transcript_page_req(id: &str, cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
             .uri(format!("/p/{id}/_transcript"))
+            .method("GET");
+        if let Some(c) = cookie {
+            b = b.header(header::COOKIE, c.to_string());
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    /// terminal-pane-scope D4: a GET to one pane's own transcript page —
+    /// `/p/{id}/_transcript/pane/{pane_id}` — the pane-scoped sibling of
+    /// `transcript_page_req` above.
+    fn transcript_pane_req(id: &str, pane_id: &str, cookie: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder()
+            .uri(format!("/p/{id}/_transcript/pane/{pane_id}"))
             .method("GET");
         if let Some(c) = cookie {
             b = b.header(header::COOKIE, c.to_string());
@@ -9824,6 +9979,368 @@ mod bee_route_tests {
         }
     }
 
+    /// terminal-pane-scope D4: a minimal `Herdr` double whose `snapshot()`
+    /// always answers a fixed, caller-built `herdr::Snapshot` verbatim —
+    /// including its top-level `focused_pane_id`, which `FakeHerdr` never
+    /// exposes a seam to set on an arbitrary pane (its own default seed
+    /// fixes it at `w1:p1`, a pane no test project's boundary can ever
+    /// accept). Every other `Herdr` method is unreachable — the page routes
+    /// this double serves never call them.
+    struct StaticSnapshotHerdr {
+        snap: herdr::Snapshot,
+    }
+
+    #[async_trait::async_trait]
+    impl herdr::Herdr for StaticSnapshotHerdr {
+        async fn snapshot(&self) -> herdr::Result<herdr::Snapshot> {
+            Ok(self.snap.clone())
+        }
+        async fn ping(&self) -> herdr::Result<herdr::ProtocolInfo> {
+            unreachable!("page-selection tests never ping")
+        }
+        async fn read_pane(
+            &self,
+            _pane_id: &str,
+            _source: herdr::ReadSource,
+            _lines: usize,
+        ) -> herdr::Result<herdr::ScreenRead> {
+            unreachable!("page-selection tests never read a screen")
+        }
+        async fn send_input(&self, _pane_id: &str, _text: &str, _submit: bool) -> herdr::Result<()> {
+            unreachable!("page-selection tests never send input")
+        }
+        async fn send_text(&self, _pane_id: &str, _bytes: &str) -> herdr::Result<()> {
+            unreachable!("page-selection tests never send text")
+        }
+        async fn send_keys(&self, _pane_id: &str, _keys: &[String]) -> herdr::Result<()> {
+            unreachable!("page-selection tests never send keys")
+        }
+        async fn tab_create(
+            &self,
+            _workspace_id: &str,
+            _cwd: Option<&str>,
+        ) -> herdr::Result<herdr::TabCreated> {
+            unreachable!("page-selection tests never create a tab")
+        }
+        async fn agent_start(
+            &self,
+            _workspace_id: &str,
+            _cwd: Option<&str>,
+            _argv: &[String],
+        ) -> herdr::Result<herdr::AgentStarted> {
+            unreachable!("page-selection tests never start an agent")
+        }
+    }
+
+    /// A two-pane `herdr::Snapshot`, both panes inside `path` (a single
+    /// workspace/tab), with `top_focus` as the snapshot's own top-level
+    /// `focused_pane_id` — the value `default_pane_id` reads to pick a
+    /// bare-route default. Pane ids are `"w:p-first"`/`"w:p-second"`, in that
+    /// list order, so `default_pane_id`'s "first in list order" fallback is
+    /// distinguishable from its "matches the global focus" branch.
+    fn two_pane_snapshot(path: &Path, top_focus: Option<&str>) -> herdr::Snapshot {
+        let p = path.to_string_lossy().into_owned();
+        herdr::Snapshot {
+            workspaces: vec![herdr::wire::Workspace {
+                workspace_id: "w".into(),
+                label: "w".into(),
+                agent_status: herdr::AgentStatus::Idle,
+                active_tab_id: Some("w:t".into()),
+            }],
+            tabs: vec![herdr::wire::Tab {
+                tab_id: "w:t".into(),
+                label: "main".into(),
+            }],
+            layouts: vec![herdr::wire::PaneLayout {
+                workspace_id: "w".into(),
+                tab_id: "w:t".into(),
+                focused_pane_id: Some("w:p-first".into()),
+            }],
+            panes: vec![
+                herdr::wire::Pane {
+                    pane_id: "w:p-first".into(),
+                    workspace_id: "w".into(),
+                    tab_id: "w:t".into(),
+                    cwd: Some(p.clone()),
+                    foreground_cwd: Some(p.clone()),
+                },
+                herdr::wire::Pane {
+                    pane_id: "w:p-second".into(),
+                    workspace_id: "w".into(),
+                    tab_id: "w:t".into(),
+                    cwd: Some(p.clone()),
+                    foreground_cwd: Some(p),
+                },
+            ],
+            focused_pane_id: top_focus.map(str::to_string),
+            ..herdr::Snapshot::default()
+        }
+    }
+
+    /// Case 12 (D4), happy path: a project with two panes renders a pane
+    /// strip carrying two entries with two different hrefs, and each pane's
+    /// own page renders exactly one `.term-screen` — never both.
+    #[tokio::test]
+    async fn two_panes_render_a_strip_with_two_hrefs_and_each_page_shows_one_screen() {
+        let dir = fresh_root("pane-scope-two-panes-data");
+        enable_terminal(&dir);
+        let root = fresh_root("pane-scope-two-panes-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let first = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let second = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "two-panes");
+        let app = router(st);
+
+        let bare = app.clone().oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(bare.status(), StatusCode::OK);
+        let bare_body = body_string(bare).await;
+        let href = |pane_id: &str| format!("/p/{}/_terminal/pane/{}", project.id, pane_id);
+        assert!(
+            bare_body.contains(&href(&first.pane_id)),
+            "the strip must carry the first pane's own href: {bare_body}"
+        );
+        assert!(
+            bare_body.contains(&href(&second.pane_id)),
+            "the strip must carry the second pane's own href: {bare_body}"
+        );
+        assert_ne!(href(&first.pane_id), href(&second.pane_id), "the two hrefs must differ");
+
+        for pane_id in [&first.pane_id, &second.pane_id] {
+            let resp = app
+                .clone()
+                .oneshot(terminal_pane_req(&project.id, pane_id, None))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_string(resp).await;
+            assert_eq!(
+                body.matches("class=\"term-screen\"").count(),
+                1,
+                "pane {pane_id}'s own page must render exactly one screen, never two: {body}"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 13 (D4), security: `/p/:id/_terminal/pane/:pane_id` for a pane
+    /// outside the project answers the ordinary not-found page — the same
+    /// refusal `terminal_screen` already makes at the data layer — and the
+    /// body never names the refused pane's own id or cwd.
+    #[tokio::test]
+    async fn terminal_pane_page_refuses_a_pane_outside_the_project_and_never_names_it() {
+        let dir = fresh_root("pane-scope-outside-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("pane-scope-outside-scratch");
+        let root = scratch.join("owned");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let outside_pane = fake
+            .agent_start("w1", Some(&outside.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "outside-refused");
+        let app = router(st);
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_pane_req(&project.id, &outside_pane.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_string(resp).await;
+        assert!(body.contains("pane not found"), "{body}");
+        assert!(
+            !body.contains(&outside_pane.pane_id),
+            "the refused pane's own id must never be echoed back: {body}"
+        );
+        assert!(
+            !body.contains(&outside.to_string_lossy().into_owned()),
+            "the refused pane's own cwd must never be echoed back: {body}"
+        );
+
+        // The Transcript tab's own pane-scoped route makes the same refusal.
+        let transcript_resp = app
+            .oneshot(transcript_pane_req(&project.id, &outside_pane.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(transcript_resp.status(), StatusCode::NOT_FOUND);
+        let transcript_body = body_string(transcript_resp).await;
+        assert!(
+            !transcript_body.contains(&outside_pane.pane_id),
+            "the refused pane's own id must never be echoed back on the Transcript tab either: {transcript_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Case 14 (D4), edge: the bare `/p/:id/_terminal` selects the
+    /// snapshot's globally focused pane when that pane is one of this
+    /// project's own, and falls back to the first pane in the project's own
+    /// list order when the focus is absent or belongs to no pane of this
+    /// project's.
+    #[tokio::test]
+    async fn bare_terminal_page_selects_the_focused_pane_when_owned_else_the_first() {
+        let dir = fresh_root("pane-scope-default-data");
+        enable_terminal(&dir);
+        let root = fresh_root("pane-scope-default-project");
+
+        // Focus names this project's own second pane: the second pane's own
+        // page must be the one selected, not the first.
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = std::sync::Arc::new(StaticSnapshotHerdr {
+            snap: two_pane_snapshot(&root, Some("w:p-second")),
+        });
+        let project = register(&st, &root, "default-owned-focus");
+        let app = router(st);
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("data-pane-id=\"w:p-second\""),
+            "the owned, globally focused pane must be the one selected: {body}"
+        );
+        assert!(
+            !body.contains("data-pane-id=\"w:p-first\""),
+            "only the focused pane's own card may render: {body}"
+        );
+
+        // Focus names a pane that is not this project's own (or is absent
+        // entirely): the fallback is the first pane in the project's own
+        // list order.
+        for top_focus in [Some("some-other-project:pane"), None] {
+            let dir2 = fresh_root("pane-scope-default-data-b");
+            enable_terminal(&dir2);
+            let root2 = fresh_root("pane-scope-default-project-b");
+            let mut st2 = build_state_with_dir(&dir2);
+            st2.herdr = std::sync::Arc::new(StaticSnapshotHerdr {
+                snap: two_pane_snapshot(&root2, top_focus),
+            });
+            let project2 = register(&st2, &root2, "default-fallback-first");
+            let app2 = router(st2);
+            let resp2 = app2.oneshot(terminal_req(&project2.id, None)).await.unwrap();
+            assert_eq!(resp2.status(), StatusCode::OK);
+            let body2 = body_string(resp2).await;
+            assert!(
+                body2.contains("data-pane-id=\"w:p-first\""),
+                "with no owned focus ({top_focus:?}), the first pane in list order must be selected: {body2}"
+            );
+            assert!(
+                !body2.contains("data-pane-id=\"w:p-second\""),
+                "only the first pane's own card may render: {body2}"
+            );
+            std::fs::remove_dir_all(&dir2).ok();
+            std::fs::remove_dir_all(&root2).ok();
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 4/14 continued (D4), edge: a project with no panes at all keeps
+    /// today's honest empty state on the bare route — never a 404, which
+    /// would be indistinguishable from an unregistered project id.
+    #[tokio::test]
+    async fn bare_terminal_page_with_no_panes_keeps_the_honest_empty_state() {
+        let dir = fresh_root("pane-scope-empty-data");
+        enable_terminal(&dir);
+        let root = fresh_root("pane-scope-empty-project");
+        // FakeHerdr::new()'s seeded panes all sit under
+        // `/home/dev/projects/...`, which this test's own root never
+        // contains — so this project's own boundary-filtered list is
+        // genuinely empty, the same "no agents running" case `terminal_page`
+        // has always rendered.
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "no-panes-empty");
+        let app = router(st);
+
+        let terminal_resp = app.clone().oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(
+            terminal_resp.status(),
+            StatusCode::OK,
+            "a project with no panes must never 404 — that is indistinguishable from an unregistered project"
+        );
+        let terminal_body = body_string(terminal_resp).await;
+        assert!(
+            terminal_body.contains("No agents are running under this project right now."),
+            "an empty project must render the named empty state: {terminal_body}"
+        );
+
+        let transcript_resp = app
+            .oneshot(transcript_page_req(&project.id, None))
+            .await
+            .unwrap();
+        assert_eq!(transcript_resp.status(), StatusCode::OK);
+        let transcript_body = body_string(transcript_resp).await;
+        assert!(
+            transcript_body.contains("No agents are running under this project right now."),
+            "an empty project's Transcript tab must render the same named empty state: {transcript_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Regression (D4/D12): the D7 `terminal.enabled` switch off turns the
+    /// two new pane-scoped page routes into the same disabled shape the bare
+    /// routes already answer with — no cookie, no token, nothing but the
+    /// switch decides this.
+    #[tokio::test]
+    async fn pane_scoped_pages_answer_the_disabled_shape_when_the_family_switch_is_off() {
+        let dir = fresh_root("pane-scope-disabled-data");
+        // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
+        let root = fresh_root("pane-scope-disabled-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "pane-scope-disabled");
+        let app = router(st);
+
+        let terminal_pane = app
+            .clone()
+            .oneshot(terminal_pane_req(&project.id, "no-such-pane", None))
+            .await
+            .unwrap();
+        assert_eq!(terminal_pane.status(), StatusCode::NOT_FOUND);
+        let terminal_pane_body = body_string(terminal_pane).await;
+        assert!(
+            terminal_pane_body.contains("disabled"),
+            "the disabled terminal pane page must name the reason: {terminal_pane_body}"
+        );
+
+        let transcript_pane = app
+            .oneshot(transcript_pane_req(&project.id, "no-such-pane", None))
+            .await
+            .unwrap();
+        assert_eq!(transcript_pane.status(), StatusCode::NOT_FOUND);
+        let transcript_pane_body = body_string(transcript_pane).await;
+        assert!(
+            transcript_pane_body.contains("disabled"),
+            "the disabled transcript pane page must name the reason: {transcript_pane_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Writes one D8 preset into `dir/config.toml`, preserving whatever is
     /// already there (mirrors `enable_terminal`'s load-mutate-save shape).
     fn configure_preset(dir: &Path, label: &str, argv: &[&str]) {
@@ -10601,6 +11118,877 @@ mod bee_route_tests {
              since the shared .fg-acc summary rule does not reach it: {style}"
         );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---- terminal-pane-scope: project_panes over snapshot.panes, either
+    // directory, cwd first (D1/D2) ----
+    //
+    // Every assertion below is made on pane id, never on an agent name --
+    // a shell row has no name to assert on, so an agent-name-only assertion
+    // would be structurally blind to it.
+
+    /// Case 1 (D2): a pane inside the project root with no agent at all is
+    /// listed, as a shell row.
+    #[tokio::test]
+    async fn terminal_project_lists_a_pane_with_no_agent_as_a_shell_row() {
+        let dir = fresh_root("scope-shell-row");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-shell-row-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "shell-row");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("data-pane-id=\"{}\"", created.pane_id)),
+            "a pane with no agent must still be listed, as a shell row: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 2 (D1, `#[cfg(unix)]`), the worktree case measured in
+    /// CONTEXT.md: a pane whose `cwd` sits outside the project root but
+    /// whose `foreground_cwd` sits inside it is listed, and its screen
+    /// route answers rather than refusing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_project_lists_a_pane_matching_only_via_foreground_cwd() {
+        let dir = fresh_root("scope-fg-only-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-fg-only-scratch");
+        let root = scratch.join("project");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&outside.to_string_lossy()))
+            .await
+            .unwrap();
+        fake.set_pane_dirs(
+            &created.pane_id,
+            Some(&outside.to_string_lossy()),
+            Some(&root.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "fg-only");
+        let app = router(st);
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("data-pane-id=\"{}\"", created.pane_id)),
+            "a pane matching only via foreground_cwd must be listed: {body}"
+        );
+
+        let screen_resp = app
+            .oneshot(terminal_screen_req(&project.id, &created.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            screen_resp.status(),
+            StatusCode::OK,
+            "the screen route must answer for a pane matched via foreground_cwd, not refuse it"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Case 3 (D1, the mirror direction): a pane whose `cwd` sits inside the
+    /// project root but whose `foreground_cwd` sits outside it is listed --
+    /// `cwd` alone is enough, on every platform, since `cwd` is tried
+    /// first.
+    #[tokio::test]
+    async fn terminal_project_lists_a_pane_whose_foreground_cwd_is_outside_but_cwd_is_inside() {
+        let dir = fresh_root("scope-cwd-only-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-cwd-only-scratch");
+        let root = scratch.join("project");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+        fake.set_pane_dirs(
+            &created.pane_id,
+            Some(&root.to_string_lossy()),
+            Some(&outside.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "cwd-only");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("data-pane-id=\"{}\"", created.pane_id)),
+            "a pane whose cwd validates must be listed even though its foreground_cwd does not: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Case 4, the widening's outer edge: a pane where neither directory
+    /// resolves inside the project root stays excluded, and its screen,
+    /// input, and keys routes all still refuse it.
+    #[tokio::test]
+    async fn terminal_project_excludes_a_pane_matching_neither_directory() {
+        let dir = fresh_root("scope-neither-dir-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-neither-dir-scratch");
+        let root = scratch.join("project");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        // agent_start sets cwd == foreground_cwd, both outside the root.
+        let outside_agent = fake
+            .agent_start(
+                "w1",
+                Some(&outside.to_string_lossy()),
+                &["claude".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "neither-dir");
+        let app = router(st);
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&outside_agent.pane_id),
+            "a pane matching neither directory must never be listed: {body}"
+        );
+
+        let screen_resp = app
+            .clone()
+            .oneshot(terminal_screen_req(
+                &project.id,
+                &outside_agent.pane_id,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(screen_resp.status(), StatusCode::NOT_FOUND);
+
+        let input_resp = app
+            .clone()
+            .oneshot(terminal_input_req(
+                &project.id,
+                &outside_agent.pane_id,
+                "should never land",
+                Some(true),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(input_resp.status(), StatusCode::NOT_FOUND);
+
+        let keys_resp = app
+            .oneshot(terminal_keys_req(
+                &project.id,
+                &outside_agent.pane_id,
+                &["enter"],
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(keys_resp.status(), StatusCode::NOT_FOUND);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Case 5 (`#[cfg(unix)]`), the security edge that turns this feature
+    /// into a vulnerability if missed: a pane whose `foreground_cwd`
+    /// escapes the project root by a symlink is refused, exactly as a `cwd`
+    /// that does (`terminal_route_lists_only_panes_within_the_project_root_boundary`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_project_refuses_a_pane_whose_foreground_cwd_escapes_via_symlink() {
+        let dir = fresh_root("scope-fg-symlink-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-fg-symlink-scratch");
+        let root = scratch.join("project");
+        let escape_target = scratch.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&escape_target).unwrap();
+        let symlink_path = root.join("escape-link");
+        std::os::unix::fs::symlink(&escape_target, &symlink_path).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+        // cwd absent: only foreground_cwd is consulted, and its raw path
+        // sits under the root but resolves outside it.
+        fake.set_pane_dirs(
+            &created.pane_id,
+            None,
+            Some(&symlink_path.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "fg-symlink");
+        let app = router(st);
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&created.pane_id),
+            "a foreground_cwd that escapes the root by symlink must be refused, not listed: {body}"
+        );
+
+        let screen_resp = app
+            .oneshot(terminal_screen_req(&project.id, &created.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            screen_resp.status(),
+            StatusCode::NOT_FOUND,
+            "the screen route must refuse a pane whose only qualifying directory is a symlink escape"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Case 6, edge: a pane reporting neither `cwd` nor `foreground_cwd` is
+    /// excluded from the project's list.
+    #[tokio::test]
+    async fn terminal_project_excludes_a_pane_reporting_neither_directory() {
+        let dir = fresh_root("scope-no-dirs-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-no-dirs-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+        fake.set_pane_dirs(&created.pane_id, None, None)
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "no-dirs");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&created.pane_id),
+            "a pane reporting neither directory must never be listed: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 7 (regression), the standing gap this cell leaves unchanged and
+    /// pinned by pane id: a shell pane under no registered project is
+    /// absent from every registered project's own list AND absent from the
+    /// Unassigned group, since `unassigned_panes`' own output loop stays
+    /// agent-only (`unassigned_panes`'s doc; inverting it too would newly
+    /// expose every shell pane on the host through routes with no
+    /// containment check of their own).
+    #[tokio::test]
+    async fn terminal_project_scope_shell_pane_under_no_project_is_invisible_everywhere() {
+        let dir = fresh_root("scope-orphan-shell-data");
+        enable_terminal(&dir);
+        enable_unassigned_group(&dir);
+        let scratch = fresh_root("scope-orphan-shell-scratch");
+        let owned_root = scratch.join("owned");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&owned_root).unwrap();
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let stray = fake
+            .tab_create("w1", Some(&stray_root.to_string_lossy()))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &owned_root, "orphan-shell-owner");
+        let app = router(st);
+
+        let project_resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        let project_body = body_string(project_resp).await;
+        assert!(
+            !project_body.contains(&stray.pane_id),
+            "the stray shell pane must not leak into an unrelated project's own list: {project_body}"
+        );
+
+        let unassigned_resp = app.oneshot(unassigned_req(None)).await.unwrap();
+        assert_eq!(unassigned_resp.status(), StatusCode::OK);
+        let unassigned_body = body_string(unassigned_resp).await;
+        assert!(
+            !unassigned_body.contains(&stray.pane_id),
+            "a shell pane under no registered project is the standing, pinned gap -- it must \
+             stay invisible to the Unassigned group too, not newly appear there: {unassigned_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Case 8 (`#[cfg(unix)]`): the precedence rule that keeps an existing
+    /// pane's transcript from silently re-keying. A pane matched only via
+    /// `foreground_cwd` keys its transcript read on that matched path,
+    /// answering `available: false` when nothing has been written there
+    /// (the honest empty state, not an error) -- and a pane whose `cwd`
+    /// validates keys its transcript on `cwd`, even when `foreground_cwd`
+    /// also validates.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_transcript_keys_on_cwd_first_and_on_foreground_cwd_only_when_cwd_does_not_validate(
+    ) {
+        let dir = fresh_root("scope-transcript-precedence-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-transcript-precedence-scratch");
+        let root = scratch.join("project");
+        let outside = scratch.join("outside");
+        let inner_cwd = root.join("launched-here");
+        let inner_fg = root.join("live-here");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&inner_cwd).unwrap();
+        std::fs::create_dir_all(&inner_fg).unwrap();
+        let transcript_root = fresh_root("scope-transcript-precedence-claude");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+
+        // Sub-case: matched only via foreground_cwd -- nothing is ever
+        // written at that path, so the transcript route must answer
+        // available:false rather than 404 (membership already passed).
+        let fg_only = fake
+            .tab_create("w1", Some(&outside.to_string_lossy()))
+            .await
+            .unwrap();
+        fake.set_pane_dirs(
+            &fg_only.pane_id,
+            Some(&outside.to_string_lossy()),
+            Some(&inner_fg.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+
+        // Sub-case: both directories validate -- the transcript is written
+        // only at the cwd path, proving cwd wins the precedence.
+        let both_match = fake
+            .tab_create("w1", Some(&inner_cwd.to_string_lossy()))
+            .await
+            .unwrap();
+        fake.set_pane_dirs(
+            &both_match.pane_id,
+            Some(&inner_cwd.to_string_lossy()),
+            Some(&inner_fg.to_string_lossy()),
+        )
+        .await
+        .unwrap();
+        let cwd_canonical = canonical_cwd(&inner_cwd);
+        write_transcript(
+            &transcript_root,
+            &cwd_canonical,
+            "s1",
+            "{\"type\":\"user\",\"message\":{\"content\":\"launched here\"}}\n",
+        );
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        st.transcript_root = Some(transcript_root.clone());
+        let project = register(&st, &root, "transcript-precedence");
+        let app = router(st);
+
+        let fg_resp = app
+            .clone()
+            .oneshot(terminal_transcript_req(
+                &project.id,
+                &fg_only.pane_id,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(fg_resp.status(), StatusCode::OK);
+        let fg_json: serde_json::Value = serde_json::from_str(&body_string(fg_resp).await).unwrap();
+        assert_eq!(
+            fg_json["available"],
+            serde_json::json!(false),
+            "a pane matched only via foreground_cwd, with nothing written there, must answer \
+             the honest empty state: {fg_json}"
+        );
+
+        let both_resp = app
+            .oneshot(terminal_transcript_req(
+                &project.id,
+                &both_match.pane_id,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(both_resp.status(), StatusCode::OK);
+        let both_json: serde_json::Value =
+            serde_json::from_str(&body_string(both_resp).await).unwrap();
+        assert_eq!(
+            both_json["available"],
+            serde_json::json!(true),
+            "a pane whose cwd validates must key its transcript on cwd, even though \
+             foreground_cwd also validates: {both_json}"
+        );
+        let lines: Vec<String> = both_json["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(lines, vec!["» launched here".to_string()], "{both_json}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+        std::fs::remove_dir_all(&transcript_root).ok();
+    }
+
+    /// Case 9 (D1): a pane can legitimately qualify for two registered
+    /// projects at once (a parent repo and its worktree) -- it is listed by
+    /// both, and each project's own screen route serves it under its own
+    /// boundary, not by borrowing the other's.
+    #[tokio::test]
+    async fn terminal_project_a_pane_qualifying_for_two_projects_is_listed_by_both() {
+        let dir = fresh_root("scope-two-projects-data");
+        enable_terminal(&dir);
+        let scratch = fresh_root("scope-two-projects-scratch");
+        let parent_root = scratch.join("parent");
+        let child_root = parent_root.join("child-worktree");
+        std::fs::create_dir_all(&child_root).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let shared = fake
+            .agent_start(
+                "w1",
+                Some(&child_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let parent = register(&st, &parent_root, "two-projects-parent");
+        let child = register(&st, &child_root, "two-projects-child");
+        let app = router(st);
+
+        let parent_resp = app
+            .clone()
+            .oneshot(terminal_req(&parent.id, None))
+            .await
+            .unwrap();
+        let parent_body = body_string(parent_resp).await;
+        assert!(
+            parent_body.contains(&format!("data-pane-id=\"{}\"", shared.pane_id)),
+            "the shared pane is missing from the parent project's own list: {parent_body}"
+        );
+
+        let child_resp = app
+            .clone()
+            .oneshot(terminal_req(&child.id, None))
+            .await
+            .unwrap();
+        let child_body = body_string(child_resp).await;
+        assert!(
+            child_body.contains(&format!("data-pane-id=\"{}\"", shared.pane_id)),
+            "the shared pane is missing from the child project's own list: {child_body}"
+        );
+
+        let parent_screen = app
+            .clone()
+            .oneshot(terminal_screen_req(&parent.id, &shared.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(parent_screen.status(), StatusCode::OK);
+
+        let child_screen = app
+            .oneshot(terminal_screen_req(&child.id, &shared.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(child_screen.status(), StatusCode::OK);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    // ---- terminal-pane-scope cell 2: a card names its workspace, its tab,
+    // and a status that admits having no agent (D3) ----
+
+    /// Case 10 (D3): a card renders its workspace label and its tab label
+    /// together as its identity, on the Terminal tab and the Transcript tab
+    /// alike -- CONTEXT.md's own gap: "Today's card shows bare status text
+    /// with no workspace or tab identity."
+    #[tokio::test]
+    async fn terminal_and_transcript_cards_name_the_panes_workspace_and_tab() {
+        let dir = fresh_root("scope-identity-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-identity-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        fake.agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "identity");
+        let app = router(st);
+
+        let terminal_resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        assert_eq!(terminal_resp.status(), StatusCode::OK);
+        let terminal_body = body_string(terminal_resp).await;
+        assert!(
+            terminal_body.contains("frontend-app · main"),
+            "the terminal card must name its workspace and tab together: {terminal_body}"
+        );
+
+        let transcript_resp = app
+            .oneshot(transcript_page_req(&project.id, None))
+            .await
+            .unwrap();
+        assert_eq!(transcript_resp.status(), StatusCode::OK);
+        let transcript_body = body_string(transcript_resp).await;
+        assert!(
+            transcript_body.contains("frontend-app · main"),
+            "the transcript card must name its workspace and tab together: {transcript_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 10, continued (D3): a working, an idle, a done and a blocked
+    /// pane each render a status pill whose class differs from the other
+    /// three -- the six states this cell owns map onto `.fg-status`'s three
+    /// tone modifiers (`components.css:145-151`) with no CSS file touched.
+    ///
+    /// terminal-pane-scope D4: `terminal_page` now renders exactly one
+    /// pane's card, so each status is checked on that pane's own
+    /// `/p/:id/_terminal/pane/:pane_id` page rather than by slicing four
+    /// cards out of one shared body.
+    #[tokio::test]
+    async fn terminal_page_renders_a_distinct_status_pill_class_per_status() {
+        let dir = fresh_root("scope-status-pill-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-status-pill-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let working = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&working.pane_id, herdr::AgentStatus::Working)
+            .await
+            .unwrap();
+        let idle = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&idle.pane_id, herdr::AgentStatus::Idle)
+            .await
+            .unwrap();
+        let done = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&done.pane_id, herdr::AgentStatus::Done)
+            .await
+            .unwrap();
+        let blocked = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&blocked.pane_id, herdr::AgentStatus::Blocked)
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "status-pill");
+        let app = router(st);
+
+        async fn pane_page(app: Router, project_id: &str, pane_id: &str) -> String {
+            let resp = app
+                .oneshot(terminal_pane_req(project_id, pane_id, None))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_string(resp).await
+        }
+        let card = |body: &str, pane_id: &str| -> String {
+            let start = body
+                .find(&format!("data-pane-id=\"{pane_id}\""))
+                .unwrap_or_else(|| panic!("no card for {pane_id}: {body}"));
+            let end = body[start..]
+                .find("</div>")
+                .map(|i| start + i)
+                .unwrap_or(body.len());
+            body[start..end].to_string()
+        };
+
+        let working_body = pane_page(app.clone(), &project.id, &working.pane_id).await;
+        assert!(
+            card(&working_body, &working.pane_id).contains("class=\"fg-status fg-status--warn\""),
+            "working must render the warn pill: {working_body}"
+        );
+        let blocked_body = pane_page(app.clone(), &project.id, &blocked.pane_id).await;
+        assert!(
+            card(&blocked_body, &blocked.pane_id).contains("class=\"fg-status fg-status--blocked\""),
+            "blocked must render the blocked pill: {blocked_body}"
+        );
+        let done_body = pane_page(app.clone(), &project.id, &done.pane_id).await;
+        assert!(
+            card(&done_body, &done.pane_id).contains("class=\"fg-status fg-status--ready\""),
+            "done must render the ready pill: {done_body}"
+        );
+        let idle_body = pane_page(app, &project.id, &idle.pane_id).await;
+        let idle_card = card(&idle_body, &idle.pane_id);
+        assert!(
+            idle_card.contains("class=\"fg-status\">"),
+            "idle must render the neutral, unmodified pill: {idle_body}"
+        );
+        assert!(
+            !idle_card.contains("fg-status--"),
+            "idle must not borrow another status's modifier: {idle_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 10, edge (D3): `AgentStatus::Unknown` -- any status value herdr
+    /// adds later that this app does not recognize (`wire.rs:27`) -- renders
+    /// the same neutral, unmodified `.fg-status` pill idle does, never
+    /// borrowing `--ready`/`--warn`/`--blocked` from a state it is not.
+    #[tokio::test]
+    async fn terminal_page_an_unknown_status_renders_the_neutral_pill() {
+        let dir = fresh_root("scope-status-unknown-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-status-unknown-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&started.pane_id, herdr::AgentStatus::Unknown)
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "status-unknown");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("class=\"fg-status\">"),
+            "an unknown status must render the neutral pill: {body}"
+        );
+        assert!(
+            !body.contains("fg-status--"),
+            "an unknown status must not borrow another state's colour: {body}"
+        );
+        assert!(
+            body.contains(">unknown<"),
+            "the pill's own text must still name the state: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Case 11 (D2/D3): a shell row (no agent) renders no agent kind and
+    /// claims no status it does not have -- both the meta text and the
+    /// status pill's own text read "shell" rather than either being blank
+    /// or borrowing `claude`/`codex`/an `AgentStatus`.
+    #[tokio::test]
+    async fn terminal_page_a_shell_row_names_itself_a_shell() {
+        let dir = fresh_root("scope-shell-identity-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-shell-identity-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "shell-identity");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let start = body
+            .find(&format!("data-pane-id=\"{}\"", created.pane_id))
+            .unwrap_or_else(|| panic!("no card for the shell pane: {body}"));
+        let end = body[start..]
+            .find("</div>")
+            .map(|i| start + i)
+            .unwrap_or(body.len());
+        let card = &body[start..end];
+
+        assert!(
+            card.contains("class=\"term-pane__meta\">shell<"),
+            "a shell row must name itself a shell, not an agent kind: {body}"
+        );
+        assert!(
+            !card.contains("claude") && !card.contains("codex"),
+            "a shell row must claim no agent kind: {body}"
+        );
+        assert!(
+            card.contains("class=\"fg-status\">") && card.contains(">shell<"),
+            "a shell row's status pill must name it a shell, not claim a status it doesn't have: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Regression (cell 2 must not touch any existing control): the reply
+    /// form, the key buttons and the scroll buttons stay on every terminal
+    /// card, including a shell row with no agent to reply to or send keys
+    /// at, and the Transcript tab still carries no `.term-screen` viewport.
+    ///
+    /// terminal-pane-scope D4: `terminal_page`/`transcript_page` now render
+    /// exactly one pane, so each pane's controls are checked on its own
+    /// `/pane/:pane_id` page rather than on one page shared by both panes.
+    #[tokio::test]
+    async fn terminal_and_transcript_cards_keep_every_existing_control_including_on_a_shell_row() {
+        let dir = fresh_root("scope-controls-survive-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-controls-survive-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let agent_pane = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let shell_pane = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "controls-survive");
+        let app = router(st);
+
+        for pane_id in [&agent_pane.pane_id, &shell_pane.pane_id] {
+            let terminal_resp = app
+                .clone()
+                .oneshot(terminal_pane_req(&project.id, pane_id, None))
+                .await
+                .unwrap();
+            assert_eq!(terminal_resp.status(), StatusCode::OK);
+            let terminal_body = body_string(terminal_resp).await;
+            assert!(
+                terminal_body.contains(&format!("class=\"term-reply\" data-pane-id=\"{pane_id}\"")),
+                "the reply form must survive on every terminal card, including a shell row ({pane_id}): {terminal_body}"
+            );
+            assert!(
+                terminal_body.contains(&format!("class=\"term-keys\" data-pane-id=\"{pane_id}\"")),
+                "the key buttons must survive on every terminal card, including a shell row ({pane_id}): {terminal_body}"
+            );
+            assert!(
+                terminal_body.contains(&format!("class=\"term-scroll\" data-pane-id=\"{pane_id}\"")),
+                "the scroll buttons must survive on every terminal card, including a shell row ({pane_id}): {terminal_body}"
+            );
+        }
+
+        for pane_id in [&agent_pane.pane_id, &shell_pane.pane_id] {
+            let transcript_resp = app
+                .clone()
+                .oneshot(transcript_pane_req(&project.id, pane_id, None))
+                .await
+                .unwrap();
+            assert_eq!(transcript_resp.status(), StatusCode::OK);
+            let transcript_body = body_string(transcript_resp).await;
+            assert!(
+                !transcript_body.contains("class=\"term-screen\""),
+                "the transcript tab must still carry no screen element: {transcript_body}"
+            );
+            assert!(
+                transcript_body.contains(&format!(
+                    "class=\"term-transcript\" data-pane-id=\"{pane_id}\""
+                )),
+                "every pane, including a shell row, must still get a transcript viewport ({pane_id}): {transcript_body}"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
     }
 }
