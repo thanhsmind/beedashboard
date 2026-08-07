@@ -185,12 +185,17 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-3); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; }
 /* Send is the primary of the pair — Stage beside it stays the quiet one. */
 .term-reply__send { background: var(--color-action); border-color: var(--color-action); color: var(--color-bg); font-weight: var(--weight-semibold); }
-.term-keys { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
+/* One tight control block under the screen: the arrows on their own line,
+   everything else on the next. The rows carry no margins of their own —
+   stacked separately they drifted apart into three loose bands. */
+.term-controls { display: flex; flex-direction: column; gap: var(--space-1); margin-top: var(--space-2); }
+.term-controls__row { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.term-keys { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .term-keys button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
 /* terminal-scroll-2: the pair of scroll buttons ("Load older" / "Live")
    share `.term-keys button`'s own look — same padding, border, radius,
    background — rather than inventing a second button style beside it. */
-.term-scroll { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
+.term-scroll { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .term-scroll button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
 .term-transcript { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
 .term-transcript__line { white-space: pre-wrap; word-break: break-word; }
@@ -254,18 +259,24 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
   <div class="term-pane__meta">{kind}{title_sep}{title}</div>
   <div class="term-pane__cwd">{cwd}</div>
   <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
-  <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
-    <button type="button" data-scroll="older">Load older</button>
-    <button type="button" data-scroll="live">Back to live</button>
-  </div>
-  <div class="term-keys" data-pane-id="{pane_id}" aria-label="Send a key to {name}">
-    <button type="button" data-key="up">↑</button>
-    <button type="button" data-key="down">↓</button>
-    <button type="button" data-key="left">←</button>
-    <button type="button" data-key="right">→</button>
-    <button type="button" data-key="enter">Enter</button>
-    <button type="button" data-key="escape">Esc</button>
-    <button type="button" data-key="tab">Tab</button>
+  <div class="term-controls">
+    <div class="term-keys" data-pane-id="{pane_id}" aria-label="Move around {name}'s screen">
+      <button type="button" data-key="up">↑</button>
+      <button type="button" data-key="down">↓</button>
+      <button type="button" data-key="left">←</button>
+      <button type="button" data-key="right">→</button>
+    </div>
+    <div class="term-controls__row">
+      <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
+        <button type="button" data-scroll="older">Load older</button>
+        <button type="button" data-scroll="live">Back to live</button>
+      </div>
+      <div class="term-keys" data-pane-id="{pane_id}" aria-label="Send a key to {name}">
+        <button type="button" data-key="enter">Enter</button>
+        <button type="button" data-key="escape">Esc</button>
+        <button type="button" data-key="tab">Tab</button>
+      </div>
+    </div>
   </div>
   <form class="term-reply" data-pane-id="{pane_id}">
     <textarea class="term-reply__text" rows="3" placeholder="Type a reply… (Ctrl+Enter to send)" aria-label="Reply to {name}" autocomplete="off"></textarea>

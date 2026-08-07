@@ -8719,13 +8719,19 @@ mod bee_route_tests {
         // squeezed beside it.
         let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("missing {needle}: {body}"));
         let screen = at("class=\"term-screen\"");
+        let arrows = at("class=\"term-keys\"");
         let scroll = at("class=\"term-scroll\"");
-        let keys = at("class=\"term-keys\"");
         let reply = at("class=\"term-reply\"");
         let actions = at("class=\"term-reply__actions\"");
         assert!(
-            screen < scroll && scroll < keys && keys < reply && reply < actions,
-            "pane controls out of order (screen {screen}, scroll {scroll}, keys {keys}, reply {reply}, actions {actions}): {body}"
+            screen < arrows && arrows < scroll && scroll < reply && reply < actions,
+            "pane controls out of order (screen {screen}, arrows {arrows}, scroll {scroll}, reply {reply}, actions {actions}): {body}"
+        );
+        // The arrows keep a line to themselves; the scroll pair and the named
+        // keys share the one under it, inside a single control block.
+        assert!(
+            body.contains("class=\"term-controls\"") && body.contains("class=\"term-controls__row\""),
+            "the controls must sit in one two-row block: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
