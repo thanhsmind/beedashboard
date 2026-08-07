@@ -1086,6 +1086,18 @@
         sendReply(paneId, input.value, true, input);
       });
 
+      // The reply box is a textarea, so Enter belongs to the text — it opens
+      // a new line the way it does anywhere else. Ctrl+Enter (Cmd+Enter on a
+      // Mac) is what a single-line field's bare Enter used to be: send.
+      if (input) {
+        input.addEventListener("keydown", function (ev) {
+          if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+            ev.preventDefault();
+            sendReply(paneId, input.value, true, input);
+          }
+        });
+      }
+
       if (stageBtn) {
         stageBtn.addEventListener("click", function () {
           sendReply(paneId, input.value, false, input);

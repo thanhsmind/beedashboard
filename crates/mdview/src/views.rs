@@ -174,8 +174,10 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    scrolls — that is what replaces wrapping when a line runs wider than the
    card. */
 .term-screen { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); white-space: pre; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.25; height: auto; overflow-x: auto; overflow-y: hidden; }
-.term-reply { display: flex; gap: var(--space-2); margin-top: var(--space-2); }
-.term-reply__text { flex: 1; min-width: 0; padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); background: var(--color-bg); color: var(--color-text); }
+/* The buttons sit at the top edge rather than stretching, now that the
+   reply box is a multi-line field whose height the operator controls. */
+.term-reply { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-2); }
+.term-reply__text { flex: 1; min-width: 0; padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.35; background: var(--color-bg); color: var(--color-text); resize: vertical; }
 .term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; }
 .term-keys { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-2); }
 .term-keys button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
@@ -247,7 +249,7 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
   <div class="term-pane__cwd">{cwd}</div>
   <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
   <form class="term-reply" data-pane-id="{pane_id}">
-    <input type="text" class="term-reply__text" placeholder="Type a reply…" aria-label="Reply to {name}" autocomplete="off">
+    <textarea class="term-reply__text" rows="3" placeholder="Type a reply… (Ctrl+Enter to send)" aria-label="Reply to {name}" autocomplete="off"></textarea>
     <button type="submit" class="term-reply__send">Send</button>
     <button type="button" class="term-reply__stage">Stage</button>
   </form>
@@ -556,6 +558,14 @@ const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
         ev.preventDefault();
         sendReply(paneId, input.value, true, input);
       });
+      if (input) {
+        input.addEventListener("keydown", function (ev) {
+          if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+            ev.preventDefault();
+            sendReply(paneId, input.value, true, input);
+          }
+        });
+      }
       if (stageBtn) {
         stageBtn.addEventListener("click", function () {
           sendReply(paneId, input.value, false, input);

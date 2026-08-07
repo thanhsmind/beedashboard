@@ -924,6 +924,11 @@ async fn terminal_screen(
         return not_found("pane not found");
     }
     let read = if let Some(history) = &query.history {
+        // TEMPORARY (remove once the button is confirmed working end to end):
+        // proves whether the browser's press reaches this route at all.
+        // Carries only the pane id and the hop count — never any typed text
+        // or key press.
+        tracing::info!("screen history read pane={pane_id} pages={}", history_pages(history));
         let scroller = herdr::pane_scroller::PaneScroller::new(st.herdr.as_ref());
         scroller.read_history(&pane_id, history_pages(history)).await
     } else {
@@ -1598,6 +1603,11 @@ async fn unassigned_terminal_screen(
         return refusal;
     }
     let read = if let Some(history) = &query.history {
+        // TEMPORARY (remove once the button is confirmed working end to end):
+        // proves whether the browser's press reaches this route at all.
+        // Carries only the pane id and the hop count — never any typed text
+        // or key press.
+        tracing::info!("screen history read pane={pane_id} pages={}", history_pages(history));
         let scroller = herdr::pane_scroller::PaneScroller::new(st.herdr.as_ref());
         scroller.read_history(&pane_id, history_pages(history)).await
     } else {
@@ -8692,6 +8702,17 @@ mod bee_route_tests {
         );
         assert!(body.contains("class=\"term-reply__send\""), "{body}");
         assert!(body.contains("data-key=\"enter\""), "{body}");
+        // The reply box holds more than one line: a message worth sending to
+        // an agent rarely fits on one, and a single-line field also stole
+        // Enter from the text itself.
+        assert!(
+            body.contains("<textarea class=\"term-reply__text\""),
+            "the reply box must be a multi-line field: {body}"
+        );
+        assert!(
+            !body.contains("<input type=\"text\" class=\"term-reply__text\""),
+            "the single-line reply field must be gone: {body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
