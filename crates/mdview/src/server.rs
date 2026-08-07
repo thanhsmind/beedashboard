@@ -9339,6 +9339,80 @@ mod bee_route_tests {
         );
     }
 
+    /// A last-seen time reads to the minute and no further. The full instant
+    /// stays in `datetime` for the script and for any machine reader, but the
+    /// text a person sees carries no seconds and no sub-second digits — those
+    /// were pushing the project's own name off the line.
+    #[tokio::test]
+    async fn home_page_shows_a_last_seen_time_cut_to_the_minute() {
+        let dir = fresh_root("home-short-instant");
+        let st = build_state_with_dir(&dir);
+        let root = dir.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+        let p = register(&st, &root, "demo");
+
+        let body = body_string(get(router(st), "/").await).await;
+
+        let full = &p.last_seen_at;
+        let (date, rest) = full.split_once('T').expect("registry writes an RFC3339 instant");
+        let minute = format!("{date} {}", &rest[..5]);
+        assert!(
+            body.contains(&format!("datetime=\"{full}\"")),
+            "the full instant must stay in datetime: {body}"
+        );
+        assert!(
+            body.contains(&format!(">{minute}</time>")),
+            "the visible text must read to the minute ({minute}): {body}"
+        );
+        // The tail past the minute — seconds and sub-second digits — must not
+        // appear as text. It is still present inside the datetime attribute,
+        // so the check is anchored on the closing tag.
+        assert!(
+            !body.contains(&format!("{full}</time>")),
+            "the raw instant must not be the visible text: {body}"
+        );
+    }
+
+    /// The two home-page behaviors that live in `assets/app.js` reach the
+    /// markup by class name, so a rename in `views.rs` silently breaks them —
+    /// which is exactly what happened when the project cards became rows: the
+    /// timestamps stopped being formatted and the delete confirmation stopped
+    /// asking. Nothing else in the suite would have caught it, because both
+    /// live in a script no route test executes.
+    #[tokio::test]
+    async fn home_page_script_selectors_match_the_markup_the_page_emits() {
+        let dir = fresh_root("home-script-selectors");
+        let st = build_state_with_dir(&dir);
+        let root = dir.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+        register(&st, &root, "demo");
+
+        let body = body_string(get(router(st), "/").await).await;
+        let script = include_str!("../assets/app.js");
+
+        for (selector, needle, what) in [
+            (
+                "time.proj-row__time[datetime]",
+                "<time class=\"proj-row__time\" datetime=",
+                "the timestamp formatter",
+            ),
+            (
+                ".proj-row__delete",
+                "<form class=\"proj-row__delete\"",
+                "the delete confirmation",
+            ),
+        ] {
+            assert!(
+                script.contains(selector),
+                "{what} must still query {selector}"
+            );
+            assert!(
+                body.contains(needle),
+                "{what}'s selector {selector} matches nothing the page emits: {body}"
+            );
+        }
+    }
+
     /// D5/D4's core resolution, on the home page itself: an unauthenticated
     /// `GET /` must never reveal an unassigned agent's name or cwd, even
     /// though the group's presence marker is visible once the D7 switch is

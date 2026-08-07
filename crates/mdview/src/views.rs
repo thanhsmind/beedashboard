@@ -59,6 +59,27 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
 /// on either side of the separator is empty — an id that names no parent, or
 /// names one but no branch, is treated as an ordinary project rather than
 /// nested under a row that would not be there.
+/// The text a timestamp shows before any script runs: the instant cut to the
+/// minute, with the date and the clock separated by a space rather than the
+/// machine-facing `T`. `2026-08-07T09:17:49.240188408Z` → `2026-08-07 09:17`.
+/// Seconds and the sub-second digits are dropped — nobody reads nine decimal
+/// places of a last-seen time, and they were pushing the project's own name
+/// off the line. The full instant stays in the element's `datetime`, which is
+/// what the script and any machine reader use.
+fn short_instant(iso: &str) -> String {
+    let (date, rest) = match iso.split_once('T') {
+        Some(parts) => parts,
+        // Not the shape this function knows how to cut; show it whole rather
+        // than guess at where its minute ends.
+        None => return iso.to_string(),
+    };
+    let hhmm: String = rest.chars().take(5).collect();
+    if hhmm.len() < 5 || !hhmm.contains(':') {
+        return iso.to_string();
+    }
+    format!("{date} {hhmm}")
+}
+
 fn worktree_branch(id: &str) -> Option<(&str, &str)> {
     let (parent, branch) = id.split_once("--wt--")?;
     if parent.is_empty() || branch.is_empty() {
@@ -114,7 +135,7 @@ pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool
                 r#"<li class="{row_class}">
   <a class="proj-row__link" href="/p/{id}/">
     <span class="proj-row__name">{label}</span>
-    <span class="proj-row__meta">{count} markdown files · <time class="proj-row__time" datetime="{seen}">{seen}</time></span>
+    <span class="proj-row__meta">{count} markdown files · <time class="proj-row__time" datetime="{seen}">{seen_short}</time></span>
   </a>
   <form class="proj-row__delete" method="post" action="/api/projects/{id}/unregister" data-project="{name}">
     <button type="submit" class="proj-card__del" aria-label="Remove {name} from mdview" title="Remove from mdview">✕</button>
@@ -126,6 +147,7 @@ pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool
                 name = esc(&p.name),
                 count = count,
                 seen = esc(&p.last_seen_at),
+                seen_short = esc(&short_instant(&p.last_seen_at)),
             ));
         }
         format!(r#"<ul class="proj-list">{rows}</ul>"#, rows = rows)

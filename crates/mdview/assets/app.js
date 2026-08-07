@@ -305,11 +305,13 @@
     });
   })();
 
-  // Project card timestamps: the server sends a raw ISO instant in
-  // <time datetime>; render it in the viewer's own locale/timezone as a short
-  // relative age (older than a week → an absolute date).
+  // Project row timestamps: the server sends the full ISO instant in
+  // <time datetime> and already prints a minute-precision fallback as the
+  // element's text; this upgrades it to the viewer's own locale/timezone —
+  // a short relative age while it is recent, an absolute date and time once
+  // it is older than a week. Never seconds, never sub-second digits.
   (function () {
-    var times = document.querySelectorAll("time.proj-card__time[datetime]");
+    var times = document.querySelectorAll("time.proj-row__time[datetime]");
     if (!times.length) return;
     function fmt(iso) {
       var d = new Date(iso);
@@ -319,7 +321,13 @@
       if (secs < 3600) return Math.floor(secs / 60) + " min ago";
       if (secs < 86400) return Math.floor(secs / 3600) + "h ago";
       if (secs < 604800) return Math.floor(secs / 86400) + "d ago";
-      return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+      return d.toLocaleString(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
     }
     times.forEach(function (t) {
       var iso = t.getAttribute("datetime");
@@ -333,7 +341,7 @@
   // Project delete (home page): confirm before unregistering. The form still
   // POSTs normally if scripting is off — this only guards against a stray tap.
   (function () {
-    var forms = document.querySelectorAll(".proj-card__delete");
+    var forms = document.querySelectorAll(".proj-row__delete");
     if (!forms.length) return;
     forms.forEach(function (f) {
       f.addEventListener("submit", function (e) {
