@@ -260,7 +260,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    defaults to `min-width: auto` would happily take it — so the chain from the
    card down is pinned to its container, and the screen scrolls inside itself
    instead of pushing the page out. */
-.term-panes, .term-pane, .term-controls, .term-controls__row, .term-reply { min-width: 0; max-width: 100%; }
+.term-panes, .term-pane, .term-screen-wrap, .term-controls, .term-controls__row, .term-reply { min-width: 0; max-width: 100%; }
 /* A pane sheds the card chrome it used to sit in: the border, the padding and
    the raised surface only framed a frame, and on a narrow screen that inset
    was width the terminal itself needed. The screen's own dark box is the
@@ -289,7 +289,6 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 @media (max-width: 720px) {
   .term-screen { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
   .term-controls__row { align-items: center; }
-  .term-scroll { margin-left: auto; }
   .term-keys button, .term-scroll button, .term-reply__send, .term-reply__stage { padding: var(--space-2) var(--space-3); }
   .term-reply__actions { justify-content: stretch; }
   .term-reply__actions button { flex: 1; }
@@ -322,9 +321,13 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 /* terminal-scroll-2: the pair of scroll buttons ("Load older" / "Live")
    share `.term-keys button`'s own look — same padding, border, radius,
    background — rather than inventing a second button style beside it. */
-/* The two screen-moving controls sit apart from the keys, at the right edge
-   of their row — a different kind of action from typing into the pane. */
-.term-scroll { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-left: auto; }
+/* The two screen-moving controls belong to the screen, not to the keys that
+   type into the pane, so they ride on the screen itself: centred on its
+   bottom edge, over its last lines rather than taking a row under them.
+   `sticky` keeps them reachable while a tall screen is scrolled past — the
+   pair a reader wants is the one for the screen they are looking at. */
+.term-screen-wrap { position: relative; display: flow-root; }
+.term-scroll { position: sticky; bottom: var(--space-2); z-index: 2; display: flex; flex-wrap: wrap; gap: var(--space-1); width: max-content; margin: calc(-1 * var(--space-5)) auto 0; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-bg-subtle); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
 .term-scroll button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
 .term-transcript { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
 .term-transcript__line { white-space: pre-wrap; word-break: break-word; }
@@ -457,7 +460,13 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     for p in panes {
         out.push_str(&format!(
             r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
-  <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
+  <div class="term-screen-wrap">
+    <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
+    <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
+      <button type="button" data-scroll="older">Older</button>
+      <button type="button" data-scroll="live">Live</button>
+    </div>
+  </div>
   <div class="term-controls">
     <div class="term-keys" data-pane-id="{pane_id}" aria-label="Move around {name}'s screen">
       <button type="button" data-key="up">↑</button>
@@ -470,10 +479,6 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
         <button type="button" data-key="enter">Enter</button>
         <button type="button" data-key="escape">Esc</button>
         <button type="button" data-key="tab">Tab</button>
-      </div>
-      <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
-        <button type="button" data-scroll="older">Older</button>
-        <button type="button" data-scroll="live">Live</button>
       </div>
     </div>
   </div>

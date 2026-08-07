@@ -8933,19 +8933,25 @@ mod bee_route_tests {
             !body.contains("<input type=\"text\" class=\"term-reply__text\""),
             "the single-line reply field must be gone: {body}"
         );
-        // The card reads in the order an operator reaches it: the screen, the
-        // two controls that move the screen, the keys that drive the agent,
-        // then the box they write in — with its send row under it, not
-        // squeezed beside it.
+        // The card reads in the order an operator reaches it: the screen with
+        // its own two scroll controls riding on it, then the keys that drive
+        // the agent, then the box they write in — with its send row under it,
+        // not squeezed beside it.
         let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("missing {needle}: {body}"));
         let screen = at("class=\"term-screen\"");
-        let arrows = at("class=\"term-keys\"");
         let scroll = at("class=\"term-scroll\"");
+        let arrows = at("class=\"term-keys\"");
         let reply = at("class=\"term-reply\"");
         let actions = at("class=\"term-reply__actions\"");
         assert!(
-            screen < arrows && arrows < scroll && scroll < reply && reply < actions,
-            "pane controls out of order (screen {screen}, arrows {arrows}, scroll {scroll}, reply {reply}, actions {actions}): {body}"
+            screen < scroll && scroll < arrows && arrows < reply && reply < actions,
+            "pane controls out of order (screen {screen}, scroll {scroll}, arrows {arrows}, reply {reply}, actions {actions}): {body}"
+        );
+        // The scroll pair belongs to the screen, inside its wrapper — not to
+        // the key row, which is where it used to live.
+        assert!(
+            at("class=\"term-screen-wrap\"") < screen && scroll < at("class=\"term-controls\""),
+            "the scroll pair must ride on the screen, not sit in the key row: {body}"
         );
         // The arrows keep a line to themselves; the scroll pair and the named
         // keys share the one under it, inside a single control block.
