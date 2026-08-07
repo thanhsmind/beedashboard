@@ -247,12 +247,6 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .pane-strip { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
 .pane-strip__tab { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text-muted); text-decoration: none; background: var(--color-bg-subtle); }
 .pane-strip__tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
-/* Name, status, kind and working directory are one line of heading, not four
-   stacked bands — the directory is the only part long enough to need room, so
-   it takes what is left and clips with an ellipsis (the full path stays in
-   its tooltip). */
-.term-pane__head { display: flex; align-items: baseline; flex-wrap: nowrap; gap: var(--space-2); min-width: 0; }
-.term-pane__cwd { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-subtle); font-size: var(--type-caption-size); }
 .term-pane__meta { flex: 0 0 auto; color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
 /* A pane's frame is a grid, not prose: `pre-wrap` + `word-break` re-flowed
    every long line and broke the box drawing of any TUI agent, and a fixed
@@ -294,7 +288,6 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    the edge. */
 @media (max-width: 720px) {
   .term-screen { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
-  .term-pane__head { flex-wrap: wrap; }
   .term-controls__row { align-items: center; }
   .term-scroll { margin-left: auto; }
   .term-keys button, .term-scroll button, .term-reply__send, .term-reply__stage { padding: var(--space-2) var(--space-3); }
@@ -346,9 +339,11 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 /// terminal-pane-scope D4: one entry per pane in the project's own
 /// D2-boundary-filtered list, each an ordinary anchor to that pane's own
 /// address (`/p/:id/_terminal/pane/:pane_id` or
-/// `/p/:id/_transcript/pane/:pane_id` — `kind` picks which). Carries the
-/// same identity and status pill [`pane_cards`]/[`transcript_cards`] render
-/// on the card itself, so the strip reads the way herdr's own sidebar does.
+/// `/p/:id/_transcript/pane/:pane_id` — `kind` picks which). The strip is the
+/// only place a pane's identity is printed: workspace and tab, its status
+/// pill, then the program the pane is running (`claude`, or `shell` when no
+/// agent holds it), so the strip reads the way herdr's own sidebar does and
+/// the card below it is nothing but the pane's own output.
 /// An empty `panes` list renders nothing — the page's own empty state
 /// (`pane_cards`/`transcript_cards`'s `empty_msg`) already says so, and an
 /// empty strip would say it twice. No JavaScript: these are links, and one
@@ -366,7 +361,7 @@ fn pane_strip(project_id: &str, kind: &str, panes: &[TerminalPaneView], selected
             "pane-strip__tab"
         };
         out.push_str(&format!(
-            r#"<a class="{cls}" href="/p/{pid}/_{kind}/pane/{pane_id}"><span class="term-pane__id">{workspace} · {tab}</span> {status_pill}</a>"#,
+            r#"<a class="{cls}" href="/p/{pid}/_{kind}/pane/{pane_id}"><span class="term-pane__id">{workspace} · {tab}</span> {status_pill}<span class="term-pane__meta">{program}</span></a>"#,
             cls = cls,
             pid = pid,
             kind = kind,
@@ -374,6 +369,7 @@ fn pane_strip(project_id: &str, kind: &str, panes: &[TerminalPaneView], selected
             workspace = esc(&p.workspace),
             tab = esc(&p.tab),
             status_pill = status_pill(&p.status),
+            program = esc(&p.kind),
         ));
     }
     out.push_str("</nav>");
@@ -450,6 +446,9 @@ fn status_pill(status: &str) -> String {
 /// rendered instead when `panes` is empty, kept distinct per caller so an
 /// empty project and an empty Unassigned group are never confusable with
 /// each other, or with [`terminal_down_page`]'s herdr-silent wording.
+/// The card carries no heading of its own: [`pane_strip`] already names the
+/// pane directly above it, and repeating that identity a second time only
+/// pushed the screen further down a handset's viewport.
 fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     if panes.is_empty() {
         return format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_msg));
@@ -458,7 +457,6 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     for p in panes {
         out.push_str(&format!(
             r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
-  <div class="fg-card__title term-pane__head"><span class="term-pane__id">{workspace} · {tab}</span> {name} {status_pill}<span class="term-pane__meta">{kind}{title_sep}{title}</span><span class="term-pane__cwd" title="{cwd}">{cwd}</span></div>
   <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
   <div class="term-controls">
     <div class="term-keys" data-pane-id="{pane_id}" aria-label="Move around {name}'s screen">
@@ -489,13 +487,6 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
 </div>"#,
             pane_id = esc(&p.pane_id),
             name = esc(&p.name),
-            status_pill = status_pill(&p.status),
-            kind = esc(&p.kind),
-            title_sep = if p.title.is_empty() { "" } else { " · " },
-            title = esc(&p.title),
-            cwd = esc(&p.cwd),
-            workspace = esc(&p.workspace),
-            tab = esc(&p.tab),
         ));
     }
     out
@@ -647,10 +638,10 @@ pub fn terminal_page(
     layout(&format!("{} · terminal", project.name), "", &body)
 }
 
-/// One pane's transcript card (agent-terminal-16, D9): the same
-/// identity/meta header [`pane_cards`] renders for the screen, with a
-/// `.term-transcript` viewport in place of `.term-screen`, `.term-reply` and
-/// `.term-keys` — this tab is read-only. `assets/app.js`'s transcript poller
+/// One pane's transcript card (agent-terminal-16, D9): headingless the way
+/// [`pane_cards`] is, with a `.term-transcript` viewport in place of
+/// `.term-screen`, `.term-reply` and `.term-keys` — this tab is read-only.
+/// [`pane_strip`] above it names the pane. `assets/app.js`'s transcript poller
 /// fills the viewport in, appending each newly returned record rather than
 /// replacing the viewport's contents, so nothing already shown is lost
 /// between polls.
@@ -662,18 +653,9 @@ fn transcript_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     for p in panes {
         out.push_str(&format!(
             r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
-  <div class="fg-card__title term-pane__head"><span class="term-pane__id">{workspace} · {tab}</span> {name} {status_pill}<span class="term-pane__meta">{kind}{title_sep}{title}</span><span class="term-pane__cwd" title="{cwd}">{cwd}</span></div>
   <div class="term-transcript" data-pane-id="{pane_id}" aria-live="polite">Loading activity…</div>
 </div>"#,
             pane_id = esc(&p.pane_id),
-            name = esc(&p.name),
-            status_pill = status_pill(&p.status),
-            kind = esc(&p.kind),
-            title_sep = if p.title.is_empty() { "" } else { " · " },
-            title = esc(&p.title),
-            cwd = esc(&p.cwd),
-            workspace = esc(&p.workspace),
-            tab = esc(&p.tab),
         ));
     }
     out

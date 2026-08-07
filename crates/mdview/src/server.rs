@@ -11932,12 +11932,14 @@ mod bee_route_tests {
             assert_eq!(resp.status(), StatusCode::OK);
             body_string(resp).await
         }
+        // The pill lives on the pane's tab, the only place a pane's identity
+        // is printed now that the card carries no heading of its own.
         let card = |body: &str, pane_id: &str| -> String {
             let start = body
-                .find(&format!("data-pane-id=\"{pane_id}\""))
-                .unwrap_or_else(|| panic!("no card for {pane_id}: {body}"));
+                .find(&format!("/pane/{pane_id}\""))
+                .unwrap_or_else(|| panic!("no tab for {pane_id}: {body}"));
             let end = body[start..]
-                .find("</div>")
+                .find("</a>")
                 .map(|i| start + i)
                 .unwrap_or(body.len());
             body[start..end].to_string()
@@ -12020,7 +12022,9 @@ mod bee_route_tests {
     /// Case 11 (D2/D3): a shell row (no agent) renders no agent kind and
     /// claims no status it does not have -- both the meta text and the
     /// status pill's own text read "shell" rather than either being blank
-    /// or borrowing `claude`/`codex`/an `AgentStatus`.
+    /// or borrowing `claude`/`codex`/an `AgentStatus`. That identity now
+    /// lives on the pane tab strip, the only place it is printed: the card
+    /// itself carries no heading, so this reads the strip, not the card.
     #[tokio::test]
     async fn terminal_page_a_shell_row_names_itself_a_shell() {
         let dir = fresh_root("scope-shell-identity-data");
@@ -12042,25 +12046,40 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         let start = body
-            .find(&format!("data-pane-id=\"{}\"", created.pane_id))
-            .unwrap_or_else(|| panic!("no card for the shell pane: {body}"));
+            .find("class=\"pane-strip\"")
+            .unwrap_or_else(|| panic!("no pane strip on the terminal page: {body}"));
         let end = body[start..]
-            .find("</div>")
+            .find("</nav>")
             .map(|i| start + i)
             .unwrap_or(body.len());
-        let card = &body[start..end];
+        let strip = &body[start..end];
 
         assert!(
-            card.contains("class=\"term-pane__meta\">shell<"),
+            strip.contains(&format!("/pane/{}", created.pane_id)),
+            "no tab for the shell pane: {body}"
+        );
+        assert!(
+            strip.contains("class=\"term-pane__meta\">shell<"),
             "a shell row must name itself a shell, not an agent kind: {body}"
         );
         assert!(
-            !card.contains("claude") && !card.contains("codex"),
+            !strip.contains("claude") && !strip.contains("codex"),
             "a shell row must claim no agent kind: {body}"
         );
         assert!(
-            card.contains("class=\"fg-status\">") && card.contains(">shell<"),
+            strip.contains("class=\"fg-status\">") && strip.contains(">shell<"),
             "a shell row's status pill must name it a shell, not claim a status it doesn't have: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "class=\"fg-card term-pane\" data-pane-id=\"{}\"",
+                created.pane_id
+            )),
+            "no card for the shell pane: {body}"
+        );
+        assert!(
+            !body.contains("term-pane__head"),
+            "a pane card must carry no heading of its own: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
