@@ -48,7 +48,7 @@ implementation. Code entry points are listed in `reading-map.md`.
 |---|---|---|---|
 | 1 | Agent | One coding agent herdr is running, addressed by its own id | id, working directory (via its pane), status, current screen |
 | 2 | Pane | The addressable session an agent runs inside; every listed agent has exactly one, but a pane can exist with no agent record attached (a plain shell) — see Open Gaps for what that means today | id, working directory |
-| 3 | Screen | The agent's current visible terminal contents, rendered with colour | a snapshot redrawn on each poll, not a live feed |
+| 3 | Screen | The agent's recent terminal contents, rendered with colour | a snapshot redrawn on each poll, not a live feed; a bounded tail of the pane's own scrollback rather than only the rows currently on screen, so a plain shell shows work that has already scrolled past, while an agent that redraws a full-screen interface has no scrollback to give and shows exactly its current frame; shown at the full height of one pane frame with its lines unwrapped, the box scrolling in both directions rather than re-flowing the frame |
 | 4 | Transcript | The agent's own activity log, read directly rather than through herdr | a gap-free running record of the agent's activity, independent of the screen poll; a fresh agent with nothing written yet reports that plainly rather than showing an empty log; if the record is found truncated or rewritten under the reader, the next read shows a visible divider rather than jumping silently; a single poll returns only a bounded number of lines, and when a poll has more than that bound, its oldest lines are marked as lost rather than silently dropped |
 | 5 | Terminal switch | The one switch standing between anyone who can reach the daemon and the terminal, transcript, and agent-creation family — there is no credential behind it | on / off, off by default |
 | 6 | Unassigned agents | Agents whose working directory is outside every registered project's root | listed on their own page, reachable only while both the terminal switch and this group's own switch (below) are on |
@@ -339,6 +339,12 @@ operates mdview every time the network path to its port changes.
   or reachable anywhere in the terminal surface once it exists. This is the
   user's call, not something this spec resolves — recorded as an outstanding
   question in `docs/history/agent-terminal/CONTEXT.md`.
+- **The operator cannot scroll a pane from the dashboard.** herdr accepts no
+  page-key name and offers no way to move a pane's own viewport; sending the
+  raw escape a terminal would use leaves the pane's scroll position untouched.
+  The screen box therefore scrolls itself over whatever tail herdr hands
+  back, which is as far back as this surface can see. Reaching further would
+  need herdr to grow the capability first.
 - Confirmation against a real, running herdr (rather than a test double) is
   a manual check at UAT, not something automated coverage certifies.
 - Mobile-specific layout for this surface, carried over as an idea from
