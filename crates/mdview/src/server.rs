@@ -858,7 +858,13 @@ const HERDR_DOWN_REMEDY: &str = "herdr is not running";
 /// ANSI screen into `<span class="ansi-…">` markup server-side — text is
 /// HTML-escaped before any markup wraps it, and any escape sequence the
 /// translator does not model (cursor movement, OSC titles, …) is dropped
-/// rather than ever reaching the page. `revision` is unchanged; the client
+/// rather than ever reaching the page. `revision` is no longer herdr's own
+/// field (screen-revision fix): that value only bumps when the operator's
+/// own input is echoed back, not when the agent under it produces new
+/// output on its own, which froze the client's poller on any pane whose
+/// agent was still actively writing. `revision` is now
+/// `mdview_core::ansi::revision_of(&read.text)`, a stateless hash of the
+/// raw screen text, so it changes exactly when the text does; the client
 /// still compares it to skip a redundant repaint.
 ///
 /// Guarded by the D7 enabled switch (D12: a reasoned JSON 404 when off),
@@ -892,7 +898,8 @@ async fn terminal_screen(
     }
     match st.herdr.read_pane(&pane_id, herdr::ReadSource::Visible, 0).await {
         Ok(read) => {
-            Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": read.revision }))
+            let revision = mdview_core::ansi::revision_of(&read.text);
+            Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": revision }))
                 .into_response()
         }
         Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
@@ -1541,7 +1548,8 @@ async fn unassigned_terminal_screen(State(st): State<AppState>, Path(pane_id): P
     }
     match st.herdr.read_pane(&pane_id, herdr::ReadSource::Visible, 0).await {
         Ok(read) => {
-            Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": read.revision }))
+            let revision = mdview_core::ansi::revision_of(&read.text);
+            Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": revision }))
                 .into_response()
         }
         Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
@@ -7109,6 +7117,234 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // ---- screen-revision fix: `revision` tracks the screen text itself ----
+    //
+    // Before this fix, `terminal_screen` returned herdr's own `read.revision`
+    // verbatim, which only bumps when the operator's own input is echoed
+    // back (see `herdr/fake.rs`'s `read_then_reply_echoes_and_bumps_revision`)
+    // — never when the agent under it produces new output on its own. Two
+    // live polls three seconds apart on one pane returned different text,
+    // both carrying `revision: 0`, so `app.js`'s dedupe
+    // (`if (lastRevision[paneId] === body.revision) return;`) discarded
+    // every repaint after the first and the pane froze.
+
+    /// The defect this cell fixes: a pane whose screen text changed between
+    /// two polls must report a DIFFERENT `revision` each time — this failed
+    /// against the pre-fix code, which echoed herdr's own unchanging
+    /// `read.revision` straight through.
+    #[tokio::test]
+    async fn terminal_screen_reports_a_changed_revision_when_the_screen_changes() {
+        let dir = fresh_root("terminal-screen-revision-changed");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-revision-changed-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.seed_scroll_pane(&started.pane_id, "first frame", "first frame", None);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let project = register(&st, &root, "screen-revision-changed");
+        let app = router(st);
+
+        let first = app
+            .clone()
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        let first_json: serde_json::Value =
+            serde_json::from_str(&body_string(first).await).unwrap();
+
+        // The agent produced new output on its own — no input was sent, so
+        // herdr's own `read.revision` would stay put.
+        fake.seed_scroll_pane(&started.pane_id, "second frame", "second frame", None);
+
+        let second = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        let second_json: serde_json::Value =
+            serde_json::from_str(&body_string(second).await).unwrap();
+
+        assert_ne!(
+            first_json["revision"], second_json["revision"],
+            "changed output must report a different revision: {first_json} vs {second_json}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The guard this cell must not break: a pane whose screen text did NOT
+    /// change between two polls reports the SAME `revision` both times, so
+    /// `app.js`'s dedupe still skips the redundant repaint.
+    #[tokio::test]
+    async fn terminal_screen_reports_the_same_revision_when_the_screen_is_unchanged() {
+        let dir = fresh_root("terminal-screen-revision-unchanged");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-revision-unchanged-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.seed_scroll_pane(&started.pane_id, "steady frame", "steady frame", None);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "screen-revision-unchanged");
+        let app = router(st);
+
+        let first = app
+            .clone()
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        let first_json: serde_json::Value =
+            serde_json::from_str(&body_string(first).await).unwrap();
+
+        let second = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        let second_json: serde_json::Value =
+            serde_json::from_str(&body_string(second).await).unwrap();
+
+        assert_eq!(
+            first_json["revision"], second_json["revision"],
+            "unchanged output must keep reporting the same revision: {first_json} vs {second_json}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Edge case: an empty screen reports a stable revision rather than
+    /// panicking or reporting a bare `0` used as a sentinel.
+    #[tokio::test]
+    async fn terminal_screen_of_an_empty_pane_reports_a_stable_non_sentinel_revision() {
+        let dir = fresh_root("terminal-screen-revision-empty");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-revision-empty-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.seed_scroll_pane(&started.pane_id, "", "", None);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "screen-revision-empty");
+        let app = router(st);
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        assert_eq!(json["text"], serde_json::json!(""), "{json}");
+        assert_ne!(
+            json["revision"],
+            serde_json::json!(0),
+            "an empty screen's revision must not collapse to the 0 sentinel: {json}"
+        );
+
+        let resp2 = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        let json2: serde_json::Value = serde_json::from_str(&body_string(resp2).await).unwrap();
+        assert_eq!(
+            json["revision"], json2["revision"],
+            "an empty screen's revision must stay stable across polls: {json} vs {json2}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Edge case: two different panes carrying identical text do not
+    /// collide in a way that suppresses either one's updates — each pane's
+    /// `revision` is compared against its own last-seen value client-side
+    /// (`lastRevision[paneId]`), so two panes sharing a revision value is
+    /// fine; what would NOT be fine is either pane failing to report a
+    /// changed revision once ITS OWN text changes.
+    #[tokio::test]
+    async fn terminal_screen_two_panes_with_identical_text_each_still_update_independently() {
+        let dir = fresh_root("terminal-screen-revision-two-panes");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-revision-two-panes-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let pane_a = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let pane_b = fake
+            .agent_start("w2", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.seed_scroll_pane(&pane_a.pane_id, "shared frame", "shared frame", None);
+        fake.seed_scroll_pane(&pane_b.pane_id, "shared frame", "shared frame", None);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let project = register(&st, &root, "screen-revision-two-panes");
+        let app = router(st);
+
+        let a_first = app
+            .clone()
+            .oneshot(terminal_screen_req(&project.id, &pane_a.pane_id, None))
+            .await
+            .unwrap();
+        let a_first_json: serde_json::Value =
+            serde_json::from_str(&body_string(a_first).await).unwrap();
+        let b_first = app
+            .clone()
+            .oneshot(terminal_screen_req(&project.id, &pane_b.pane_id, None))
+            .await
+            .unwrap();
+        let b_first_json: serde_json::Value =
+            serde_json::from_str(&body_string(b_first).await).unwrap();
+
+        // Identical text on both panes is expected to agree — that's not a
+        // collision, since the client keys its dedupe by pane id.
+        assert_eq!(a_first_json["revision"], b_first_json["revision"]);
+
+        // Pane A's own output changes; pane B's does not.
+        fake.seed_scroll_pane(&pane_a.pane_id, "pane a moved on", "pane a moved on", None);
+
+        let a_second = app
+            .clone()
+            .oneshot(terminal_screen_req(&project.id, &pane_a.pane_id, None))
+            .await
+            .unwrap();
+        let a_second_json: serde_json::Value =
+            serde_json::from_str(&body_string(a_second).await).unwrap();
+        let b_second = app
+            .oneshot(terminal_screen_req(&project.id, &pane_b.pane_id, None))
+            .await
+            .unwrap();
+        let b_second_json: serde_json::Value =
+            serde_json::from_str(&body_string(b_second).await).unwrap();
+
+        assert_ne!(
+            a_first_json["revision"], a_second_json["revision"],
+            "pane A's own changed output must report a different revision"
+        );
+        assert_eq!(
+            b_first_json["revision"], b_second_json["revision"],
+            "pane B's unchanged output must keep reporting the same revision, unaffected by pane A"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// agent-terminal-6, truth: "The rendered screen shows the text herdr
     /// returned, with a UTF-8 screen containing wide CJK and emoji intact" —
     /// proven on the JSON the client polls. Since agent-terminal-12, `text`
@@ -7143,7 +7379,15 @@ mod bee_route_tests {
         let body = body_string(resp).await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["text"], serde_json::json!(screen_text), "{body}");
-        assert_eq!(json["revision"], serde_json::json!(1), "{body}");
+        // Since the screen-revision fix, `revision` is a stateless hash of
+        // the raw screen text (`mdview_core::ansi::revision_of`), not
+        // herdr's own field — see `terminal_screen_reports_a_changed_revision_when_the_screen_changes`
+        // below for the defect this replaced.
+        assert_eq!(
+            json["revision"],
+            serde_json::json!(mdview_core::ansi::revision_of(screen_text)),
+            "{body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
@@ -8689,6 +8933,72 @@ mod bee_route_tests {
             .await
             .unwrap();
         assert_eq!(owned_input_resp.status(), StatusCode::NOT_FOUND);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Regression (screen-revision fix): the Unassigned group's own screen
+    /// endpoint carries the exact same `ScreenBody { text, revision }` shape
+    /// as `terminal_screen` and shares the same bug — a pane whose output
+    /// changed between two polls must report a DIFFERENT revision, and one
+    /// whose output did not change must report the SAME revision.
+    #[tokio::test]
+    async fn unassigned_terminal_screen_reports_a_changed_revision_when_the_screen_changes() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("unassigned-screen-revision");
+        enable_terminal(&dir);
+        enable_unassigned_group(&dir);
+        let scratch = fresh_root("unassigned-screen-revision-scratch");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let stray = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.seed_scroll_pane(&stray.pane_id, "unassigned first frame", "unassigned first frame", None);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let app = router(st);
+
+        let first = app
+            .clone()
+            .oneshot(unassigned_screen_req(&stray.pane_id, None))
+            .await
+            .unwrap();
+        let first_json: serde_json::Value =
+            serde_json::from_str(&body_string(first).await).unwrap();
+
+        // Same text again — the revision must not move.
+        let repeat = app
+            .clone()
+            .oneshot(unassigned_screen_req(&stray.pane_id, None))
+            .await
+            .unwrap();
+        let repeat_json: serde_json::Value =
+            serde_json::from_str(&body_string(repeat).await).unwrap();
+        assert_eq!(
+            first_json["revision"], repeat_json["revision"],
+            "unchanged unassigned pane output must keep the same revision: {first_json} vs {repeat_json}"
+        );
+
+        // The agent produces new output on its own — no input sent.
+        fake.seed_scroll_pane(&stray.pane_id, "unassigned second frame", "unassigned second frame", None);
+
+        let second = app
+            .oneshot(unassigned_screen_req(&stray.pane_id, None))
+            .await
+            .unwrap();
+        let second_json: serde_json::Value =
+            serde_json::from_str(&body_string(second).await).unwrap();
+        assert_ne!(
+            first_json["revision"], second_json["revision"],
+            "changed unassigned pane output must report a different revision: {first_json} vs {second_json}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&scratch).ok();

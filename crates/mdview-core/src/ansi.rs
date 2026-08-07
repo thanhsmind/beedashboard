@@ -111,6 +111,27 @@ pub fn to_html(raw: &str) -> String {
     out
 }
 
+/// Derive a screen poll's `revision` from its raw text — a pure hash, so
+/// the server needs no per-pane state to compute it (screen-revision fix).
+///
+/// herdr's own `read.revision` only bumps when the operator's own input is
+/// echoed back (see `herdr/fake.rs`'s `read_then_reply_echoes_and_bumps_revision`),
+/// not when the agent under it produces new output on its own — so a
+/// client comparing that value against the last one it saw freezes on a
+/// pane whose agent is still actively writing. Hashing the exact text the
+/// client would repaint instead means the value changes whenever that text
+/// does, and stays put — including for an empty screen — when it does not;
+/// two panes that happen to carry identical text are unaffected, since the
+/// client compares this value per pane id, never across panes.
+pub fn revision_of(text: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Escape a text run and wrap it in a `<span>` iff `style` carries any
 /// active class — escaping always happens first, regardless of which
 /// branch runs, so there is exactly one place text ever becomes HTML.
@@ -716,5 +737,40 @@ mod tests {
     #[test]
     fn empty_input_produces_empty_output() {
         assert_eq!(to_html(""), "");
+    }
+
+    // --- revision_of: screen-revision fix ---
+
+    #[test]
+    fn revision_of_changed_text_differs() {
+        let before = revision_of("first frame");
+        let after = revision_of("second frame");
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn revision_of_unchanged_text_is_stable() {
+        let a = revision_of("same frame");
+        let b = revision_of("same frame");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn revision_of_empty_screen_is_stable_and_not_a_bare_zero_sentinel() {
+        let a = revision_of("");
+        let b = revision_of("");
+        assert_eq!(a, b, "an empty screen must still report a stable revision");
+        assert_ne!(a, 0, "an empty screen's revision must not collapse to the 0 sentinel");
+    }
+
+    #[test]
+    fn revision_of_two_panes_with_identical_text_agree_without_suppressing_either() {
+        // The client dedupes per pane id (`lastRevision[paneId]`), so two
+        // panes carrying identical text producing the same revision is
+        // correct, not a collision — each pane's own last-seen value is
+        // tracked independently.
+        let pane_a_text = "same output on both panes";
+        let pane_b_text = "same output on both panes";
+        assert_eq!(revision_of(pane_a_text), revision_of(pane_b_text));
     }
 }
