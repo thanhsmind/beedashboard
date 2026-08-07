@@ -59,3 +59,7 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # socket.rs's local-io-failure test binds a scratch Unix socket.
 tempfile = "3"
+# pane_scroller.rs's tests fast-forward tokio's clock past its ~50ms x 10
+# stability-wait budget with `#[tokio::test(start_paused = true)]`, so the
+# stability-wait tests run in milliseconds instead of real time.
+tokio = { workspace = true, features = ["test-util"] }

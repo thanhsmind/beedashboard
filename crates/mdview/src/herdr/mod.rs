@@ -7,8 +7,8 @@
 //! asserts no `tokio`/`axum`/`hyper` in its `Cargo.toml`), and this client
 //! needs `tokio` for the socket I/O. `mdview` already depends on both tokio
 //! and axum, so it carries the extra weight this port needs no axum for.
-//! `pane_scroller.rs` does not travel with this cell: it has no consumer
-//! until slice 3.
+//! `pane_scroller.rs` ports herdr-go's alt-screen scrollback nudger; it has
+//! no route-level consumer yet (see its own module doc).
 //!
 //! The surface is request/response only (no live stream): snapshot the runtime,
 //! read a pane's screen (polled), and send input as a reply. One trait, two
@@ -16,6 +16,7 @@
 //! [`fake::FakeHerdr`] for tests.
 
 pub mod fake;
+pub mod pane_scroller;
 pub mod socket;
 pub mod wire;
 
