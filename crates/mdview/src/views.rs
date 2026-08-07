@@ -198,6 +198,23 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    width no readable type size can hold the grid, so the lines wrap instead
    of running off the side. */
 .term-screen--wrapped { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
+/* Below this width the answer is the same whatever the measurement says: no
+   readable type size fits a terminal frame on a handset, so the lines wrap.
+   Stated in CSS rather than left to the script, because a page whose script
+   never ran — or ran from the Unassigned page's own copy, which has no fit of
+   its own — must still not push the layout sideways. Everything else on the
+   card gives up its horizontal ambitions here too: rows wrap instead of
+   overflowing, and the buttons share the width rather than being pushed off
+   the edge. */
+@media (max-width: 720px) {
+  .term-screen { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
+  .term-pane__head { flex-wrap: wrap; }
+  .term-controls__row { align-items: center; }
+  .term-scroll { margin-left: auto; }
+  .term-keys button, .term-scroll button, .term-reply__send, .term-reply__stage { padding: var(--space-2) var(--space-3); }
+  .term-reply__actions { justify-content: stretch; }
+  .term-reply__actions button { flex: 1; }
+}
 /* The controls read top to bottom in the order they are reached: the screen,
    then the two controls that move the screen, then the keys that drive the
    agent, then the box you write in with its own send row under it. The reply
