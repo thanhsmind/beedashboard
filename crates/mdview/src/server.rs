@@ -1954,6 +1954,22 @@ fn unassigned_panes(
 /// canonicalizing here would just reintroduce the same gap) against every
 /// registered project's own raw `root_path`, **in addition to**, never
 /// instead of, the `project_panes`-membership check above.
+///
+/// project-suggestions-3 (independent review): `is_contained_in_root`
+/// matches raw path *components*, never text, so it still has a gap of its
+/// own — a candidate like `<parent>/other/../<root_basename>/sub` resolves
+/// inside a registered project, but its raw components diverge from the
+/// root's own components right at `other`, so the containment check reads
+/// it as *not* contained and it printed here anyway. Rather than teach the
+/// containment check to resolve `.`/`..` (which would just move the
+/// canonicalize-vs-raw gap `project-suggestions-2` already closed once),
+/// every candidate whose raw components carry a `ParentDir` or `CurDir` at
+/// all is dropped outright, **before** the `assigned`-membership check and
+/// **before** `is_contained_in_root` — a traversal cwd can never become a
+/// suggestion worth offering either way, because `validate_register_path`
+/// (`server.rs:775-792`) refuses any submitted path carrying a traversal
+/// component before it ever reaches the deny-list gate, so such a row's own
+/// register button could never succeed, whatever its path resolves to.
 fn suggested_projects(
     snapshot: &herdr::Snapshot,
     projects: &[mdview_core::domain::Project],
@@ -1978,13 +1994,28 @@ fn suggested_projects(
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut order: Vec<String> = Vec::new();
     for pane in &snapshot.panes {
-        if assigned.contains(&pane.pane_id) {
-            continue;
-        }
         let Some(cwd) = pane.cwd.as_deref().filter(|c| !c.is_empty()) else {
             continue;
         };
         let cwd_path = std::path::Path::new(cwd);
+        // project-suggestions-3: a raw traversal component is dropped before
+        // any other check, membership included — a candidate carrying one
+        // can resolve to anywhere, including inside a registered project by
+        // a route `is_contained_in_root`'s raw component match cannot see
+        // (the doc comment above this function has the full story), and its
+        // own register button could never succeed regardless.
+        let has_traversal = cwd_path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        });
+        if has_traversal {
+            continue;
+        }
+        if assigned.contains(&pane.pane_id) {
+            continue;
+        }
         if projects
             .iter()
             .any(|p| mdview_core::paths_boundary::is_contained_in_root(cwd_path, &p.root_path))
@@ -9591,18 +9622,51 @@ mod bee_route_tests {
             .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
             .await
             .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let app = router(st);
+
+        // project-suggestions-3 (independent review): `FakeHerdr::new()`
+        // itself seeds several unrelated agentless panes, so the section
+        // renders regardless of this test's own pane — asserting the whole
+        // section is absent can never fail whatever this guard does, and
+        // asserting only `stray_root`'s own string is absent can never fail
+        // either once `set_pane_dirs` below has overwritten it. Capture the
+        // row count with the pane's *real* cwd first (proving it would
+        // otherwise render), then assert overwriting to `Some("")` drops
+        // that one row entirely rather than swapping it for a blank one.
+        let before = get(app.clone(), "/").await;
+        let before_body = body_string(before).await;
+        assert!(
+            before_body.contains(&stray_root.to_string_lossy().to_string()),
+            "sanity: the pane's real cwd must render as a suggestion before it is overwritten: \
+             {before_body}"
+        );
+        let before_rows = before_body
+            .matches(r#"class="proj-row proj-suggestion""#)
+            .count();
+
         fake.set_pane_dirs(&started.pane_id, Some(""), Some(""))
             .await
             .unwrap();
 
-        let mut st = build_state_with_dir(&dir);
-        st.herdr = fake;
-        let resp = get(router(st), "/").await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
+        let after = get(app, "/").await;
+        assert_eq!(after.status(), StatusCode::OK);
+        let after_body = body_string(after).await;
         assert!(
-            !body.contains(&stray_root.to_string_lossy().to_string()),
-            "a pane whose cwd is Some(\"\") must never render as a blank-path suggestion: {body}"
+            !after_body.contains(&stray_root.to_string_lossy().to_string()),
+            "a pane whose cwd is Some(\"\") must never render as a blank-path suggestion: \
+             {after_body}"
+        );
+        let after_rows = after_body
+            .matches(r#"class="proj-row proj-suggestion""#)
+            .count();
+        assert_eq!(
+            after_rows,
+            before_rows - 1,
+            "overwriting the pane's cwd to Some(\"\") must drop its row entirely, not swap it \
+             for a blank-path row: before {before_rows} rows, after {after_rows}: {after_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -9725,6 +9789,186 @@ mod bee_route_tests {
             !body.contains(&dotted_cwd),
             "a pane whose cwd carries a `..` component but resolves inside a registered \
              project must never be suggested: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&project_root).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-3 — the confirmed
+    /// disclosure gap): a candidate like `<parent>/other/../<root_basename>/sub`
+    /// resolves inside a registered project, but its raw components diverge
+    /// from the root's own raw components right at `other` — unlike the
+    /// `a/../b` case above, whose root-prefix still matches component for
+    /// component — so `is_contained_in_root` reads it as *not* contained and
+    /// it used to print here anyway. The traversal drop must catch this one
+    /// too, regardless of what it resolves to.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_whose_cwd_carries_a_sibling_dot_dot_that_resolves_inside_a_registered_project()
+    {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-sibling-dot-dot");
+        enable_terminal(&dir);
+        let parent = fresh_root("suggest-sibling-dot-dot-parent");
+        let project_root = parent.join("registered-project");
+        std::fs::create_dir_all(project_root.join("sub")).unwrap();
+        std::fs::create_dir_all(parent.join("other")).unwrap();
+        // Resolves to `parent/registered-project/sub` -- genuinely inside
+        // the registered project -- but the raw components after `parent`
+        // are `other`, `..`, `registered-project`, `sub`: they never match
+        // the root's own raw components (`parent`, `registered-project`) as
+        // a prefix, so raw component-wise containment alone misses it.
+        let dotted_cwd = format!(
+            "{}/other/../registered-project/sub",
+            parent.to_string_lossy().trim_end_matches('/')
+        );
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&dotted_cwd), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "sibling-dot-dot-project");
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&dotted_cwd),
+            "a pane whose cwd carries a sibling `..` that resolves inside a registered project \
+             must never be suggested, even when raw component-wise containment alone would miss \
+             it: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-3): a traversal cwd
+    /// must never be suggested even when it resolves to a folder genuinely
+    /// outside every registered project — before this fix,
+    /// `is_contained_in_root` would read it as not contained (correctly, it
+    /// resolves outside) and let it through as a suggestion whose register
+    /// button could never succeed, because `validate_register_path` refuses
+    /// any submitted path carrying a traversal component outright.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_whose_cwd_carries_a_dot_dot_component_even_when_it_resolves_outside_every_project()
+    {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-dot-dot-outside");
+        enable_terminal(&dir);
+        let scratch = fresh_root("suggest-dot-dot-outside-scratch");
+        std::fs::create_dir_all(scratch.join("a")).unwrap();
+        std::fs::create_dir_all(scratch.join("b")).unwrap();
+        let dotted_cwd = format!(
+            "{}/a/../b",
+            scratch.to_string_lossy().trim_end_matches('/')
+        );
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&dotted_cwd), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&dotted_cwd),
+            "a pane whose cwd carries a `..` component must never be suggested, even when it \
+             resolves outside every registered project — its own register button could never \
+             succeed: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-3 — route-level
+    /// coverage the review found missing): a sibling directory whose name
+    /// merely starts with a registered project's name is still suggested.
+    /// Only `paths_boundary::is_contained_in_root_false_for_a_sibling_that_merely_shares_a_prefix`
+    /// covered this at the unit level; every route test kept passing when
+    /// the predicate was swapped for a text prefix, so this pins it at the
+    /// route the disclosure actually happens on.
+    #[tokio::test]
+    async fn suggestions_include_a_sibling_whose_name_merely_shares_a_prefix_with_a_registered_project() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-sibling-prefix");
+        enable_terminal(&dir);
+        let scratch = fresh_root("suggest-sibling-prefix-scratch");
+        let project_root = scratch.join("owned-project");
+        let sibling_root = scratch.join("owned-project-evil");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&sibling_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&sibling_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "owned-project");
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&sibling_root.to_string_lossy().to_string()),
+            "a sibling directory that merely shares a name prefix with a registered project must \
+             still be suggested, not treated as contained in it: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-3 — route-level
+    /// coverage the review found missing): a pane whose cwd is inside a
+    /// registered project's own root but resolves onto the hard deny list
+    /// through a symlink is not suggested. The raw component-wise
+    /// containment check already excludes it by the literal path (the link
+    /// itself sits textually under the registered root), whatever it
+    /// resolves to on disk — this pins that at the route level rather than
+    /// leaving it implicit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_inside_a_registered_project_whose_cwd_resolves_onto_the_hard_deny_list_through_a_symlink()
+    {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-symlink-deny");
+        enable_terminal(&dir);
+        let project_root = fresh_root("suggest-symlink-deny-project");
+
+        let mut st = build_state_with_dir(&dir);
+        register(&st, &project_root, "symlink-deny-project");
+
+        // Planted after registration so the register route's own scan never
+        // walks the symlink into `/etc`.
+        let link = project_root.join("etc-link");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        let pane_cwd = link.to_string_lossy().to_string();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&pane_cwd), &["claude".to_string()])
+            .await
+            .unwrap();
+        st.herdr = fake;
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&pane_cwd),
+            "a pane inside a registered project whose cwd resolves onto the hard deny list \
+             through a symlink must never be suggested: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
