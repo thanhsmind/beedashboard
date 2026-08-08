@@ -5,11 +5,12 @@ use crate::runtime::{self, DaemonInfo};
 use crate::views;
 use anyhow::Result;
 use axum::{
+    body::Bytes,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Form, Path, Query, State,
+        DefaultBodyLimit, Form, Path, Query, State,
     },
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
@@ -48,6 +49,14 @@ pub struct AppState {
     /// transcript reader then resolves the root exactly where Claude Code
     /// itself writes it.
     pub transcript_root: Option<PathBuf>,
+    /// terminal-image-attach D3's storage-root test seam: overrides where
+    /// `terminal_attach` stores uploaded images, the same shape
+    /// `config_data_dir`/`transcript_root` give other terminal routes above.
+    /// `None` in production resolves through `resolve_attach_root`'s
+    /// env-or-home default (`$XDG_RUNTIME_DIR/mdview-attach`, else
+    /// `~/.cache/mdview/attach`); every attach-route test points this at a
+    /// scratch dir instead of the developer's real cache.
+    pub attach_root: Option<PathBuf>,
     /// D7's live background manager (agent-terminal-18): reconciled against
     /// the D7 switches at startup and on every `update_terminal_config`
     /// write, so flipping a switch takes effect without a restart. One
@@ -114,6 +123,7 @@ pub async fn serve() -> Result<()> {
         config_data_dir: None,
         herdr: Arc::new(herdr::socket::SocketHerdr::new(herdr_socket_path)),
         transcript_root: None,
+        attach_root: None,
         terminal_background: Arc::new(crate::TerminalBackground::new()),
         notify_store,
     };
@@ -239,6 +249,15 @@ fn router(state: AppState) -> Router {
         // into a pane.
         .route("/p/:id/_terminal/:pane_id/input", post(terminal_input))
         .route("/p/:id/_terminal/:pane_id/keys", post(terminal_keys))
+        // terminal-image-attach D1/D3: one image upload per request, raw
+        // body (plan.md's Approach: no `multipart` feature). The per-route
+        // body-limit layer here — not the router's default — is what lets a
+        // body just over `ATTACH_MAX_BYTES` still reach `terminal_attach`'s
+        // own JSON-shaped refusal instead of axum's plain-text 413.
+        .route(
+            "/p/:id/_terminal/:pane_id/attach",
+            post(terminal_attach).layer(DefaultBodyLimit::max(ATTACH_BODY_LIMIT_BYTES)),
+        )
         // agent-terminal-13 (D8/P4): start a new pane or agent in this
         // project — the same D2 containment boundary the routes above use,
         // applied to the destination workspace's own anchor rather than an
@@ -1590,6 +1609,186 @@ async fn terminal_keys(
     }
 }
 
+/// terminal-image-attach D3: the enforced per-file cap on an attach upload
+/// — checked explicitly by `terminal_attach` so an over-cap body answers in
+/// the same JSON error shape every other terminal refusal uses, never
+/// axum's own plain-text 413. `ATTACH_BODY_LIMIT_BYTES` (the route's own
+/// `DefaultBodyLimit` layer) sits comfortably above this so a body up to,
+/// and a little past, the cap still reaches this check instead of being cut
+/// off by axum first.
+const ATTACH_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+/// The attach route's own `DefaultBodyLimit` layer — see `ATTACH_MAX_BYTES`.
+const ATTACH_BODY_LIMIT_BYTES: usize = ATTACH_MAX_BYTES + 1024 * 1024;
+
+/// The most files one pane's attach directory may hold at once. No cleanup
+/// daemon exists (plan.md's Out of scope — `$XDG_RUNTIME_DIR` clears itself
+/// on logout where that root is used), so the 33rd upload for a given pane
+/// is refused rather than let the attach root grow unbounded.
+const ATTACH_MAX_FILES_PER_PANE: usize = 32;
+
+/// The declared `Content-Type` values `terminal_attach` accepts, mapped to
+/// the extension the stored file is written with. `image/svg+xml` is
+/// deliberately absent — scriptable, unlike the four raster formats here
+/// (plan.md's security notes) — and so is anything else, whatever its
+/// declared MIME.
+fn attach_extension_for_mime(mime: &str) -> Option<&'static str> {
+    match mime {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+/// Sniffs `bytes`' leading magic bytes against the signature for `mime` —
+/// checked in addition to the declared `Content-Type` (`attach_extension_for_mime`),
+/// never instead of it, so a client that lies about the type (an arbitrary
+/// file declared `image/png`) is refused rather than written to disk under
+/// an image extension.
+fn attach_bytes_match_mime(mime: &str, bytes: &[u8]) -> bool {
+    match mime {
+        "image/png" => bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),
+        "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        _ => false,
+    }
+}
+
+/// Sanitizes a project id or pane id into a filesystem path segment made
+/// only of `[A-Za-z0-9-]` — a herdr pane id carries `:` (illegal on NTFS),
+/// so every character outside that set collapses to `-`. Never empty: an
+/// all-illegal input still yields a non-empty segment.
+fn sanitize_attach_segment(raw: &str) -> String {
+    let mapped: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect();
+    if mapped.is_empty() {
+        "-".to_string()
+    } else {
+        mapped
+    }
+}
+
+/// D3's storage root: `$XDG_RUNTIME_DIR/mdview-attach` when that env var is
+/// set and non-empty, else `~/.cache/mdview/attach` — never bare `/tmp`,
+/// which is world-writable (1777) and symlink-preseedable (plan.md's
+/// security notes). `override_root` is `AppState::attach_root`, the same
+/// test seam `config_data_dir`/`transcript_root` already give other
+/// terminal routes; `None` in production resolves the env-or-home path
+/// above.
+fn resolve_attach_root(override_root: Option<&std::path::Path>) -> PathBuf {
+    if let Some(dir) = override_root {
+        return dir.to_path_buf();
+    }
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        if !runtime_dir.is_empty() {
+            return PathBuf::from(runtime_dir).join("mdview-attach");
+        }
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cache")
+        .join("mdview")
+        .join("attach")
+}
+
+/// The JSON error shape every terminal refusal in this file already uses —
+/// `terminal_attach`'s own validation refusals (disallowed MIME, oversize,
+/// spoofed bytes, zero-byte, the per-pane file cap) all answer through this,
+/// never axum's plain-text default for anything this handler catches itself.
+fn attach_error(status: StatusCode, msg: impl Into<String>) -> Response {
+    (status, Json(json!({ "error": msg.into() }))).into_response()
+}
+
+/// `POST /p/:id/_terminal/:pane_id/attach` (terminal-image-attach D1/D3) —
+/// stores one uploaded image for a pane and answers with its absolute path,
+/// for the composer (`assets/app.js`) to carry into the pane's next message
+/// (D2: one message, N paths). One request per file — the body is the raw
+/// image bytes, `Content-Type` names the declared MIME (plan.md's Approach:
+/// axum 0.7 here carries no `multipart` feature, so multipart is not an
+/// option without a new dependency).
+///
+/// Guarded exactly like `terminal_input`: the D7 enabled switch (D12: a
+/// reasoned JSON 404 when off), then the same D2 containment boundary via
+/// `project_and_verify_pane_in_boundary` — an upload can only ever land
+/// under a pane already present in this project's own boundary-filtered
+/// pane list, never trusted from the URL alone.
+///
+/// The client's filename never reaches this handler at all (no multipart
+/// field carries one) — the stored leaf name is always server-generated
+/// from `rand`, D3's "the client filename never reaches disk" satisfied
+/// structurally rather than by stripping an input.
+async fn terminal_attach(
+    State(st): State<AppState>,
+    Path((id, pane_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_disabled_json_404();
+    }
+    if let Err(refusal) = project_and_verify_pane_in_boundary(&st, &id, &pane_id).await {
+        return refusal;
+    }
+
+    let declared_mime = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).trim().to_string())
+        .unwrap_or_default();
+    let Some(ext) = attach_extension_for_mime(&declared_mime) else {
+        return attach_error(
+            StatusCode::BAD_REQUEST,
+            format!("unsupported image type: {declared_mime}"),
+        );
+    };
+
+    if body.is_empty() {
+        return attach_error(StatusCode::BAD_REQUEST, "empty upload");
+    }
+    if body.len() > ATTACH_MAX_BYTES {
+        return attach_error(
+            StatusCode::BAD_REQUEST,
+            format!("upload exceeds the {ATTACH_MAX_BYTES}-byte limit"),
+        );
+    }
+    if !attach_bytes_match_mime(&declared_mime, &body) {
+        return attach_error(
+            StatusCode::BAD_REQUEST,
+            format!("upload bytes do not match declared type {declared_mime}"),
+        );
+    }
+
+    let root = resolve_attach_root(st.attach_root.as_deref());
+    let pane_dir = root
+        .join(sanitize_attach_segment(&id))
+        .join(sanitize_attach_segment(&pane_id));
+    if let Ok(entries) = std::fs::read_dir(&pane_dir) {
+        if entries.filter_map(|e| e.ok()).count() >= ATTACH_MAX_FILES_PER_PANE {
+            return attach_error(
+                StatusCode::BAD_REQUEST,
+                format!("pane already holds {ATTACH_MAX_FILES_PER_PANE} attached images"),
+            );
+        }
+    }
+    if let Err(e) = std::fs::create_dir_all(&pane_dir) {
+        tracing::warn!("attach dir create failed ({e})");
+        return attach_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to store the upload");
+    }
+    let leaf = format!("{:032x}.{ext}", rand::random::<u128>());
+    let path = pane_dir.join(leaf);
+    if let Err(e) = std::fs::write(&path, &body) {
+        tracing::warn!("attach write failed ({e})");
+        return attach_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to store the upload");
+    }
+
+    Json(json!({ "path": path.to_string_lossy() })).into_response()
+}
+
 #[derive(serde::Deserialize)]
 struct CreatePaneBody {}
 
@@ -2880,6 +3079,10 @@ mod bee_route_tests {
             // transcript tests set this explicitly (see
             // `transcript_root_dir` below).
             transcript_root: None,
+            // No route test writes into the developer's real
+            // `~/.cache/mdview/attach` — attach-route tests set this
+            // explicitly to a scratch dir (see `attach_fixture` below).
+            attach_root: None,
             // A fresh manager per state — no route test shares live
             // background tasks across states.
             terminal_background: Arc::new(crate::TerminalBackground::new()),
@@ -9276,6 +9479,357 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A POST request to `/p/{id}/_terminal/{pane_id}/attach` carrying a raw
+    /// image body with the given declared `Content-Type` — the attach
+    /// route's body is raw bytes, not the JSON `terminal_input_req` sends
+    /// (plan.md's Approach: one request per file, no `multipart` feature).
+    fn attach_req(id: &str, pane_id: &str, content_type: &str, body: Vec<u8>) -> Request<Body> {
+        Request::builder()
+            .uri(format!("/p/{id}/_terminal/{pane_id}/attach"))
+            .method("POST")
+            .header(header::CONTENT_TYPE, content_type)
+            .body(Body::from(body))
+            .unwrap()
+    }
+
+    /// A real PNG signature followed by arbitrary bytes — passes both the
+    /// declared-MIME allowlist and the magic-byte sniff for `image/png`.
+    const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    fn fake_png_bytes() -> Vec<u8> {
+        let mut b = PNG_MAGIC.to_vec();
+        b.extend_from_slice(b"fake-png-body-terminal-image-attach-test");
+        b
+    }
+
+    /// Shared setup for the attach-route edge-case tests below: herdr
+    /// enabled, one registered project with one pane genuinely inside its
+    /// root (mirroring `terminal_route_lists_only_panes_within_the_project_root_boundary`'s
+    /// "included" case), and a fresh scratch attach root via `st.attach_root`
+    /// so no test ever touches the developer's real `~/.cache/mdview/attach`.
+    /// Returns the router, the project, the pane id, and the three scratch
+    /// directories the caller must remove with `cleanup_attach_fixture`.
+    async fn attach_fixture(label: &str) -> (Router, Project, String, PathBuf, PathBuf, PathBuf) {
+        let dir = fresh_root(&format!("attach-{label}-dir"));
+        enable_terminal(&dir);
+        let scratch = fresh_root(&format!("attach-{label}-scratch"));
+        let attach_root = fresh_root(&format!("attach-{label}-root"));
+        let root = scratch.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let pane = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        st.attach_root = Some(attach_root.clone());
+        let project = register(&st, &root, label);
+        let app = router(st);
+
+        (app, project, pane.pane_id, dir, scratch, attach_root)
+    }
+
+    fn cleanup_attach_fixture(dir: &Path, scratch: &Path, attach_root: &Path) {
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(scratch).ok();
+        std::fs::remove_dir_all(attach_root).ok();
+    }
+
+    /// D12: with the D7 `terminal.enabled` switch off, the attach endpoint
+    /// answers with the family's reasoned JSON 404 — the same shape and
+    /// wording `terminal_write_routes_disabled_answer_with_a_reasoned_json_404`
+    /// proves for `input`/`keys` above.
+    #[tokio::test]
+    async fn terminal_attach_disabled_answers_with_a_reasoned_json_404() {
+        let dir = fresh_root("attach-disabled-dir");
+        // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
+        let root = fresh_root("attach-disabled-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "attach-disabled");
+        let app = router(st);
+
+        let resp = app
+            .oneshot(attach_req(&project.id, "w1:p1", "image/png", fake_png_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "the disabled attach endpoint must answer JSON, not an empty body"
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains("disabled"), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Mirrors `terminal_write_routes_refuse_a_pane_outside_the_project_root`:
+    /// a pane whose real cwd sits outside the project's own root is refused
+    /// even though the URL names this project, proving the attach route
+    /// shares the same D2 containment boundary as the other write routes.
+    #[tokio::test]
+    async fn terminal_attach_refuses_a_pane_outside_the_project_root() {
+        let dir = fresh_root("attach-foreign-dir");
+        enable_terminal(&dir);
+        let scratch = fresh_root("attach-foreign-scratch");
+        let root = scratch.join("project");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let outside_agent = fake
+            .agent_start("w1", Some(&outside.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "attach-foreign");
+        let app = router(st);
+
+        let resp = app
+            .oneshot(attach_req(
+                &project.id,
+                &outside_agent.pane_id,
+                "image/png",
+                fake_png_bytes(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_string(resp).await;
+        assert!(body.contains("pane not found"), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// A pane id that exists nowhere in herdr's snapshot at all (distinct
+    /// from the foreign-project case above, which is a genuine pane the
+    /// boundary excludes) still answers the same opaque not-found — never
+    /// trusted from the URL alone.
+    #[tokio::test]
+    async fn terminal_attach_refuses_an_unknown_pane() {
+        let dir = fresh_root("attach-unknown-pane-dir");
+        enable_terminal(&dir);
+        let root = fresh_root("attach-unknown-pane-project");
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "attach-unknown-pane");
+        let app = router(st);
+
+        let resp = app
+            .oneshot(attach_req(
+                &project.id,
+                "no-such-pane-at-all",
+                "image/png",
+                fake_png_bytes(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_string(resp).await;
+        assert!(body.contains("pane not found"), "{body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Input extremes: an empty body is refused rather than written as a
+    /// zero-byte file.
+    #[tokio::test]
+    async fn terminal_attach_refuses_a_zero_byte_body() {
+        let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("zero-byte").await;
+
+        let resp = app
+            .oneshot(attach_req(&project.id, &pane_id, "image/png", Vec::new()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_string(resp).await;
+        assert!(body.contains("\"error\""), "{body}");
+
+        cleanup_attach_fixture(&dir, &scratch, &attach_root);
+    }
+
+    /// Input extremes: a body over `ATTACH_MAX_BYTES` is refused with the
+    /// JSON error shape the composer can render — never axum's own
+    /// plain-text 413, which the per-route `DefaultBodyLimit` layer set
+    /// above `ATTACH_MAX_BYTES` exists to prevent.
+    #[tokio::test]
+    async fn terminal_attach_refuses_a_body_over_the_cap() {
+        let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("over-cap").await;
+
+        let mut oversize = PNG_MAGIC.to_vec();
+        oversize.resize(ATTACH_MAX_BYTES + 1, 0xAB);
+        let resp = app
+            .oneshot(attach_req(&project.id, &pane_id, "image/png", oversize))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "an over-cap upload must answer JSON, never axum's plain-text 413"
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains("\"error\""), "{body}");
+
+        cleanup_attach_fixture(&dir, &scratch, &attach_root);
+    }
+
+    /// Input extremes: a declared MIME outside the allowlist is refused —
+    /// both an ordinary non-image type and `image/svg+xml`, excluded even
+    /// though it names an image format, because it is scriptable.
+    #[tokio::test]
+    async fn terminal_attach_refuses_a_disallowed_mime_type() {
+        let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("bad-mime").await;
+
+        let resp = app
+            .clone()
+            .oneshot(attach_req(&project.id, &pane_id, "text/plain", b"hello".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_string(resp).await;
+        assert!(body.contains("\"error\""), "{body}");
+
+        let svg_resp = app
+            .oneshot(attach_req(
+                &project.id,
+                &pane_id,
+                "image/svg+xml",
+                b"<svg onload=\"alert(1)\"></svg>".to_vec(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(svg_resp.status(), StatusCode::BAD_REQUEST);
+        let svg_body = body_string(svg_resp).await;
+        assert!(svg_body.contains("\"error\""), "{svg_body}");
+
+        cleanup_attach_fixture(&dir, &scratch, &attach_root);
+    }
+
+    /// Input extremes: bytes that do not match the declared `image/png`
+    /// magic number are refused even though the declared MIME is allowed —
+    /// the sniff runs in addition to the allowlist, never instead of it.
+    #[tokio::test]
+    async fn terminal_attach_refuses_bytes_that_do_not_match_the_declared_type() {
+        let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("spoofed").await;
+
+        let resp = app
+            .oneshot(attach_req(
+                &project.id,
+                &pane_id,
+                "image/png",
+                b"<html>not actually a png</html>".to_vec(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_string(resp).await;
+        assert!(body.contains("\"error\""), "{body}");
+
+        cleanup_attach_fixture(&dir, &scratch, &attach_root);
+    }
+
+    /// Happy path + data integrity: a genuine PNG lands under the attach
+    /// root at an absolute path whose parent segments (project, pane) never
+    /// carry the pane id's raw `:` — proving `sanitize_attach_segment` runs
+    /// on the real write path, not just in isolation.
+    #[tokio::test]
+    async fn terminal_attach_stores_a_valid_png_under_the_sanitized_attach_root() {
+        let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("happy").await;
+        assert!(pane_id.contains(':'), "fixture pane id must carry ':' to make this test mean anything: {pane_id}");
+
+        let resp = app
+            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let path_str = parsed["path"].as_str().expect("path field");
+        let path = std::path::Path::new(path_str);
+        assert!(path.is_absolute(), "{}", path.display());
+        assert!(path.starts_with(&attach_root), "{}", path.display());
+        assert!(path.exists(), "the uploaded file must actually land on disk");
+        let parent = path.parent().unwrap();
+        let relative = parent.strip_prefix(&attach_root).unwrap();
+        for component in relative.components() {
+            let seg = component.as_os_str().to_string_lossy();
+            assert!(!seg.contains(':'), "pane/project segment leaked a raw ':': {seg}");
+        }
+
+        cleanup_attach_fixture(&dir, &scratch, &attach_root);
+    }
+
+    /// Data integrity: two uploads to the same pane never collide on the
+    /// same stored name.
+    #[tokio::test]
+    async fn terminal_attach_gives_two_uploads_distinct_names() {
+        let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("distinct").await;
+
+        let first = app
+            .clone()
+            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_path = serde_json::from_str::<serde_json::Value>(&body_string(first).await)
+            .unwrap()["path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let second = app
+            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let second_path = serde_json::from_str::<serde_json::Value>(&body_string(second).await)
+            .unwrap()["path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        assert_ne!(first_path, second_path, "two uploads must never collide on the same name");
+
+        cleanup_attach_fixture(&dir, &scratch, &attach_root);
+    }
+
+    /// Data integrity: the 33rd file in one pane's attach directory is
+    /// refused (count cap) — and, critically, the refused upload never
+    /// lands on disk itself.
+    #[tokio::test]
+    async fn terminal_attach_refuses_the_33rd_file_in_one_panes_directory() {
+        let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("cap-33").await;
+
+        let pane_dir = attach_root
+            .join(sanitize_attach_segment(&project.id))
+            .join(sanitize_attach_segment(&pane_id));
+        std::fs::create_dir_all(&pane_dir).unwrap();
+        for n in 0..ATTACH_MAX_FILES_PER_PANE {
+            std::fs::write(pane_dir.join(format!("seed-{n}.png")), b"seed").unwrap();
+        }
+
+        let resp = app
+            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = body_string(resp).await;
+        assert!(body.contains("\"error\""), "{body}");
+        let count = std::fs::read_dir(&pane_dir).unwrap().count();
+        assert_eq!(count, ATTACH_MAX_FILES_PER_PANE, "a refused upload must never land on disk");
+
+        cleanup_attach_fixture(&dir, &scratch, &attach_root);
     }
 
     /// D3/agent-terminal-9: the reply bar and the named-key buttons render on
