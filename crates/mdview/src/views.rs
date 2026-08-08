@@ -678,12 +678,34 @@ fn status_pill(status: &str) -> String {
 /// The card carries no heading of its own: [`pane_strip`] already names the
 /// pane directly above it, and repeating that identity a second time only
 /// pushed the screen further down a handset's viewport.
-fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
+///
+/// terminal-image-attach: `attach` gates the image-attach control (picker
+/// button, hidden file input, chip list, error slot) that rides inside the
+/// reply form. It is `true` only for [`terminal_page`] — the Unassigned page
+/// shares this card markup but has no project-scoped
+/// `/p/:id/_terminal/:pane_id/attach` route to upload against (plan finding
+/// 7), so [`unassigned_terminal_page`] passes `false` and renders none of it.
+fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str, attach: bool) -> String {
     if panes.is_empty() {
         return format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_msg));
     }
     let mut out = String::new();
     for p in panes {
+        let attach_block = if attach {
+            format!(
+                r#"
+    <div class="term-attach" data-pane-id="{pane_id}">
+      <input type="file" class="term-attach__input" data-pane-id="{pane_id}" accept="image/*" multiple aria-label="Attach images to send to {name}" hidden>
+      <button type="button" class="term-attach__btn" data-pane-id="{pane_id}">Attach images</button>
+      <ul class="term-attach__chips" data-pane-id="{pane_id}"></ul>
+      <p class="term-attach__error" data-pane-id="{pane_id}" role="alert" hidden></p>
+    </div>"#,
+                pane_id = esc(&p.pane_id),
+                name = esc(&p.name),
+            )
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
             r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
   <div class="term-screen-wrap">
@@ -707,7 +729,7 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     </div>
   </div>
   <form class="term-reply" data-pane-id="{pane_id}">
-    <textarea class="term-reply__text" rows="3" placeholder="Type a reply… (Ctrl+Enter to send)" aria-label="Reply to {name}" autocomplete="off"></textarea>
+    <textarea class="term-reply__text" rows="3" placeholder="Type a reply… (Ctrl+Enter to send)" aria-label="Reply to {name}" autocomplete="off"></textarea>{attach_block}
     <div class="term-reply__actions">
       <button type="button" class="term-reply__stage">Stage</button>
       <button type="submit" class="term-reply__send">Send</button>
@@ -716,6 +738,7 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
 </div>"#,
             pane_id = esc(&p.pane_id),
             name = esc(&p.name),
+            attach_block = attach_block,
         ));
     }
     out
@@ -837,8 +860,8 @@ pub fn terminal_page(
 ) -> String {
     let empty_msg = "No agents are running under this project right now.";
     let rows = match selected.and_then(|pid| panes.iter().find(|p| p.pane_id == pid)) {
-        Some(pane) => pane_cards(std::slice::from_ref(pane), empty_msg),
-        None => pane_cards(&[], empty_msg),
+        Some(pane) => pane_cards(std::slice::from_ref(pane), empty_msg, true),
+        None => pane_cards(&[], empty_msg, true),
     };
     let bar = pane_bar(
         &project.id,
@@ -1059,7 +1082,7 @@ const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
 /// of its own. Zero panes renders a named empty state distinct from both
 /// [`terminal_page`]'s own empty wording and [`unassigned_terminal_down_page`].
 pub fn unassigned_terminal_page(panes: &[TerminalPaneView]) -> String {
-    let rows = pane_cards(panes, "No agents are running outside a registered project right now.");
+    let rows = pane_cards(panes, "No agents are running outside a registered project right now.", false);
     let body = format!(
         r#"{topbar}
 {tab_style}
@@ -3636,6 +3659,49 @@ mod tests {
         assert!(!html.contains("data-preset=\"Aider\""), "an unconfigured label must never render: {html}");
         // The plain-shell control is unconditional — it needs no preset.
         assert!(html.contains(r#"<button type="button" class="term-create__pane">New shell</button>"#));
+    }
+
+    /// terminal-image-attach: the attach control (picker button, hidden file
+    /// input, chip list) rides in the reply form on a project's own terminal
+    /// page — it has a project-scoped `/p/:id/_terminal/:pane_id/attach`
+    /// route to upload against — but the Unassigned page shares
+    /// [`pane_cards`]'s markup with no such route, so it must render none of
+    /// it (plan finding 7).
+    #[test]
+    fn terminal_page_renders_the_attach_control_and_unassigned_does_not() {
+        let project = sample_project();
+        let panes = vec![TerminalPaneView {
+            pane_id: "w1:p1".into(),
+            kind: "claude".into(),
+            name: "one".into(),
+            status: "working".into(),
+            title: String::new(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+        }];
+        let project_html = terminal_page(&project, &panes, Some("w1:p1"), &[]);
+        assert!(
+            project_html.contains(r#"class="term-attach" data-pane-id="w1:p1""#),
+            "the project pane page must render the attach control: {project_html}"
+        );
+        assert!(
+            project_html.contains(r#"class="term-attach__input""#)
+                && project_html.contains(r#"type="file""#)
+                && project_html.contains("multiple")
+                && project_html.contains(r#"accept="image/*""#),
+            "the attach control must be a multi-file image picker: {project_html}"
+        );
+        assert!(
+            project_html.contains(r#"class="term-attach__chips""#),
+            "the attach control must offer an (initially empty) chip list: {project_html}"
+        );
+
+        let unassigned_html = unassigned_terminal_page(&panes);
+        assert!(
+            !unassigned_html.contains("term-attach"),
+            "the Unassigned page has no project-scoped attach route, so it must render no attach markup: {unassigned_html}"
+        );
     }
 
     /// The section nav rides in the top bar, and the control that makes a

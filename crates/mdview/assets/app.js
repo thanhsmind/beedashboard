@@ -1124,6 +1124,19 @@
   // already runs on its own interval and will pick up the change on its
   // next tick, per this cell's instruction not to invent a second refresh
   // mechanism.
+  //
+  // terminal-image-attach (D1/D2): the same form also owns the attach
+  // control, when the page rendered one (`views.rs::pane_cards` gates the
+  // markup to project pages only, per plan finding 7 — the Unassigned page
+  // has no `.term-attach` box for this loop to find, so all of the wiring
+  // below is a no-op there). Picker, drag-drop on the form, and paste in the
+  // textarea all feed one `upload` function; each 200 adds a removable chip
+  // holding the returned path, any refusal shows the server's own message
+  // and adds no chip. "Send" (the submit event and the Ctrl+Enter
+  // keybinding — the two `submit: true` paths) composes ONE message out of
+  // the prompt text and every remaining chip's path and clears the chips
+  // once that send lands; "Stage" keeps sending the textarea alone, and
+  // neither keybinding changes shape.
   (function () {
     var main = document.querySelector("main.fg-page[data-project-id]");
     if (!main) return;
@@ -1136,6 +1149,10 @@
 
     function keysUrl(paneId) {
       return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/keys";
+    }
+
+    function attachUrl(paneId) {
+      return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/attach";
     }
 
     function postJson(url, body) {
@@ -1156,14 +1173,153 @@
         .catch(function () {});
     }
 
+    // paneId -> [{ path: "<absolute path>" }, ...], the chips currently
+    // staged for that pane's next send.
+    var chips = {};
+
+    function chipsFor(paneId) {
+      if (!chips[paneId]) chips[paneId] = [];
+      return chips[paneId];
+    }
+
+    function clearChips(paneId, chipList) {
+      chips[paneId] = [];
+      if (chipList) chipList.innerHTML = "";
+    }
+
+    function showAttachError(errorEl, message) {
+      if (!errorEl) return;
+      errorEl.textContent = message;
+      errorEl.hidden = false;
+    }
+
+    function clearAttachError(errorEl) {
+      if (!errorEl) return;
+      errorEl.hidden = true;
+      errorEl.textContent = "";
+    }
+
+    // One chip: the stored path plus a button that drops it from this
+    // pane's staged list — a removed chip's path never rides a later send
+    // because `composeMessage` only ever reads `chipsFor(paneId)`.
+    function addChip(paneId, chipList, path) {
+      chipsFor(paneId).push({ path: path });
+      var li = document.createElement("li");
+      li.className = "term-attach__chip";
+      var label = document.createElement("span");
+      label.className = "term-attach__chip-label";
+      label.textContent = path;
+      var remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "term-attach__chip-remove";
+      remove.setAttribute("aria-label", "Remove " + path);
+      remove.textContent = "×";
+      remove.addEventListener("click", function () {
+        var list = chipsFor(paneId);
+        var at = list.findIndex(function (c) {
+          return c.path === path;
+        });
+        if (at !== -1) list.splice(at, 1);
+        li.remove();
+      });
+      li.appendChild(label);
+      li.appendChild(remove);
+      chipList.appendChild(li);
+    }
+
+    // One raw-body upload per file (D1) — the endpoint this cell wires
+    // against takes one file per request, `Content-Type` carrying the
+    // file's own MIME type.
+    function upload(paneId, file, chipList, errorEl) {
+      clearAttachError(errorEl);
+      return fetch(attachUrl(paneId), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      })
+        .then(function (res) {
+          return res
+            .json()
+            .catch(function () {
+              return null;
+            })
+            .then(function (body) {
+              if (!res.ok) {
+                showAttachError(errorEl, (body && body.error) || "upload failed");
+                return;
+              }
+              if (body && body.path) addChip(paneId, chipList, body.path);
+            });
+        })
+        .catch(function () {
+          showAttachError(errorEl, "upload failed");
+        });
+    }
+
+    // terminal-image-attach-3 P3: mirrors the server's own `ATTACH_MAX_BYTES`
+    // (`server.rs`) so an oversized drop is refused client-side, with the
+    // same visible error surface a server refusal uses, before any bytes
+    // ever leave the browser.
+    var ATTACH_MAX_BYTES = 10 * 1024 * 1024;
+
+    function uploadFiles(paneId, files, chipList, errorEl) {
+      Array.prototype.slice.call(files || []).forEach(function (file) {
+        if (file.size > ATTACH_MAX_BYTES) {
+          showAttachError(errorEl, "upload exceeds the 10 MB limit");
+          return;
+        }
+        upload(paneId, file, chipList, errorEl);
+      });
+    }
+
+    // terminal-image-attach-3 P3: a path containing whitespace (a `$HOME` or
+    // `$XDG_RUNTIME_DIR` with a space in it) would otherwise fall apart when
+    // space-joined with its neighbors; quoting only the paths that need it
+    // keeps the common case bare.
+    function quotePathIfNeeded(path) {
+      return /\s/.test(path) ? '"' + path + '"' : path;
+    }
+
+    // The composed message a "Send" carries: prompt text, a newline when
+    // both parts exist, then every remaining chip's path space-joined (D2),
+    // double-quoting any path that itself contains whitespace.
+    function composeMessage(paneId, promptText) {
+      var paths = chipsFor(paneId)
+        .map(function (c) {
+          return quotePathIfNeeded(c.path);
+        })
+        .join(" ");
+      if (promptText && paths) return promptText + "\n" + paths;
+      return promptText || paths;
+    }
+
+    function sendComposed(paneId, promptText, input, chipList) {
+      var text = composeMessage(paneId, promptText);
+      if (!text) return;
+      postJson(inputUrl(paneId), { text: text, submit: true })
+        .then(function (res) {
+          if (res.ok) {
+            if (input) input.value = "";
+            clearChips(paneId, chipList);
+          }
+        })
+        .catch(function () {});
+    }
+
     Array.prototype.slice.call(document.querySelectorAll(".term-reply[data-pane-id]")).forEach(function (form) {
       var paneId = form.getAttribute("data-pane-id");
       var input = form.querySelector(".term-reply__text");
       var stageBtn = form.querySelector(".term-reply__stage");
+      var attachBox = form.querySelector(".term-attach[data-pane-id]");
+      var fileInput = attachBox && attachBox.querySelector(".term-attach__input");
+      var attachBtn = attachBox && attachBox.querySelector(".term-attach__btn");
+      var chipList = attachBox && attachBox.querySelector(".term-attach__chips");
+      var errorEl = attachBox && attachBox.querySelector(".term-attach__error");
 
       form.addEventListener("submit", function (ev) {
         ev.preventDefault();
-        sendReply(paneId, input.value, true, input);
+        sendComposed(paneId, input.value, input, chipList);
       });
 
       // The reply box is a textarea, so Enter belongs to the text — it opens
@@ -1173,7 +1329,25 @@
         input.addEventListener("keydown", function (ev) {
           if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
             ev.preventDefault();
-            sendReply(paneId, input.value, true, input);
+            sendComposed(paneId, input.value, input, chipList);
+          }
+        });
+
+        // Clipboard paste (D1): any pasted item that is a file (an image
+        // copied from elsewhere) feeds the same upload path as the picker
+        // and drag-drop, instead of landing as text/garbage in the textarea.
+        input.addEventListener("paste", function (ev) {
+          var items = ev.clipboardData && ev.clipboardData.items;
+          if (!items || !attachBox) return;
+          var files = [];
+          Array.prototype.slice.call(items).forEach(function (item) {
+            if (item.kind !== "file") return;
+            var file = item.getAsFile();
+            if (file) files.push(file);
+          });
+          if (files.length) {
+            ev.preventDefault();
+            uploadFiles(paneId, files, chipList, errorEl);
           }
         });
       }
@@ -1181,6 +1355,32 @@
       if (stageBtn) {
         stageBtn.addEventListener("click", function () {
           sendReply(paneId, input.value, false, input);
+        });
+      }
+
+      if (attachBox) {
+        if (attachBtn && fileInput) {
+          attachBtn.addEventListener("click", function () {
+            fileInput.click();
+          });
+          fileInput.addEventListener("change", function () {
+            uploadFiles(paneId, fileInput.files, chipList, errorEl);
+            fileInput.value = "";
+          });
+        }
+
+        // Drag-drop onto the whole composer (D1), not just the file input.
+        form.addEventListener("dragover", function (ev) {
+          if (ev.dataTransfer && Array.prototype.indexOf.call(ev.dataTransfer.types || [], "Files") !== -1) {
+            ev.preventDefault();
+          }
+        });
+        form.addEventListener("drop", function (ev) {
+          var files = ev.dataTransfer && ev.dataTransfer.files;
+          if (files && files.length) {
+            ev.preventDefault();
+            uploadFiles(paneId, files, chipList, errorEl);
+          }
         });
       }
     });
