@@ -20,9 +20,6 @@ Call `mdview_view_file` with:
 - `project_root`: absolute path to the project root
 - `relative_path`: the file path relative to that root
 
-It returns a browser `url`. Tell the user: "You can view this at: `<url>`".
-The server auto-registers the project on first use and indexes the file
-immediately.
 
 ### Using CLI fallback
 
