@@ -1257,18 +1257,37 @@
         });
     }
 
+    // terminal-image-attach-3 P3: mirrors the server's own `ATTACH_MAX_BYTES`
+    // (`server.rs`) so an oversized drop is refused client-side, with the
+    // same visible error surface a server refusal uses, before any bytes
+    // ever leave the browser.
+    var ATTACH_MAX_BYTES = 10 * 1024 * 1024;
+
     function uploadFiles(paneId, files, chipList, errorEl) {
       Array.prototype.slice.call(files || []).forEach(function (file) {
+        if (file.size > ATTACH_MAX_BYTES) {
+          showAttachError(errorEl, "upload exceeds the 10 MB limit");
+          return;
+        }
         upload(paneId, file, chipList, errorEl);
       });
     }
 
+    // terminal-image-attach-3 P3: a path containing whitespace (a `$HOME` or
+    // `$XDG_RUNTIME_DIR` with a space in it) would otherwise fall apart when
+    // space-joined with its neighbors; quoting only the paths that need it
+    // keeps the common case bare.
+    function quotePathIfNeeded(path) {
+      return /\s/.test(path) ? '"' + path + '"' : path;
+    }
+
     // The composed message a "Send" carries: prompt text, a newline when
-    // both parts exist, then every remaining chip's path space-joined (D2).
+    // both parts exist, then every remaining chip's path space-joined (D2),
+    // double-quoting any path that itself contains whitespace.
     function composeMessage(paneId, promptText) {
       var paths = chipsFor(paneId)
         .map(function (c) {
-          return c.path;
+          return quotePathIfNeeded(c.path);
         })
         .join(" ");
       if (promptText && paths) return promptText + "\n" + paths;

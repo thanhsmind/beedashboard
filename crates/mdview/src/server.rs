@@ -1627,6 +1627,46 @@ const ATTACH_BODY_LIMIT_BYTES: usize = ATTACH_MAX_BYTES + 1024 * 1024;
 /// is refused rather than let the attach root grow unbounded.
 const ATTACH_MAX_FILES_PER_PANE: usize = 32;
 
+/// terminal-image-attach-3 P2: the age past which a stored attach file is
+/// pruned before the `ATTACH_MAX_FILES_PER_PANE` count cap is enforced.
+/// `~/.cache/mdview/attach` (the `XDG_RUNTIME_DIR`-unset fallback, the
+/// common WSL case) never clears on logout the way the runtime-dir root
+/// does, so without this a pane's directory only grows and every upload
+/// past its lifetime 32nd is refused forever. 24 hours comfortably outlives
+/// one working session while still bounding disk growth.
+const ATTACH_STALE_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Removes files in `pane_dir` whose mtime is older than `ATTACH_STALE_AGE`
+/// — called by `terminal_attach` before its count-cap check (see
+/// `ATTACH_STALE_AGE`). Best-effort: a missing directory, unreadable
+/// metadata, or a failed removal is skipped rather than propagated —
+/// pruning is housekeeping, never part of the upload's own success/failure
+/// path.
+fn prune_stale_attach_files(pane_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(pane_dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let is_stale = now
+            .duration_since(modified)
+            .map(|age| age > ATTACH_STALE_AGE)
+            .unwrap_or(false);
+        if is_stale {
+            std::fs::remove_file(entry.path()).ok();
+        }
+    }
+}
+
 /// The declared `Content-Type` values `terminal_attach` accepts, mapped to
 /// the extension the stored file is written with. `image/svg+xml` is
 /// deliberately absent — scriptable, unlike the four raster formats here
@@ -1767,6 +1807,7 @@ async fn terminal_attach(
     let pane_dir = root
         .join(sanitize_attach_segment(&id))
         .join(sanitize_attach_segment(&pane_id));
+    prune_stale_attach_files(&pane_dir);
     if let Ok(entries) = std::fs::read_dir(&pane_dir) {
         if entries.filter_map(|e| e.ok()).count() >= ATTACH_MAX_FILES_PER_PANE {
             return attach_error(
@@ -9828,6 +9869,72 @@ mod bee_route_tests {
         assert!(body.contains("\"error\""), "{body}");
         let count = std::fs::read_dir(&pane_dir).unwrap().count();
         assert_eq!(count, ATTACH_MAX_FILES_PER_PANE, "a refused upload must never land on disk");
+
+        cleanup_attach_fixture(&dir, &scratch, &attach_root);
+    }
+
+    /// terminal-image-attach-3 P2: a pane directory holding
+    /// `ATTACH_MAX_FILES_PER_PANE` files whose mtimes are all older than
+    /// `ATTACH_STALE_AGE` gets pruned before the count cap runs, so the
+    /// upload that would otherwise be the "33rd" still succeeds — proving
+    /// `prune_stale_attach_files` actually runs on the real request path,
+    /// not just in isolation. Mtimes are set via `File::set_modified`
+    /// (std-only, no new dependency).
+    #[tokio::test]
+    async fn terminal_attach_prunes_stale_files_before_the_cap_and_accepts_the_upload() {
+        let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("prune-stale").await;
+
+        let pane_dir = attach_root
+            .join(sanitize_attach_segment(&project.id))
+            .join(sanitize_attach_segment(&pane_id));
+        std::fs::create_dir_all(&pane_dir).unwrap();
+        let stale_mtime =
+            std::time::SystemTime::now() - (ATTACH_STALE_AGE + std::time::Duration::from_secs(60));
+        for n in 0..ATTACH_MAX_FILES_PER_PANE {
+            let path = pane_dir.join(format!("stale-{n}.png"));
+            std::fs::write(&path, b"seed").unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            file.set_modified(stale_mtime).unwrap();
+        }
+
+        let resp = app
+            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a pane directory of only stale files must be pruned before the cap check"
+        );
+        let remaining = std::fs::read_dir(&pane_dir).unwrap().count();
+        assert_eq!(remaining, 1, "the 32 stale seed files must be pruned, leaving only the new upload");
+
+        cleanup_attach_fixture(&dir, &scratch, &attach_root);
+    }
+
+    /// terminal-image-attach-3 P2 (the other half of the guarantee above):
+    /// a pane directory holding `ATTACH_MAX_FILES_PER_PANE` files with
+    /// fresh mtimes is untouched by pruning and still refuses the next
+    /// upload — pruning narrows the cap's growth, it never disables it.
+    #[tokio::test]
+    async fn terminal_attach_does_not_prune_fresh_files_and_still_refuses_the_cap() {
+        let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("prune-fresh").await;
+
+        let pane_dir = attach_root
+            .join(sanitize_attach_segment(&project.id))
+            .join(sanitize_attach_segment(&pane_id));
+        std::fs::create_dir_all(&pane_dir).unwrap();
+        for n in 0..ATTACH_MAX_FILES_PER_PANE {
+            std::fs::write(pane_dir.join(format!("fresh-{n}.png")), b"seed").unwrap();
+        }
+
+        let resp = app
+            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let count = std::fs::read_dir(&pane_dir).unwrap().count();
+        assert_eq!(count, ATTACH_MAX_FILES_PER_PANE, "fresh files must not be pruned away");
 
         cleanup_attach_fixture(&dir, &scratch, &attach_root);
     }
