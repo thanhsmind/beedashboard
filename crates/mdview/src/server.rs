@@ -361,6 +361,17 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
             } else {
                 None
             };
+            // project-suggestions S1/S3: gated on `terminal_family_enabled`
+            // alone (the plan's locked narrowing of toa-4/D9's scope for
+            // this one surface) — deliberately not also on
+            // `unassigned_group_enabled`, which every other reader of
+            // `unassigned_panes`'s complement checks. With the switch off,
+            // `snapshot` is `None` and this is `Vec::new()` with no herdr
+            // call and no filesystem path in reach of the page at all.
+            let suggestions: Vec<views::ProjectSuggestion> = snapshot
+                .as_ref()
+                .map(|snap| suggested_projects(snap, &projects))
+                .unwrap_or_default();
             let with_counts: Vec<_> = projects
                 .into_iter()
                 .map(|p| {
@@ -384,18 +395,24 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                     (p, c, panes)
                 })
                 .collect();
-            // D5/D4: presence only, never contents — this unauthenticated
-            // route reads only the D7 and, per toa-4/D9, the group's own
-            // switch (no herdr call, no session), so it can never learn
-            // whether any pane is actually unassigned. toa-4: once the
-            // group is off by policy — its own switch, not merely an empty
-            // pane list — this marker itself becomes a disclosure ("this
-            // machine has a host-wide pane group configured"), so it must
-            // track both switches, not the family switch alone.
+            // D5/D4: presence only, never contents. Stale to say "no herdr
+            // call" here (project-suggestions correction): the snapshot
+            // above is taken whenever `badges_enabled`, for badges and, per
+            // D3, for the suggestion block too. What still holds is that
+            // this marker's own truth is derived from the two switches
+            // alone (`badges_enabled` and `unassigned_group_enabled`) — it
+            // never reads `snapshot` or `unassigned_panes` itself, so it
+            // still cannot learn whether any pane is actually unassigned.
+            // toa-4: once the group is off by policy — its own switch, not
+            // merely an empty pane list — this marker itself becomes a
+            // disclosure ("this machine has a host-wide pane group
+            // configured"), so it must track both switches, not the family
+            // switch alone.
             let unassigned_visible = badges_enabled && unassigned_group_enabled(&st);
             Html(views::project_list_page(
                 &with_counts,
                 unassigned_visible,
+                &suggestions,
                 flag.register_error.as_deref(),
             ))
             .into_response()
@@ -1846,12 +1863,20 @@ fn project_panes(
 /// the exact widening this group's own gate is the last line of defense
 /// against (per P6, there is no second containment check for this group;
 /// toa-4/D9's `unassigned_enabled` switch, checked by every caller of this
-/// function, is what authorizes it now that D1 removed the session that
-/// used to). There is no way to tell, without a working boundary, which of
-/// the project's real panes those were — so the whole group fails closed to
-/// empty rather than guess, the same "fail closed to zero, not a crash and
-/// not a laxer check" rule `terminal_page` already applies to a single
-/// unconstructible project.
+/// function that surfaces the Unassigned group itself, is what authorizes
+/// it now that D1 removed the session that used to). There is no way to
+/// tell, without a working boundary, which of the project's real panes
+/// those were — so the whole group fails closed to empty rather than guess,
+/// the same "fail closed to zero, not a crash and not a laxer check" rule
+/// `terminal_page` already applies to a single unconstructible project.
+///
+/// project-suggestions: `suggested_projects` (below) is this function's one
+/// other caller, and it does NOT check `unassigned_enabled` — D3 narrows
+/// the gate for that one surface to `terminal_family_enabled` alone
+/// (`docs/history/project-suggestions/plan.md`). What it reuses from here is
+/// only the fail-closed membership complement (this function's own D5
+/// partition, computed the same way regardless of caller), never the
+/// Unassigned group's own switch or presence marker.
 ///
 /// A pane's raw, unvalidated cwd is used for display here (or left empty if
 /// herdr never reported one) — never resolved through any `Boundary`, since
@@ -1899,6 +1924,124 @@ fn unassigned_panes(
                 workspace: snapshot.workspace_label_for(agent),
                 tab: snapshot.tab_label_for(agent),
             }
+        })
+        .collect()
+}
+
+/// project-suggestions (D1, D4, D6): every folder an agent-backed herdr
+/// **pane** is running in that sits under no registered project's own D2
+/// containment boundary. Reuses `unassigned_panes`'s complement directly,
+/// rather than re-deriving it: that function's own fail-closed membership
+/// rule (one unconstructable project boundary empties the whole group) is
+/// exactly the rule this list needs too, and hand-rolling a second copy of
+/// it here would risk drifting from it. D6: this is deliberately
+/// agents-only, the same as `unassigned_panes`'s own source
+/// (`snapshot.agents`) — a plain shell holding no agent never becomes a
+/// suggestion, even when its folder is otherwise unregistered. The
+/// superseded pre-D6 implementation read `snapshot.panes` instead
+/// specifically to include shell-only panes; D6 forbids that.
+///
+/// D1/D4: a suggestion's path is the pane's own `cwd`, exactly as herdr
+/// reports it — never resolved through a `Boundary`, never walked up to a
+/// repository root. A pane with no cwd at all, or one herdr reports as the
+/// empty string, is dropped rather than surfaced as a blank path. D1's
+/// normalization is limited to trimming one trailing slash for dedup
+/// purposes only (`/a/b` and `/a/b/` merge into one row) — the path is
+/// never canonicalized. Suggestions are grouped by that normalized path and
+/// carry the number of panes found there; rows are sorted by path,
+/// ascending, bytewise (plan.md's answer to CONTEXT's deferred ordering
+/// question).
+///
+/// project-suggestions-2 (independent review, carried forward from the
+/// superseded implementation): `unassigned_panes`'s own membership check
+/// (`project_panes`'s `Boundary::validate_existing`) canonicalizes, so it
+/// refuses a pane whose directory has since been deleted, whose `cwd` still
+/// carries a `.`/`..` component, or whose registered project's root does
+/// not exist on disk (`Boundary::new` never stats a root) — such a pane
+/// still genuinely belongs to a registered project, but falls through
+/// `unassigned_panes`'s membership check and would print here as if
+/// unregistered. Every candidate is therefore also checked, by raw
+/// component-wise containment (`paths_boundary::is_contained_in_root`,
+/// deliberately uncanonicalized — canonicalizing here would just
+/// reintroduce the same gap) against every registered project's own raw
+/// `root_path` — the owned-subtree second guard, **in addition to**, never
+/// instead of, `unassigned_panes`'s own membership check.
+///
+/// project-suggestions-3 (independent review): `is_contained_in_root`
+/// matches raw path *components*, never text, so it still has a gap of its
+/// own — a candidate like `<parent>/other/../<root_basename>/sub` resolves
+/// inside a registered project, but its raw components diverge from the
+/// root's own components right at `other`, so the containment check reads
+/// it as *not* contained and it printed here anyway. Rather than teach the
+/// containment check to resolve `.`/`..` (which would just move the
+/// canonicalize-vs-raw gap `project-suggestions-2` already closed once),
+/// every candidate whose raw components carry a `ParentDir` or `CurDir` at
+/// all is dropped outright, **before** the second guard runs — a traversal
+/// cwd can never become a suggestion worth offering either way, because
+/// `validate_register_path` (`server.rs:775-792`) refuses any submitted
+/// path carrying a traversal component before it ever reaches the deny-list
+/// gate, so such a row's own register button could never succeed, whatever
+/// its path resolves to.
+fn suggested_projects(
+    snapshot: &herdr::Snapshot,
+    projects: &[mdview_core::domain::Project],
+) -> Vec<views::ProjectSuggestion> {
+    // Never re-derive the assigned set by hand: `unassigned_panes` already
+    // is the fail-closed complement this list aggregates over (D6: agents
+    // only, since it reads `snapshot.agents`).
+    let unassigned = unassigned_panes(snapshot, projects);
+
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut paths: Vec<String> = Vec::new();
+    for pane in &unassigned {
+        if pane.cwd.is_empty() {
+            continue;
+        }
+        // D1: trim exactly one trailing slash so `/a/b` and `/a/b/` dedup
+        // to one row — never canonicalized, never walked up.
+        let normalized = pane.cwd.strip_suffix('/').unwrap_or(&pane.cwd);
+        if normalized.is_empty() {
+            continue;
+        }
+        let cwd_path = std::path::Path::new(normalized);
+        // project-suggestions-3: a raw traversal component is dropped
+        // before the second guard runs — a candidate carrying one can
+        // resolve to anywhere, including inside a registered project by a
+        // route `is_contained_in_root`'s raw component match cannot see
+        // (the doc comment above this function has the full story), and
+        // its own register button could never succeed regardless.
+        let has_traversal = cwd_path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        });
+        if has_traversal {
+            continue;
+        }
+        // Owned-subtree second guard: a candidate that equals or sits
+        // lexically under a registered project's own root is never
+        // suggested, even when `unassigned_panes`'s own membership check
+        // missed it (project-suggestions-2).
+        if projects
+            .iter()
+            .any(|p| mdview_core::paths_boundary::is_contained_in_root(cwd_path, &p.root_path))
+        {
+            continue;
+        }
+        if !counts.contains_key(normalized) {
+            paths.push(normalized.to_string());
+        }
+        *counts.entry(normalized.to_string()).or_insert(0) += 1;
+    }
+
+    paths.sort();
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let pane_count = counts[&path];
+            views::ProjectSuggestion { path, pane_count }
         })
         .collect()
 }
@@ -9272,6 +9415,1037 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // ---- project-suggestions: suggested folders on the Projects page ----
+
+    /// Truth: with `terminal.enabled` off, `GET /` carries no suggestion
+    /// block and no filesystem path — this cell's gate deliberately reads
+    /// only `terminal_family_enabled`, so a stray session running while the
+    /// switch is off must leave no trace at all, not even the section
+    /// itself.
+    #[tokio::test]
+    async fn suggestions_switch_off_carries_no_block_and_no_path() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-switch-off");
+        let scratch = fresh_root("suggest-switch-off-scratch");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("proj-suggestions") && !body.contains("Suggested projects"),
+            "the switch being off must render no suggestion block at all: {body}"
+        );
+        assert!(
+            !body.contains(&stray_root.to_string_lossy().to_string()),
+            "the switch being off must never leak a filesystem path: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Truth: with the switch on but genuinely nothing running at all (an
+    /// empty herdr snapshot, no agents whatsoever), the page renders no
+    /// suggestion section markup — not an empty `<section>` shell.
+    #[tokio::test]
+    async fn suggestions_empty_state_renders_no_block_markup() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-empty-state");
+        enable_terminal(&dir);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = std::sync::Arc::new(FakeHerdr::empty());
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("proj-suggestions") && !body.contains("Suggested projects"),
+            "nothing running must render no suggestion block at all: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Truth: a pane inside a registered project is never suggested; a pane
+    /// outside every project is. The registered pane sits in a
+    /// subdirectory of the project root (not the root itself), proving the
+    /// D2 containment check, not merely a root-string comparison, is what
+    /// excludes it.
+    #[tokio::test]
+    async fn suggestions_partition_owned_panes_from_a_genuinely_stray_one() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-partition");
+        enable_terminal(&dir);
+        let scratch = fresh_root("suggest-partition-scratch");
+        let project_root = scratch.join("owned-project");
+        let owned_sub = project_root.join("sub");
+        let stray_root = scratch.join("stray-agent-cwd");
+        std::fs::create_dir_all(&owned_sub).unwrap();
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&owned_sub.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "owned-project");
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&stray_root.to_string_lossy().to_string()),
+            "a pane outside every registered project must be suggested: {body}"
+        );
+        assert!(
+            !body.contains(&owned_sub.to_string_lossy().to_string()),
+            "a pane already inside a registered project's boundary must never be suggested: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Truth (D6): a pane with no agent at all (a plain shell) in an
+    /// unregistered folder is never suggested — suggestions read
+    /// `unassigned_panes`'s complement, which iterates `snapshot.agents`,
+    /// the same source the Unassigned group itself reads, so a folder that
+    /// only ever launched a shell stays low-noise (no suggestion) exactly
+    /// the way it stays absent from that group.
+    ///
+    /// Retires `suggestions_include_a_shell_pane_with_no_agent` (this test's
+    /// former name and assertion): the superseded pre-plan implementation
+    /// read `snapshot.panes` directly and asserted the opposite —
+    /// shell-only panes DID produce a suggestion. D6
+    /// (`docs/history/project-suggestions/CONTEXT.md`) supersedes that:
+    /// "Only agent-backed panes produce suggestions, matching how the
+    /// Unassigned group is computed; shell-only panes never do."
+    #[tokio::test]
+    async fn suggestions_exclude_a_shell_pane_with_no_agent() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-shell-only");
+        enable_terminal(&dir);
+        let stray_root = fresh_root("suggest-shell-only-stray");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.tab_create("w1", Some(&stray_root.to_string_lossy()))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&stray_root.to_string_lossy().to_string()),
+            "D6: a plain shell pane (no agent) in an unregistered folder must never be \
+             suggested: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&stray_root).ok();
+    }
+
+    /// Truth (D4): two agent-backed panes in one folder produce one
+    /// suggestion carrying a count of two, not two rows.
+    #[tokio::test]
+    async fn suggestions_dedup_two_panes_in_one_folder_to_one_row_with_count_two() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-dedup");
+        enable_terminal(&dir);
+        let stray_root = fresh_root("suggest-dedup-stray");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let path = stray_root.to_string_lossy().to_string();
+        // Each suggestion row carries the path twice — once as display text,
+        // once as the register form's hidden `value` — so a single,
+        // deduped row shows the path exactly twice; two undeduped rows
+        // would show it four times.
+        assert_eq!(
+            body.matches(&path).count(),
+            2,
+            "two panes in the same folder must dedup to one row: {body}"
+        );
+        assert!(
+            body.contains("2 panes"),
+            "the deduped row must carry a pane count of two: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&stray_root).ok();
+    }
+
+    /// Truth (D1 trailing-slash normalization): a pane whose cwd is
+    /// reported with a trailing slash merges into the same row as a pane
+    /// reporting the identical directory without one — `/a/b` and `/a/b/`
+    /// are the same folder, not two different suggestions.
+    #[tokio::test]
+    async fn suggestions_merge_a_trailing_slash_cwd_variant_into_the_same_row() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-trailing-slash");
+        enable_terminal(&dir);
+        let stray_root = fresh_root("suggest-trailing-slash-stray");
+        let bare = stray_root
+            .to_string_lossy()
+            .trim_end_matches('/')
+            .to_string();
+        let with_slash = format!("{bare}/");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&bare), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.agent_start("w1", Some(&with_slash), &["codex".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        // Same reasoning as the dedup test above: `FakeHerdr::new()`'s own
+        // seeded agents legitimately produce their own suggestion rows too
+        // (nothing here is registered), so the proof is not "exactly one
+        // row total" but that OUR OWN path merges to one row: it appears
+        // exactly twice (display text + hidden value) rather than four
+        // times split across a bare and a trailing-slash spelling.
+        assert_eq!(
+            body.matches(&bare).count(),
+            2,
+            "a trailing-slash cwd variant must merge into the same row as the bare path: {body}"
+        );
+        assert!(
+            body.contains("2 panes"),
+            "the merged row must carry a pane count of two: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&stray_root).ok();
+    }
+
+    /// Truth (D2, HTML injection defense): a hostile cwd containing double
+    /// and single quotes renders escaped in both the display text and the
+    /// register form's hidden `value` attribute, and the two are
+    /// byte-identical — what the user sees is exactly what the row would
+    /// submit. `esc()` (views.rs) escapes `& < > "` and leaves `'`
+    /// untouched, the file's own convention, since every attribute here
+    /// stays double-quoted.
+    #[tokio::test]
+    async fn suggestions_escape_a_hostile_cwd_and_keep_text_and_hidden_value_identical() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-hostile-cwd");
+        enable_terminal(&dir);
+        let scratch = fresh_root("suggest-hostile-cwd-scratch");
+        let hostile_cwd = format!(
+            "{}/hostile\"'dir",
+            scratch.to_string_lossy().trim_end_matches('/')
+        );
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&hostile_cwd), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&hostile_cwd),
+            "the raw, unescaped hostile path must never reach the body: {body}"
+        );
+        let escaped = hostile_cwd.replace('"', "&quot;");
+        assert!(
+            body.contains(&escaped),
+            "the escaped hostile path must render: {body}"
+        );
+        // The visible text and the hidden input's `value` are built from
+        // the same escaped string (views.rs), so it appears exactly twice
+        // — once as text, once as the attribute value.
+        assert_eq!(
+            body.matches(&escaped).count(),
+            2,
+            "the visible path text and the hidden register value must be byte-identical: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Truth: a pane whose cwd herdr reports as empty is dropped rather than
+    /// suggested as a blank path.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_whose_cwd_is_empty() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-empty-cwd");
+        enable_terminal(&dir);
+        let stray_root = fresh_root("suggest-empty-cwd-stray");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_pane_dirs(&started.pane_id, None, None).await.unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&stray_root.to_string_lossy().to_string()),
+            "a pane with no cwd at all must never render as a blank-path suggestion: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&stray_root).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-2): a pane whose cwd
+    /// herdr reports as `Some("")` — the empty string, not an absent
+    /// `cwd` — must be dropped exactly the same as the `None` case above,
+    /// not rendered as a blank row. `agent_start`'s own fixture always sets
+    /// `cwd == foreground_cwd`, so `set_pane_dirs` is the only seam that can
+    /// produce this shape.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_whose_cwd_is_reported_as_the_empty_string() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-empty-string-cwd");
+        enable_terminal(&dir);
+        let stray_root = fresh_root("suggest-empty-string-cwd-stray");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let app = router(st);
+
+        // project-suggestions-3 (independent review): `FakeHerdr::new()`
+        // itself seeds several unrelated agentless panes, so the section
+        // renders regardless of this test's own pane — asserting the whole
+        // section is absent can never fail whatever this guard does, and
+        // asserting only `stray_root`'s own string is absent can never fail
+        // either once `set_pane_dirs` below has overwritten it. Capture the
+        // row count with the pane's *real* cwd first (proving it would
+        // otherwise render), then assert overwriting to `Some("")` drops
+        // that one row entirely rather than swapping it for a blank one.
+        let before = get(app.clone(), "/").await;
+        let before_body = body_string(before).await;
+        assert!(
+            before_body.contains(&stray_root.to_string_lossy().to_string()),
+            "sanity: the pane's real cwd must render as a suggestion before it is overwritten: \
+             {before_body}"
+        );
+        let before_rows = before_body
+            .matches(r#"class="proj-row proj-suggestion""#)
+            .count();
+
+        fake.set_pane_dirs(&started.pane_id, Some(""), Some(""))
+            .await
+            .unwrap();
+
+        let after = get(app, "/").await;
+        assert_eq!(after.status(), StatusCode::OK);
+        let after_body = body_string(after).await;
+        assert!(
+            !after_body.contains(&stray_root.to_string_lossy().to_string()),
+            "a pane whose cwd is Some(\"\") must never render as a blank-path suggestion: \
+             {after_body}"
+        );
+        let after_rows = after_body
+            .matches(r#"class="proj-row proj-suggestion""#)
+            .count();
+        assert_eq!(
+            after_rows,
+            before_rows - 1,
+            "overwriting the pane's cwd to Some(\"\") must drop its row entirely, not swap it \
+             for a blank-path row: before {before_rows} rows, after {after_rows}: {after_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&stray_root).ok();
+    }
+
+    /// Truth: a directory that is exactly a registered project's root never
+    /// appears as a suggestion, even though a session is running there.
+    #[tokio::test]
+    async fn suggestions_never_include_a_registered_projects_own_root() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-own-root");
+        enable_terminal(&dir);
+        let project_root = fresh_root("suggest-own-root-project");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&project_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "own-root");
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&project_root.to_string_lossy().to_string()),
+            "a registered project's own root must never appear as a suggestion: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&project_root).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-2 — the confirmed
+    /// path-disclosure gap): `assigned` is built from `project_panes`,
+    /// which only counts a pane whose `cwd` `Boundary::validate_existing`
+    /// accepts, and that call canonicalizes — so it refuses a pane whose
+    /// directory has since been deleted. Such a pane still genuinely
+    /// belongs to the registered project it was created under; it must
+    /// never fall through to a suggestion, and its full path must never
+    /// reach the page.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_whose_directory_was_deleted_after_registration() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-deleted-dir");
+        enable_terminal(&dir);
+        let project_root = fresh_root("suggest-deleted-dir-project");
+        let pane_cwd = project_root.join("sub");
+        std::fs::create_dir_all(&pane_cwd).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&pane_cwd.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "deleted-dir-project");
+        // The pane's own directory is deleted after registration -- herdr
+        // still reports its old cwd, which can no longer be canonicalized,
+        // so `project_panes`'s own boundary check refuses it.
+        std::fs::remove_dir_all(&pane_cwd).unwrap();
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&pane_cwd.to_string_lossy().to_string()),
+            "a pane whose directory is inside a registered project but has been deleted must \
+             never be suggested, nor leak its path: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&project_root).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-2): `Boundary::validate_existing`
+    /// refuses any raw traversal component outright, before it ever
+    /// canonicalizes (step 2 of the ordered gate) — so a pane whose
+    /// reported `cwd` carries a `.`/`..` component never counts as
+    /// `assigned` via `project_panes`, even when that path plainly resolves
+    /// inside a registered project. The raw component-wise containment
+    /// check must catch it anyway: the project root's own raw path
+    /// components form a prefix of the dotted candidate's raw components,
+    /// regardless of what the trailing `..` textually does.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_whose_cwd_carries_a_dot_dot_component_but_resolves_inside_a_registered_project()
+    {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-dot-dot");
+        enable_terminal(&dir);
+        let project_root = fresh_root("suggest-dot-dot-project");
+        std::fs::create_dir_all(project_root.join("a")).unwrap();
+        std::fs::create_dir_all(project_root.join("b")).unwrap();
+        // Resolves to `project_root/b` -- genuinely inside the project, not
+        // merely equal to its root -- but the raw string carries a `..`
+        // component `Boundary::validate_existing` refuses outright.
+        let dotted_cwd = format!(
+            "{}/a/../b",
+            project_root.to_string_lossy().trim_end_matches('/')
+        );
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&dotted_cwd), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "dot-dot-project");
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&dotted_cwd),
+            "a pane whose cwd carries a `..` component but resolves inside a registered \
+             project must never be suggested: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&project_root).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-3 — the confirmed
+    /// disclosure gap): a candidate like `<parent>/other/../<root_basename>/sub`
+    /// resolves inside a registered project, but its raw components diverge
+    /// from the root's own raw components right at `other` — unlike the
+    /// `a/../b` case above, whose root-prefix still matches component for
+    /// component — so `is_contained_in_root` reads it as *not* contained and
+    /// it used to print here anyway. The traversal drop must catch this one
+    /// too, regardless of what it resolves to.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_whose_cwd_carries_a_sibling_dot_dot_that_resolves_inside_a_registered_project()
+    {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-sibling-dot-dot");
+        enable_terminal(&dir);
+        let parent = fresh_root("suggest-sibling-dot-dot-parent");
+        let project_root = parent.join("registered-project");
+        std::fs::create_dir_all(project_root.join("sub")).unwrap();
+        std::fs::create_dir_all(parent.join("other")).unwrap();
+        // Resolves to `parent/registered-project/sub` -- genuinely inside
+        // the registered project -- but the raw components after `parent`
+        // are `other`, `..`, `registered-project`, `sub`: they never match
+        // the root's own raw components (`parent`, `registered-project`) as
+        // a prefix, so raw component-wise containment alone misses it.
+        let dotted_cwd = format!(
+            "{}/other/../registered-project/sub",
+            parent.to_string_lossy().trim_end_matches('/')
+        );
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&dotted_cwd), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "sibling-dot-dot-project");
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&dotted_cwd),
+            "a pane whose cwd carries a sibling `..` that resolves inside a registered project \
+             must never be suggested, even when raw component-wise containment alone would miss \
+             it: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-3): a traversal cwd
+    /// must never be suggested even when it resolves to a folder genuinely
+    /// outside every registered project — before this fix,
+    /// `is_contained_in_root` would read it as not contained (correctly, it
+    /// resolves outside) and let it through as a suggestion whose register
+    /// button could never succeed, because `validate_register_path` refuses
+    /// any submitted path carrying a traversal component outright.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_whose_cwd_carries_a_dot_dot_component_even_when_it_resolves_outside_every_project()
+    {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-dot-dot-outside");
+        enable_terminal(&dir);
+        let scratch = fresh_root("suggest-dot-dot-outside-scratch");
+        std::fs::create_dir_all(scratch.join("a")).unwrap();
+        std::fs::create_dir_all(scratch.join("b")).unwrap();
+        let dotted_cwd = format!(
+            "{}/a/../b",
+            scratch.to_string_lossy().trim_end_matches('/')
+        );
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&dotted_cwd), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&dotted_cwd),
+            "a pane whose cwd carries a `..` component must never be suggested, even when it \
+             resolves outside every registered project — its own register button could never \
+             succeed: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-3 — route-level
+    /// coverage the review found missing): a sibling directory whose name
+    /// merely starts with a registered project's name is still suggested.
+    /// Only `paths_boundary::is_contained_in_root_false_for_a_sibling_that_merely_shares_a_prefix`
+    /// covered this at the unit level; every route test kept passing when
+    /// the predicate was swapped for a text prefix, so this pins it at the
+    /// route the disclosure actually happens on.
+    #[tokio::test]
+    async fn suggestions_include_a_sibling_whose_name_merely_shares_a_prefix_with_a_registered_project() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-sibling-prefix");
+        enable_terminal(&dir);
+        let scratch = fresh_root("suggest-sibling-prefix-scratch");
+        let project_root = scratch.join("owned-project");
+        let sibling_root = scratch.join("owned-project-evil");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&sibling_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&sibling_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "owned-project");
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&sibling_root.to_string_lossy().to_string()),
+            "a sibling directory that merely shares a name prefix with a registered project must \
+             still be suggested, not treated as contained in it: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-3 — route-level
+    /// coverage the review found missing): a pane whose cwd is inside a
+    /// registered project's own root but resolves onto the hard deny list
+    /// through a symlink is not suggested. The raw component-wise
+    /// containment check already excludes it by the literal path (the link
+    /// itself sits textually under the registered root), whatever it
+    /// resolves to on disk — this pins that at the route level rather than
+    /// leaving it implicit.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_inside_a_registered_project_whose_cwd_resolves_onto_the_hard_deny_list_through_a_symlink()
+    {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-symlink-deny");
+        enable_terminal(&dir);
+        let project_root = fresh_root("suggest-symlink-deny-project");
+
+        let mut st = build_state_with_dir(&dir);
+        register(&st, &project_root, "symlink-deny-project");
+
+        // Planted after registration so the register route's own scan never
+        // walks the symlink into `/etc`.
+        let link = project_root.join("etc-link");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        let pane_cwd = link.to_string_lossy().to_string();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&pane_cwd), &["claude".to_string()])
+            .await
+            .unwrap();
+        st.herdr = fake;
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&pane_cwd),
+            "a pane inside a registered project whose cwd resolves onto the hard deny list \
+             through a symlink must never be suggested: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&project_root).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-2): `Boundary::new`
+    /// never stats a root, so a registered project whose root directory no
+    /// longer exists on disk still constructs a working boundary — but
+    /// `project_panes`'s `validate_existing` call still canonicalizes each
+    /// *pane's* own cwd, which fails for a directory that was never
+    /// created. The raw containment check is the only thing that still
+    /// suppresses a suggestion for a path under that missing root.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_under_a_registered_projects_root_that_does_not_exist_on_disk() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-missing-root");
+        enable_terminal(&dir);
+        let scratch = fresh_root("suggest-missing-root-scratch");
+        let missing_root = scratch.join("gone-project");
+        // Deliberately never created -- `Boundary::new` never stats a root,
+        // so registration and boundary construction both still succeed.
+        let pane_cwd = missing_root.join("sub");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&pane_cwd.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &missing_root, "gone-project");
+        assert_eq!(
+            project.root_path, missing_root,
+            "sanity: canonicalize falls back to the literal path when it doesn't exist"
+        );
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&pane_cwd.to_string_lossy().to_string()),
+            "a pane under a registered project's root that no longer exists on disk must never \
+             be suggested, even though `project_panes`'s own boundary check cannot validate it: \
+             {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// Truth: with two registered projects, one whose root cannot construct
+    /// a `Boundary`, the WHOLE suggestion list is empty, not just missing
+    /// that one project's own share — a genuinely valid second project's
+    /// working boundary never rescues the group, the same fail-closed rule
+    /// `unassigned_panes` follows, proven the same way
+    /// `unassigned_group_fails_closed_when_a_projects_boundary_is_unconstructable`
+    /// proves it for the Unassigned group.
+    #[tokio::test]
+    async fn suggestions_fail_closed_when_a_projects_boundary_is_unconstructable() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-fail-closed");
+        enable_terminal(&dir);
+        let scratch = fresh_root("suggest-fail-closed-scratch");
+        let stray_root = scratch.join("stray");
+        let valid_root = scratch.join("valid-project");
+        std::fs::create_dir_all(&stray_root).unwrap();
+        std::fs::create_dir_all(&valid_root).unwrap();
+        let denied_root = PathBuf::from("/etc/mdview-test-fixture-nonexistent");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &valid_root, "valid-project");
+        let project = register(&st, &denied_root, "denied-root-project");
+        assert_eq!(
+            project.root_path, denied_root,
+            "sanity: canonicalize falls back to the literal path when it doesn't exist"
+        );
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&stray_root.to_string_lossy().to_string())
+                && !body.contains("proj-suggestions"),
+            "one project whose boundary cannot be constructed must fail the whole suggestion \
+             list closed to zero, even with a second, genuinely valid registered project \
+             present — never leak a stray pane's path: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// End to end (truth): posting a suggestion's path registers it, and it
+    /// appears as a project row — no longer a suggestion — on the next load.
+    #[tokio::test]
+    async fn suggestions_posting_a_suggested_path_registers_it_as_a_project() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-end-to-end");
+        enable_terminal(&dir);
+        let stray_root = fresh_root("suggest-end-to-end-stray");
+        write(&stray_root, "README.md", "# Stray\n");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let engine = st.engine.clone();
+        let app = router(st);
+
+        let before = get(app.clone(), "/").await;
+        let before_body = body_string(before).await;
+        assert!(
+            before_body.contains(&stray_root.to_string_lossy().to_string()),
+            "sanity: the stray folder must render as a suggestion first: {before_body}"
+        );
+
+        let register_req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "path={}",
+                urlencoding_lite(&stray_root.to_string_lossy())
+            )))
+            .unwrap();
+        let register_resp = app.clone().oneshot(register_req).await.unwrap();
+        assert_eq!(register_resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(register_resp.headers().get(header::LOCATION).unwrap(), "/");
+        assert_eq!(
+            engine.list_projects().unwrap().len(),
+            1,
+            "the suggested path must now be registered"
+        );
+
+        let after = get(app, "/").await;
+        let after_body = body_string(after).await;
+        assert!(
+            after_body.contains("href=\"/p/"),
+            "the newly registered project must appear as a project row: {after_body}"
+        );
+        // D7: the suggestion is stateless and recomputed every render — once
+        // the folder is registered, `suggested_projects` no longer emits it
+        // (it now sits inside a registered project's own boundary), so the
+        // suggestion row for THIS path is gone, not merely relabeled. Other
+        // fixture agents (`FakeHerdr::new()`'s own seeded panes) still
+        // produce their own unrelated suggestions, so this checks the
+        // stray path itself rather than the section's mere presence.
+        assert!(
+            !after_body.contains(&stray_root.to_string_lossy().to_string()),
+            "the newly registered folder must no longer render as a suggestion row (its path \
+             must not appear anywhere on the page, since a registered project's own row shows \
+             no path either): {after_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&stray_root).ok();
+    }
+
+    /// Truth (D5, dimension 5 — state transitions): registering a
+    /// suggestion twice — the double-click case — refuses the second post
+    /// with the same `duplicate` code a hand-typed re-submission gets
+    /// (`register_project_refuses_a_duplicate_root_and_its_trailing_slash_form`
+    /// proves the route's own side of this; nothing here duplicates that
+    /// coverage). Following the resulting redirect renders the existing
+    /// `register_error` banner on `/`, and the registry gains exactly one
+    /// project, never two.
+    #[tokio::test]
+    async fn suggestions_double_registering_the_same_path_surfaces_the_duplicate_banner() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-double-register");
+        enable_terminal(&dir);
+        let stray_root = fresh_root("suggest-double-register-stray");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let engine = st.engine.clone();
+        let app = router(st);
+
+        let post_register = || {
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/register")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "path={}",
+                    urlencoding_lite(&stray_root.to_string_lossy())
+                )))
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(post_register()).await.unwrap();
+        assert_eq!(
+            first.headers().get(header::LOCATION).unwrap(),
+            "/",
+            "the first register post from a suggestion must succeed"
+        );
+
+        let second = app.clone().oneshot(post_register()).await.unwrap();
+        assert_eq!(
+            second.headers().get(header::LOCATION).unwrap(),
+            "/?register_error=duplicate",
+            "a second identical register post (double-click) must be refused as a duplicate"
+        );
+        assert_eq!(
+            engine.list_projects().unwrap().len(),
+            1,
+            "a double-click register must never add a second project"
+        );
+
+        let after = get(app, "/?register_error=duplicate").await;
+        let after_body = body_string(after).await;
+        assert!(
+            after_body.contains("That project is already registered."),
+            "the duplicate refusal must surface the existing register_error banner: {after_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&stray_root).ok();
+    }
+
+    /// Refusal parity (truth): a suggestion whose path is deny-listed is
+    /// refused by the register route's own fixed-code guard, exactly like a
+    /// hand-typed path — `suggested_projects` runs no deny-list check of its
+    /// own, so `/etc` (guaranteed to exist, same fixture the register-route
+    /// deny-list tests use) still renders as a suggestion, and posting it
+    /// gets the same `denied` refusal `register_project_refuses_a_root_on_the_hard_deny_list`
+    /// proves for a hand-typed submission.
+    #[tokio::test]
+    async fn suggestions_deny_listed_path_is_refused_by_the_register_route_itself() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-deny-listed");
+        enable_terminal(&dir);
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some("/etc"), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let engine = st.engine.clone();
+        let app = router(st);
+
+        let resp = get(app.clone(), "/").await;
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("/etc"),
+            "suggestion computation must not pre-filter a deny-listed path: {body}"
+        );
+
+        let register_req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("path=%2Fetc"))
+            .unwrap();
+        let register_resp = app.oneshot(register_req).await.unwrap();
+        assert_eq!(
+            register_resp.headers().get(header::LOCATION).unwrap(),
+            "/?register_error=denied",
+            "a deny-listed suggestion must be refused by the register route's own code"
+        );
+        assert_eq!(
+            engine.list_projects().unwrap().len(),
+            0,
+            "a deny-listed suggestion must never register"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Truth (D2's ON-state analogue): the existing pin at
+    /// `home_page_lists_projects_as_rows_with_each_worktree_under_its_parent`
+    /// only proves a registered project's row carries no filesystem path
+    /// with the terminal switch off (no herdr call reaches the page at
+    /// all). D2's supersession is scoped to suggestion rows only — a
+    /// registered project's own row is unauthorized to show a path exactly
+    /// as before this feature. This pins that with the switch ON and a
+    /// suggestion legitimately rendering its own path elsewhere on the
+    /// same page, the registered project's row still never does.
+    #[tokio::test]
+    async fn registered_project_row_shows_no_filesystem_path_with_terminal_enabled() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("registered-row-on-state");
+        enable_terminal(&dir);
+        let scratch = fresh_root("registered-row-on-state-scratch");
+        let project_root = scratch.join("owned-project");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "owned-project");
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        // Sanity: the suggestion block legitimately shows the stray pane's
+        // path — D2's supersession is real and in effect on this render.
+        assert!(
+            body.contains(&stray_root.to_string_lossy().to_string()),
+            "sanity: the suggestion block must render the stray pane's path: {body}"
+        );
+        // D2 (unsuperseded half): the registered project's own row still
+        // never shows a filesystem path, even with the terminal switch on
+        // and a suggestion block rendering elsewhere on the same page.
+        assert!(
+            !body.contains(&project_root.to_string_lossy().to_string()),
+            "a registered project's row leaked its filesystem path with the terminal switch \
+             on: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
     // ---- agent-terminal-10 (D5): the Unassigned group ----
 
     /// A GET request to `/_terminal/unassigned`, optionally carrying the
@@ -9895,7 +11069,9 @@ mod bee_route_tests {
     /// `tokio::time::timeout` precisely because `SocketHerdr::call` has none
     /// of its own — proven here against a herdr double that never answers at
     /// all, not only one that answers with an `Err` (that path is
-    /// `home_page_renders_plain_rows_when_herdr_is_down` above).
+    /// `home_page_renders_plain_rows_when_herdr_is_down` above). The
+    /// suggestion block reads the same, single, timed-out snapshot (D3), so
+    /// a hung herdr must render neither badges nor a suggestion section.
     #[tokio::test]
     async fn home_page_returns_promptly_when_herdr_hangs() {
         let dir = fresh_root("home-badges-herdr-hang");
@@ -9921,8 +11097,9 @@ mod bee_route_tests {
         );
         let body = body_string(resp).await;
         assert!(
-            !body.contains("proj-row__badges"),
-            "a hung herdr must render plain rows, not a badge container: {body}"
+            !body.contains("proj-row__badges") && !body.contains("proj-suggestions"),
+            "a hung herdr must render plain rows, not a badge container or a suggestion \
+             section: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -10213,17 +11390,43 @@ mod bee_route_tests {
     }
 
     /// D5/D4's core resolution, on the home page itself: an unauthenticated
-    /// `GET /` must never reveal an unassigned agent's name or cwd, even
-    /// though the group's presence marker is visible once the D7 switch is
-    /// on. A second request with the switch off proves the page renders
-    /// exactly as it did before this feature (no marker, no mention of
-    /// "Unassigned" at all).
+    /// `GET /` must never reveal an unassigned agent's identity through the
+    /// Unassigned card's own markup, even though the group's presence
+    /// marker is visible once the D7 switch is on. A second request with
+    /// the switch off proves the page renders exactly as it did before this
+    /// feature (no marker, no mention of "Unassigned" at all).
+    ///
+    /// project-suggestions surgery (plan.md's "named assertion by
+    /// assertion" section, the authority for this test's three phases):
+    /// - Phase 1 (switch off): byte-identical to baseline — off means no
+    ///   herdr call, so a stray session leaves no trace, proven exactly as
+    ///   it always was.
+    /// - Phase 2 (family switch only): the whole-body
+    ///   `!contains("unassigned")` cannot survive as written for a second
+    ///   reason the wording alone doesn't fix — once `terminal.enabled` is
+    ///   on, the suggestion block (D3: gated on that one switch alone)
+    ///   legitimately prints the stray path in THIS phase too. Re-targeted
+    ///   to the marker itself (its title text and its own route href)
+    ///   rather than the bare word, plus a positive pin that the
+    ///   suggestion block legitimately renders here (D3).
+    /// - Phase 3 (both on): D2 supersedes the original
+    ///   `!body_on.contains(&stray_root...)` in part — inverted to
+    ///   `assert!(...)`, since the suggestion block now legitimately shows
+    ///   the full path. The name pin survives unchanged and extends to the
+    ///   full unauthorized field set (D2 authorizes path + count only,
+    ///   never a name, title, workspace, or tab).
     #[tokio::test]
     async fn unauthenticated_home_page_shows_unassigned_presence_only_and_leaks_nothing() {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("home-unassigned-presence");
-        let scratch = fresh_root("home-unassigned-presence-scratch");
+        // project-suggestions: deliberately not named "...unassigned..." —
+        // once `terminal.enabled` is on, the suggestion block (a separate
+        // feature, gated on that one switch alone) prints this folder's
+        // full path, and this test's own marker-scoped checks below must
+        // not trip over the literal word appearing inside a scratch
+        // *directory name* rather than the Unassigned marker itself.
+        let scratch = fresh_root("home-group-presence-scratch");
         let stray_root = scratch.join("stray");
         std::fs::create_dir_all(&stray_root).unwrap();
 
@@ -10234,7 +11437,8 @@ mod bee_route_tests {
             .unwrap();
 
         // Switch off (default): the home page must carry no trace of the
-        // feature at all — not even the word "Unassigned".
+        // feature at all — not even the word "Unassigned". Byte-identical
+        // to baseline: off means no herdr call, so nothing here changed.
         let mut st_off = build_state_with_dir(&dir);
         st_off.herdr = fake.clone();
         let resp_off = get(router(st_off), "/").await;
@@ -10248,6 +11452,9 @@ mod bee_route_tests {
         // toa-4 (D9): the family switch on, the group's own switch still
         // off — the marker must stay absent. Turning on `terminal.enabled`
         // alone must never be read as turning on the Unassigned group.
+        // Re-targeted to the marker itself (title text + route href),
+        // never the bare word, because D3 makes the suggestion block (a
+        // legitimate, separate disclosure) render in this same phase.
         enable_terminal(&dir);
         let mut st_family_only = build_state_with_dir(&dir);
         st_family_only.herdr = fake.clone();
@@ -10255,13 +11462,20 @@ mod bee_route_tests {
         assert_eq!(resp_family_only.status(), StatusCode::OK);
         let body_family_only = body_string(resp_family_only).await;
         assert!(
-            !body_family_only.contains("Unassigned") && !body_family_only.contains("unassigned"),
+            !body_family_only.contains("Unassigned agents")
+                && !body_family_only.contains(r#"href="/_terminal/unassigned""#),
             "the family switch alone must not surface the Unassigned group's presence marker: {body_family_only}"
         );
+        assert!(
+            body_family_only.contains(&stray_root.to_string_lossy().to_string()),
+            "D3: the family switch alone must surface the suggestion block, gated on that one \
+             switch alone, independent of the Unassigned group's own switch: {body_family_only}"
+        );
 
-        // Both switches on: the presence marker appears, but the pane's own
-        // name and cwd never do — this route takes no session and makes no
-        // herdr call, so it structurally cannot leak them.
+        // Both switches on: the presence marker appears, and the
+        // suggestion block legitimately shows the stray pane's own path
+        // (D2) — but no agent identity beyond that path and a count ever
+        // does, anywhere on the page.
         enable_unassigned_group(&dir);
         let mut st_on = build_state_with_dir(&dir);
         st_on.herdr = fake;
@@ -10273,13 +11487,60 @@ mod bee_route_tests {
             "the group's presence marker is missing once both switches are on: {body_on}"
         );
         assert!(
-            !body_on.contains(&stray.name),
-            "an unauthenticated home page leaked an unassigned agent's name: {body_on}"
+            !body_on.contains(&stray.name) && !body_on.contains(&stray.pane_id),
+            "an unauthenticated home page leaked an unassigned agent's name or pane id: {body_on}"
         );
+        // D2 inverted: the page as a whole now legitimately shows the
+        // stray pane's cwd, via the separate suggestion block — that
+        // disclosure is this feature's own locked, recorded decision, not
+        // a leak.
         assert!(
-            !body_on.contains(&stray_root.to_string_lossy().to_string()),
-            "an unauthenticated home page leaked an unassigned agent's cwd: {body_on}"
+            body_on.contains(&stray_root.to_string_lossy().to_string()),
+            "D2: with both switches on, the suggestion block must show the stray pane's full \
+             path: {body_on}"
         );
+        // What the Unassigned card itself must still never carry is the
+        // pane's cwd (D5/D4 — presence only), so this narrower assertion
+        // survives unchanged, scoped to that card's own markup.
+        let card_start = body_on
+            .find(r#"<div class="proj-cards">"#)
+            .expect("the Unassigned card must render once both switches are on");
+        let card_end = body_on[card_start..]
+            .find("</div>")
+            .map(|i| card_start + i + "</div>".len())
+            .unwrap_or(body_on.len());
+        let card_markup = &body_on[card_start..card_end];
+        assert!(
+            !card_markup.contains(&stray_root.to_string_lossy().to_string()),
+            "the Unassigned card's own markup leaked an unassigned agent's cwd: {card_markup}"
+        );
+        // The name/pane-id pin above extends to title too, proven against
+        // `FakeHerdr::new()`'s own seeded agent `w1:p1` ("claude-main",
+        // title "Building the parser") rather than `stray`: `agent_start`
+        // always starts a fresh agent with an empty title (no fake seam
+        // sets one), so asserting `!body.contains("")` on `stray`'s own
+        // title would be vacuous (an empty string is trivially "contained"
+        // in everything). `w1:p1` is itself unassigned in this test (no
+        // project is ever registered), so it legitimately renders as a
+        // second suggestion row here too — its identity fields must still
+        // never appear.
+        assert!(
+            !body_on.contains("Building the parser")
+                && !body_on.contains("claude-main")
+                && !body_on.contains("w1:p1"),
+            "an unauthenticated home page leaked a suggested folder's agent title, name, or \
+             pane id: {body_on}"
+        );
+        // Workspace and tab labels are deliberately not checked here: this
+        // fixture's own seeded labels ("frontend-app"/"main") are
+        // themselves substrings of that same pane's own legitimately
+        // suggested path (`/home/dev/projects/frontend-app`) and, for
+        // "main", of the page's own generic `<main class=...>` furniture —
+        // a whole-body (or even row-scoped) `.contains()` check on either
+        // label cannot distinguish a real leak from that unrelated
+        // collision. `ProjectSuggestion` (views.rs) carries no
+        // workspace/tab field at all, which is the structural guarantee
+        // that backs this dimension instead.
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&scratch).ok();

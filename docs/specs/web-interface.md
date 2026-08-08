@@ -42,6 +42,7 @@ content itself.
 | 8 | Project row (project list) | One registered project | a row linking to the project — its name, indexed markdown file count, and when it was last seen (never the filesystem path, per R5) — with a delete control that unregisters it. A worktree of a registered project sits indented under it, labelled by its branch alone |
 | 8a | Session marker (project row) | One coding session running inside that project | a small marker per session, carrying its state and the program it is running; absent entirely when the terminal switch is off (per R6) |
 | 8b | Add-project field | Where the operator names a folder to register | one absolute folder path; the project's name is taken from the folder's own name |
+| 8c | Suggestion | One folder holding coding agents that no registered project covers | its full path, the number of agent sessions in it, and a one-press register control (per R9) |
 | 9 | Reading breadcrumb (file pages) | Orientation trail above the article, distinct from the chapter sidebar's zoom breadcrumb | project name → each path segment of the file, in order; segments are not independently clickable (orientation only) |
 | 10 | "On this page" (TOC) | Right-hand list of the current file's headings (levels 1-4) | one entry per heading, indented by level, linking to that heading |
 | 11 | "Linked from" (backlinks) | Right-hand list of other files that link to the one being viewed | empty when nothing links here; hidden entirely when both this and the TOC are empty |
@@ -77,6 +78,21 @@ content itself.
   not exist, is not a folder, is already registered, sits in or around a
   protected folder, or holds too much to index — are each reported on the page
   in fixed words, and the list is never left silently unchanged (per R7).
+- **Suggested projects:** under the list, one entry per folder where a coding
+  agent is running that no registered project covers — its full path, how many
+  agent sessions are in it, and a control that registers it in one press,
+  going through the same registration as the field above and meeting the same
+  refusals. Only sessions with a coding agent count (per D a302ac94): a plain
+  shell session never produces a suggestion, matching how the Unassigned
+  group is drawn. A folder already inside a registered project is
+  never suggested, whether or not that folder still exists on disk and whether
+  or not the session reports its location by a roundabout route; nor is a
+  session whose location is reported as nothing at all, or by a path that
+  walks up through a parent. Two sessions in one folder are one entry, and
+  entries are ordered by their path. The block shows nothing beyond the path
+  and count — never a session's own name or title — carries no dismissal, is
+  recomputed on every page load, and follows the terminal switch alone,
+  showing nothing when it is off (per R6, R9).
 - **Unassigned agents card:** when both the terminal switch and the
   Unassigned group's own switch are on (see the Agent terminal spec), one
   extra card, "Unassigned agents," sits below the project rows and
@@ -237,7 +253,7 @@ consumes it.
 - **R4.** Copying a selection from a rendered file yields the raw markdown of the
   spanned source lines, not the rendered output; the mapping is by source line
   range (block granularity), and a selection that maps to nothing copies normally.
-- **R5 (per D 184c77b0).** A project's filesystem root path is never shown on
+- **R5 (per D 184c77b0, narrowed by D 8f21c4ab).** A project's filesystem root path is never shown on
   the project list page — only its name, indexed file count, and last-seen
   time. The project list page carries no authentication (per settings.md,
   outside the agent terminal family) and a wildcard/LAN-reachable bind is a
@@ -273,6 +289,19 @@ consumes it.
   presses outside the panel. Above the narrow width the menu is not a menu at
   all: its control is not shown and its contents sit in the bar exactly as
   they did before it existed.
+
+- **R9 (per D 4d0e77a1, D 8f21c4ab).** The suggestion block is the one place
+  on this page that prints a filesystem path, and it prints only folders no
+  registered project covers — never a registered project's own location, which
+  R5 still protects. It follows the terminal switch alone, not the Unassigned
+  group's separate switch, even though it reads the same set of sessions: the
+  consequence, accepted deliberately, is that with the terminal switch on
+  anyone who can reach the page learns where on this machine coding sessions
+  are running outside the registered projects. A folder is suppressed whenever
+  it lies within a registered project by plain path containment, independently
+  of whether that project's folder still exists; and a location reported by a
+  path that walks up through a parent is never suggested at all, since
+  registering such a path would be refused anyway.
 
 
 ## Edge Cases Settled

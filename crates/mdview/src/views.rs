@@ -88,9 +88,23 @@ fn worktree_branch(id: &str) -> Option<(&str, &str)> {
     Some((parent, branch))
 }
 
+/// project-suggestions (D1, D2, D4, D6): one folder an agent-backed herdr
+/// pane is running in that sits under no registered project —
+/// `server.rs::suggested_projects`'s own output type. `path` is the pane's
+/// cwd exactly as herdr reported it (D1, no walk to a repository root, one
+/// trailing slash trimmed for dedup). D2 authorizes only a full path and a
+/// count on this page — never a name, title, workspace, or tab — so this
+/// type carries no such field (unlike `TerminalPaneView`). `pane_count` is
+/// how many agent-backed panes share that one directory.
+pub struct ProjectSuggestion {
+    pub path: String,
+    pub pane_count: usize,
+}
+
 pub fn project_list_page(
     projects: &[(Project, usize, Vec<TerminalPaneView>)],
     unassigned_visible: bool,
+    suggestions: &[ProjectSuggestion],
     register_error: Option<&str>,
 ) -> String {
     let listing = if projects.is_empty() {
@@ -162,6 +176,48 @@ pub fn project_list_page(
         }
         format!(r#"<ul class="proj-list">{rows}</ul>"#, rows = rows)
     };
+    // project-suggestions (D1-D6): one row per unregistered folder an
+    // agent-backed herdr pane is running in, each a one-press form posting
+    // straight to the existing `/api/projects/register` route (D9a/D9b's
+    // whole guard chain applies unchanged; nothing here validates the path
+    // a second time). An empty `suggestions` slice — the gate off, no herdr
+    // call reached, or genuinely nothing unregistered running — renders no
+    // section at all, byte-identical to the page before this feature.
+    let suggestions_block = if suggestions.is_empty() {
+        String::new()
+    } else {
+        let mut rows = String::new();
+        for s in suggestions {
+            // D2: the visible path text and the hidden input's `value` are
+            // the same escaped string, computed once — byte-identical by
+            // construction rather than by two separate `esc()` calls that
+            // could drift apart.
+            let path = esc(&s.path);
+            rows.push_str(&format!(
+                r#"<li class="proj-row proj-suggestion">
+  <div class="proj-row__link proj-suggestion__info">
+    <span class="proj-row__name proj-suggestion__path">{path}</span>
+    <span class="proj-row__meta">{count} pane{plural}</span>
+  </div>
+  <form class="proj-suggestion__register" method="post" action="/api/projects/register">
+    <input type="hidden" name="path" value="{path}">
+    <button type="submit" class="fg-btn fg-btn--primary">Register</button>
+  </form>
+</li>"#,
+                path = path,
+                count = s.pane_count,
+                plural = if s.pane_count == 1 { "" } else { "s" },
+            ));
+        }
+        format!(
+            r#"<section class="proj-suggestions">
+  <h3 class="proj-suggestions__title">Suggested projects</h3>
+  <p class="fg-empty proj-suggestions__hint">Sessions are running here, but the folder is not registered.</p>
+  <ul class="proj-list proj-suggestions__list">{rows}</ul>
+</section>"#,
+            rows = rows,
+        )
+    };
     // D5/D4: presence only — no agent name, no cwd, not even a count, ever
     // reaches this markup. The link's own route (`/_terminal/unassigned`)
     // carries the same session/switch/method gate as every other terminal
@@ -190,11 +246,12 @@ pub fn project_list_page(
     };
     let body = format!(
         r#"{topbar}
-<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{register_banner}{add_form}{listing}{unassigned_card}</main>"#,
+<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{register_banner}{add_form}{listing}{suggestions_block}{unassigned_card}</main>"#,
         topbar = topbar(""),
         register_banner = register_banner,
         add_form = project_add_form(),
         listing = listing,
+        suggestions_block = suggestions_block,
         unassigned_card = unassigned_card,
     );
     layout("Projects", "", &body)

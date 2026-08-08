@@ -416,6 +416,40 @@ main.fg-page {
   color: var(--color-text-muted);
   font-size: var(--type-caption-size);
 }
+/* project-suggestions S1/S2/S3: the suggestion block sits under the
+   project list, one `.proj-row` per unregistered folder a herdr session is
+   running in. It reuses `.proj-list`/`.proj-row`'s own row layout rather
+   than a second one — a suggestion differs from a registered project's row
+   only in showing a full path (S3) and carrying a register form instead of
+   a delete one. */
+.proj-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.proj-suggestions__title {
+  margin: 0;
+}
+.proj-suggestions__hint {
+  margin: 0;
+}
+.proj-suggestion__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) 0;
+}
+.proj-suggestion__path {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+.proj-suggestion__register {
+  margin: 0;
+  align-self: center;
+}
 .proj-card {
   position: relative;
   display: flex;
