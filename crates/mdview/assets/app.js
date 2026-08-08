@@ -1196,22 +1196,33 @@
       });
     });
   })();
-  // Top bar menu: the checkbox already owns open/closed, so this only adds
-  // the two things the markup has no opinion about — Escape, and a press
-  // outside the panel. Without this script the menu still opens and closes
-  // from its own label.
+  // Collapsible menus (the top bar's navigation, a terminal page's pane
+  // bar): the checkbox already owns open/closed, so this only adds the two
+  // things the markup has no opinion about — Escape, and a press outside the
+  // panel. Without this script every menu still opens and closes from its
+  // own label.
   (function () {
-    var menu = document.querySelector(".topbar-menu");
-    var toggle = menu && menu.querySelector(".topbar-menu__toggle");
-    if (!toggle) return;
-    function close() {
-      if (toggle.checked) toggle.checked = false;
+    var menus = Array.prototype.slice.call(document.querySelectorAll(".js-menu"));
+    if (!menus.length) return;
+    function toggleOf(menu) {
+      return menu.querySelector("input[type=checkbox]");
+    }
+    function closeAll(except) {
+      menus.forEach(function (menu) {
+        if (menu === except) return;
+        var t = toggleOf(menu);
+        if (t && t.checked) t.checked = false;
+      });
     }
     document.addEventListener("click", function (e) {
-      if (toggle.checked && !menu.contains(e.target)) close();
+      var inside = null;
+      menus.forEach(function (menu) {
+        if (menu.contains(e.target)) inside = menu;
+      });
+      closeAll(inside);
     });
     document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape") close();
+      if (e.key === "Escape") closeAll(null);
     });
   })();
 })();

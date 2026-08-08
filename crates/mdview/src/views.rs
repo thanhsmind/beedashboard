@@ -468,28 +468,83 @@ fn pane_strip(project_id: &str, kind: &str, panes: &[TerminalPaneView], selected
     if panes.is_empty() {
         return String::new();
     }
-    let pid = esc(project_id);
     let mut out = String::from(r#"<nav class="pane-strip" aria-label="Panes">"#);
     for p in panes {
-        let cls = if selected == Some(p.pane_id.as_str()) {
-            "pane-strip__tab pane-strip__tab--active"
-        } else {
-            "pane-strip__tab"
-        };
-        out.push_str(&format!(
-            r#"<a class="{cls}" href="/p/{pid}/_{kind}/pane/{pane_id}"><span class="term-pane__id">{workspace} · {tab}</span> {status_pill}<span class="term-pane__meta">{program}</span></a>"#,
-            cls = cls,
-            pid = pid,
-            kind = kind,
-            pane_id = esc(&p.pane_id),
-            workspace = esc(&p.workspace),
-            tab = esc(&p.tab),
-            status_pill = status_pill(&p.status),
-            program = esc(&p.kind),
-        ));
+        let active = selected == Some(p.pane_id.as_str());
+        out.push_str(&pane_tab(project_id, kind, p, active, ""));
     }
     out.push_str("</nav>");
     out
+}
+
+/// One entry in the pane strip. `extra` adds classes to the anchor — the pane
+/// bar uses it to mark the standalone copy of the active tab it shows on a
+/// narrow screen, where the strip itself is inside the menu.
+fn pane_tab(
+    project_id: &str,
+    kind: &str,
+    p: &TerminalPaneView,
+    active: bool,
+    extra: &str,
+) -> String {
+    let cls = match (active, extra.is_empty()) {
+        (true, true) => "pane-strip__tab pane-strip__tab--active".to_string(),
+        (true, false) => format!("pane-strip__tab pane-strip__tab--active {extra}"),
+        (false, true) => "pane-strip__tab".to_string(),
+        (false, false) => format!("pane-strip__tab {extra}"),
+    };
+    format!(
+        r#"<a class="{cls}" href="/p/{pid}/_{kind}/pane/{pane_id}"><span class="term-pane__id">{workspace} · {tab}</span> {status_pill}<span class="term-pane__meta">{program}</span></a>"#,
+        cls = cls,
+        pid = esc(project_id),
+        kind = kind,
+        pane_id = esc(&p.pane_id),
+        workspace = esc(&p.workspace),
+        tab = esc(&p.tab),
+        status_pill = status_pill(&p.status),
+        program = esc(&p.kind),
+    )
+}
+
+/// The row above the pane: on a wide screen the pane strip on the left and
+/// the creation controls on the right, exactly as before. On a narrow one it
+/// collapses to a single line — the tab of the pane being viewed, and a menu
+/// control holding every other pane and the creation controls.
+///
+/// The active tab is rendered twice on purpose: once standalone for the
+/// narrow row, once inside the strip where it keeps its place among its
+/// siblings. Only one of the two is ever displayed, so a reader — including
+/// one using a screen reader — meets a single copy.
+fn pane_bar(
+    project_id: &str,
+    kind: &str,
+    panes: &[TerminalPaneView],
+    selected: Option<&str>,
+    create: &str,
+) -> String {
+    let strip = pane_strip(project_id, kind, panes, selected);
+    if strip.is_empty() {
+        // No panes to switch between: there is nothing for a menu to hold,
+        // and the creation controls (when the page has any) stand alone.
+        return format!(r#"<div class="pane-bar">{create}</div>"#, create = create);
+    }
+    let current = panes
+        .iter()
+        .find(|p| selected == Some(p.pane_id.as_str()))
+        .or_else(|| panes.first())
+        .map(|p| pane_tab(project_id, kind, p, true, "pane-bar__current"))
+        .unwrap_or_default();
+    format!(
+        r#"<div class="pane-bar js-menu">
+  {current}
+  <input type="checkbox" id="pane-menu-toggle" class="pane-menu__toggle">
+  <label class="pane-menu__button" for="pane-menu-toggle" title="Panes"><span class="menu-label">Panes</span><span aria-hidden="true">☰</span></label>
+  <div class="pane-menu__panel">{strip}{create}</div>
+</div>"#,
+        current = current,
+        strip = strip,
+        create = create,
+    )
 }
 
 fn project_tabs(project_id: &str, active: &str) -> String {
@@ -727,7 +782,13 @@ pub fn terminal_page(
         Some(pane) => pane_cards(std::slice::from_ref(pane), empty_msg),
         None => pane_cards(&[], empty_msg),
     };
-    let strip = pane_strip(&project.id, "terminal", panes, selected);
+    let bar = pane_bar(
+        &project.id,
+        "terminal",
+        panes,
+        selected,
+        &terminal_create_controls(&project.id, presets),
+    );
     // `data-project-id` lets `assets/app.js`'s screen poller build each
     // pane's `/p/:id/_terminal/:pane_id/screen` URL without threading the id
     // through every `.term-screen` element individually.
@@ -735,7 +796,7 @@ pub fn terminal_page(
         r#"{topbar}
 {tab_style}
 <main class="fg-page fg-page--tight" data-project-id="{pid}">
-  <div class="pane-bar">{strip}{create}</div>
+  {bar}
   <div class="term-panes">{rows}</div>
 </main>"#,
         topbar = topbar_full(
@@ -749,8 +810,7 @@ pub fn terminal_page(
         ),
         tab_style = PROJECT_TAB_STYLE,
         pid = esc(&project.id),
-        create = terminal_create_controls(&project.id, presets),
-        strip = strip,
+        bar = bar,
         rows = rows,
     );
     layout(&format!("{} · terminal", project.name), "", &body)
@@ -797,7 +857,7 @@ pub fn transcript_page(project: &Project, panes: &[TerminalPaneView], selected: 
         Some(pane) => transcript_cards(std::slice::from_ref(pane), empty_msg),
         None => transcript_cards(&[], empty_msg),
     };
-    let strip = pane_strip(&project.id, "transcript", panes, selected);
+    let bar = pane_bar(&project.id, "transcript", panes, selected, "");
     // `data-project-id` lets `assets/app.js`'s transcript poller build each
     // pane's `/p/:id/_terminal/:pane_id/transcript` URL, mirroring the
     // screen poller's own `data-project-id` use on `terminal_page`.
@@ -805,7 +865,7 @@ pub fn transcript_page(project: &Project, panes: &[TerminalPaneView], selected: 
         r#"{topbar}
 {tab_style}
 <main class="fg-page fg-page--tight" data-project-id="{pid}">
-  <div class="pane-bar">{strip}</div>
+  {bar}
   <div class="term-panes">{rows}</div>
 </main>"#,
         topbar = topbar_full(
@@ -819,7 +879,7 @@ pub fn transcript_page(project: &Project, panes: &[TerminalPaneView], selected: 
         ),
         tab_style = PROJECT_TAB_STYLE,
         pid = esc(&project.id),
-        strip = strip,
+        bar = bar,
         rows = rows,
     );
     layout(&format!("{} · transcript", project.name), "", &body)
@@ -2993,9 +3053,9 @@ fn topbar_full(lead: &str, center: &str, actions: &str, nav: &str) -> String {
   <a href="/" class="home">mdview</a>
   {center}
   {actions}
-  <div class="topbar-menu">
+  <div class="topbar-menu js-menu">
     <input type="checkbox" id="topbar-menu-toggle" class="topbar-menu__toggle">
-    <label class="topbar-menu__button" for="topbar-menu-toggle" title="Menu"><span class="topbar-menu__label">Menu</span><span aria-hidden="true">☰</span></label>
+    <label class="topbar-menu__button" for="topbar-menu-toggle" title="Menu"><span class="menu-label">Menu</span><span aria-hidden="true">☰</span></label>
     <div class="topbar-menu__panel">
       {nav}
       <a class="nav-link" href="/settings">Settings</a>
@@ -3559,7 +3619,7 @@ mod tests {
         let project = sample_project();
         let html = terminal_page(&project, &[], None, &[]);
         let menu_start = html
-            .find(r#"<div class="topbar-menu">"#)
+            .find(r#"<div class="topbar-menu js-menu">"#)
             .expect("no top bar menu");
         let menu_end = html[menu_start..]
             .find("</header>")
@@ -3583,6 +3643,81 @@ mod tests {
             menu.contains(r#"<input type="checkbox" id="topbar-menu-toggle" class="topbar-menu__toggle">"#)
                 && menu.contains(r#"<label class="topbar-menu__button" for="topbar-menu-toggle""#),
             "the menu must open from its own checkbox, not from script: {html}"
+        );
+    }
+
+    /// The pane row costs one line on a narrow screen: the tab of the pane
+    /// being viewed stands outside the menu, and every pane — that one
+    /// included, in its place among its siblings — plus the creation controls
+    /// sit inside it.
+    #[test]
+    fn the_pane_bar_keeps_the_current_pane_out_and_everything_else_in_the_menu() {
+        let project = sample_project();
+        let panes = vec![
+            TerminalPaneView {
+                pane_id: "w1:p1".into(),
+                kind: "claude".into(),
+                name: "one".into(),
+                status: "working".into(),
+                title: String::new(),
+                cwd: String::new(),
+                workspace: "w1".into(),
+                tab: "t1".into(),
+            },
+            TerminalPaneView {
+                pane_id: "w1:p2".into(),
+                kind: "shell".into(),
+                name: String::new(),
+                status: "shell".into(),
+                title: String::new(),
+                cwd: String::new(),
+                workspace: "w1".into(),
+                tab: "t2".into(),
+            },
+        ];
+        let html = terminal_page(&project, &panes, Some("w1:p2"), &["Claude".to_string()]);
+        let panel = html
+            .find(r#"<div class="pane-menu__panel">"#)
+            .expect("no pane menu panel");
+        let before = &html[..panel];
+        let after = &html[panel..];
+        // Outside the panel: exactly one tab, the one being viewed.
+        assert!(
+            before.contains("pane-bar__current") && before.contains("pane/w1:p2"),
+            "the viewed pane's tab must stand outside the menu: {html}"
+        );
+        assert!(
+            !before.contains("pane/w1:p1"),
+            "no other pane may sit on the row: {html}"
+        );
+        // Inside it: the whole strip, both panes, and the creation controls.
+        assert!(
+            after.contains("pane/w1:p1") && after.contains("pane/w1:p2"),
+            "every pane must be reachable from the menu: {html}"
+        );
+        assert!(
+            after.contains("class=\"term-create__pane\"") && after.contains(r#"data-preset="Claude""#),
+            "the creation controls must move into the menu: {html}"
+        );
+        assert!(
+            html.contains(r#"<input type="checkbox" id="pane-menu-toggle" class="pane-menu__toggle">"#),
+            "the pane menu must open from its own checkbox, not from script: {html}"
+        );
+    }
+
+    /// With no panes there is nothing to switch between, so the row carries
+    /// no menu at all — only whatever creation controls the page has.
+    #[test]
+    fn the_pane_bar_grows_no_menu_when_there_are_no_panes() {
+        let project = sample_project();
+        let html = terminal_page(&project, &[], None, &[]);
+        assert!(
+            !html.contains("pane-menu__panel") && !html.contains("pane-bar__current"),
+            "an empty pane list must not produce a menu: {html}"
+        );
+        assert!(
+            html.contains("class=\"term-create__pane\""),
+            "the creation controls must still render: {html}"
         );
     }
 
@@ -3612,6 +3747,26 @@ mod tests {
             narrow.contains(".topbar-menu__panel {\n    display: none;")
                 && narrow.contains(".topbar-menu__toggle:checked ~ .topbar-menu__panel"),
             "under the breakpoint the panel must be closed until the toggle is checked"
+        );
+        // The pane bar's own menu follows the same rule, and must not turn
+        // the wide row into a menu either.
+        let pane_hidden = css
+            .find(".pane-menu__toggle,\n.pane-menu__button {\n  display: none;\n}")
+            .expect("the pane menu control must be hidden by default");
+        let standalone_hidden = css
+            .find(".pane-bar > .pane-bar__current {\n  display: none;\n}")
+            .expect(
+                "the standalone active tab must be hidden by default, and by a selector that \
+                 outranks .pane-strip__tab's own display",
+            );
+        assert!(
+            pane_hidden < query && standalone_hidden < query,
+            "the pane bar's wide-screen defaults must come before the narrow override"
+        );
+        assert!(
+            narrow.contains(".pane-menu__panel {\n    display: none;")
+                && narrow.contains(".pane-menu__toggle:checked ~ .pane-menu__panel"),
+            "under the breakpoint the pane panel must be closed until the toggle is checked"
         );
     }
 

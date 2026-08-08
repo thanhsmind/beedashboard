@@ -87,8 +87,34 @@ main.fg-page {
   align-items: center;
   gap: var(--space-4);
 }
+/* ── Pane bar menu ───────────────────────────────────────────────────
+   Same shape as the bar menu above, applied to the row over a terminal
+   pane: wide, the strip and the creation controls lay out as they always
+   did; narrow, the row is the active pane's tab and one control, with
+   every other pane and the creation controls inside the panel. */
+.pane-menu__toggle,
+.pane-menu__button {
+  display: none;
+}
+/* The standalone copy of the active tab needs a selector that outranks
+   `.pane-strip__tab`'s own `display: flex`, which the terminal page emits
+   in an inline <style> AFTER this file — same specificity, later wins, and
+   the tab rendered twice on a wide screen until this was two classes. */
+.pane-bar > .pane-bar__current {
+  display: none;
+}
+.pane-menu__panel {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
 /* The control's text label is for screen readers; sighted users get the
    glyph beside it. */
+.menu-label,
 .topbar-menu__label {
   position: absolute;
   width: 1px;
@@ -158,6 +184,73 @@ main.fg-page {
   .topbar-menu__panel .proj-tab--active {
     border-bottom: 0;
     border-left-color: var(--color-action);
+  }
+  /* One line: the pane being viewed, then the control. Neither may wrap —
+     the whole point of the row is that it costs one line. */
+  .pane-bar {
+    position: relative;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    gap: var(--space-2);
+  }
+  .pane-bar > .pane-bar__current {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
+  /* The tab's own parts shrink rather than push the control off the edge. */
+  .pane-bar__current .term-pane__id,
+  .pane-bar__current .term-pane__meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pane-menu__button {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border: var(--border-width-hairline) solid var(--color-border);
+    border-radius: var(--btn-radius);
+    color: var(--color-text);
+    font-size: var(--type-ui-size);
+    cursor: pointer;
+  }
+  .pane-menu__toggle:focus-visible + .pane-menu__button,
+  .pane-menu__toggle:checked + .pane-menu__button {
+    background: var(--color-surface-hover);
+  }
+  .pane-menu__panel {
+    display: none;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    z-index: var(--z-nav);
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
+    padding: var(--space-2);
+    border: var(--border-width-hairline) solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-raised);
+    box-shadow: 0 4px 12px rgb(0 0 0 / 0.35);
+  }
+  .pane-menu__toggle:checked ~ .pane-menu__panel {
+    display: flex;
+  }
+  /* Inside the panel the strip is a list, and the creation controls sit
+     under it rather than off to one side. */
+  .pane-menu__panel .pane-strip {
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .pane-menu__panel .term-create {
+    justify-content: flex-start;
   }
 }
 .theme-toggle {
