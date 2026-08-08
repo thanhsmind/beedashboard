@@ -88,16 +88,17 @@ fn worktree_branch(id: &str) -> Option<(&str, &str)> {
     Some((parent, branch))
 }
 
-/// project-suggestions S1/S2/S3: one folder a herdr session is running in
-/// that sits under no registered project — `server.rs::suggested_projects`'s
-/// own output type. `path` is the pane's cwd exactly as herdr reported it
-/// (S2, no walk to a repository root); `name` is that path's own basename,
-/// computed once at build time rather than re-derived per render.
-/// `session_count` is how many sessions share that one directory.
+/// project-suggestions (D1, D2, D4, D6): one folder an agent-backed herdr
+/// pane is running in that sits under no registered project —
+/// `server.rs::suggested_projects`'s own output type. `path` is the pane's
+/// cwd exactly as herdr reported it (D1, no walk to a repository root, one
+/// trailing slash trimmed for dedup). D2 authorizes only a full path and a
+/// count on this page — never a name, title, workspace, or tab — so this
+/// type carries no such field (unlike `TerminalPaneView`). `pane_count` is
+/// how many agent-backed panes share that one directory.
 pub struct ProjectSuggestion {
     pub path: String,
-    pub name: String,
-    pub session_count: usize,
+    pub pane_count: usize,
 }
 
 pub fn project_list_page(
@@ -175,34 +176,37 @@ pub fn project_list_page(
         }
         format!(r#"<ul class="proj-list">{rows}</ul>"#, rows = rows)
     };
-    // project-suggestions S1/S2/S3: one row per unregistered folder a herdr
-    // session is running in, each a one-press form posting straight to the
-    // existing `/api/projects/register` route (D9a/D9b's whole guard chain
-    // applies unchanged; nothing here validates the path a second time). An
-    // empty `suggestions` slice — the gate off, no herdr call reached, or
-    // genuinely nothing unregistered running — renders no section at all,
-    // byte-identical to the page before this feature.
+    // project-suggestions (D1-D6): one row per unregistered folder an
+    // agent-backed herdr pane is running in, each a one-press form posting
+    // straight to the existing `/api/projects/register` route (D9a/D9b's
+    // whole guard chain applies unchanged; nothing here validates the path
+    // a second time). An empty `suggestions` slice — the gate off, no herdr
+    // call reached, or genuinely nothing unregistered running — renders no
+    // section at all, byte-identical to the page before this feature.
     let suggestions_block = if suggestions.is_empty() {
         String::new()
     } else {
         let mut rows = String::new();
         for s in suggestions {
+            // D2: the visible path text and the hidden input's `value` are
+            // the same escaped string, computed once — byte-identical by
+            // construction rather than by two separate `esc()` calls that
+            // could drift apart.
+            let path = esc(&s.path);
             rows.push_str(&format!(
                 r#"<li class="proj-row proj-suggestion">
   <div class="proj-row__link proj-suggestion__info">
-    <span class="proj-row__name">{name}</span>
-    <span class="proj-row__meta proj-suggestion__path">{path}</span>
-    <span class="proj-row__meta">{count} session{plural}</span>
+    <span class="proj-row__name proj-suggestion__path">{path}</span>
+    <span class="proj-row__meta">{count} pane{plural}</span>
   </div>
   <form class="proj-suggestion__register" method="post" action="/api/projects/register">
     <input type="hidden" name="path" value="{path}">
     <button type="submit" class="fg-btn fg-btn--primary">Register</button>
   </form>
 </li>"#,
-                name = esc(&s.name),
-                path = esc(&s.path),
-                count = s.session_count,
-                plural = if s.session_count == 1 { "" } else { "s" },
+                path = path,
+                count = s.pane_count,
+                plural = if s.pane_count == 1 { "" } else { "s" },
             ));
         }
         format!(

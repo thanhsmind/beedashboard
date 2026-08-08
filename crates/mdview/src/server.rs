@@ -395,14 +395,19 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                     (p, c, panes)
                 })
                 .collect();
-            // D5/D4: presence only, never contents — this unauthenticated
-            // route reads only the D7 and, per toa-4/D9, the group's own
-            // switch (no herdr call, no session), so it can never learn
-            // whether any pane is actually unassigned. toa-4: once the
-            // group is off by policy — its own switch, not merely an empty
-            // pane list — this marker itself becomes a disclosure ("this
-            // machine has a host-wide pane group configured"), so it must
-            // track both switches, not the family switch alone.
+            // D5/D4: presence only, never contents. Stale to say "no herdr
+            // call" here (project-suggestions correction): the snapshot
+            // above is taken whenever `badges_enabled`, for badges and, per
+            // D3, for the suggestion block too. What still holds is that
+            // this marker's own truth is derived from the two switches
+            // alone (`badges_enabled` and `unassigned_group_enabled`) — it
+            // never reads `snapshot` or `unassigned_panes` itself, so it
+            // still cannot learn whether any pane is actually unassigned.
+            // toa-4: once the group is off by policy — its own switch, not
+            // merely an empty pane list — this marker itself becomes a
+            // disclosure ("this machine has a host-wide pane group
+            // configured"), so it must track both switches, not the family
+            // switch alone.
             let unassigned_visible = badges_enabled && unassigned_group_enabled(&st);
             Html(views::project_list_page(
                 &with_counts,
@@ -1858,12 +1863,20 @@ fn project_panes(
 /// the exact widening this group's own gate is the last line of defense
 /// against (per P6, there is no second containment check for this group;
 /// toa-4/D9's `unassigned_enabled` switch, checked by every caller of this
-/// function, is what authorizes it now that D1 removed the session that
-/// used to). There is no way to tell, without a working boundary, which of
-/// the project's real panes those were — so the whole group fails closed to
-/// empty rather than guess, the same "fail closed to zero, not a crash and
-/// not a laxer check" rule `terminal_page` already applies to a single
-/// unconstructible project.
+/// function that surfaces the Unassigned group itself, is what authorizes
+/// it now that D1 removed the session that used to). There is no way to
+/// tell, without a working boundary, which of the project's real panes
+/// those were — so the whole group fails closed to empty rather than guess,
+/// the same "fail closed to zero, not a crash and not a laxer check" rule
+/// `terminal_page` already applies to a single unconstructible project.
+///
+/// project-suggestions: `suggested_projects` (below) is this function's one
+/// other caller, and it does NOT check `unassigned_enabled` — D3 narrows
+/// the gate for that one surface to `terminal_family_enabled` alone
+/// (`docs/history/project-suggestions/plan.md`). What it reuses from here is
+/// only the fail-closed membership complement (this function's own D5
+/// partition, computed the same way regardless of caller), never the
+/// Unassigned group's own switch or presence marker.
 ///
 /// A pane's raw, unvalidated cwd is used for display here (or left empty if
 /// herdr never reported one) — never resolved through any `Boundary`, since
@@ -1915,45 +1928,44 @@ fn unassigned_panes(
         .collect()
 }
 
-/// project-suggestions S1: every folder where a herdr **pane** (not just an
-/// agent — `unassigned_panes` iterates `snapshot.agents`, which is blind to
-/// a plain shell holding no agent at all) is running that sits under no
-/// registered project's own D2 containment boundary. Reads the same
-/// complement `unassigned_panes` computes, over `snapshot.panes` instead, so
-/// a folder that only ever launched a shell is still surfaced as something
-/// worth registering.
+/// project-suggestions (D1, D4, D6): every folder an agent-backed herdr
+/// **pane** is running in that sits under no registered project's own D2
+/// containment boundary. Reuses `unassigned_panes`'s complement directly,
+/// rather than re-deriving it: that function's own fail-closed membership
+/// rule (one unconstructable project boundary empties the whole group) is
+/// exactly the rule this list needs too, and hand-rolling a second copy of
+/// it here would risk drifting from it. D6: this is deliberately
+/// agents-only, the same as `unassigned_panes`'s own source
+/// (`snapshot.agents`) — a plain shell holding no agent never becomes a
+/// suggestion, even when its folder is otherwise unregistered. The
+/// superseded pre-D6 implementation read `snapshot.panes` instead
+/// specifically to include shell-only panes; D6 forbids that.
 ///
-/// Mirrors `unassigned_panes`'s fail-closed rule exactly, for the identical
-/// reason given there: without a working `Boundary` there is no way to tell
-/// a registered project's own panes apart from a genuinely unregistered one,
-/// so one unconstructable root empties the whole suggestion list rather than
-/// guess.
+/// D1/D4: a suggestion's path is the pane's own `cwd`, exactly as herdr
+/// reports it — never resolved through a `Boundary`, never walked up to a
+/// repository root. A pane with no cwd at all, or one herdr reports as the
+/// empty string, is dropped rather than surfaced as a blank path. D1's
+/// normalization is limited to trimming one trailing slash for dedup
+/// purposes only (`/a/b` and `/a/b/` merge into one row) — the path is
+/// never canonicalized. Suggestions are grouped by that normalized path and
+/// carry the number of panes found there; rows are sorted by path,
+/// ascending, bytewise (plan.md's answer to CONTEXT's deferred ordering
+/// question).
 ///
-/// S2: a suggestion's path is the pane's own `cwd`, exactly as herdr reports
-/// it — never resolved through a `Boundary`, never walked up to a repository
-/// root. A pane with no cwd at all, or one herdr reports as the empty string
-/// rather than absent, is dropped rather than surfaced as a blank path, and
-/// a directory that is exactly a registered project's own root is dropped
-/// too (a pane can sit in that project's *parent*, which is a genuinely
-/// different, unregistered folder, and must still be suggested). Suggestions
-/// are deduplicated by directory and carry the number of sessions found
-/// there, in first-seen order.
-///
-/// project-suggestions-2 (independent review): `assigned` above is built
-/// from `project_panes`, which only counts a pane whose `cwd`
-/// `Boundary::validate_existing` accepts — and that call canonicalizes, so
-/// it refuses a pane whose directory has since been deleted, whose `cwd`
-/// still carries a `.`/`..` component, or whose registered project's root
-/// does not exist on disk (`Boundary::new` never stats a root). Such a pane
-/// still genuinely belongs to a registered project, but it fell through
-/// `assigned` and its full path used to print here as if unregistered — a
-/// disclosure `unassigned_panes` cannot make the same way because it prints
-/// presence only, never a path, under two switches rather than one. Every
-/// candidate is therefore also checked, by raw component-wise containment
-/// (`paths_boundary::is_contained_in_root`, deliberately uncanonicalized —
-/// canonicalizing here would just reintroduce the same gap) against every
-/// registered project's own raw `root_path`, **in addition to**, never
-/// instead of, the `project_panes`-membership check above.
+/// project-suggestions-2 (independent review, carried forward from the
+/// superseded implementation): `unassigned_panes`'s own membership check
+/// (`project_panes`'s `Boundary::validate_existing`) canonicalizes, so it
+/// refuses a pane whose directory has since been deleted, whose `cwd` still
+/// carries a `.`/`..` component, or whose registered project's root does
+/// not exist on disk (`Boundary::new` never stats a root) — such a pane
+/// still genuinely belongs to a registered project, but falls through
+/// `unassigned_panes`'s membership check and would print here as if
+/// unregistered. Every candidate is therefore also checked, by raw
+/// component-wise containment (`paths_boundary::is_contained_in_root`,
+/// deliberately uncanonicalized — canonicalizing here would just
+/// reintroduce the same gap) against every registered project's own raw
+/// `root_path` — the owned-subtree second guard, **in addition to**, never
+/// instead of, `unassigned_panes`'s own membership check.
 ///
 /// project-suggestions-3 (independent review): `is_contained_in_root`
 /// matches raw path *components*, never text, so it still has a gap of its
@@ -1964,46 +1976,40 @@ fn unassigned_panes(
 /// containment check to resolve `.`/`..` (which would just move the
 /// canonicalize-vs-raw gap `project-suggestions-2` already closed once),
 /// every candidate whose raw components carry a `ParentDir` or `CurDir` at
-/// all is dropped outright, **before** the `assigned`-membership check and
-/// **before** `is_contained_in_root` — a traversal cwd can never become a
-/// suggestion worth offering either way, because `validate_register_path`
-/// (`server.rs:775-792`) refuses any submitted path carrying a traversal
-/// component before it ever reaches the deny-list gate, so such a row's own
-/// register button could never succeed, whatever its path resolves to.
+/// all is dropped outright, **before** the second guard runs — a traversal
+/// cwd can never become a suggestion worth offering either way, because
+/// `validate_register_path` (`server.rs:775-792`) refuses any submitted
+/// path carrying a traversal component before it ever reaches the deny-list
+/// gate, so such a row's own register button could never succeed, whatever
+/// its path resolves to.
 fn suggested_projects(
     snapshot: &herdr::Snapshot,
     projects: &[mdview_core::domain::Project],
 ) -> Vec<views::ProjectSuggestion> {
-    let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for p in projects {
-        match mdview_core::paths_boundary::Boundary::new(vec![p.root_path.clone()]) {
-            Ok(boundary) => {
-                assigned.extend(project_panes(snapshot, &boundary).into_iter().map(|pane| pane.pane_id));
-            }
-            Err(_) => {
-                // Fail closed, the same reason `unassigned_panes` gives:
-                // without a working boundary this project's own panes
-                // cannot be told apart from a genuinely unregistered one,
-                // so the whole suggestion list empties rather than risk a
-                // wrong complement.
-                return Vec::new();
-            }
-        }
-    }
+    // Never re-derive the assigned set by hand: `unassigned_panes` already
+    // is the fail-closed complement this list aggregates over (D6: agents
+    // only, since it reads `snapshot.agents`).
+    let unassigned = unassigned_panes(snapshot, projects);
 
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut order: Vec<String> = Vec::new();
-    for pane in &snapshot.panes {
-        let Some(cwd) = pane.cwd.as_deref().filter(|c| !c.is_empty()) else {
+    let mut paths: Vec<String> = Vec::new();
+    for pane in &unassigned {
+        if pane.cwd.is_empty() {
             continue;
-        };
-        let cwd_path = std::path::Path::new(cwd);
-        // project-suggestions-3: a raw traversal component is dropped before
-        // any other check, membership included — a candidate carrying one
-        // can resolve to anywhere, including inside a registered project by
-        // a route `is_contained_in_root`'s raw component match cannot see
-        // (the doc comment above this function has the full story), and its
-        // own register button could never succeed regardless.
+        }
+        // D1: trim exactly one trailing slash so `/a/b` and `/a/b/` dedup
+        // to one row — never canonicalized, never walked up.
+        let normalized = pane.cwd.strip_suffix('/').unwrap_or(&pane.cwd);
+        if normalized.is_empty() {
+            continue;
+        }
+        let cwd_path = std::path::Path::new(normalized);
+        // project-suggestions-3: a raw traversal component is dropped
+        // before the second guard runs — a candidate carrying one can
+        // resolve to anywhere, including inside a registered project by a
+        // route `is_contained_in_root`'s raw component match cannot see
+        // (the doc comment above this function has the full story), and
+        // its own register button could never succeed regardless.
         let has_traversal = cwd_path.components().any(|c| {
             matches!(
                 c,
@@ -2013,34 +2019,29 @@ fn suggested_projects(
         if has_traversal {
             continue;
         }
-        if assigned.contains(&pane.pane_id) {
-            continue;
-        }
+        // Owned-subtree second guard: a candidate that equals or sits
+        // lexically under a registered project's own root is never
+        // suggested, even when `unassigned_panes`'s own membership check
+        // missed it (project-suggestions-2).
         if projects
             .iter()
             .any(|p| mdview_core::paths_boundary::is_contained_in_root(cwd_path, &p.root_path))
         {
             continue;
         }
-        if !counts.contains_key(cwd) {
-            order.push(cwd.to_string());
+        if !counts.contains_key(normalized) {
+            paths.push(normalized.to_string());
         }
-        *counts.entry(cwd.to_string()).or_insert(0) += 1;
+        *counts.entry(normalized.to_string()).or_insert(0) += 1;
     }
 
-    order
+    paths.sort();
+
+    paths
         .into_iter()
         .map(|path| {
-            let session_count = counts[&path];
-            let name = std::path::Path::new(&path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.clone());
-            views::ProjectSuggestion {
-                path,
-                name,
-                session_count,
-            }
+            let pane_count = counts[&path];
+            views::ProjectSuggestion { path, pane_count }
         })
         .collect()
 }
@@ -9454,6 +9455,29 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
+    /// Truth: with the switch on but genuinely nothing running at all (an
+    /// empty herdr snapshot, no agents whatsoever), the page renders no
+    /// suggestion section markup — not an empty `<section>` shell.
+    #[tokio::test]
+    async fn suggestions_empty_state_renders_no_block_markup() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-empty-state");
+        enable_terminal(&dir);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = std::sync::Arc::new(FakeHerdr::empty());
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("proj-suggestions") && !body.contains("Suggested projects"),
+            "nothing running must render no suggestion block at all: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// Truth: a pane inside a registered project is never suggested; a pane
     /// outside every project is. The registered pane sits in a
     /// subdirectory of the project root (not the root itself), proving the
@@ -9499,12 +9523,22 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// Truth: a pane with no agent at all (a plain shell) in an unregistered
-    /// folder is still suggested — `unassigned_panes` iterates
-    /// `snapshot.agents` and would miss this case entirely, which is exactly
-    /// why `suggested_projects` reads `snapshot.panes` instead.
+    /// Truth (D6): a pane with no agent at all (a plain shell) in an
+    /// unregistered folder is never suggested — suggestions read
+    /// `unassigned_panes`'s complement, which iterates `snapshot.agents`,
+    /// the same source the Unassigned group itself reads, so a folder that
+    /// only ever launched a shell stays low-noise (no suggestion) exactly
+    /// the way it stays absent from that group.
+    ///
+    /// Retires `suggestions_include_a_shell_pane_with_no_agent` (this test's
+    /// former name and assertion): the superseded pre-plan implementation
+    /// read `snapshot.panes` directly and asserted the opposite —
+    /// shell-only panes DID produce a suggestion. D6
+    /// (`docs/history/project-suggestions/CONTEXT.md`) supersedes that:
+    /// "Only agent-backed panes produce suggestions, matching how the
+    /// Unassigned group is computed; shell-only panes never do."
     #[tokio::test]
-    async fn suggestions_include_a_shell_pane_with_no_agent() {
+    async fn suggestions_exclude_a_shell_pane_with_no_agent() {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("suggest-shell-only");
@@ -9522,18 +9556,19 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
-            body.contains(&stray_root.to_string_lossy().to_string()),
-            "a plain shell pane (no agent) in an unregistered folder must still be suggested: {body}"
+            !body.contains(&stray_root.to_string_lossy().to_string()),
+            "D6: a plain shell pane (no agent) in an unregistered folder must never be \
+             suggested: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&stray_root).ok();
     }
 
-    /// Truth: two sessions in one folder produce one suggestion carrying a
-    /// count of two, not two rows.
+    /// Truth (D4): two agent-backed panes in one folder produce one
+    /// suggestion carrying a count of two, not two rows.
     #[tokio::test]
-    async fn suggestions_dedup_two_sessions_in_one_folder_to_one_row_with_count_two() {
+    async fn suggestions_dedup_two_panes_in_one_folder_to_one_row_with_count_two() {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("suggest-dedup");
@@ -9561,15 +9596,116 @@ mod bee_route_tests {
         assert_eq!(
             body.matches(&path).count(),
             2,
-            "two sessions in the same folder must dedup to one row: {body}"
+            "two panes in the same folder must dedup to one row: {body}"
         );
         assert!(
-            body.contains("2 sessions"),
-            "the deduped row must carry a session count of two: {body}"
+            body.contains("2 panes"),
+            "the deduped row must carry a pane count of two: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&stray_root).ok();
+    }
+
+    /// Truth (D1 trailing-slash normalization): a pane whose cwd is
+    /// reported with a trailing slash merges into the same row as a pane
+    /// reporting the identical directory without one — `/a/b` and `/a/b/`
+    /// are the same folder, not two different suggestions.
+    #[tokio::test]
+    async fn suggestions_merge_a_trailing_slash_cwd_variant_into_the_same_row() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-trailing-slash");
+        enable_terminal(&dir);
+        let stray_root = fresh_root("suggest-trailing-slash-stray");
+        let bare = stray_root
+            .to_string_lossy()
+            .trim_end_matches('/')
+            .to_string();
+        let with_slash = format!("{bare}/");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&bare), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.agent_start("w1", Some(&with_slash), &["codex".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        // Same reasoning as the dedup test above: `FakeHerdr::new()`'s own
+        // seeded agents legitimately produce their own suggestion rows too
+        // (nothing here is registered), so the proof is not "exactly one
+        // row total" but that OUR OWN path merges to one row: it appears
+        // exactly twice (display text + hidden value) rather than four
+        // times split across a bare and a trailing-slash spelling.
+        assert_eq!(
+            body.matches(&bare).count(),
+            2,
+            "a trailing-slash cwd variant must merge into the same row as the bare path: {body}"
+        );
+        assert!(
+            body.contains("2 panes"),
+            "the merged row must carry a pane count of two: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&stray_root).ok();
+    }
+
+    /// Truth (D2, HTML injection defense): a hostile cwd containing double
+    /// and single quotes renders escaped in both the display text and the
+    /// register form's hidden `value` attribute, and the two are
+    /// byte-identical — what the user sees is exactly what the row would
+    /// submit. `esc()` (views.rs) escapes `& < > "` and leaves `'`
+    /// untouched, the file's own convention, since every attribute here
+    /// stays double-quoted.
+    #[tokio::test]
+    async fn suggestions_escape_a_hostile_cwd_and_keep_text_and_hidden_value_identical() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-hostile-cwd");
+        enable_terminal(&dir);
+        let scratch = fresh_root("suggest-hostile-cwd-scratch");
+        let hostile_cwd = format!(
+            "{}/hostile\"'dir",
+            scratch.to_string_lossy().trim_end_matches('/')
+        );
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&hostile_cwd), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&hostile_cwd),
+            "the raw, unescaped hostile path must never reach the body: {body}"
+        );
+        let escaped = hostile_cwd.replace('"', "&quot;");
+        assert!(
+            body.contains(&escaped),
+            "the escaped hostile path must render: {body}"
+        );
+        // The visible text and the hidden input's `value` are built from
+        // the same escaped string (views.rs), so it appears exactly twice
+        // — once as text, once as the attribute value.
+        assert_eq!(
+            body.matches(&escaped).count(),
+            2,
+            "the visible path text and the hidden register value must be byte-identical: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     /// Truth: a pane whose cwd herdr reports as empty is dropped rather than
@@ -10020,9 +10156,11 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// Truth: when one registered project's root cannot construct a
-    /// `Boundary`, the suggestion block is empty, not populated — the same
-    /// fail-closed rule `unassigned_panes` follows, proven the same way
+    /// Truth: with two registered projects, one whose root cannot construct
+    /// a `Boundary`, the WHOLE suggestion list is empty, not just missing
+    /// that one project's own share — a genuinely valid second project's
+    /// working boundary never rescues the group, the same fail-closed rule
+    /// `unassigned_panes` follows, proven the same way
     /// `unassigned_group_fails_closed_when_a_projects_boundary_is_unconstructable`
     /// proves it for the Unassigned group.
     #[tokio::test]
@@ -10033,7 +10171,9 @@ mod bee_route_tests {
         enable_terminal(&dir);
         let scratch = fresh_root("suggest-fail-closed-scratch");
         let stray_root = scratch.join("stray");
+        let valid_root = scratch.join("valid-project");
         std::fs::create_dir_all(&stray_root).unwrap();
+        std::fs::create_dir_all(&valid_root).unwrap();
         let denied_root = PathBuf::from("/etc/mdview-test-fixture-nonexistent");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
@@ -10043,6 +10183,7 @@ mod bee_route_tests {
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
+        register(&st, &valid_root, "valid-project");
         let project = register(&st, &denied_root, "denied-root-project");
         assert_eq!(
             project.root_path, denied_root,
@@ -10052,9 +10193,11 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
-            !body.contains(&stray_root.to_string_lossy().to_string()),
-            "a project whose boundary cannot be constructed must fail the whole suggestion list \
-             closed to zero, not leak a stray pane's path: {body}"
+            !body.contains(&stray_root.to_string_lossy().to_string())
+                && !body.contains("proj-suggestions"),
+            "one project whose boundary cannot be constructed must fail the whole suggestion \
+             list closed to zero, even with a second, genuinely valid registered project \
+             present — never leak a stray pane's path: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -10793,7 +10936,9 @@ mod bee_route_tests {
     /// `tokio::time::timeout` precisely because `SocketHerdr::call` has none
     /// of its own — proven here against a herdr double that never answers at
     /// all, not only one that answers with an `Err` (that path is
-    /// `home_page_renders_plain_rows_when_herdr_is_down` above).
+    /// `home_page_renders_plain_rows_when_herdr_is_down` above). The
+    /// suggestion block reads the same, single, timed-out snapshot (D3), so
+    /// a hung herdr must render neither badges nor a suggestion section.
     #[tokio::test]
     async fn home_page_returns_promptly_when_herdr_hangs() {
         let dir = fresh_root("home-badges-herdr-hang");
@@ -10819,8 +10964,9 @@ mod bee_route_tests {
         );
         let body = body_string(resp).await;
         assert!(
-            !body.contains("proj-row__badges"),
-            "a hung herdr must render plain rows, not a badge container: {body}"
+            !body.contains("proj-row__badges") && !body.contains("proj-suggestions"),
+            "a hung herdr must render plain rows, not a badge container or a suggestion \
+             section: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -11111,20 +11257,31 @@ mod bee_route_tests {
     }
 
     /// D5/D4's core resolution, on the home page itself: an unauthenticated
-    /// `GET /` must never reveal an unassigned agent's name through the
+    /// `GET /` must never reveal an unassigned agent's identity through the
     /// Unassigned card's own markup, even though the group's presence
     /// marker is visible once the D7 switch is on. A second request with
     /// the switch off proves the page renders exactly as it did before this
     /// feature (no marker, no mention of "Unassigned" at all).
     ///
-    /// project-suggestions S3 supersedes this test's original cwd claim in
-    /// part: with `terminal.enabled` on, the page's separate suggestion
-    /// block (gated on that one switch alone, a locked narrowing of D9's
-    /// scope recorded in `docs/history/project-suggestions/plan.md`) does
-    /// print the stray pane's cwd on purpose — that is the whole feature.
-    /// What still holds, and is what this test asserts on the cwd, is
-    /// narrower but unchanged: the Unassigned card's own markup carries no
-    /// cwd, only presence.
+    /// project-suggestions surgery (plan.md's "named assertion by
+    /// assertion" section, the authority for this test's three phases):
+    /// - Phase 1 (switch off): byte-identical to baseline — off means no
+    ///   herdr call, so a stray session leaves no trace, proven exactly as
+    ///   it always was.
+    /// - Phase 2 (family switch only): the whole-body
+    ///   `!contains("unassigned")` cannot survive as written for a second
+    ///   reason the wording alone doesn't fix — once `terminal.enabled` is
+    ///   on, the suggestion block (D3: gated on that one switch alone)
+    ///   legitimately prints the stray path in THIS phase too. Re-targeted
+    ///   to the marker itself (its title text and its own route href)
+    ///   rather than the bare word, plus a positive pin that the
+    ///   suggestion block legitimately renders here (D3).
+    /// - Phase 3 (both on): D2 supersedes the original
+    ///   `!body_on.contains(&stray_root...)` in part — inverted to
+    ///   `assert!(...)`, since the suggestion block now legitimately shows
+    ///   the full path. The name pin survives unchanged and extends to the
+    ///   full unauthorized field set (D2 authorizes path + count only,
+    ///   never a name, title, workspace, or tab).
     #[tokio::test]
     async fn unauthenticated_home_page_shows_unassigned_presence_only_and_leaks_nothing() {
         use crate::herdr::fake::FakeHerdr;
@@ -11133,9 +11290,9 @@ mod bee_route_tests {
         // project-suggestions: deliberately not named "...unassigned..." —
         // once `terminal.enabled` is on, the suggestion block (a separate
         // feature, gated on that one switch alone) prints this folder's
-        // full path, and this test's own `!contains("unassigned")` checks
-        // below must not trip over the literal word appearing inside a
-        // scratch *directory name* rather than the Unassigned marker itself.
+        // full path, and this test's own marker-scoped checks below must
+        // not trip over the literal word appearing inside a scratch
+        // *directory name* rather than the Unassigned marker itself.
         let scratch = fresh_root("home-group-presence-scratch");
         let stray_root = scratch.join("stray");
         std::fs::create_dir_all(&stray_root).unwrap();
@@ -11147,7 +11304,8 @@ mod bee_route_tests {
             .unwrap();
 
         // Switch off (default): the home page must carry no trace of the
-        // feature at all — not even the word "Unassigned".
+        // feature at all — not even the word "Unassigned". Byte-identical
+        // to baseline: off means no herdr call, so nothing here changed.
         let mut st_off = build_state_with_dir(&dir);
         st_off.herdr = fake.clone();
         let resp_off = get(router(st_off), "/").await;
@@ -11161,6 +11319,9 @@ mod bee_route_tests {
         // toa-4 (D9): the family switch on, the group's own switch still
         // off — the marker must stay absent. Turning on `terminal.enabled`
         // alone must never be read as turning on the Unassigned group.
+        // Re-targeted to the marker itself (title text + route href),
+        // never the bare word, because D3 makes the suggestion block (a
+        // legitimate, separate disclosure) render in this same phase.
         enable_terminal(&dir);
         let mut st_family_only = build_state_with_dir(&dir);
         st_family_only.herdr = fake.clone();
@@ -11168,13 +11329,20 @@ mod bee_route_tests {
         assert_eq!(resp_family_only.status(), StatusCode::OK);
         let body_family_only = body_string(resp_family_only).await;
         assert!(
-            !body_family_only.contains("Unassigned") && !body_family_only.contains("unassigned"),
+            !body_family_only.contains("Unassigned agents")
+                && !body_family_only.contains(r#"href="/_terminal/unassigned""#),
             "the family switch alone must not surface the Unassigned group's presence marker: {body_family_only}"
         );
+        assert!(
+            body_family_only.contains(&stray_root.to_string_lossy().to_string()),
+            "D3: the family switch alone must surface the suggestion block, gated on that one \
+             switch alone, independent of the Unassigned group's own switch: {body_family_only}"
+        );
 
-        // Both switches on: the presence marker appears, but the pane's own
-        // name and cwd never do — this route takes no session and makes no
-        // herdr call, so it structurally cannot leak them.
+        // Both switches on: the presence marker appears, and the
+        // suggestion block legitimately shows the stray pane's own path
+        // (D2) — but no agent identity beyond that path and a count ever
+        // does, anywhere on the page.
         enable_unassigned_group(&dir);
         let mut st_on = build_state_with_dir(&dir);
         st_on.herdr = fake;
@@ -11186,15 +11354,21 @@ mod bee_route_tests {
             "the group's presence marker is missing once both switches are on: {body_on}"
         );
         assert!(
-            !body_on.contains(&stray.name),
-            "an unauthenticated home page leaked an unassigned agent's name: {body_on}"
+            !body_on.contains(&stray.name) && !body_on.contains(&stray.pane_id),
+            "an unauthenticated home page leaked an unassigned agent's name or pane id: {body_on}"
         );
-        // project-suggestions S3: the page as a whole now legitimately
-        // shows the stray pane's cwd, via the separate suggestion block —
-        // that disclosure is this cell's own locked, recorded decision, not
-        // a leak. What the Unassigned card itself must still never carry is
-        // the pane's cwd, so the assertion narrows to that card's own
-        // markup rather than the whole page body.
+        // D2 inverted: the page as a whole now legitimately shows the
+        // stray pane's cwd, via the separate suggestion block — that
+        // disclosure is this feature's own locked, recorded decision, not
+        // a leak.
+        assert!(
+            body_on.contains(&stray_root.to_string_lossy().to_string()),
+            "D2: with both switches on, the suggestion block must show the stray pane's full \
+             path: {body_on}"
+        );
+        // What the Unassigned card itself must still never carry is the
+        // pane's cwd (D5/D4 — presence only), so this narrower assertion
+        // survives unchanged, scoped to that card's own markup.
         let card_start = body_on
             .find(r#"<div class="proj-cards">"#)
             .expect("the Unassigned card must render once both switches are on");
@@ -11207,6 +11381,33 @@ mod bee_route_tests {
             !card_markup.contains(&stray_root.to_string_lossy().to_string()),
             "the Unassigned card's own markup leaked an unassigned agent's cwd: {card_markup}"
         );
+        // The name/pane-id pin above extends to title too, proven against
+        // `FakeHerdr::new()`'s own seeded agent `w1:p1` ("claude-main",
+        // title "Building the parser") rather than `stray`: `agent_start`
+        // always starts a fresh agent with an empty title (no fake seam
+        // sets one), so asserting `!body.contains("")` on `stray`'s own
+        // title would be vacuous (an empty string is trivially "contained"
+        // in everything). `w1:p1` is itself unassigned in this test (no
+        // project is ever registered), so it legitimately renders as a
+        // second suggestion row here too — its identity fields must still
+        // never appear.
+        assert!(
+            !body_on.contains("Building the parser")
+                && !body_on.contains("claude-main")
+                && !body_on.contains("w1:p1"),
+            "an unauthenticated home page leaked a suggested folder's agent title, name, or \
+             pane id: {body_on}"
+        );
+        // Workspace and tab labels are deliberately not checked here: this
+        // fixture's own seeded labels ("frontend-app"/"main") are
+        // themselves substrings of that same pane's own legitimately
+        // suggested path (`/home/dev/projects/frontend-app`) and, for
+        // "main", of the page's own generic `<main class=...>` furniture —
+        // a whole-body (or even row-scoped) `.contains()` check on either
+        // label cannot distinguish a real leak from that unrelated
+        // collision. `ProjectSuggestion` (views.rs) carries no
+        // workspace/tab field at all, which is the structural guarantee
+        // that backs this dimension instead.
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&scratch).ok();
