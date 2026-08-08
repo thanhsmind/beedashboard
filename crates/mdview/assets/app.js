@@ -1425,4 +1425,141 @@
       if (e.key === "Escape") closeAll(null);
     });
   })();
+
+  // agent-switch-drawer-2: the cross-project agent feed
+  // (`views.rs::AGENT_SWITCH_DRAWER` renders the panel and its toggle;
+  // `GET /api/agents` is the feed itself). Polled only while the drawer is
+  // open — same fetch/repaint idiom as the terminal screen poller above,
+  // but gated on the checkbox's own state, since this list is a jump menu
+  // rather than a live view anything else on the page depends on.
+  (function () {
+    var toggle = document.getElementById("agent-drawer-toggle");
+    var list = document.querySelector("[data-agent-drawer-list]");
+    if (!toggle || !list) return;
+
+    var POLL_MS = 5000;
+    var timer = null;
+
+    var SECTIONS = [
+      { key: "working", label: "Working" },
+      { key: "blocked", label: "Waiting" },
+      { key: "done", label: "Done" },
+      { key: "idle", label: "Idle" },
+    ];
+
+    // The same mapping `views.rs::status_pill` applies server-side: `done`
+    // reads ready, `working` reads warn, `blocked` reads blocked, and every
+    // other status (`idle`, `unknown`, or anything this list has never seen
+    // before) keeps the bare, unmodified dot — and groups under this
+    // drawer's own "Idle" section below rather than being dropped.
+    function pillModifier(status) {
+      if (status === "done") return " fg-status--ready";
+      if (status === "working") return " fg-status--warn";
+      if (status === "blocked") return " fg-status--blocked";
+      return "";
+    }
+
+    function sectionKey(status) {
+      return status === "working" || status === "blocked" || status === "done" ? status : "idle";
+    }
+
+    function agentRow(agent) {
+      var item = document.createElement("a");
+      item.className = "fg-menu__item agent-drawer__item";
+      item.href = agent.url;
+
+      var name = document.createElement("span");
+      name.textContent = agent.name;
+      item.appendChild(name);
+
+      var pill = document.createElement("span");
+      pill.className = "fg-status" + pillModifier(agent.status);
+      var dot = document.createElement("span");
+      dot.className = "fg-status__dot";
+      pill.appendChild(dot);
+      pill.appendChild(document.createTextNode(agent.status));
+      item.appendChild(pill);
+
+      var suffix = document.createElement("span");
+      suffix.className = "agent-drawer__suffix";
+      suffix.textContent = agent.project_name + " · " + agent.workspace + ":" + agent.tab;
+      item.appendChild(suffix);
+
+      return item;
+    }
+
+    function render(agents) {
+      list.textContent = "";
+      if (!agents.length) {
+        var empty = document.createElement("p");
+        empty.className = "fg-empty";
+        empty.textContent = "No agents";
+        list.appendChild(empty);
+        return;
+      }
+      var groups = { working: [], blocked: [], done: [], idle: [] };
+      agents.forEach(function (agent) {
+        groups[sectionKey(agent.status)].push(agent);
+      });
+      SECTIONS.forEach(function (section) {
+        var rows = groups[section.key];
+        if (!rows.length) return;
+        var heading = document.createElement("div");
+        heading.className = "agent-drawer__section";
+        heading.textContent = section.label;
+        list.appendChild(heading);
+        rows.forEach(function (agent) {
+          list.appendChild(agentRow(agent));
+        });
+      });
+    }
+
+    function fetchAgents() {
+      fetch("/api/agents", { credentials: "same-origin" })
+        .then(function (res) {
+          return res.ok ? res.json() : [];
+        })
+        .then(function (agents) {
+          render(Array.isArray(agents) ? agents : []);
+        })
+        .catch(function () {});
+    }
+
+    function stop() {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    }
+
+    function start() {
+      fetchAgents();
+      stop();
+      timer = setInterval(fetchAgents, POLL_MS);
+    }
+
+    toggle.addEventListener("change", function () {
+      if (toggle.checked) start();
+      else stop();
+    });
+
+    // The generic `.js-menu` handler above closes this drawer the same way
+    // it closes any other menu — setting `toggle.checked = false` directly
+    // on an outside click or Escape — which fires no "change" event of its
+    // own. Watching the same two triggers here, deferred one tick so that
+    // handler (registered earlier in this file, so it always runs first) has
+    // already flipped the box, is what notices the drawer closed and stops
+    // the poll.
+    document.addEventListener("click", function () {
+      setTimeout(function () {
+        if (!toggle.checked) stop();
+      }, 0);
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Escape") return;
+      setTimeout(function () {
+        if (!toggle.checked) stop();
+      }, 0);
+    });
+  })();
 })();

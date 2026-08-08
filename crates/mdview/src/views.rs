@@ -502,6 +502,53 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .term-scroll button { padding: var(--space-2) var(--space-4); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; font-size: var(--type-body-sm-size); }
 .term-transcript { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
 .term-transcript__line { white-space: pre-wrap; word-break: break-word; }
+/* agent-switch-drawer-2: a fixed edge tab reaches the cross-project agent
+   feed (`GET /api/agents`) from any terminal page without first hunting
+   through the pane bar's own menu, which only ever lists this project's
+   own panes. Checkbox-driven the same way `pane_bar`'s own
+   `.pane-menu__toggle` is (`assets/app.css`) — no script owns open/closed,
+   only Escape/outside-click layers on top via the generic `.js-menu`
+   handler in `assets/app.js`, which this markup's own `js-menu` class
+   already opts into. */
+.agent-drawer__check { position: absolute; opacity: 0; pointer-events: none; }
+.agent-drawer__tab {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  z-index: var(--z-nav);
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width-hairline) solid var(--color-border-strong);
+  border-right: 0;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-text-muted);
+  font-size: var(--type-body-sm-size);
+  cursor: pointer;
+  box-shadow: var(--elevation-md);
+}
+.agent-drawer__check:checked + .agent-drawer__tab,
+.agent-drawer__check:focus-visible + .agent-drawer__tab {
+  color: var(--color-text);
+  border-color: var(--color-action);
+}
+/* `.fg-drawer` (components.css) is always fixed and full-height; every
+   other caller in the app only ever mounts it while open, so this is the
+   only page that needs to hide it off-screen itself. */
+.agent-drawer .fg-drawer {
+  transform: translateX(100%);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+.agent-drawer__check:checked ~ .fg-drawer {
+  transform: translateX(0);
+}
+.agent-drawer__section { padding: var(--space-3) var(--space-1) var(--space-1); color: var(--color-text-subtle); font-family: var(--type-label-font); font-size: var(--type-micro-size); letter-spacing: var(--type-label-tracking); text-transform: var(--type-label-case); }
+.agent-drawer__section:first-child { padding-top: 0; }
+.agent-drawer__item { flex-direction: column; align-items: flex-start; gap: 2px; min-height: 44px; }
+.agent-drawer__suffix { color: var(--color-text-muted); font-size: var(--type-caption-size); }
 </style>"#;
 
 /// D6: the Terminal tab is always present on a project page, whether or not
@@ -842,6 +889,29 @@ fn terminal_create_controls(project_id: &str, presets: &[String]) -> String {
     )
 }
 
+/// agent-switch-drawer-2: a right-edge slide-in panel that lists every
+/// agent-backed pane across every project (`GET /api/agents`), reachable
+/// from any terminal page without first navigating to that pane's own
+/// project. Terminal pages only — [`terminal_page`] renders both a
+/// project's own pane list and its `/pane/:pane_id` view through this one
+/// function, and both get the drawer; the read-only Transcript tab
+/// ([`transcript_page`]) and the Unassigned page
+/// ([`unassigned_terminal_page`]) do not, since there is no second place to
+/// jump *from* to make the drawer worth the screen space there. Checkbox-
+/// driven the same way [`pane_bar`]'s own `.pane-menu__toggle` is — no
+/// script owns open/closed, only Escape/outside-click layers on top via
+/// the generic `.js-menu` handler `assets/app.js` already runs. Entirely
+/// static: `assets/app.js` fills `[data-agent-drawer-list]` in from JSON
+/// once the drawer opens, so there is nothing here to escape.
+const AGENT_SWITCH_DRAWER: &str = r#"<div class="agent-drawer js-menu">
+  <input type="checkbox" id="agent-drawer-toggle" class="agent-drawer__check">
+  <label for="agent-drawer-toggle" class="agent-drawer__tab">Agents</label>
+  <div class="fg-drawer">
+    <div class="fg-drawer__head"><span class="fg-drawer__title">Agents</span></div>
+    <div class="fg-drawer__body" data-agent-drawer-list></div>
+  </div>
+</div>"#;
+
 /// `GET /p/:id/_terminal` and `/p/:id/_terminal/pane/:pane_id` up state
 /// (D2/D4/D6): one pane's own page, chosen by `selected` from the pane strip
 /// (D4) rendered above it. `selected` is `None` only when `panes` is empty
@@ -879,7 +949,8 @@ pub fn terminal_page(
 <main class="fg-page fg-page--tight" data-project-id="{pid}">
   {bar}
   <div class="term-panes">{rows}</div>
-</main>"#,
+</main>
+{drawer}"#,
         topbar = topbar_full(
             "",
             &format!(
@@ -893,6 +964,7 @@ pub fn terminal_page(
         pid = esc(&project.id),
         bar = bar,
         rows = rows,
+        drawer = AGENT_SWITCH_DRAWER,
     );
     layout(&format!("{} · terminal", project.name), "", &body)
 }
@@ -3731,6 +3803,38 @@ mod tests {
         assert!(
             html[row_start..row_end].contains("class=\"term-create__pane\""),
             "New shell must share the pane strip's row: {html}"
+        );
+    }
+
+    /// agent-switch-drawer-2: the terminal page — both a project's own pane
+    /// list and its `/pane/:pane_id` render, which share this one function —
+    /// carries the right-edge agent switcher drawer, and the checkbox that
+    /// opens it is the hook `assets/app.js`'s poller and the generic
+    /// `.js-menu` handler both key off.
+    #[test]
+    fn terminal_page_renders_the_agent_switch_drawer() {
+        let project = sample_project();
+        let list_html = terminal_page(&project, &[], None, &[]);
+        assert!(
+            list_html.contains(r#"id="agent-drawer-toggle""#)
+                && list_html.contains(r#"data-agent-drawer-list"#),
+            "the terminal list page must render the agent switch drawer: {list_html}"
+        );
+
+        let panes = vec![TerminalPaneView {
+            pane_id: "w1:p1".into(),
+            kind: "claude".into(),
+            name: "one".into(),
+            status: "working".into(),
+            title: String::new(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+        }];
+        let pane_html = terminal_page(&project, &panes, Some("w1:p1"), &[]);
+        assert!(
+            pane_html.contains(r#"id="agent-drawer-toggle""#),
+            "the per-pane terminal page must render the agent switch drawer too: {pane_html}"
         );
     }
 
