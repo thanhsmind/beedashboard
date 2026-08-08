@@ -355,7 +355,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    sideways: a project with many panes still needs every one reachable on a
    handset. */
 .pane-strip { display: flex; flex-wrap: wrap; gap: var(--space-2); min-width: 0; }
-.pane-strip__tab { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text-muted); text-decoration: none; background: var(--color-bg-subtle); }
+.pane-strip__tab { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text-muted); text-decoration: none; background: var(--color-surface-raised); }
 .pane-strip__tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
 .term-pane__meta { flex: 0 0 auto; color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
 /* A pane's frame is a grid, not prose: `pre-wrap` + `word-break` re-flowed
@@ -370,7 +370,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    defaults to `min-width: auto` would happily take it — so the chain from the
    card down is pinned to its container, and the screen scrolls inside itself
    instead of pushing the page out. */
-.term-panes, .term-pane, .term-screen-wrap, .term-controls, .term-controls__row, .term-reply { min-width: 0; max-width: 100%; }
+.term-panes, .term-pane, .term-screen-wrap, .term-controls, .term-reply { min-width: 0; max-width: 100%; }
 /* A pane sheds the card chrome it used to sit in: the border, the padding and
    the raised surface only framed a frame, and on a narrow screen that inset
    was width the terminal itself needed. The screen's own dark box is the
@@ -398,7 +398,6 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    the edge. */
 @media (max-width: 720px) {
   .term-screen { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
-  .term-controls__row { align-items: center; }
   .term-keys button, .term-scroll button, .term-reply__send, .term-reply__stage { padding: var(--space-2) var(--space-3); }
   .term-reply__actions { justify-content: stretch; }
   .term-reply__actions button { flex: 1; }
@@ -411,23 +410,23 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .term-reply { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
 .term-reply__text { width: 100%; min-width: 0; box-sizing: border-box; padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.35; background: var(--color-bg); color: var(--color-text); resize: vertical; }
 .term-reply__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
-.term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-3); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; }
+.term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-3); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; }
 /* Send is the primary of the pair — Stage beside it stays the quiet one. */
 .term-reply__send { background: var(--color-action); border-color: var(--color-action); color: var(--color-bg); font-weight: var(--weight-semibold); }
-/* One tight control block under the screen: the arrows on their own line,
-   everything else on the next. The rows carry no margins of their own —
-   stacked separately they drifted apart into three loose bands. */
-.term-controls { display: flex; flex-direction: column; gap: var(--space-1); margin-top: 0; }
-.term-controls__row { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+/* One tight control block under the screen, on a single line: the arrows and
+   the named keys read as one row of controls rather than two bands with a
+   gap between them. The row carries no margin of its own and wraps only when
+   the card is too narrow to hold both groups. */
+.term-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: 0; }
 .term-keys { display: flex; flex-wrap: wrap; gap: var(--space-1); }
-.term-keys button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
-/* D5: the four screen-moving arrows sit directly under `.term-controls`
-   (`.term-controls > .term-keys`, not `.term-controls__row .term-keys` —
-   that reaches the named keys instead) and are pressed repeatedly while
-   reading a screen, often with a thumb, so they get a real 44px target with
-   the glyph at body size. The named keys beside them (Enter, Esc, Tab) are
-   pressed occasionally and deliberately and keep the smaller box above. */
-.term-controls > .term-keys button { min-width: 44px; min-height: 44px; font-size: var(--type-body-size); }
+.term-keys button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
+/* D5: the four screen-moving arrows are pressed repeatedly while reading a
+   screen, often with a thumb, so they get a real 44px target with the glyph
+   at body size. They are picked out by their own `--move` modifier rather
+   than by position: once both groups share one row, "the direct child of
+   `.term-controls`" reaches the named keys too. Enter, Esc and Tab are
+   pressed occasionally and deliberately and keep the smaller box. */
+.term-keys--move button { min-width: 44px; min-height: 44px; font-size: var(--type-body-size); }
 /* The two screen-moving controls belong to the screen, not to the keys that
    type into the pane, so they ride on it: centred, wholly inside its lower
    edge rather than straddling it. `sticky` keeps them reachable while a tall
@@ -436,13 +435,13 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    own rendered height, which is what both lifts it clear of the edge and
    gives back the flow row it would otherwise open above the keys. */
 .term-screen-wrap { position: relative; display: flow-root; }
-.term-scroll { position: sticky; bottom: var(--space-3); z-index: 2; display: flex; flex-wrap: wrap; gap: var(--space-2); width: max-content; margin: calc(-1 * var(--space-7)) auto 0; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-bg-subtle); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
+.term-scroll { position: sticky; bottom: var(--space-3); z-index: 2; display: flex; flex-wrap: wrap; gap: var(--space-2); width: max-content; margin: calc(-1 * var(--space-7)) auto 0; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-surface-raised); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
 /* Bigger than the named keys beside the arrows: these are read at a glance
    and pressed mid-scroll. Width comes from padding, never a `min-width` —
    that 44px target is the arrows' own, and the pair keeps the smaller box
    the touch-target rule reserves for everything else. */
-.term-scroll button { padding: var(--space-2) var(--space-4); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-bg-subtle); color: var(--color-text); cursor: pointer; font-size: var(--type-body-sm-size); }
-.term-transcript { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken, var(--color-bg-subtle)); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
+.term-scroll button { padding: var(--space-2) var(--space-4); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; font-size: var(--type-body-sm-size); }
+.term-transcript { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
 .term-transcript__line { white-space: pre-wrap; word-break: break-word; }
 </style>"#;
 
@@ -581,18 +580,16 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
     </div>
   </div>
   <div class="term-controls">
-    <div class="term-keys" data-pane-id="{pane_id}" aria-label="Move around {name}'s screen">
+    <div class="term-keys term-keys--move" data-pane-id="{pane_id}" aria-label="Move around {name}'s screen">
       <button type="button" data-key="up">↑</button>
       <button type="button" data-key="down">↓</button>
       <button type="button" data-key="left">←</button>
       <button type="button" data-key="right">→</button>
     </div>
-    <div class="term-controls__row">
-      <div class="term-keys" data-pane-id="{pane_id}" aria-label="Send a key to {name}">
-        <button type="button" data-key="enter">Enter</button>
-        <button type="button" data-key="escape">Esc</button>
-        <button type="button" data-key="tab">Tab</button>
-      </div>
+    <div class="term-keys" data-pane-id="{pane_id}" aria-label="Send a key to {name}">
+      <button type="button" data-key="enter">Enter</button>
+      <button type="button" data-key="escape">Esc</button>
+      <button type="button" data-key="tab">Tab</button>
     </div>
   </div>
   <form class="term-reply" data-pane-id="{pane_id}">
@@ -3551,27 +3548,31 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"), "{html}");
     }
 
-    /// D5 (terminal-pane-scope): the four screen-moving arrows sit in
-    /// `.term-controls > .term-keys`, pressed repeatedly while reading a
-    /// screen, often with a thumb — they get a 44px minimum box with the
-    /// glyph at body size. The named keys beside them
-    /// (`.term-controls__row .term-keys`), the scroll pair (`.term-scroll`)
-    /// and the reply buttons (`.term-reply__send`/`.term-reply__stage`)
-    /// carry no such rule.
+    /// D5 (terminal-pane-scope): the four screen-moving arrows are pressed
+    /// repeatedly while reading a screen, often with a thumb — they get a
+    /// 44px minimum box with the glyph at body size. Now that they share one
+    /// row with the named keys, they are picked out by their own
+    /// `.term-keys--move` modifier rather than by being a direct child of
+    /// `.term-controls`, which since the merge reaches the named keys too.
+    /// The named keys, the scroll pair (`.term-scroll`) and the reply buttons
+    /// (`.term-reply__send`/`.term-reply__stage`) carry no such rule.
     #[test]
     fn terminal_arrow_keys_get_a_larger_minimum_box_than_the_named_keys_row() {
         let project = sample_project();
         let html = terminal_page(&project, &[], None, &[]);
         assert!(
             html.contains(
-                ".term-controls > .term-keys button { min-width: 44px; min-height: 44px; font-size: var(--type-body-size); }"
+                ".term-keys--move button { min-width: 44px; min-height: 44px; font-size: var(--type-body-size); }"
             ),
             "the arrow group must carry a 44px minimum box at body-size type: {html}"
         );
+        // The markup carrying that modifier is pinned by the route test
+        // `terminal_page_renders_the_reply_bar_and_key_buttons`; this fixture
+        // has no panes, so only the stylesheet is in reach here.
         assert!(
-            !html.contains(".term-controls__row .term-keys button { min-width: 44px")
-                && !html.contains(".term-controls__row > .term-keys button { min-width: 44px"),
-            "the named-key row must carry no such rule: {html}"
+            !html.contains(".term-controls > .term-keys button { min-width: 44px")
+                && !html.contains(".term-controls .term-keys button { min-width: 44px"),
+            "a positional rule would reach the named keys too, so it must not exist: {html}"
         );
         assert!(
             !html.contains(".term-scroll button { min-width: 44px") && !html.contains(".term-scroll { min-width: 44px"),

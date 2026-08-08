@@ -9185,7 +9185,7 @@ mod bee_route_tests {
         let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("missing {needle}: {body}"));
         let screen = at("class=\"term-screen\"");
         let scroll = at("class=\"term-scroll\"");
-        let arrows = at("class=\"term-keys\"");
+        let arrows = at("class=\"term-keys term-keys--move\"");
         let reply = at("class=\"term-reply\"");
         let actions = at("class=\"term-reply__actions\"");
         assert!(
@@ -9198,11 +9198,22 @@ mod bee_route_tests {
             at("class=\"term-screen-wrap\"") < screen && scroll < at("class=\"term-controls\""),
             "the scroll pair must ride on the screen, not sit in the key row: {body}"
         );
-        // The arrows keep a line to themselves; the scroll pair and the named
-        // keys share the one under it, inside a single control block.
+        // The arrows and the named keys now share one line inside a single
+        // control block — the second row they used to sit in is gone, and its
+        // wrapper must not come back, or the line splits in two again.
         assert!(
-            body.contains("class=\"term-controls\"") && body.contains("class=\"term-controls__row\""),
-            "the controls must sit in one two-row block: {body}"
+            body.contains("class=\"term-controls\"") && !body.contains("term-controls__row"),
+            "the controls must sit in one single-row block: {body}"
+        );
+        // Both key groups are inside that block, the arrows first.
+        let named = body[arrows + 1..]
+            .find("class=\"term-keys\"")
+            .unwrap_or_else(|| panic!("missing the named-key group: {body}"))
+            + arrows
+            + 1;
+        assert!(
+            named < reply,
+            "the named keys must sit in the control block, above the reply box: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
