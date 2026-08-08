@@ -1429,3 +1429,66 @@ pre.mermaid.zoomable:focus-within .mermaid-controls {
 .ansi-fg-256-253 { color: #dadada; } .ansi-bg-256-253 { background-color: #dadada; }
 .ansi-fg-256-254 { color: #e4e4e4; } .ansi-bg-256-254 { background-color: #e4e4e4; }
 .ansi-fg-256-255 { color: #eeeeee; } .ansi-bg-256-255 { background-color: #eeeeee; }
+
+/* terminal-image-attach (D1/D2): the attach control that rides inside a
+   project pane's `.term-reply` form (`views.rs::pane_cards`, gated off the
+   Unassigned page). Styled to match the existing `.term-reply__send` /
+   `.term-reply__stage` pair those rules already sit beside in
+   `views.rs::PROJECT_TAB_STYLE`. */
+.term-attach { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
+.term-attach__btn {
+  align-self: flex-start;
+  padding: var(--space-1) var(--space-3);
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: var(--type-body-sm-size);
+}
+.term-attach__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.term-attach__chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--type-caption-size);
+  max-width: 100%;
+}
+.term-attach__chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 22em;
+}
+.term-attach__chip-remove {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  line-height: 1;
+  font-size: var(--type-ui-size);
+}
+.term-attach__error {
+  margin: 0;
+  padding: var(--space-2);
+  border: var(--border-width-hairline) solid var(--color-danger);
+  border-radius: var(--radius-sm);
+  background: var(--color-danger-tint);
+  color: var(--color-danger);
+  font-size: var(--type-body-sm-size);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
