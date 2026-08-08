@@ -493,7 +493,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    own rendered height, which is what both lifts it clear of the edge and
    gives back the flow row it would otherwise open above the keys. */
 .term-screen-wrap { position: relative; display: flow-root; }
-.term-scroll { position: sticky; bottom: var(--space-3); z-index: 2; display: flex; flex-wrap: wrap; gap: var(--space-2); width: max-content; margin: calc(-1 * var(--space-7)) auto 0; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-surface-raised); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
+.term-scroll { position: sticky; bottom: var(--space-3); z-index: 2; display: flex; flex-wrap: wrap; gap: var(--space-2); width: max-content; margin: calc(-1 * var(--space-7)) var(--space-3) 0 auto; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-surface-raised); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
 /* Bigger than the named keys beside the arrows: these are read at a glance
    and pressed mid-scroll. Width comes from padding, never a `min-width` —
    that 44px target is the arrows' own, and the pair keeps the smaller box
