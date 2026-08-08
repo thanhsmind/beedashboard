@@ -122,6 +122,23 @@ main.fg-page {
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: var(--space-4);
 }
+/* D7/D8: the add-project form sits above the list, one field wide rather
+   than the multi-column `.fg-field-row` the settings page uses — a single
+   absolute path is the whole form. `.fg-field`/`.fg-input`/`.fg-btn` are the
+   Atelier core roles (`atelier/components.css`) the settings form already
+   reuses; this rule only sets the row layout around them. Spacing above and
+   below the form comes from `.fg-page`'s own flex `gap`, the same as every
+   other direct child of `<main class="fg-page">` on this page (the register
+   error banner, the list, the unassigned card) — no margin duplicates it. */
+.proj-add {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+.proj-add .fg-field {
+  flex: 1;
+  min-width: 0;
+}
 /* The project list reads as rows, not tiles: every name starts on the same
    left edge so the eye scans one column instead of eight boxes, and a
    worktree is indented under the project it branches from with a rule down

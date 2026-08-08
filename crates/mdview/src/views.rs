@@ -91,6 +91,7 @@ fn worktree_branch(id: &str) -> Option<(&str, &str)> {
 pub fn project_list_page(
     projects: &[(Project, usize, Vec<TerminalPaneView>)],
     unassigned_visible: bool,
+    register_error: Option<&str>,
 ) -> String {
     let listing = if projects.is_empty() {
         "<p class=\"fg-empty\">Chưa có project nào. Đăng ký: <code>mdview register &lt;dir&gt;</code> hoặc gọi MCP <code>mdview_view_file</code>.</p>".to_string()
@@ -176,14 +177,68 @@ pub fn project_list_page(
     } else {
         String::new()
     };
+    // D10: a fixed, static message keyed by the register route's own fixed
+    // error code — the submitted path never reaches this page (see
+    // `register_error_message`'s own doc). An unrecognized or absent code
+    // renders no banner at all.
+    let register_banner = match register_error.and_then(register_error_message) {
+        Some(msg) => format!(
+            r#"<div class="fg-banner fg-banner--danger"><span class="fg-banner__dot"></span><span class="fg-banner__body">{msg}</span></div>"#,
+            msg = esc(msg),
+        ),
+        None => String::new(),
+    };
     let body = format!(
         r#"{topbar}
-<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{listing}{unassigned_card}</main>"#,
+<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{register_banner}{add_form}{listing}{unassigned_card}</main>"#,
         topbar = topbar(""),
+        register_banner = register_banner,
+        add_form = project_add_form(),
         listing = listing,
         unassigned_card = unassigned_card,
     );
     layout("Projects", "", &body)
+}
+
+/// D7's add-project form — one absolute-path field; the project name is
+/// derived server-side from the directory (`server.rs::register_project`
+/// passes `None` to `Engine::register`), so there is no second field for it.
+/// D8: a plain HTML form post to the new register route, the same
+/// method="post"/action shape as the unregister form above — no fetch, no
+/// JavaScript. Every value here is static markup: the submitted path is
+/// never echoed back onto this page (D9a/D10's refusal messages, below, are
+/// fixed text keyed by a fixed error code, never the raw input).
+fn project_add_form() -> &'static str {
+    r#"<form class="proj-add" method="post" action="/api/projects/register">
+  <div class="fg-field">
+    <label class="fg-field__label" for="proj-add-path">Register a project</label>
+    <input class="fg-input" type="text" id="proj-add-path" name="path" placeholder="/absolute/path/to/project" autocomplete="off">
+  </div>
+  <button type="submit" class="fg-btn fg-btn--primary">Register</button>
+</form>"#
+}
+
+/// D10's fixed refusal messages, keyed by `register_project`'s own fixed
+/// error codes (`server.rs::validate_register_path`, plus its own generic
+/// `"failed"`). Every branch is static text — nothing user-supplied reaches
+/// this unauthenticated page, which is the whole point of carrying a code
+/// rather than the path itself. An unrecognized code renders no banner,
+/// fail-safe rather than fail-loud: it can only arrive by someone hand-
+/// crafting the query string, since every code this page itself ever
+/// redirects with is one of the branches below.
+fn register_error_message(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "invalid_path" => "Enter an absolute path with no relative (\"..\") segments.",
+        "not_found" => "That path does not exist.",
+        "not_directory" => "That path is not a directory.",
+        "denied" => "That path cannot be registered.",
+        "duplicate" => "That project is already registered.",
+        "too_large" => {
+            "That directory has too many markdown files (or took too long to scan) to register."
+        }
+        "failed" => "That project could not be registered. Try again.",
+        _ => return None,
+    })
 }
 
 /// D1, as clarified by D1a — D2, D3, D5: one badge per terminal pane in
