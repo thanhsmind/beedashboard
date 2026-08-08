@@ -75,6 +75,14 @@ implementation. Code entry points are listed in `reading-map.md`.
   without naming one shows the session the operator is currently focused on
   when it belongs to this project, and otherwise the first in the strip, so
   the tab always opens on something.
+- **On a narrow screen:** the strip costs one line instead of several. The
+  entry for the session being viewed stays on the line; every other entry,
+  together with the controls that start a new session, moves behind one menu
+  control beside it. Opening that menu lists them all — the viewed session
+  included, in its place among the others — so nothing is reachable only on a
+  wide screen. With no session to switch between there is no menu at all, and
+  the creation controls stand on their own. The menu opens and closes without
+  scripting, the same way the top bar's does (see the Web interface spec).
 - **Afterwards:** the operator sees exactly the sessions that belong to this
   project, and has an address for each one on its own.
 
