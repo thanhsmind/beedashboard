@@ -21,6 +21,7 @@ use serde_json::json;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
 
 #[derive(Clone)]
@@ -265,14 +266,57 @@ fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// D1/D6: the bound on `index_page`'s one herdr snapshot. `SocketHerdr::call`
+/// (`herdr/socket.rs:198-217`) carries no timeout of its own on connect,
+/// write, or read, and the router has no `TimeoutLayer` — the moment `/`
+/// starts making a herdr call at all, an accepted-but-silent socket would
+/// otherwise wedge the home page for every visitor. A couple of seconds is
+/// long enough for a live daemon's ordinary reply and short enough that a
+/// hung one never reads as the page itself being down.
+const INDEX_HERDR_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(2);
+
 async fn index_page(State(st): State<AppState>) -> Response {
     match st.engine.list_projects() {
         Ok(projects) => {
+            // D1/D1a/D2/D5/D6: badges are gated on the same single switch as
+            // every other terminal route (`terminal_family_enabled`) — off,
+            // this makes no herdr call at all, so a switched-off page reads
+            // exactly as it did before this feature. On, one snapshot is
+            // taken for the whole page and matched against every project in
+            // one pass, rather than one herdr round trip per row.
+            let badges_enabled = terminal_family_enabled(&st);
+            let snapshot = if badges_enabled {
+                match tokio::time::timeout(INDEX_HERDR_SNAPSHOT_TIMEOUT, st.herdr.snapshot()).await
+                {
+                    Ok(Ok(snapshot)) => Some(snapshot),
+                    // D6: an errored or a timed-out snapshot both answer with
+                    // plain rows — never a raw error, and never a hang.
+                    Ok(Err(_)) | Err(_) => None,
+                }
+            } else {
+                None
+            };
             let with_counts: Vec<_> = projects
                 .into_iter()
                 .map(|p| {
                     let c = st.engine.file_count(&p.id).unwrap_or(0);
-                    (p, c)
+                    // D1/D2/D5: the same per-project idiom
+                    // `terminal_page_inner` uses (server.rs:747-749) — a
+                    // boundary that fails to construct (e.g. a root sitting
+                    // on the hard-deny list) empties only *this* row's own
+                    // badges, never every row's. That's deliberately not
+                    // `unassigned_panes`'s shape, which fails the whole
+                    // group closed on any single project's unconstructable
+                    // boundary — the wrong semantics for a per-row badge.
+                    let panes = snapshot
+                        .as_ref()
+                        .map(|snap| {
+                            mdview_core::paths_boundary::Boundary::new(vec![p.root_path.clone()])
+                                .map(|boundary| project_panes(snap, &boundary))
+                                .unwrap_or_default()
+                        })
+                        .unwrap_or_default();
+                    (p, c, panes)
                 })
                 .collect();
             // D5/D4: presence only, never contents — this unauthenticated
@@ -283,7 +327,7 @@ async fn index_page(State(st): State<AppState>) -> Response {
             // pane list — this marker itself becomes a disclosure ("this
             // machine has a host-wide pane group configured"), so it must
             // track both switches, not the family switch alone.
-            let unassigned_visible = terminal_family_enabled(&st) && unassigned_group_enabled(&st);
+            let unassigned_visible = badges_enabled && unassigned_group_enabled(&st);
             Html(views::project_list_page(&with_counts, unassigned_visible)).into_response()
         }
         Err(e) => internal_error(&e.to_string()),
@@ -9377,6 +9421,467 @@ mod bee_route_tests {
             !body.contains(&format!("{full}</time>")),
             "the raw instant must not be the visible text: {body}"
         );
+    }
+
+    /// projects-home-1 (D6): the badges family switch is the same
+    /// `terminal_family_enabled` gate every other terminal route already
+    /// checks — off, `index_page` must never make a herdr call, so no pane
+    /// id, program name, or badge markup of any kind reaches `/`.
+    #[tokio::test]
+    async fn home_page_carries_no_pane_badges_when_terminal_switch_is_off() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-switch-off");
+        let scratch = fresh_root("home-badges-switch-off-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "demo");
+        let app = router(st);
+
+        let body = body_string(get(app, "/").await).await;
+        assert!(
+            !body.contains("proj-row__badges")
+                && !body.contains(&started.pane_id)
+                && !body.contains("claude"),
+            "the switch off must carry no pane id, program name, or badge markup: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D1/D2/D3/D5: a parent project, its own worktree branch, and an
+    /// unrelated sibling each hold exactly one pane. Every row must badge
+    /// only the pane whose working directory sits inside *that row's own*
+    /// D2 boundary — a worktree row badges its own panes, never its
+    /// parent's, and no project's pane leaks onto a sibling's row.
+    #[tokio::test]
+    async fn home_page_badges_only_panes_within_each_projects_own_boundary() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-boundary");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-boundary-scratch");
+        let parent_root = scratch.join("demo");
+        let branch_root = scratch.join("demo--wt--alpha");
+        let sibling_root = scratch.join("sibling");
+        for r in [&parent_root, &branch_root, &sibling_root] {
+            std::fs::create_dir_all(r).unwrap();
+        }
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let parent_pane = fake
+            .agent_start("w1", Some(&parent_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let branch_pane = fake
+            .agent_start("w1", Some(&branch_root.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+        let sibling_pane = fake
+            .agent_start("w1", Some(&sibling_root.to_string_lossy()), &["aider".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let parent = register(&st, &parent_root, "demo");
+        let branch = register(&st, &branch_root, "demo--wt--alpha");
+        let sibling = register(&st, &sibling_root, "sibling");
+        let app = router(st);
+
+        let body = body_string(get(app, "/").await).await;
+        let href = |project_id: &str, pane_id: &str| format!("/p/{project_id}/_terminal/pane/{pane_id}");
+
+        assert!(
+            body.contains(&href(&parent.id, &parent_pane.pane_id)),
+            "the parent's own pane is missing from its row: {body}"
+        );
+        assert!(
+            !body.contains(&href(&parent.id, &branch_pane.pane_id)),
+            "the branch's pane leaked onto the parent's row: {body}"
+        );
+        assert!(
+            body.contains(&href(&branch.id, &branch_pane.pane_id)),
+            "the branch's own pane is missing from its own row: {body}"
+        );
+        assert!(
+            !body.contains(&href(&branch.id, &parent_pane.pane_id)),
+            "the parent's pane leaked onto the branch's row: {body}"
+        );
+        assert!(
+            body.contains(&href(&sibling.id, &sibling_pane.pane_id)),
+            "the sibling's own pane is missing from its row: {body}"
+        );
+        assert!(
+            !body.contains(&href(&sibling.id, &parent_pane.pane_id))
+                && !body.contains(&href(&sibling.id, &branch_pane.pane_id)),
+            "another project's pane leaked onto the sibling's row: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D6: a registered project with no pane inside its own boundary must
+    /// render exactly as it did before this feature — the row itself, but
+    /// no empty badge container standing in for the absence.
+    #[tokio::test]
+    async fn home_page_project_with_no_pane_in_boundary_renders_without_badge_container() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-empty");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-empty-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = std::sync::Arc::new(FakeHerdr::empty());
+        register(&st, &root, "demo");
+        let app = router(st);
+
+        let body = body_string(get(app, "/").await).await;
+        assert!(
+            !body.contains("proj-row__badges"),
+            "a project with no pane in its boundary must render no badge container: {body}"
+        );
+        assert!(
+            body.contains("<span class=\"proj-row__name\">demo</span>"),
+            "the row itself must still render: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D6: an errored herdr snapshot (`FakeHerdr::set_available(false)`,
+    /// `herdr/fake.rs:280`) must still answer `/` with `200` and plain rows
+    /// — never a raw error, and never a badge container standing in for the
+    /// snapshot it could not take.
+    #[tokio::test]
+    async fn home_page_renders_plain_rows_when_herdr_is_down() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-herdr-down");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-herdr-down-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.set_available(false);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "demo");
+        let app = router(st);
+
+        let resp = get(app, "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("proj-row__badges"),
+            "a down herdr must render plain rows, not a badge container: {body}"
+        );
+        assert!(
+            body.contains("<span class=\"proj-row__name\">demo</span>"),
+            "the row itself must still render when herdr is down: {body}"
+        );
+        assert!(
+            !body.to_lowercase().contains("error"),
+            "a down herdr must never surface a raw error on the home page: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// A herdr double whose `snapshot()` never resolves — the one behavior
+    /// `FakeHerdr` cannot express (it always answers immediately, `Ok` or
+    /// `Err`), but which a real hung daemon can, since `SocketHerdr::call`
+    /// carries no timeout of its own on connect, write, or read
+    /// (`herdr/socket.rs:198-217`). Every other method is unused by
+    /// `index_page` and left unimplemented — reaching one is this test's own
+    /// bug, not the code under test's.
+    struct HangingHerdr;
+
+    #[async_trait::async_trait]
+    impl Herdr for HangingHerdr {
+        async fn snapshot(&self) -> herdr::Result<herdr::Snapshot> {
+            std::future::pending().await
+        }
+        async fn ping(&self) -> herdr::Result<herdr::ProtocolInfo> {
+            unimplemented!("index_page never pings herdr")
+        }
+        async fn read_pane(
+            &self,
+            _pane_id: &str,
+            _source: herdr::ReadSource,
+            _lines: usize,
+        ) -> herdr::Result<herdr::ScreenRead> {
+            unimplemented!("index_page never reads a pane")
+        }
+        async fn send_input(&self, _pane_id: &str, _text: &str, _submit: bool) -> herdr::Result<()> {
+            unimplemented!("index_page never sends input")
+        }
+        async fn send_text(&self, _pane_id: &str, _bytes: &str) -> herdr::Result<()> {
+            unimplemented!("index_page never sends text")
+        }
+        async fn send_keys(&self, _pane_id: &str, _keys: &[String]) -> herdr::Result<()> {
+            unimplemented!("index_page never sends keys")
+        }
+        async fn tab_create(&self, _workspace_id: &str, _cwd: Option<&str>) -> herdr::Result<herdr::TabCreated> {
+            unimplemented!("index_page never creates a tab")
+        }
+        async fn agent_start(
+            &self,
+            _workspace_id: &str,
+            _cwd: Option<&str>,
+            _argv: &[String],
+        ) -> herdr::Result<herdr::AgentStarted> {
+            unimplemented!("index_page never starts an agent")
+        }
+    }
+
+    /// D6: `index_page` wraps its one herdr snapshot in an explicit
+    /// `tokio::time::timeout` precisely because `SocketHerdr::call` has none
+    /// of its own — proven here against a herdr double that never answers at
+    /// all, not only one that answers with an `Err` (that path is
+    /// `home_page_renders_plain_rows_when_herdr_is_down` above).
+    #[tokio::test]
+    async fn home_page_returns_promptly_when_herdr_hangs() {
+        let dir = fresh_root("home-badges-herdr-hang");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-herdr-hang-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = Arc::new(HangingHerdr);
+        register(&st, &root, "demo");
+        let app = router(st);
+
+        let started = std::time::Instant::now();
+        let resp = tokio::time::timeout(Duration::from_secs(10), get(app, "/"))
+            .await
+            .expect("index_page must return well within its own bounded herdr timeout");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a hung herdr must not wedge the home page: took {:?}",
+            started.elapsed()
+        );
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("proj-row__badges"),
+            "a hung herdr must render plain rows, not a badge container: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// A badge's own `href` must resolve on the router (D3) — proven by
+    /// actually driving it through `router()`, not just by string shape.
+    #[tokio::test]
+    async fn home_page_badge_link_resolves_on_the_router() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-link-resolves");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-link-resolves-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "demo");
+        let app = router(st);
+
+        let body = body_string(get(app.clone(), "/").await).await;
+        let href = format!("/p/{}/_terminal/pane/{}", project.id, started.pane_id);
+        assert!(
+            body.contains(&href),
+            "the badge's own href is missing from the row: {body}"
+        );
+
+        let resp = get(app, &href).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the badge's href must resolve on the router"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// projects-home-1: one project registered on a hard-deny-listed root
+    /// (`Boundary::new` refuses to construct on every platform this suite
+    /// runs on, same fixture as
+    /// `unassigned_group_fails_closed_when_a_projects_boundary_is_unconstructable`
+    /// above) sits beside a perfectly healthy one. Only the unconstructable
+    /// project's own row loses its badges; the healthy row keeps its own —
+    /// the per-project idiom `terminal_page_inner` uses, not
+    /// `unassigned_panes`'s whole-group fail-closed shape.
+    #[tokio::test]
+    async fn home_page_unconstructable_boundary_loses_only_its_own_badges() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-unconstructable");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-unconstructable-scratch");
+        let ok_root = scratch.join("demo");
+        std::fs::create_dir_all(&ok_root).unwrap();
+        let denied_root = PathBuf::from("/etc/mdview-test-fixture-nonexistent-projects-home-1");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let ok_pane = fake
+            .agent_start("w1", Some(&ok_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let denied_pane = fake
+            .agent_start("w1", Some(&denied_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let ok_project = register(&st, &ok_root, "demo");
+        let denied_project = register(&st, &denied_root, "denied-root-project");
+        assert_eq!(
+            denied_project.root_path, denied_root,
+            "sanity: canonicalize falls back to the literal path when it doesn't exist"
+        );
+        let app = router(st);
+
+        let body = body_string(get(app, "/").await).await;
+        assert!(
+            body.contains(&format!(
+                "/p/{}/_terminal/pane/{}",
+                ok_project.id, ok_pane.pane_id
+            )),
+            "a healthy project's own badge must still render when a different project's boundary \
+             is unconstructable: {body}"
+        );
+        let denied_row_start = body
+            .find(&format!("href=\"/p/{}/\"", denied_project.id))
+            .expect("the denied project's own row must still render");
+        let denied_row_end = body[denied_row_start..]
+            .find("</li>")
+            .map(|i| denied_row_start + i + "</li>".len())
+            .unwrap_or(body.len());
+        assert!(
+            !body[denied_row_start..denied_row_end].contains("proj-row__badges"),
+            "a project whose own boundary cannot be constructed must lose only its own badges: {body}"
+        );
+        assert!(
+            !body.contains(&denied_pane.pane_id),
+            "the denied project's own pane must never badge anywhere on the page: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D2: every pane in the boundary badges whatever its status —
+    /// working, idle, done, blocked, and an agent-less shell. D3's own
+    /// `status_pill` tints only done/working/blocked, so idle and shell
+    /// share the neutral, unmodified dot and are told apart only by the
+    /// pill's own text — asserted on that text, never on a modifier class
+    /// neither carries. D1a: the badge prints the pane's program (`kind`,
+    /// or the literal `shell`), and the agent's own `name` field never
+    /// reaches the page.
+    #[tokio::test]
+    async fn home_page_badges_cover_every_pane_status_and_the_program_never_the_agent_name() {
+        use crate::herdr::fake::FakeHerdr;
+        use crate::herdr::wire::AgentStatus;
+
+        let dir = fresh_root("home-badges-statuses");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-statuses-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let working = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&working.pane_id, AgentStatus::Working).await.unwrap();
+        let idle = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&idle.pane_id, AgentStatus::Idle).await.unwrap();
+        let done = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["aider".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&done.pane_id, AgentStatus::Done).await.unwrap();
+        let blocked = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["cursor".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&blocked.pane_id, AgentStatus::Blocked).await.unwrap();
+        let shell = fake.tab_create("w1", Some(&root.to_string_lossy())).await.unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "demo");
+        let app = router(st);
+
+        let body = body_string(get(app, "/").await).await;
+        let href = |pane_id: &str| format!("/p/{}/_terminal/pane/{}", project.id, pane_id);
+        for pane_id in [
+            &working.pane_id,
+            &idle.pane_id,
+            &done.pane_id,
+            &blocked.pane_id,
+            &shell.pane_id,
+        ] {
+            assert!(
+                body.contains(&href(pane_id)),
+                "every pane, whatever its status, must badge: {body}"
+            );
+        }
+        for status_text in ["working", "idle", "done", "blocked", "shell"] {
+            assert!(
+                body.contains(&format!(">{status_text}</span>")),
+                "the {status_text} pill's own text must appear: {body}"
+            );
+        }
+        for program in ["claude", "codex", "aider", "cursor", "shell"] {
+            assert!(
+                body.contains(program),
+                "the pane's program {program} must badge: {body}"
+            );
+        }
+        for started in [&working, &idle, &done, &blocked] {
+            assert!(
+                !body.contains(&started.name),
+                "the agent's own name field must never reach the home page: {body}"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     /// The two home-page behaviors that live in `assets/app.js` reach the

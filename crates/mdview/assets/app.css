@@ -135,6 +135,7 @@ main.fg-page {
 .proj-row {
   position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: var(--space-3);
   border-bottom: var(--border-width-hairline) solid var(--color-border);
@@ -175,6 +176,38 @@ main.fg-page {
   right: 0;
   transform: translateY(-50%);
   margin: 0;
+}
+/* Terminal-pane badges (D1/D1a/D2/D3/D5): sit under the row's meta line, a
+   sibling of `.proj-row__link` rather than nested inside it — `flex-wrap`
+   on `.proj-row` above plus `flex-basis: 100%` here pushes this onto its
+   own line under the name/meta anchor. Reuses `.fg-status`'s tone
+   vocabulary rather than a second one — a badge is nothing but a
+   `.fg-status` pill plus the pane's program, at row scale. */
+.proj-row__badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 100%;
+  padding: 0 var(--space-7) var(--space-2) 0;
+}
+.proj-row__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 1px var(--space-2);
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--radius-pill);
+  text-decoration: none;
+  color: inherit;
+}
+.proj-row__badge:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-hover);
+}
+.proj-row__badge-program {
+  color: var(--color-text-muted);
+  font-size: var(--type-caption-size);
 }
 .proj-card {
   position: relative;
