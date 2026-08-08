@@ -115,6 +115,34 @@ implementation. Code entry points are listed in `reading-map.md`.
 - **Afterwards:** the agent's next screen poll reflects whatever it did with
   the input.
 
+### Attaching images to a reply
+
+- **Triggers:** picking image files with the composer's attach control,
+  dragging them onto the composer, or pasting an image from the clipboard
+  into the reply box — several images at a time — on a project's per-pane
+  terminal page, while the terminal switch is on.
+- **What it does:** each image is stored on the machine in a per-pane
+  holding area owned by the operator's own user account, outside the
+  project's folder, under a name the server invents — the sender's file
+  name never becomes part of where it lands. The composer shows each stored
+  image as a removable chip. Sending then delivers ONE submitted message to
+  the agent: the typed prompt (when any), then the stored images' locations,
+  space-separated — a location containing whitespace is double-quoted so it
+  survives as one word. A successful send clears the chips; a chip removed
+  before sending never appears in the message. The composer's own keys are
+  unchanged: plain Enter still opens a new line, and sending is still the
+  explicit act it always was.
+- **Blocked when:** the file is not one of the accepted image kinds (PNG,
+  JPEG, GIF, WebP — judged by its actual content, not just its declared
+  kind, and SVG is deliberately excluded as scriptable); the file exceeds
+  10 MB (refused in the page before any upload starts, and again by the
+  server); or the pane already holds 32 stored images. Every refusal is
+  shown beside the composer in words and stores nothing.
+- **Afterwards:** stored images older than a day are swept out of the
+  pane's holding area the next time an upload arrives, so the 32-image
+  ceiling is a working-set bound, not a lifetime one. What the agent does
+  with the locations is its own affair.
+
 ### Starting a new agent
 
 - **Triggers:** using the Terminal tab's creation control — either picking
@@ -359,6 +387,15 @@ operates mdview every time the network path to its port changes.
   redrawn on each poll; the transcript is the agent's own gap-free log. They
   are kept as two tabs rather than one, because collapsing them loses
   whichever one isn't currently showing.
+- **Attachments are scoped like everything else.** The image attach surface
+  exists only on a project's own terminal pages and obeys the same two
+  guards as replying — the terminal switch and the pane belonging to the
+  project. The Unassigned group's page deliberately renders no attach
+  control, because that surface has no project scope to validate against.
+  The holding area is bounded three ways — accepted kinds judged by
+  content, a per-file size ceiling, a per-pane count ceiling with a daily
+  sweep — and lives outside every project folder so attaching never
+  dirties a repository.
 - **An agent is not its pane.** "Agent" is the coding agent herdr is
   running; "pane" is the session it runs inside. Every agent has exactly one
   pane, but the reverse does not hold — a plain shell opened with no agent
@@ -409,6 +446,15 @@ No settled screenshot captured yet.
 
 ## Pointers (implementation)
 
+- `crates/mdview/src/server.rs` — the image attach route
+  (`POST /p/:id/_terminal/:pane_id/attach`): raw-body upload, declared-MIME
+  allowlist + magic-byte sniff, explicit 10 MB check answering in the
+  terminal JSON error shape under a higher `DefaultBodyLimit`, 24h mtime
+  prune then 32-file cap, storage at `$XDG_RUNTIME_DIR/mdview-attach` else
+  `~/.cache/mdview/attach` with `[A-Za-z0-9-]`-sanitized project/pane
+  segments and `rand`-hex leaf names; client wiring in
+  `crates/mdview/assets/app.js` (composer IIFE: upload/chips/composeMessage)
+  and gated markup via `pane_cards(..., attach)` in `crates/mdview/src/views.rs`.
 - `crates/mdview/src/server.rs` — the routes themselves (`/p/:id/_terminal`,
   `/p/:id/_transcript`, their per-pane `pane/:pane_id` pages, their
   screen/input/keys/create children, and the `/_terminal/unassigned` family),
