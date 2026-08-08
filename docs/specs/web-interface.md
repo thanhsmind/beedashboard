@@ -136,9 +136,19 @@ content itself.
 ### Top bar (all pages)
 
 - **What it shows:** the brand, a page-specific center slot, the Settings link,
-  and the theme toggle — on every page without exception (per R1).
+  and the theme toggle — on every page without exception (per R1). On a
+  project's own pages the bar also carries that project's section switcher
+  (element 12).
+- **On a narrow screen:** everything in the bar that navigates *away* from the
+  current page — the section switcher and the Settings link — collapses behind
+  one menu control at the bar's right edge, opening as a panel that spans the
+  full width directly under the bar, one comfortably-sized row per
+  destination, the current section marked. The brand, the page label and the
+  theme toggle stay on the bar itself: the toggle changes this page rather
+  than leaving it, so it is never a press further away. The menu opens and
+  closes on its own; it does not depend on scripting (per R8).
 - **Afterwards:** from anywhere, the operator can reach Settings and the project
-  list in one click.
+  list in one click, on any screen.
 
 ### Chapter sidebar (file pages) — breadcrumb zoom
 
@@ -256,6 +266,14 @@ consumes it.
   refused as a duplicate, recognised through the folder's real location, so a
   shortcut to it or a trailing separator is caught too. Every refusal names its
   reason in fixed words and never repeats back what the operator typed.
+- **R8 (per D a5f4f0c6, D 0f2c8d7a).** The narrow-screen menu's open state
+  belongs to the page itself, not to a script: the menu opens, closes and
+  navigates on a page whose scripting never ran. Scripting adds only two
+  conveniences on top — closing on Escape, and closing when the reader
+  presses outside the panel. Above the narrow width the menu is not a menu at
+  all: its control is not shown and its contents sit in the bar exactly as
+  they did before it existed.
+
 
 ## Edge Cases Settled
 
