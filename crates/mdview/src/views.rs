@@ -1067,11 +1067,35 @@ const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
     var paneId = el.getAttribute("data-pane-id");
     fetch(screenUrl(paneId), { credentials: "same-origin" })
       .then(function (res) {
-        if (!res.ok) { el.textContent = HERDR_DOWN_TEXT; return null; }
+        // A 502 is the one status `herdr_down_response()` (server.rs) ever
+        // sends, and only when herdr itself is unreachable — but the body
+        // still has to say so, because a tunnel or proxy in front of this
+        // page can hand back its own unrelated 502 HTML on a blip. Every
+        // other failure (a thrown fetch below, any other status, a 502
+        // whose body isn't that exact JSON) is treated as transient: the
+        // pane keeps its last good screen and just gets marked stale, never
+        // overwritten with wording that says the agent is gone.
+        if (res.status === 502) {
+          return res.json().then(function (body) {
+            if (body && body.error === HERDR_DOWN_TEXT) {
+              el.textContent = HERDR_DOWN_TEXT;
+              el.classList.remove("term-screen--stale");
+              // The next successful poll must always repaint, even if its
+              // revision happens to match whatever was last drawn before
+              // the outage — otherwise this banner never clears.
+              delete lastRevision[paneId];
+              return null;
+            }
+            el.classList.add("term-screen--stale");
+            return null;
+          });
+        }
+        if (!res.ok) { el.classList.add("term-screen--stale"); return null; }
         return res.json();
       })
       .then(function (body) {
         if (!body) return;
+        el.classList.remove("term-screen--stale");
         if (lastRevision[paneId] === body.revision) return;
         lastRevision[paneId] = body.revision;
         // `body.text` is safe, pre-escaped HTML from mdview-core's ansi
@@ -1080,7 +1104,12 @@ const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
         // showing literal escape characters.
         el.innerHTML = body.text;
       })
-      .catch(function () { el.textContent = HERDR_DOWN_TEXT; });
+      .catch(function () {
+        // Thrown fetch (network blip, phone waking from sleep) or an
+        // unparseable 502 body — none of these confirm herdr is actually
+        // down, so the pane keeps whatever it last showed.
+        el.classList.add("term-screen--stale");
+      });
   }
 
   function pollAll() {

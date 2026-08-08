@@ -1185,6 +1185,29 @@ pre.mermaid.zoomable:focus-within .mermaid-controls {
 /* Reverse video against the screen's own surface, not the page's. */
 .term-screen .ansi-inverse { color: #1c1f26; background-color: #d7dae0; }
 
+/* terminal-down-signal-1: a poll that fails without herdr actually being
+   down (a thrown fetch, a proxy's own 502, an unparseable body) used to
+   overwrite the pane with "herdr is not running" — indistinguishable from
+   the real thing and often wrong. Now that failure leaves the pane's last
+   good screen untouched and only gets this small corner badge instead, so
+   a mid-poll blip reads as "still catching up", never as another herdr-down
+   banner. `position: relative` is scoped to the stale state itself so it
+   never touches `.term-screen`'s own layout otherwise. */
+.term-screen--stale { position: relative; }
+.term-screen--stale::after {
+  content: "reconnecting…";
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-sm);
+  background: rgb(0 0 0 / 0.55);
+  color: #d7dae0;
+  font-size: var(--type-caption-size);
+  line-height: 1.2;
+  pointer-events: none;
+}
+
 /* xterm 256-colour palette (indices 16-231: the 6x6x6 colour cube;
    232-255: the grayscale ramp). Indices 0-15 are never generated here —
    `ansi.rs` maps a 256-mode index below 16 onto the theme-aware classes
