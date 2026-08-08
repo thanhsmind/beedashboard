@@ -10256,6 +10256,87 @@ mod bee_route_tests {
             after_body.contains("href=\"/p/"),
             "the newly registered project must appear as a project row: {after_body}"
         );
+        // D7: the suggestion is stateless and recomputed every render — once
+        // the folder is registered, `suggested_projects` no longer emits it
+        // (it now sits inside a registered project's own boundary), so the
+        // suggestion row for THIS path is gone, not merely relabeled. Other
+        // fixture agents (`FakeHerdr::new()`'s own seeded panes) still
+        // produce their own unrelated suggestions, so this checks the
+        // stray path itself rather than the section's mere presence.
+        assert!(
+            !after_body.contains(&stray_root.to_string_lossy().to_string()),
+            "the newly registered folder must no longer render as a suggestion row (its path \
+             must not appear anywhere on the page, since a registered project's own row shows \
+             no path either): {after_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&stray_root).ok();
+    }
+
+    /// Truth (D5, dimension 5 — state transitions): registering a
+    /// suggestion twice — the double-click case — refuses the second post
+    /// with the same `duplicate` code a hand-typed re-submission gets
+    /// (`register_project_refuses_a_duplicate_root_and_its_trailing_slash_form`
+    /// proves the route's own side of this; nothing here duplicates that
+    /// coverage). Following the resulting redirect renders the existing
+    /// `register_error` banner on `/`, and the registry gains exactly one
+    /// project, never two.
+    #[tokio::test]
+    async fn suggestions_double_registering_the_same_path_surfaces_the_duplicate_banner() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-double-register");
+        enable_terminal(&dir);
+        let stray_root = fresh_root("suggest-double-register-stray");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let engine = st.engine.clone();
+        let app = router(st);
+
+        let post_register = || {
+            Request::builder()
+                .method("POST")
+                .uri("/api/projects/register")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "path={}",
+                    urlencoding_lite(&stray_root.to_string_lossy())
+                )))
+                .unwrap()
+        };
+
+        let first = app.clone().oneshot(post_register()).await.unwrap();
+        assert_eq!(
+            first.headers().get(header::LOCATION).unwrap(),
+            "/",
+            "the first register post from a suggestion must succeed"
+        );
+
+        let second = app.clone().oneshot(post_register()).await.unwrap();
+        assert_eq!(
+            second.headers().get(header::LOCATION).unwrap(),
+            "/?register_error=duplicate",
+            "a second identical register post (double-click) must be refused as a duplicate"
+        );
+        assert_eq!(
+            engine.list_projects().unwrap().len(),
+            1,
+            "a double-click register must never add a second project"
+        );
+
+        let after = get(app, "/?register_error=duplicate").await;
+        let after_body = body_string(after).await;
+        assert!(
+            after_body.contains("That project is already registered."),
+            "the duplicate refusal must surface the existing register_error banner: {after_body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&stray_root).ok();
@@ -10311,6 +10392,58 @@ mod bee_route_tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Truth (D2's ON-state analogue): the existing pin at
+    /// `home_page_lists_projects_as_rows_with_each_worktree_under_its_parent`
+    /// only proves a registered project's row carries no filesystem path
+    /// with the terminal switch off (no herdr call reaches the page at
+    /// all). D2's supersession is scoped to suggestion rows only — a
+    /// registered project's own row is unauthorized to show a path exactly
+    /// as before this feature. This pins that with the switch ON and a
+    /// suggestion legitimately rendering its own path elsewhere on the
+    /// same page, the registered project's row still never does.
+    #[tokio::test]
+    async fn registered_project_row_shows_no_filesystem_path_with_terminal_enabled() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("registered-row-on-state");
+        enable_terminal(&dir);
+        let scratch = fresh_root("registered-row-on-state-scratch");
+        let project_root = scratch.join("owned-project");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "owned-project");
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        // Sanity: the suggestion block legitimately shows the stray pane's
+        // path — D2's supersession is real and in effect on this render.
+        assert!(
+            body.contains(&stray_root.to_string_lossy().to_string()),
+            "sanity: the suggestion block must render the stray pane's path: {body}"
+        );
+        // D2 (unsuperseded half): the registered project's own row still
+        // never shows a filesystem path, even with the terminal switch on
+        // and a suggestion block rendering elsewhere on the same page.
+        assert!(
+            !body.contains(&project_root.to_string_lossy().to_string()),
+            "a registered project's row leaked its filesystem path with the terminal switch \
+             on: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     // ---- agent-terminal-10 (D5): the Unassigned group ----
