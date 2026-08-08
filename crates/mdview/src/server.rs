@@ -1931,21 +1931,34 @@ fn unassigned_panes(
 ///
 /// S2: a suggestion's path is the pane's own `cwd`, exactly as herdr reports
 /// it — never resolved through a `Boundary`, never walked up to a repository
-/// root. A pane with no cwd at all is dropped rather than surfaced as a
-/// blank path, and a directory that is exactly a registered project's own
-/// root is dropped too (a pane can sit in that project's *parent*, which is
-/// a genuinely different, unregistered folder, and must still be
-/// suggested). Suggestions are deduplicated by directory and carry the
-/// number of sessions found there, in first-seen order.
+/// root. A pane with no cwd at all, or one herdr reports as the empty string
+/// rather than absent, is dropped rather than surfaced as a blank path, and
+/// a directory that is exactly a registered project's own root is dropped
+/// too (a pane can sit in that project's *parent*, which is a genuinely
+/// different, unregistered folder, and must still be suggested). Suggestions
+/// are deduplicated by directory and carry the number of sessions found
+/// there, in first-seen order.
+///
+/// project-suggestions-2 (independent review): `assigned` above is built
+/// from `project_panes`, which only counts a pane whose `cwd`
+/// `Boundary::validate_existing` accepts — and that call canonicalizes, so
+/// it refuses a pane whose directory has since been deleted, whose `cwd`
+/// still carries a `.`/`..` component, or whose registered project's root
+/// does not exist on disk (`Boundary::new` never stats a root). Such a pane
+/// still genuinely belongs to a registered project, but it fell through
+/// `assigned` and its full path used to print here as if unregistered — a
+/// disclosure `unassigned_panes` cannot make the same way because it prints
+/// presence only, never a path, under two switches rather than one. Every
+/// candidate is therefore also checked, by raw component-wise containment
+/// (`paths_boundary::is_contained_in_root`, deliberately uncanonicalized —
+/// canonicalizing here would just reintroduce the same gap) against every
+/// registered project's own raw `root_path`, **in addition to**, never
+/// instead of, the `project_panes`-membership check above.
 fn suggested_projects(
     snapshot: &herdr::Snapshot,
     projects: &[mdview_core::domain::Project],
 ) -> Vec<views::ProjectSuggestion> {
     let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let registered_roots: std::collections::HashSet<String> = projects
-        .iter()
-        .map(|p| p.root_path.to_string_lossy().into_owned())
-        .collect();
     for p in projects {
         match mdview_core::paths_boundary::Boundary::new(vec![p.root_path.clone()]) {
             Ok(boundary) => {
@@ -1971,7 +1984,11 @@ fn suggested_projects(
         let Some(cwd) = pane.cwd.as_deref().filter(|c| !c.is_empty()) else {
             continue;
         };
-        if registered_roots.contains(cwd) {
+        let cwd_path = std::path::Path::new(cwd);
+        if projects
+            .iter()
+            .any(|p| mdview_core::paths_boundary::is_contained_in_root(cwd_path, &p.root_path))
+        {
             continue;
         }
         if !counts.contains_key(cwd) {
@@ -9555,6 +9572,43 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&stray_root).ok();
     }
 
+    /// Truth (independent review, project-suggestions-2): a pane whose cwd
+    /// herdr reports as `Some("")` — the empty string, not an absent
+    /// `cwd` — must be dropped exactly the same as the `None` case above,
+    /// not rendered as a blank row. `agent_start`'s own fixture always sets
+    /// `cwd == foreground_cwd`, so `set_pane_dirs` is the only seam that can
+    /// produce this shape.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_whose_cwd_is_reported_as_the_empty_string() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-empty-string-cwd");
+        enable_terminal(&dir);
+        let stray_root = fresh_root("suggest-empty-string-cwd-stray");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_pane_dirs(&started.pane_id, Some(""), Some(""))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&stray_root.to_string_lossy().to_string()),
+            "a pane whose cwd is Some(\"\") must never render as a blank-path suggestion: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&stray_root).ok();
+    }
+
     /// Truth: a directory that is exactly a registered project's root never
     /// appears as a suggestion, even though a session is running there.
     #[tokio::test]
@@ -9583,6 +9637,143 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&project_root).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-2 — the confirmed
+    /// path-disclosure gap): `assigned` is built from `project_panes`,
+    /// which only counts a pane whose `cwd` `Boundary::validate_existing`
+    /// accepts, and that call canonicalizes — so it refuses a pane whose
+    /// directory has since been deleted. Such a pane still genuinely
+    /// belongs to the registered project it was created under; it must
+    /// never fall through to a suggestion, and its full path must never
+    /// reach the page.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_whose_directory_was_deleted_after_registration() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-deleted-dir");
+        enable_terminal(&dir);
+        let project_root = fresh_root("suggest-deleted-dir-project");
+        let pane_cwd = project_root.join("sub");
+        std::fs::create_dir_all(&pane_cwd).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&pane_cwd.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "deleted-dir-project");
+        // The pane's own directory is deleted after registration -- herdr
+        // still reports its old cwd, which can no longer be canonicalized,
+        // so `project_panes`'s own boundary check refuses it.
+        std::fs::remove_dir_all(&pane_cwd).unwrap();
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&pane_cwd.to_string_lossy().to_string()),
+            "a pane whose directory is inside a registered project but has been deleted must \
+             never be suggested, nor leak its path: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&project_root).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-2): `Boundary::validate_existing`
+    /// refuses any raw traversal component outright, before it ever
+    /// canonicalizes (step 2 of the ordered gate) — so a pane whose
+    /// reported `cwd` carries a `.`/`..` component never counts as
+    /// `assigned` via `project_panes`, even when that path plainly resolves
+    /// inside a registered project. The raw component-wise containment
+    /// check must catch it anyway: the project root's own raw path
+    /// components form a prefix of the dotted candidate's raw components,
+    /// regardless of what the trailing `..` textually does.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_whose_cwd_carries_a_dot_dot_component_but_resolves_inside_a_registered_project()
+    {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-dot-dot");
+        enable_terminal(&dir);
+        let project_root = fresh_root("suggest-dot-dot-project");
+        std::fs::create_dir_all(project_root.join("a")).unwrap();
+        std::fs::create_dir_all(project_root.join("b")).unwrap();
+        // Resolves to `project_root/b` -- genuinely inside the project, not
+        // merely equal to its root -- but the raw string carries a `..`
+        // component `Boundary::validate_existing` refuses outright.
+        let dotted_cwd = format!(
+            "{}/a/../b",
+            project_root.to_string_lossy().trim_end_matches('/')
+        );
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&dotted_cwd), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &project_root, "dot-dot-project");
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&dotted_cwd),
+            "a pane whose cwd carries a `..` component but resolves inside a registered \
+             project must never be suggested: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&project_root).ok();
+    }
+
+    /// Truth (independent review, project-suggestions-2): `Boundary::new`
+    /// never stats a root, so a registered project whose root directory no
+    /// longer exists on disk still constructs a working boundary — but
+    /// `project_panes`'s `validate_existing` call still canonicalizes each
+    /// *pane's* own cwd, which fails for a directory that was never
+    /// created. The raw containment check is the only thing that still
+    /// suppresses a suggestion for a path under that missing root.
+    #[tokio::test]
+    async fn suggestions_drop_a_pane_under_a_registered_projects_root_that_does_not_exist_on_disk() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("suggest-missing-root");
+        enable_terminal(&dir);
+        let scratch = fresh_root("suggest-missing-root-scratch");
+        let missing_root = scratch.join("gone-project");
+        // Deliberately never created -- `Boundary::new` never stats a root,
+        // so registration and boundary construction both still succeed.
+        let pane_cwd = missing_root.join("sub");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&pane_cwd.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &missing_root, "gone-project");
+        assert_eq!(
+            project.root_path, missing_root,
+            "sanity: canonicalize falls back to the literal path when it doesn't exist"
+        );
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains(&pane_cwd.to_string_lossy().to_string()),
+            "a pane under a registered project's root that no longer exists on disk must never \
+             be suggested, even though `project_panes`'s own boundary check cannot validate it: \
+             {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     /// Truth: when one registered project's root cannot construct a

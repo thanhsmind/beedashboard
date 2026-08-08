@@ -245,6 +245,29 @@ pub fn is_denied_root(path: &Path) -> bool {
         .any(|d| is_contained(path, d) || is_contained(d, path))
 }
 
+/// project-suggestions: is `candidate` (a pane's raw, unvalidated `cwd` —
+/// exactly as herdr reported it, never passed through
+/// `Boundary::validate_existing`) equal to or inside `root` (a registered
+/// project's own, also-raw `root_path`)? Matched by path components exactly
+/// like [`is_denied_root`] above matches the hard-deny list — never a text
+/// prefix (`/root/projects-evil` is not contained in `/root/projects`),
+/// reusing the same `is_contained` walk `Boundary` itself uses internally
+/// rather than duplicating it.
+///
+/// Deliberately makes **no** filesystem call and does **no**
+/// canonicalization. `Boundary::validate_existing`'s own
+/// `std::fs::canonicalize` is exactly what refuses a pane whose directory
+/// has since been deleted, whose reported `cwd` still carries a `.`/`..`
+/// component, or whose registered project's root does not exist on disk
+/// (`Boundary::new` never stats a root, so a since-deleted project root
+/// still constructs one) — this predicate exists precisely to catch what
+/// that call refuses to even look at, so a candidate this predicate accepts
+/// must be dropped from a suggestion list in addition to, never instead of,
+/// the existing `project_panes`-membership check.
+pub fn is_contained_in_root(candidate: &Path, root: &Path) -> bool {
+    is_contained(candidate, root)
+}
+
 /// Component-wise containment: is `path` equal to or inside `root`, matched by
 /// path components (NOT a text prefix). `/a/projects-evil` is NOT contained in
 /// `/a/projects` even though the string starts with it.
@@ -357,6 +380,43 @@ mod tests {
         assert!(is_contained(Path::new("/a/b/c"), Path::new("/a/b")));
         assert!(!is_contained(Path::new("/a/b-evil"), Path::new("/a/b")));
         assert!(is_contained(Path::new("/a/b"), Path::new("/a/b")));
+    }
+
+    // ── project-suggestions: is_contained_in_root, the raw (no-canonicalize)
+    //    membership predicate a suggestion candidate is checked against ──────
+
+    #[test]
+    fn is_contained_in_root_true_when_candidate_is_inside_root() {
+        assert!(is_contained_in_root(
+            Path::new("/scratch/owned-project/sub"),
+            Path::new("/scratch/owned-project")
+        ));
+    }
+
+    #[test]
+    fn is_contained_in_root_true_when_candidate_equals_root() {
+        assert!(is_contained_in_root(
+            Path::new("/scratch/owned-project"),
+            Path::new("/scratch/owned-project")
+        ));
+    }
+
+    #[test]
+    fn is_contained_in_root_false_for_a_sibling_that_merely_shares_a_prefix() {
+        // `/scratch/owned-project-evil` must NOT read as contained in
+        // `/scratch/owned-project` even though the string starts with it.
+        assert!(!is_contained_in_root(
+            Path::new("/scratch/owned-project-evil"),
+            Path::new("/scratch/owned-project")
+        ));
+    }
+
+    #[test]
+    fn is_contained_in_root_false_when_candidate_is_genuinely_outside() {
+        assert!(!is_contained_in_root(
+            Path::new("/scratch/stray-agent-cwd"),
+            Path::new("/scratch/owned-project")
+        ));
     }
 
     #[test]
