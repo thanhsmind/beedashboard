@@ -224,6 +224,27 @@ fn reject_traversal(path: &Path) -> Result<(), PathRefusal> {
     Ok(())
 }
 
+/// D9b (`docs/history/projects-home/CONTEXT.md`): whether `path` is itself a
+/// hard-deny-listed root, sits inside one, or **contains** one — containment
+/// checked in both directions, not only the "is this candidate root inside a
+/// denied root" half `Boundary::new`'s own `check_denied` answers for an
+/// already-*allowed* root. A caller validating a single candidate root before
+/// it ever becomes a `Boundary` (the register route) needs the other
+/// direction too: `$HOME` is not itself on the deny list, but it *contains*
+/// the deny-listed `$HOME/.ssh`, and `Boundary::new(vec![$HOME])` alone would
+/// accept it — which is exactly how `POST path=$HOME` on the register route
+/// slipped past the gate and went on to index (and later serve, unauthenticated)
+/// markdown under `~/.ssh`, `~/.aws` and `~/.gnupg`. Reuses `hard_deny_list`
+/// and its canonical-form expansion rather than exposing the list itself or
+/// duplicating its contents in a caller crate. `path` is expected already
+/// canonical (symlink-resolved); this makes no filesystem call of its own.
+pub fn is_denied_root(path: &Path) -> bool {
+    let denied = expand_with_canonical_forms(hard_deny_list());
+    denied
+        .iter()
+        .any(|d| is_contained(path, d) || is_contained(d, path))
+}
+
 /// Component-wise containment: is `path` equal to or inside `root`, matched by
 /// path components (NOT a text prefix). `/a/projects-evil` is NOT contained in
 /// `/a/projects` even though the string starts with it.
@@ -344,5 +365,40 @@ mod tests {
         let b = Boundary::new(vec![dir.path().to_path_buf()]).unwrap();
         let intended = dir.path().join("new-project");
         assert!(b.validate_intended(&intended).is_ok());
+    }
+
+    // ── D9b: is_denied_root's containment in both directions ──────────────
+
+    #[test]
+    fn is_denied_root_true_when_path_equals_a_denied_root() {
+        assert!(is_denied_root(Path::new("/etc")));
+    }
+
+    #[test]
+    fn is_denied_root_true_when_path_is_inside_a_denied_root() {
+        assert!(is_denied_root(Path::new("/etc/hosts")));
+    }
+
+    #[test]
+    fn is_denied_root_true_when_path_contains_a_denied_root() {
+        // "/" contains every hard-deny-listed root, /etc among them -- this
+        // is the direction `Boundary::new` alone never checks.
+        assert!(is_denied_root(Path::new("/")));
+    }
+
+    #[test]
+    fn is_denied_root_true_when_home_contains_a_denied_subdirectory() {
+        // `$HOME/.ssh` is on the deny list even when it doesn't exist on
+        // disk -- hard_deny_list is a fixed set of paths, not a directory
+        // listing -- so $HOME itself, which contains it, must be denied too.
+        if let Some(home) = std::env::var_os("HOME") {
+            assert!(is_denied_root(Path::new(&home)));
+        }
+    }
+
+    #[test]
+    fn is_denied_root_false_for_an_unrelated_path() {
+        let dir = tmp();
+        assert!(!is_denied_root(dir.path()));
     }
 }

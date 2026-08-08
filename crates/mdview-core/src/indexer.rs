@@ -7,6 +7,7 @@ use crate::error::Result;
 use crate::repository::SqliteStore;
 use ignore::WalkBuilder;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -105,6 +106,60 @@ pub fn scan_markdown_files(root: &Path, exclude: &[String]) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// Outcome of [`bounded_scan_markdown_files`]: how far a bounded walk got
+/// before finishing within its budget, or breaching one of its two bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanBudget {
+    /// The walk finished within both bounds; carries the markdown file count.
+    Ok(usize),
+    /// The walk passed `max_files` markdown files before finishing.
+    TooManyFiles,
+    /// The walk ran longer than `max_duration` before finishing.
+    TooSlow,
+}
+
+/// A bounded pre-flight over `root`, built with the SAME `WalkBuilder`
+/// settings [`scan_markdown_files`] uses (`.hidden(false)`, `.git_ignore(true)`,
+/// the `exclude` filter) — so a tree this refuses is exactly the tree
+/// `IndexService::index_project`'s own inline, uncapped walk would otherwise
+/// have read in full (D9a, `projects-home`). Aborts and returns a refusal as
+/// soon as either bound is crossed, rather than counting to completion: this
+/// is a gate for a caller deciding whether to index at all, not a scan whose
+/// count is the point.
+pub fn bounded_scan_markdown_files(
+    root: &Path,
+    exclude: &[String],
+    max_files: usize,
+    max_duration: Duration,
+) -> ScanBudget {
+    let start = Instant::now();
+    let mut count = 0usize;
+    let exclude: Vec<String> = exclude.to_vec();
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_global(false)
+        .parents(false)
+        .filter_entry(move |e| {
+            let name = e.file_name().to_string_lossy();
+            !exclude.iter().any(|ex| name.as_ref() == ex.as_str())
+        })
+        .build();
+    for entry in walker.flatten() {
+        if start.elapsed() > max_duration {
+            return ScanBudget::TooSlow;
+        }
+        let path = entry.path();
+        if path.is_file() && is_markdown(path) {
+            count += 1;
+            if count > max_files {
+                return ScanBudget::TooManyFiles;
+            }
+        }
+    }
+    ScanBudget::Ok(count)
 }
 
 fn is_markdown(p: &Path) -> bool {
@@ -233,5 +288,72 @@ mod tests {
     fn slug_generation() {
         assert_eq!(slug_from_root(Path::new("/home/x/My App")), "my-app");
         assert_eq!(slug_from_root(Path::new("/home/x/proj.v2")), "proj-v2");
+    }
+
+    #[test]
+    fn bounded_scan_accepts_a_small_tree_within_both_bounds() {
+        let dir = std::env::temp_dir().join(format!("mdview-bscan-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "README.md", "# Root");
+        write(&dir, "docs/guide.md", "# Guide");
+        write(&dir, "notes.txt", "not markdown");
+
+        let got = bounded_scan_markdown_files(&dir, &[], 10, Duration::from_secs(5));
+        assert_eq!(got, ScanBudget::Ok(2), "should count the 2 markdown files, ignoring the .txt");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bounded_scan_refuses_past_the_file_cap() {
+        let dir = std::env::temp_dir().join(format!("mdview-bscan-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for i in 0..5 {
+            write(&dir, &format!("f{i}.md"), "# x");
+        }
+
+        let got = bounded_scan_markdown_files(&dir, &[], 3, Duration::from_secs(5));
+        assert_eq!(
+            got,
+            ScanBudget::TooManyFiles,
+            "5 markdown files must refuse a cap of 3"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bounded_scan_refuses_past_the_time_budget() {
+        let dir = std::env::temp_dir().join(format!("mdview-bscan-slow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "a.md", "# a");
+        write(&dir, "b.md", "# b");
+
+        // A zero budget is crossed by the time the walk visits its first
+        // entry, regardless of how few files exist — proving the time bound
+        // fires independently of the file-count bound (a cap high enough to
+        // never trip on its own, `usize::MAX`).
+        let got = bounded_scan_markdown_files(&dir, &[], usize::MAX, Duration::ZERO);
+        assert_eq!(got, ScanBudget::TooSlow, "a zero wall-clock budget must refuse");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bounded_scan_respects_the_same_exclude_patterns_as_scan_markdown_files() {
+        let dir = std::env::temp_dir().join(format!("mdview-bscan-excl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "README.md", "# Root");
+        write(&dir, "node_modules/pkg/x.md", "# Should be excluded");
+
+        let got = bounded_scan_markdown_files(
+            &dir,
+            &["node_modules".to_string()],
+            10,
+            Duration::from_secs(5),
+        );
+        assert_eq!(got, ScanBudget::Ok(1), "excluded directory must not be walked");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

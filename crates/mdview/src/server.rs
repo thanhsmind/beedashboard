@@ -21,6 +21,7 @@ use serde_json::json;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
 
 #[derive(Clone)]
@@ -196,6 +197,10 @@ fn router(state: AppState) -> Router {
         // entirely (D1) — nothing was ever gated on them but themselves.
         .route("/api/terminal-config", post(update_terminal_config))
         .route("/api/projects/:id/unregister", post(unregister_project))
+        // D7/D8: the add-project form's target. Mounted with its one true
+        // method (toa-1), so an unauthenticated GET here answers axum's
+        // ordinary 405 rather than reaching the handler.
+        .route("/api/projects/register", post(register_project))
         .route("/static/app.css", get(css_asset))
         .route("/static/app.js", get(js_asset))
         .route("/static/mermaid.min.js", get(mermaid_asset))
@@ -265,14 +270,118 @@ fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn index_page(State(st): State<AppState>) -> Response {
+/// D1/D6: the bound on `index_page`'s one herdr snapshot. `SocketHerdr::call`
+/// (`herdr/socket.rs:198-217`) carries no timeout of its own on connect,
+/// write, or read, and the router has no `TimeoutLayer` — the moment `/`
+/// starts making a herdr call at all, an accepted-but-silent socket would
+/// otherwise wedge the home page for every visitor. A couple of seconds is
+/// long enough for a live daemon's ordinary reply and short enough that a
+/// hung one never reads as the page itself being down.
+const INDEX_HERDR_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// D9a's pre-flight budget for a root submitted to `register_project`:
+/// refuses before indexing starts, rather than after `ensure_project`'s
+/// inline, uncapped walk (`indexer.rs:88-107`) has already read the whole
+/// tree into sqlite. `REGISTER_MAX_MARKDOWN_FILES` sits well above this
+/// repository's own markdown count (~200 files, `docs/history/projects-home/plan.md`
+/// § Discovery) so an ordinary project registers without friction, and low
+/// enough that the walk itself stays fast; `REGISTER_SCAN_BUDGET` is the
+/// same couple-of-seconds order of magnitude as `INDEX_HERDR_SNAPSHOT_TIMEOUT`
+/// above, for the same reason — long enough for an ordinary tree, short
+/// enough that a pathological one never reads as the daemon being down.
+const REGISTER_MAX_MARKDOWN_FILES: usize = 500;
+const REGISTER_SCAN_BUDGET: Duration = Duration::from_secs(2);
+
+struct RegisterFlag {
+    /// D10's fixed error code from a refused `register_project` redirect —
+    /// never the submitted path (see `views::register_error_message`).
+    register_error: Option<String>,
+}
+
+// `#[derive(Deserialize)]`'s generated struct visitor refuses a repeated
+// query key outright ("duplicate field"), and axum's `Query` extractor turns
+// that refusal into a 400 for the whole request — so
+// `/?register_error=a&register_error=b` turned `/` itself into a 400 rather
+// than rendering the Projects page. Nothing about this query string is
+// trusted input to begin with (D10: only a fixed code, never the submitted
+// path, ever reaches the page), so there is no reason a merely-repeated key
+// should fail closed at the extractor. A hand-written `Visitor` walks every
+// `(key, value)` pair itself and keeps the last `register_error` seen
+// instead of erroring on the second one.
+impl<'de> serde::Deserialize<'de> for RegisterFlag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RegisterFlagVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RegisterFlagVisitor {
+            type Value = RegisterFlag;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a query string carrying at most one register_error value")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut register_error = None;
+                while let Some((key, value)) = map.next_entry::<String, String>()? {
+                    if key == "register_error" {
+                        register_error = Some(value);
+                    }
+                }
+                Ok(RegisterFlag { register_error })
+            }
+        }
+
+        deserializer.deserialize_map(RegisterFlagVisitor)
+    }
+}
+
+async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>) -> Response {
     match st.engine.list_projects() {
         Ok(projects) => {
+            // D1/D1a/D2/D5/D6: badges are gated on the same single switch as
+            // every other terminal route (`terminal_family_enabled`) — off,
+            // this makes no herdr call at all, so a switched-off page reads
+            // exactly as it did before this feature. On, one snapshot is
+            // taken for the whole page and matched against every project in
+            // one pass, rather than one herdr round trip per row.
+            let badges_enabled = terminal_family_enabled(&st);
+            let snapshot = if badges_enabled {
+                match tokio::time::timeout(INDEX_HERDR_SNAPSHOT_TIMEOUT, st.herdr.snapshot()).await
+                {
+                    Ok(Ok(snapshot)) => Some(snapshot),
+                    // D6: an errored or a timed-out snapshot both answer with
+                    // plain rows — never a raw error, and never a hang.
+                    Ok(Err(_)) | Err(_) => None,
+                }
+            } else {
+                None
+            };
             let with_counts: Vec<_> = projects
                 .into_iter()
                 .map(|p| {
                     let c = st.engine.file_count(&p.id).unwrap_or(0);
-                    (p, c)
+                    // D1/D2/D5: the same per-project idiom
+                    // `terminal_page_inner` uses (server.rs:747-749) — a
+                    // boundary that fails to construct (e.g. a root sitting
+                    // on the hard-deny list) empties only *this* row's own
+                    // badges, never every row's. That's deliberately not
+                    // `unassigned_panes`'s shape, which fails the whole
+                    // group closed on any single project's unconstructable
+                    // boundary — the wrong semantics for a per-row badge.
+                    let panes = snapshot
+                        .as_ref()
+                        .map(|snap| {
+                            mdview_core::paths_boundary::Boundary::new(vec![p.root_path.clone()])
+                                .map(|boundary| project_panes(snap, &boundary))
+                                .unwrap_or_default()
+                        })
+                        .unwrap_or_default();
+                    (p, c, panes)
                 })
                 .collect();
             // D5/D4: presence only, never contents — this unauthenticated
@@ -283,8 +392,13 @@ async fn index_page(State(st): State<AppState>) -> Response {
             // pane list — this marker itself becomes a disclosure ("this
             // machine has a host-wide pane group configured"), so it must
             // track both switches, not the family switch alone.
-            let unassigned_visible = terminal_family_enabled(&st) && unassigned_group_enabled(&st);
-            Html(views::project_list_page(&with_counts, unassigned_visible)).into_response()
+            let unassigned_visible = badges_enabled && unassigned_group_enabled(&st);
+            Html(views::project_list_page(
+                &with_counts,
+                unassigned_visible,
+                flag.register_error.as_deref(),
+            ))
+            .into_response()
         }
         Err(e) => internal_error(&e.to_string()),
     }
@@ -583,6 +697,137 @@ async fn update_config(State(st): State<AppState>, Form(form): Form<SettingsForm
 async fn unregister_project(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     let _ = st.engine.unregister(&id);
     Redirect::to("/").into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct RegisterProjectForm {
+    path: String,
+}
+
+/// D7/D8/D9a/D10: register a project from the Projects page's add-project
+/// form. `Engine::register` (`ensure_project`) validates nothing of its
+/// own — it canonicalizes with a raw-path fallback (`engine.rs:44-46`),
+/// swallows every metadata error into a silently skipped file
+/// (`indexer.rs:43-52`), and returns the existing project on a root match
+/// rather than failing — so every one of D10's refusals, and D9a's
+/// deny-list/cap guard, is this handler's own work, run in
+/// `validate_register_path`'s fixed order, each with its own fixed error
+/// code. Like every route here it is unauthenticated.
+async fn register_project(
+    State(st): State<AppState>,
+    Form(form): Form<RegisterProjectForm>,
+) -> Response {
+    // D9a/P1: `validate_register_path` itself canonicalizes, stats, resolves
+    // the deny list, and runs the sqlite duplicate lookup, and on success
+    // walks the tree up to `REGISTER_SCAN_BUDGET` (2s) — every bit of that is
+    // filesystem or sqlite work, and this route is unauthenticated. Running
+    // it (and the register call it gates) inline on the async request thread
+    // would let concurrent POSTs each pin a tokio worker for up to two
+    // seconds and stall every other route including `/`; the whole
+    // validate-then-register sequence runs in one `spawn_blocking` so none of
+    // it ever touches the async thread.
+    let engine = st.engine.clone();
+    let code: Result<(), &'static str> = tokio::task::spawn_blocking(move || {
+        let canonical = validate_register_path(&engine, &form.path)?;
+        // ensure_project indexes inline (engine.rs:72-77), which is exactly
+        // the walk D9a exists to keep off the request thread — the
+        // pre-flight above only decided whether to index at all.
+        //
+        // Every named D10 refusal already returned above; a failure here is
+        // the engine/store call itself failing after every guard passed, so
+        // it gets its own generic code rather than being folded into one of
+        // the named ones.
+        engine
+            .register(&canonical, None)
+            .map(|_| ())
+            .map_err(|_| "failed")
+    })
+    .await
+    .unwrap_or(Err("failed"));
+
+    match code {
+        Ok(()) => Redirect::to("/").into_response(),
+        Err(code) => Redirect::to(&format!("/?register_error={code}")).into_response(),
+    }
+}
+
+/// The ordered D9a/D9b/D10 gate a submitted path must pass before
+/// `Engine::register` ever runs. Fail-closed throughout: any ambiguity is a
+/// refusal, never a best-effort accept. Returns the canonical path on
+/// success, so `register_project` never re-resolves it, or one of D10's
+/// fixed error codes on refusal — never the raw submitted string, which
+/// `views::register_error_message` never receives either. Filesystem and
+/// sqlite calls throughout (canonicalize, the deny-list check, the
+/// duplicate lookup, the bounded scan) make this a blocking function —
+/// callers run it inside `spawn_blocking`, never directly on an async task.
+fn validate_register_path(engine: &Engine, raw: &str) -> Result<PathBuf, &'static str> {
+    let raw_path = std::path::Path::new(raw);
+    // Empty, relative, and any raw `.`/`..` component are refused before
+    // ever touching the filesystem. This mirrors
+    // `paths_boundary::reject_traversal`'s own check (not exposed publicly,
+    // and this cell's prohibitions rule out duplicating `hard_deny_list` —
+    // this is the separate, unrelated traversal-component gate, not the
+    // deny list) — canonicalizing first would silently resolve a `..` away
+    // rather than refuse the submission that carried one.
+    let has_traversal = raw_path.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    });
+    if raw.trim().is_empty() || !raw_path.is_absolute() || has_traversal {
+        return Err("invalid_path");
+    }
+    let canonical = std::fs::canonicalize(raw_path).map_err(|_| "not_found")?;
+    if !canonical.is_dir() {
+        return Err("not_directory");
+    }
+    // D9a/D9b: the deny-list, absolute-path, and traversal gate all in one
+    // call — refuses a root on `paths_boundary::hard_deny_list` (e.g.
+    // `$HOME/.ssh`) without this handler ever seeing, let alone
+    // duplicating, that list (`paths_boundary.rs:101-125`).
+    // `Boundary::new` alone only answers "is this root inside a denied
+    // root" (its `check_denied`/`is_within_allowed` machinery is built for
+    // an already-constructed boundary's *allowed* side), so a root that
+    // *contains* a denied directory — `$HOME` containing `$HOME/.ssh`, or
+    // `/` and `/home` containing it transitively — passed that gate alone
+    // and went on to index (and later serve, unauthenticated) markdown
+    // under `~/.ssh`, `~/.aws` and `~/.gnupg`. `is_denied_root` closes the
+    // other direction; both run so neither guard's own coverage regresses
+    // silently if the other is ever removed.
+    if mdview_core::paths_boundary::Boundary::new(vec![canonical.clone()]).is_err()
+        || mdview_core::paths_boundary::is_denied_root(&canonical)
+    {
+        return Err("denied");
+    }
+    // D10: look up the CANONICAL path, never the raw submitted string — a
+    // symlink to, or a trailing-slash form of, an already-registered root
+    // canonicalizes to the same value and must be caught here too, rather
+    // than falling through to `ensure_project` as a silent success. A store
+    // failure here is not a path decision at all — it gets the same generic
+    // `"failed"` code `register_project` uses for `Engine::register`'s own
+    // failure, never folded into `"denied"` (see this function's own doc).
+    match engine.store.find_project_by_root(&canonical) {
+        Ok(Some(_)) => return Err("duplicate"),
+        Ok(None) => {}
+        Err(_) => return Err("failed"),
+    }
+    // D9a: bound the work before doing it — the same `WalkBuilder` settings
+    // `scan_markdown_files` uses, aborted at a file cap or a wall-clock
+    // budget rather than walked to completion. The two bounds get distinct
+    // codes: folding them into one `"too_large"` would let a route-level
+    // test meant to prove the *file* cap pass instead via a slow walk
+    // crossing the *time* budget, without ever proving the cap it claims to.
+    match mdview_core::indexer::bounded_scan_markdown_files(
+        &canonical,
+        &engine.config.indexing.exclude_patterns,
+        REGISTER_MAX_MARKDOWN_FILES,
+        REGISTER_SCAN_BUDGET,
+    ) {
+        mdview_core::indexer::ScanBudget::Ok(_) => Ok(canonical),
+        mdview_core::indexer::ScanBudget::TooManyFiles => Err("too_large"),
+        mdview_core::indexer::ScanBudget::TooSlow => Err("too_slow"),
+    }
 }
 
 // The CSS/JS assets are compiled into the binary and change whenever the daemon
@@ -9379,6 +9624,543 @@ mod bee_route_tests {
         );
     }
 
+    /// projects-home-1 (D6), tightened by projects-home-2, restored to full
+    /// strength by projects-home-3: the badges family switch is the same
+    /// `terminal_family_enabled` gate every other terminal route already
+    /// checks — off, `index_page` must never make a herdr call at all, and
+    /// no pane id, program name, or badge markup of any kind may reach `/`.
+    /// `HangingHerdr`'s `snapshot()` never resolves (`std::future::pending`),
+    /// so a stray call despite the switch being off would still hit
+    /// `index_page`'s own `INDEX_HERDR_SNAPSHOT_TIMEOUT` (`server.rs:280`)
+    /// before answering `None` — projects-home-2 swapped onto this double for
+    /// exactly that reason, but then deleted the three assertions that would
+    /// have proven anything real leaked, leaving only
+    /// `!body.contains("proj-row__badges")`, which the timed-out `None` path
+    /// also satisfies. Restored here, plus the elapsed-time assertion
+    /// projects-home-2 never added: without it, a stray call still passes
+    /// this test, just slowly (after the ~2s timeout) — only a fast response
+    /// proves the switch was checked before herdr was ever touched.
+    /// `started`'s pane comes from a *separate* `FakeHerdr` never wired into
+    /// `st.herdr` — it exists only to give this test real values to assert
+    /// absent, since `HangingHerdr` itself tracks no panes.
+    #[tokio::test]
+    async fn home_page_carries_no_pane_badges_when_terminal_switch_is_off() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-switch-off");
+        let scratch = fresh_root("home-badges-switch-off-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let fixture = std::sync::Arc::new(FakeHerdr::new());
+        let started = fixture
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = Arc::new(HangingHerdr);
+        register(&st, &root, "demo");
+        let app = router(st);
+
+        let start = std::time::Instant::now();
+        let body = body_string(get(app, "/").await).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            !body.contains("proj-row__badges")
+                && !body.contains(&started.pane_id)
+                && !body.contains("claude"),
+            "the switch off must carry no pane id, program name, or badge markup: {body}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "the switch off must never reach herdr at all — a stray call \
+             behind it would still return `None` after \
+             INDEX_HERDR_SNAPSHOT_TIMEOUT and let the assertion above pass \
+             anyway, so only a fast response proves the switch was honoured: \
+             took {elapsed:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D1/D2/D3/D5: a parent project, its own worktree branch, and an
+    /// unrelated sibling each hold exactly one pane. Every row must badge
+    /// only the pane whose working directory sits inside *that row's own*
+    /// D2 boundary — a worktree row badges its own panes, never its
+    /// parent's, and no project's pane leaks onto a sibling's row.
+    #[tokio::test]
+    async fn home_page_badges_only_panes_within_each_projects_own_boundary() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-boundary");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-boundary-scratch");
+        let parent_root = scratch.join("demo");
+        let branch_root = scratch.join("demo--wt--alpha");
+        let sibling_root = scratch.join("sibling");
+        for r in [&parent_root, &branch_root, &sibling_root] {
+            std::fs::create_dir_all(r).unwrap();
+        }
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let parent_pane = fake
+            .agent_start("w1", Some(&parent_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let branch_pane = fake
+            .agent_start("w1", Some(&branch_root.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+        let sibling_pane = fake
+            .agent_start("w1", Some(&sibling_root.to_string_lossy()), &["aider".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let parent = register(&st, &parent_root, "demo");
+        let branch = register(&st, &branch_root, "demo--wt--alpha");
+        let sibling = register(&st, &sibling_root, "sibling");
+        let app = router(st);
+
+        let body = body_string(get(app, "/").await).await;
+        let href = |project_id: &str, pane_id: &str| format!("/p/{project_id}/_terminal/pane/{pane_id}");
+
+        assert!(
+            body.contains(&href(&parent.id, &parent_pane.pane_id)),
+            "the parent's own pane is missing from its row: {body}"
+        );
+        assert!(
+            !body.contains(&href(&parent.id, &branch_pane.pane_id)),
+            "the branch's pane leaked onto the parent's row: {body}"
+        );
+        assert!(
+            body.contains(&href(&branch.id, &branch_pane.pane_id)),
+            "the branch's own pane is missing from its own row: {body}"
+        );
+        assert!(
+            !body.contains(&href(&branch.id, &parent_pane.pane_id)),
+            "the parent's pane leaked onto the branch's row: {body}"
+        );
+        assert!(
+            body.contains(&href(&sibling.id, &sibling_pane.pane_id)),
+            "the sibling's own pane is missing from its row: {body}"
+        );
+        assert!(
+            !body.contains(&href(&sibling.id, &parent_pane.pane_id))
+                && !body.contains(&href(&sibling.id, &branch_pane.pane_id)),
+            "another project's pane leaked onto the sibling's row: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D6: a registered project with no pane inside its own boundary must
+    /// render exactly as it did before this feature — the row itself, but
+    /// no empty badge container standing in for the absence.
+    #[tokio::test]
+    async fn home_page_project_with_no_pane_in_boundary_renders_without_badge_container() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-empty");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-empty-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = std::sync::Arc::new(FakeHerdr::empty());
+        register(&st, &root, "demo");
+        let app = router(st);
+
+        let body = body_string(get(app, "/").await).await;
+        assert!(
+            !body.contains("proj-row__badges"),
+            "a project with no pane in its boundary must render no badge container: {body}"
+        );
+        assert!(
+            body.contains("<span class=\"proj-row__name\">demo</span>"),
+            "the row itself must still render: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D6: an errored herdr snapshot (`FakeHerdr::set_available(false)`,
+    /// `herdr/fake.rs:280`) must still answer `/` with `200` and plain rows
+    /// — never a raw error, and never a badge container standing in for the
+    /// snapshot it could not take.
+    #[tokio::test]
+    async fn home_page_renders_plain_rows_when_herdr_is_down() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-herdr-down");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-herdr-down-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.set_available(false);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "demo");
+        let app = router(st);
+
+        let resp = get(app, "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("proj-row__badges"),
+            "a down herdr must render plain rows, not a badge container: {body}"
+        );
+        assert!(
+            body.contains("<span class=\"proj-row__name\">demo</span>"),
+            "the row itself must still render when herdr is down: {body}"
+        );
+        assert!(
+            !body.to_lowercase().contains("error"),
+            "a down herdr must never surface a raw error on the home page: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// A herdr double whose `snapshot()` never resolves — the one behavior
+    /// `FakeHerdr` cannot express (it always answers immediately, `Ok` or
+    /// `Err`), but which a real hung daemon can, since `SocketHerdr::call`
+    /// carries no timeout of its own on connect, write, or read
+    /// (`herdr/socket.rs:198-217`). Every other method is unused by
+    /// `index_page` and left unimplemented — reaching one is this test's own
+    /// bug, not the code under test's.
+    struct HangingHerdr;
+
+    #[async_trait::async_trait]
+    impl Herdr for HangingHerdr {
+        async fn snapshot(&self) -> herdr::Result<herdr::Snapshot> {
+            std::future::pending().await
+        }
+        async fn ping(&self) -> herdr::Result<herdr::ProtocolInfo> {
+            unimplemented!("index_page never pings herdr")
+        }
+        async fn read_pane(
+            &self,
+            _pane_id: &str,
+            _source: herdr::ReadSource,
+            _lines: usize,
+        ) -> herdr::Result<herdr::ScreenRead> {
+            unimplemented!("index_page never reads a pane")
+        }
+        async fn send_input(&self, _pane_id: &str, _text: &str, _submit: bool) -> herdr::Result<()> {
+            unimplemented!("index_page never sends input")
+        }
+        async fn send_text(&self, _pane_id: &str, _bytes: &str) -> herdr::Result<()> {
+            unimplemented!("index_page never sends text")
+        }
+        async fn send_keys(&self, _pane_id: &str, _keys: &[String]) -> herdr::Result<()> {
+            unimplemented!("index_page never sends keys")
+        }
+        async fn tab_create(&self, _workspace_id: &str, _cwd: Option<&str>) -> herdr::Result<herdr::TabCreated> {
+            unimplemented!("index_page never creates a tab")
+        }
+        async fn agent_start(
+            &self,
+            _workspace_id: &str,
+            _cwd: Option<&str>,
+            _argv: &[String],
+        ) -> herdr::Result<herdr::AgentStarted> {
+            unimplemented!("index_page never starts an agent")
+        }
+    }
+
+    /// D6: `index_page` wraps its one herdr snapshot in an explicit
+    /// `tokio::time::timeout` precisely because `SocketHerdr::call` has none
+    /// of its own — proven here against a herdr double that never answers at
+    /// all, not only one that answers with an `Err` (that path is
+    /// `home_page_renders_plain_rows_when_herdr_is_down` above).
+    #[tokio::test]
+    async fn home_page_returns_promptly_when_herdr_hangs() {
+        let dir = fresh_root("home-badges-herdr-hang");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-herdr-hang-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = Arc::new(HangingHerdr);
+        register(&st, &root, "demo");
+        let app = router(st);
+
+        let started = std::time::Instant::now();
+        let resp = tokio::time::timeout(Duration::from_secs(10), get(app, "/"))
+            .await
+            .expect("index_page must return well within its own bounded herdr timeout");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a hung herdr must not wedge the home page: took {:?}",
+            started.elapsed()
+        );
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("proj-row__badges"),
+            "a hung herdr must render plain rows, not a badge container: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// A badge's own `href` must resolve on the router (D3) — proven by
+    /// actually driving it through `router()`, not just by string shape.
+    #[tokio::test]
+    async fn home_page_badge_link_resolves_on_the_router() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-link-resolves");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-link-resolves-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "demo");
+        let app = router(st);
+
+        let body = body_string(get(app.clone(), "/").await).await;
+        let href = format!("/p/{}/_terminal/pane/{}", project.id, started.pane_id);
+        assert!(
+            body.contains(&href),
+            "the badge's own href is missing from the row: {body}"
+        );
+
+        let resp = get(app, &href).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the badge's href must resolve on the router"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// projects-home-1: one project registered on a hard-deny-listed root
+    /// (`Boundary::new` refuses to construct on every platform this suite
+    /// runs on, same fixture as
+    /// `unassigned_group_fails_closed_when_a_projects_boundary_is_unconstructable`
+    /// above) sits beside a perfectly healthy one. Only the unconstructable
+    /// project's own row loses its badges; the healthy row keeps its own —
+    /// the per-project idiom `terminal_page_inner` uses, not
+    /// `unassigned_panes`'s whole-group fail-closed shape.
+    #[tokio::test]
+    async fn home_page_unconstructable_boundary_loses_only_its_own_badges() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-unconstructable");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-unconstructable-scratch");
+        let ok_root = scratch.join("demo");
+        std::fs::create_dir_all(&ok_root).unwrap();
+        let denied_root = PathBuf::from("/etc/mdview-test-fixture-nonexistent-projects-home-1");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let ok_pane = fake
+            .agent_start("w1", Some(&ok_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let denied_pane = fake
+            .agent_start("w1", Some(&denied_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let ok_project = register(&st, &ok_root, "demo");
+        let denied_project = register(&st, &denied_root, "denied-root-project");
+        assert_eq!(
+            denied_project.root_path, denied_root,
+            "sanity: canonicalize falls back to the literal path when it doesn't exist"
+        );
+        let app = router(st);
+
+        let body = body_string(get(app, "/").await).await;
+        assert!(
+            body.contains(&format!(
+                "/p/{}/_terminal/pane/{}",
+                ok_project.id, ok_pane.pane_id
+            )),
+            "a healthy project's own badge must still render when a different project's boundary \
+             is unconstructable: {body}"
+        );
+        let denied_row_start = body
+            .find(&format!("href=\"/p/{}/\"", denied_project.id))
+            .expect("the denied project's own row must still render");
+        let denied_row_end = body[denied_row_start..]
+            .find("</li>")
+            .map(|i| denied_row_start + i + "</li>".len())
+            .unwrap_or(body.len());
+        assert!(
+            !body[denied_row_start..denied_row_end].contains("proj-row__badges"),
+            "a project whose own boundary cannot be constructed must lose only its own badges: {body}"
+        );
+        assert!(
+            !body.contains(&denied_pane.pane_id),
+            "the denied project's own pane must never badge anywhere on the page: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D2: every pane in the boundary badges whatever its status —
+    /// working, idle, done, blocked, and an agent-less shell. D3's own
+    /// `status_pill` tints only done/working/blocked, so idle and shell
+    /// share the neutral, unmodified dot and are told apart only by the
+    /// pill's own text — asserted on that text, never on a modifier class
+    /// neither carries. D1a: the badge prints the pane's program (`kind`,
+    /// or the literal `shell`), and the agent's own `name` field never
+    /// reaches the page.
+    #[tokio::test]
+    async fn home_page_badges_cover_every_pane_status_and_the_program_never_the_agent_name() {
+        use crate::herdr::fake::FakeHerdr;
+        use crate::herdr::wire::AgentStatus;
+
+        let dir = fresh_root("home-badges-statuses");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-statuses-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let working = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&working.pane_id, AgentStatus::Working).await.unwrap();
+        let idle = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&idle.pane_id, AgentStatus::Idle).await.unwrap();
+        let done = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["aider".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&done.pane_id, AgentStatus::Done).await.unwrap();
+        let blocked = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["cursor".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&blocked.pane_id, AgentStatus::Blocked).await.unwrap();
+        let shell = fake.tab_create("w1", Some(&root.to_string_lossy())).await.unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "demo");
+        let app = router(st);
+
+        let body = body_string(get(app, "/").await).await;
+        let href = |pane_id: &str| format!("/p/{}/_terminal/pane/{}", project.id, pane_id);
+        for pane_id in [
+            &working.pane_id,
+            &idle.pane_id,
+            &done.pane_id,
+            &blocked.pane_id,
+            &shell.pane_id,
+        ] {
+            assert!(
+                body.contains(&href(pane_id)),
+                "every pane, whatever its status, must badge: {body}"
+            );
+        }
+        for status_text in ["working", "idle", "done", "blocked", "shell"] {
+            assert!(
+                body.contains(&format!(">{status_text}</span>")),
+                "the {status_text} pill's own text must appear: {body}"
+            );
+        }
+        for program in ["claude", "codex", "aider", "cursor", "shell"] {
+            assert!(
+                body.contains(program),
+                "the pane's program {program} must badge: {body}"
+            );
+        }
+        for started in [&working, &idle, &done, &blocked] {
+            assert!(
+                !body.contains(&started.name),
+                "the agent's own name field must never reach the home page: {body}"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// projects-home-2: the markup-validity probe the plan declared but the
+    /// badge slice never authored. `project_badges` is meant to render as a
+    /// sibling of `proj-row__link`, never nested inside it — an anchor
+    /// inside an anchor is invalid HTML and browsers unnest it, which would
+    /// break the row link itself (D3). Nothing before this test failed if
+    /// that sibling relationship were broken; this pins it by locating the
+    /// row link's own opening and closing tags and asserting the badge
+    /// markup never appears between them.
+    #[tokio::test]
+    async fn home_page_badges_are_never_nested_inside_the_row_link() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("home-badges-markup-validity");
+        enable_terminal(&dir);
+        let scratch = fresh_root("home-badges-markup-validity-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "demo");
+        let app = router(st);
+
+        let body = body_string(get(app, "/").await).await;
+        assert!(
+            body.contains("proj-row__badges"),
+            "fixture must actually render a badge for this test to prove anything: {body}"
+        );
+
+        let link_start = body
+            .find("<a class=\"proj-row__link\"")
+            .unwrap_or_else(|| panic!("row link markup missing: {body}"));
+        let link_close = body[link_start..]
+            .find("</a>")
+            .map(|i| link_start + i)
+            .unwrap_or_else(|| panic!("row link never closes: {body}"));
+        assert!(
+            !body[link_start..link_close].contains("proj-row__badges"),
+            "the badge block must be a sibling of proj-row__link, never nested inside its anchor: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
     /// The two home-page behaviors that live in `assets/app.js` reach the
     /// markup by class name, so a rename in `views.rs` silently breaks them —
     /// which is exactly what happened when the project cards became rows: the
@@ -12165,5 +12947,540 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── projects-home-2: POST /api/projects/register (D7/D8/D9a/D10) ──────
+
+    /// D7/D8: a valid absolute directory registers, redirects 303 to `/`,
+    /// and the derived name is the directory's own name — `register_project`
+    /// passes `None` to `Engine::register` rather than a name field the
+    /// form never carries.
+    #[tokio::test]
+    async fn register_project_happy_path_registers_and_redirects() {
+        let dir = fresh_root("register-happy-path");
+        let scratch = fresh_root("register-happy-path-scratch");
+        let root = scratch.join("newproj");
+        std::fs::create_dir_all(&root).unwrap();
+        write(&root, "README.md", "# New Project");
+
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let app = router(st);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "path={}",
+                urlencoding_lite(&root.to_string_lossy())
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::SEE_OTHER,
+            "a valid path must redirect 303"
+        );
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/",
+            "a successful registration must redirect to /"
+        );
+
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let projects = engine.list_projects().unwrap();
+        let found = projects
+            .iter()
+            .find(|p| p.root_path == canonical)
+            .unwrap_or_else(|| panic!("the new root was not registered: {projects:?}"));
+        assert_eq!(
+            found.name,
+            canonical.file_name().unwrap().to_string_lossy(),
+            "the derived name must be the directory's own name"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D9a: an ordinary path outside every existing project root DOES
+    /// register — there is no allow-list anywhere in this route. This is
+    /// D9a's openness pinned as deliberate: a later reader must never mistake
+    /// the absence of a guard here for an oversight.
+    #[tokio::test]
+    async fn register_project_registers_an_ordinary_path_with_no_allow_list() {
+        let dir = fresh_root("register-no-allowlist");
+        let scratch = fresh_root("register-no-allowlist-scratch");
+        // Nothing under `scratch` is registered anywhere, and no allowed-roots
+        // list constrains this route (D9a) — an arbitrary ordinary directory
+        // must still register.
+        let root = scratch.join("unrelated").join("elsewhere");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let app = router(st);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "path={}",
+                urlencoding_lite(&root.to_string_lossy())
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert!(
+            engine
+                .list_projects()
+                .unwrap()
+                .iter()
+                .any(|p| p.root_path == canonical),
+            "a path outside every registered root must still register — D9a keeps the route open"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D10: an empty path, a relative path, and an absolute path carrying a
+    /// raw `..` component are each refused before any filesystem check that
+    /// could otherwise let the `..` resolve away into an accepted root.
+    /// `engine.list_projects().len()` is asserted unchanged after every one.
+    #[tokio::test]
+    async fn register_project_refuses_empty_relative_and_dotdot_paths() {
+        let dir = fresh_root("register-invalid-path");
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let before = engine.list_projects().unwrap().len();
+        let app = router(st);
+
+        for raw in ["", "relative/path", "/tmp/../tmp"] {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/projects/register")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("path={}", urlencoding_lite(raw))))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+            let location = resp
+                .headers()
+                .get(header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert_eq!(
+                location, "/?register_error=invalid_path",
+                "path {raw:?} must be refused as invalid_path, got redirect to {location}"
+            );
+        }
+
+        assert_eq!(
+            engine.list_projects().unwrap().len(),
+            before,
+            "none of the invalid paths may register a project"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D10: a path to an existing regular file (not a directory) is refused,
+    /// distinctly from a missing path.
+    #[tokio::test]
+    async fn register_project_refuses_a_regular_file_as_not_a_directory() {
+        let dir = fresh_root("register-not-directory");
+        let scratch = fresh_root("register-not-directory-scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        write(&scratch, "plain-file.txt", "just a file");
+        let file_path = scratch.join("plain-file.txt");
+
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let before = engine.list_projects().unwrap().len();
+        let app = router(st);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "path={}",
+                urlencoding_lite(&file_path.to_string_lossy())
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/?register_error=not_directory"
+        );
+        assert_eq!(engine.list_projects().unwrap().len(), before);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D9a: a root sitting on `paths_boundary::hard_deny_list` (`/etc` —
+    /// `$HOME/.ssh` is the example CONTEXT.md names, but it may not exist in
+    /// a CI sandbox; `/etc` is the same deny-listed class of directory and
+    /// is guaranteed to exist) is refused, and nothing is indexed. This
+    /// proves the route goes through `Boundary::new` rather than never
+    /// consulting the deny list at all — the gap the plan's P1 names.
+    #[tokio::test]
+    async fn register_project_refuses_a_root_on_the_hard_deny_list() {
+        let dir = fresh_root("register-deny-list");
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let before = engine.list_projects().unwrap().len();
+        let app = router(st);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("path=%2Fetc"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/?register_error=denied",
+            "a deny-listed root must be refused"
+        );
+        assert_eq!(
+            engine.list_projects().unwrap().len(),
+            before,
+            "a deny-listed root must never register, and nothing gets indexed"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D9b: `Boundary::new` alone only answers "is this root inside a denied
+    /// root", so `POST path=$HOME` passed that gate and went on to index
+    /// (and later serve, unauthenticated) markdown under `~/.ssh`, `~/.aws`
+    /// and `~/.gnupg` — the credential-directory case D9a exists to close.
+    /// `/` and `$HOME` both *contain* a hard-deny-listed directory without
+    /// sitting inside one, which is exactly the direction
+    /// `paths_boundary::is_denied_root` adds.
+    #[tokio::test]
+    async fn register_project_refuses_a_root_that_contains_a_denied_directory() {
+        let dir = fresh_root("register-deny-containment");
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let before = engine.list_projects().unwrap().len();
+        let app = router(st.clone());
+
+        // "/" contains /etc (and every other hard-deny-listed root) — refused
+        // regardless of what $HOME happens to be in this environment.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("path=%2F"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/?register_error=denied",
+            "/ contains a denied directory and must be refused"
+        );
+
+        // $HOME contains $HOME/.ssh, $HOME/.aws, etc — refused even though
+        // $HOME itself is never named on the deny list.
+        if let Some(home) = std::env::var_os("HOME") {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/projects/register")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "path={}",
+                    urlencoding_lite(&home.to_string_lossy())
+                )))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.headers().get(header::LOCATION).unwrap(),
+                "/?register_error=denied",
+                "$HOME contains a denied directory and must be refused"
+            );
+        }
+
+        assert_eq!(
+            engine.list_projects().unwrap().len(),
+            before,
+            "neither / nor $HOME may register, and nothing gets indexed"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D9b's containment refusal is not an allow-list in disguise: an
+    /// ordinary directory under the home directory — sharing no path
+    /// component with any hard-deny-listed entry beyond `$HOME` itself —
+    /// still registers.
+    #[tokio::test]
+    async fn register_project_still_registers_an_ordinary_directory_under_home() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let dir = fresh_root("register-under-home");
+        let root = std::path::PathBuf::from(&home)
+            .join("mdview-bee-test-register-under-home-projects-home-3");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let app = router(st);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "path={}",
+                urlencoding_lite(&root.to_string_lossy())
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/",
+            "an ordinary directory under home must still register — D9b denies containment, not the whole home tree"
+        );
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert!(
+            engine
+                .list_projects()
+                .unwrap()
+                .iter()
+                .any(|p| p.root_path == canonical),
+            "the ordinary under-home directory must actually be registered"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// D10: re-registering an already-registered root is refused with the
+    /// duplicate code, and so is its trailing-slash form — a raw-string
+    /// comparison against the stored `root_path` would miss the
+    /// trailing-slash variant and fall through to a silent
+    /// `ensure_project` success, which is exactly what D10 forbids.
+    #[tokio::test]
+    async fn register_project_refuses_a_duplicate_root_and_its_trailing_slash_form() {
+        let dir = fresh_root("register-duplicate");
+        let scratch = fresh_root("register-duplicate-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let st = build_state_with_dir(&dir);
+        register(&st, &root, "demo");
+        let engine = st.engine.clone();
+        let before = engine.list_projects().unwrap().len();
+        let app = router(st);
+
+        for raw in [
+            root.to_string_lossy().into_owned(),
+            format!("{}/", root.to_string_lossy()),
+        ] {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/projects/register")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("path={}", urlencoding_lite(&raw))))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.headers().get(header::LOCATION).unwrap(),
+                "/?register_error=duplicate",
+                "{raw:?} must be refused as a duplicate"
+            );
+        }
+
+        assert_eq!(
+            engine.list_projects().unwrap().len(),
+            before,
+            "no duplicate submission may change the project count"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D10: a symlink to an already-registered root is also a duplicate — it
+    /// canonicalizes to the same path, so only comparing the canonical form
+    /// (never the raw submitted string) catches it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn register_project_refuses_a_symlink_to_an_already_registered_root() {
+        let dir = fresh_root("register-duplicate-symlink");
+        let scratch = fresh_root("register-duplicate-symlink-scratch");
+        let root = scratch.join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+        let link = scratch.join("demo-link");
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+
+        let st = build_state_with_dir(&dir);
+        register(&st, &root, "demo");
+        let engine = st.engine.clone();
+        let before = engine.list_projects().unwrap().len();
+        let app = router(st);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "path={}",
+                urlencoding_lite(&link.to_string_lossy())
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/?register_error=duplicate",
+            "a symlink to an already-registered root must be refused as a duplicate"
+        );
+        assert_eq!(engine.list_projects().unwrap().len(), before);
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D9a: a tree whose markdown count exceeds `REGISTER_MAX_MARKDOWN_FILES`
+    /// is refused before `Engine::register` ever runs, registering nothing —
+    /// the pre-flight this cell adds specifically to close the P1 unbounded
+    /// walk (`indexer.rs:88-107` via `engine.rs:72-77`).
+    #[tokio::test]
+    async fn register_project_refuses_a_tree_over_the_markdown_file_cap() {
+        let dir = fresh_root("register-too-large");
+        let scratch = fresh_root("register-too-large-scratch");
+        let root = scratch.join("huge");
+        std::fs::create_dir_all(&root).unwrap();
+        for i in 0..(REGISTER_MAX_MARKDOWN_FILES + 1) {
+            write(&root, &format!("f{i}.md"), "# x");
+        }
+
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let before = engine.list_projects().unwrap().len();
+        let app = router(st);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "path={}",
+                urlencoding_lite(&root.to_string_lossy())
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/?register_error=too_large",
+            "a tree over the markdown-file cap must be refused"
+        );
+        assert_eq!(
+            engine.list_projects().unwrap().len(),
+            before,
+            "an oversized tree must register nothing"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D10/P1: the rejected path string must never appear in the response
+    /// body of the page a refusal redirects to — a fixed code carries the
+    /// same information without anything to inject on this unauthenticated
+    /// route.
+    #[tokio::test]
+    async fn register_project_never_echoes_the_submitted_path_into_the_page() {
+        let dir = fresh_root("register-no-echo");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let marker = "UNIQUE-MARKER-should-never-render-4f8c";
+        let raw = format!("/definitely/not/real/{marker}");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!("path={}", urlencoding_lite(&raw))))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(location, "/?register_error=not_found");
+
+        let page = body_string(get(app, &location).await).await;
+        assert!(
+            !page.contains(marker),
+            "the submitted path must never be echoed into the refusal page: {page}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// toa-1: mounted with its one true method (`post`) — a `GET` never
+    /// reaches the handler and registers nothing, the built-in axum 405 the
+    /// same family of route already relies on
+    /// (`a_get_carrying_switch_values_in_its_query_changes_no_switch`).
+    #[tokio::test]
+    async fn get_register_project_route_is_405_and_registers_nothing() {
+        let dir = fresh_root("register-get-405");
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let before = engine.list_projects().unwrap().len();
+        let app = router(st);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/projects/register?path=%2Ftmp")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "GET must never reach the register handler"
+        );
+        assert_eq!(engine.list_projects().unwrap().len(), before);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D10: `#[derive(Deserialize)]`'s generated struct visitor refuses a
+    /// repeated query key outright, and nothing about a redirect target rules
+    /// one out — a bookmarked or hand-edited URL, or a client that appends
+    /// rather than replaces a query parameter, can send
+    /// `register_error` twice. That must render the Projects page, never
+    /// turn `/` itself into a 400.
+    #[tokio::test]
+    async fn duplicated_register_error_query_key_still_renders_the_page() {
+        let dir = fresh_root("register-flag-duplicate-key");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let resp = get(app, "/?register_error=a&register_error=b").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a duplicated register_error query key must still render the Projects page"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

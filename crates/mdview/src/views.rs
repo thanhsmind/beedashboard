@@ -88,7 +88,11 @@ fn worktree_branch(id: &str) -> Option<(&str, &str)> {
     Some((parent, branch))
 }
 
-pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool) -> String {
+pub fn project_list_page(
+    projects: &[(Project, usize, Vec<TerminalPaneView>)],
+    unassigned_visible: bool,
+    register_error: Option<&str>,
+) -> String {
     let listing = if projects.is_empty() {
         "<p class=\"fg-empty\">Chưa có project nào. Đăng ký: <code>mdview register &lt;dir&gt;</code> hoặc gọi MCP <code>mdview_view_file</code>.</p>".to_string()
     } else {
@@ -100,12 +104,12 @@ pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool
         // three branches instead of four unrelated entries. The filesystem path
         // is deliberately omitted (unauthenticated page).
         let registered: std::collections::HashSet<&str> =
-            projects.iter().map(|(p, _)| p.id.as_str()).collect();
+            projects.iter().map(|(p, _, _)| p.id.as_str()).collect();
         // Order: every project that is not a branch keeps the order it arrived
         // in, and each one is immediately followed by its own branches, in
         // their own arrival order. A branch is never emitted twice and never
         // emitted before its parent, whatever order the registry hands them in.
-        let mut ordered: Vec<(&(Project, usize), Option<&str>)> = Vec::new();
+        let mut ordered: Vec<(&(Project, usize, Vec<TerminalPaneView>), Option<&str>)> = Vec::new();
         for entry in projects {
             if worktree_branch(&entry.0.id)
                 .map(|(parent, _)| registered.contains(parent))
@@ -123,7 +127,7 @@ pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool
             }
         }
         let mut rows = String::new();
-        for ((p, count), branch) in ordered {
+        for ((p, count, panes), branch) in ordered {
             // A worktree whose parent is not registered has nothing to nest
             // under, so it stands on its own and keeps its full name — never
             // hidden, and never indented under a row that is not there.
@@ -131,12 +135,17 @@ pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool
                 Some(branch) => ("proj-row proj-row--branch", branch.to_string()),
                 None => ("proj-row", p.name.clone()),
             };
+            // D1/D1a/D2/D3/D5: a sibling of `proj-row__link`, never nested
+            // inside it — an anchor inside an anchor is invalid HTML and
+            // browsers unnest it, which would break the row link itself.
+            let badges = project_badges(&p.id, panes);
             rows.push_str(&format!(
                 r#"<li class="{row_class}">
   <a class="proj-row__link" href="/p/{id}/">
     <span class="proj-row__name">{label}</span>
     <span class="proj-row__meta">{count} markdown files · <time class="proj-row__time" datetime="{seen}">{seen_short}</time></span>
   </a>
+  {badges}
   <form class="proj-row__delete" method="post" action="/api/projects/{id}/unregister" data-project="{name}">
     <button type="submit" class="proj-card__del" aria-label="Remove {name} from mdview" title="Remove from mdview">✕</button>
   </form>
@@ -148,6 +157,7 @@ pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool
                 count = count,
                 seen = esc(&p.last_seen_at),
                 seen_short = esc(&short_instant(&p.last_seen_at)),
+                badges = badges,
             ));
         }
         format!(r#"<ul class="proj-list">{rows}</ul>"#, rows = rows)
@@ -167,14 +177,99 @@ pub fn project_list_page(projects: &[(Project, usize)], unassigned_visible: bool
     } else {
         String::new()
     };
+    // D10: a fixed, static message keyed by the register route's own fixed
+    // error code — the submitted path never reaches this page (see
+    // `register_error_message`'s own doc). An unrecognized or absent code
+    // renders no banner at all.
+    let register_banner = match register_error.and_then(register_error_message) {
+        Some(msg) => format!(
+            r#"<div class="fg-banner fg-banner--danger"><span class="fg-banner__dot"></span><span class="fg-banner__body">{msg}</span></div>"#,
+            msg = esc(msg),
+        ),
+        None => String::new(),
+    };
     let body = format!(
         r#"{topbar}
-<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{listing}{unassigned_card}</main>"#,
+<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{register_banner}{add_form}{listing}{unassigned_card}</main>"#,
         topbar = topbar(""),
+        register_banner = register_banner,
+        add_form = project_add_form(),
         listing = listing,
         unassigned_card = unassigned_card,
     );
     layout("Projects", "", &body)
+}
+
+/// D7's add-project form — one absolute-path field; the project name is
+/// derived server-side from the directory (`server.rs::register_project`
+/// passes `None` to `Engine::register`), so there is no second field for it.
+/// D8: a plain HTML form post to the new register route, the same
+/// method="post"/action shape as the unregister form above — no fetch, no
+/// JavaScript. Every value here is static markup: the submitted path is
+/// never echoed back onto this page (D9a/D10's refusal messages, below, are
+/// fixed text keyed by a fixed error code, never the raw input).
+fn project_add_form() -> &'static str {
+    r#"<form class="proj-add" method="post" action="/api/projects/register">
+  <div class="fg-field">
+    <label class="fg-field__label" for="proj-add-path">Register a project</label>
+    <input class="fg-input" type="text" id="proj-add-path" name="path" placeholder="/absolute/path/to/project" autocomplete="off">
+  </div>
+  <button type="submit" class="fg-btn fg-btn--primary">Register</button>
+</form>"#
+}
+
+/// D10's fixed refusal messages, keyed by `register_project`'s own fixed
+/// error codes (`server.rs::validate_register_path`, plus its own generic
+/// `"failed"`). Every branch is static text — nothing user-supplied reaches
+/// this unauthenticated page, which is the whole point of carrying a code
+/// rather than the path itself. An unrecognized code renders no banner,
+/// fail-safe rather than fail-loud: it can only arrive by someone hand-
+/// crafting the query string, since every code this page itself ever
+/// redirects with is one of the branches below.
+fn register_error_message(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "invalid_path" => "Enter an absolute path with no relative (\"..\") segments.",
+        "not_found" => "That path does not exist.",
+        "not_directory" => "That path is not a directory.",
+        "denied" => "That path cannot be registered.",
+        "duplicate" => "That project is already registered.",
+        "too_large" => "That directory has too many markdown files to register.",
+        "too_slow" => "That directory took too long to scan to register.",
+        "failed" => "That project could not be registered. Try again.",
+        _ => return None,
+    })
+}
+
+/// D1, as clarified by D1a — D2, D3, D5: one badge per terminal pane in
+/// `panes`, which the caller has already matched against this project's own
+/// D2 containment boundary (`server.rs::project_panes`, the same query
+/// `pane_strip` above draws from at pane-page scope). Each badge is a link
+/// to that pane's own terminal view carrying the same [`status_pill`] and
+/// program (`kind` — the herdr agent kind, or the literal `shell` for an
+/// agent-less pane) `pane_strip` prints; the pane's `name` field — the
+/// agent's own name — never reaches this markup (D1a). An empty `panes`
+/// list (the switch off, the snapshot unavailable, an unconstructable
+/// boundary, or simply no pane inside this project) renders no container at
+/// all, so an unbadged row is byte-identical to how every row rendered
+/// before this feature (D6) — not an empty `<nav>` that would say the same
+/// thing twice.
+fn project_badges(project_id: &str, panes: &[TerminalPaneView]) -> String {
+    if panes.is_empty() {
+        return String::new();
+    }
+    let pid = esc(project_id);
+    let mut out = String::from(r#"<nav class="proj-row__badges" aria-label="Terminal panes">"#);
+    for p in panes {
+        out.push_str(&format!(
+            r#"<a class="proj-row__badge" href="/p/{pid}/_terminal/pane/{pane_id}">{status_pill}<span class="proj-row__badge-program">{program}</span></a>"#,
+            pid = pid,
+            pane_id = esc(&p.pane_id),
+            status_pill = status_pill(&p.status),
+            program = esc(&p.kind),
+        ));
+    }
+    out.push_str("</nav>");
+    out
 }
 
 /// A registered project's landing page: a card linking into the bee board
