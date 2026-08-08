@@ -195,6 +195,11 @@ fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/api/status", get(status))
         .route("/api/projects", get(api_projects))
+        // agent-switch-drawer: the cross-project pane switcher's own feed —
+        // every agent-backed pane on the host, from every registered
+        // project plus the Unassigned group, gated the same as the rest of
+        // the terminal family (`api_agents`'s own doc comment).
+        .route("/api/agents", get(api_agents))
         .route("/settings", get(settings_page_handler))
         .route("/api/config", get(api_config).post(update_config))
         // toa-1 (D5/D11): the method-mismatch-oracle this family used to
@@ -480,6 +485,37 @@ fn project_summary_json(id: &str, name: &str, file_count: usize) -> serde_json::
         "file_count": file_count,
         "url": format!("/p/{id}/"),
     })
+}
+
+/// `GET /api/agents` (agent-switch-drawer): a flat, cross-project list of
+/// every agent-backed pane on the host — the feed a pane switcher drawer can
+/// poll to jump straight to any agent from any project's own terminal page,
+/// without first navigating to that project's own `/p/:id/_terminal`. Gated
+/// exactly like the rest of the terminal family (`terminal_family_enabled`,
+/// D12's JSON-shaped disabled answer) — never the narrower
+/// `unassigned_group_enabled` switch on top, the same D3 narrowing
+/// `project_panes`'s own doc comment already applies to `suggested_projects`:
+/// this is a read surface over the whole snapshot, not the Unassigned
+/// group's own page.
+///
+/// A registry read failure fails closed to an empty list — the same
+/// agent-terminal-11 rule `unassigned_terminal_page` applies to its own
+/// registry failure — rather than press on with an empty project set, which
+/// would read every pane on the host as unassigned. A herdr snapshot failure
+/// answers the same `herdr_down_response` `terminal_screen` gives any other
+/// data route: a `502` naming the reason, never a `200` with an empty array
+/// that would be indistinguishable from a host that genuinely has no agents.
+async fn api_agents(State(st): State<AppState>) -> Response {
+    if !terminal_family_enabled(&st) {
+        return terminal_disabled_json_404();
+    }
+    let Ok(projects) = st.engine.list_projects() else {
+        return Json(json!([])).into_response();
+    };
+    match st.herdr.snapshot().await {
+        Ok(snapshot) => Json(json!(agent_pane_rows(&snapshot, &projects))).into_response(),
+        Err(_) => herdr_down_response(),
+    }
 }
 
 async fn api_config(State(st): State<AppState>) -> impl IntoResponse {
@@ -2166,6 +2202,102 @@ fn unassigned_panes(
             }
         })
         .collect()
+}
+
+/// `GET /api/agents` row (agent-switch-drawer): one agent-backed pane,
+/// carrying enough to both render and link to it from any project's own
+/// drawer. `project_id`/`project_name` are `None`/`"(unassigned)"` for a
+/// pane outside every registered project's D2 boundary — the same
+/// vocabulary `unassigned_panes` itself never spells out because its own
+/// view has no project column, but the label agent-terminal already uses
+/// for that group's own page title ("Unassigned agents").
+#[derive(serde::Serialize)]
+struct AgentPaneRow {
+    project_id: Option<String>,
+    project_name: String,
+    pane_id: String,
+    name: String,
+    status: String,
+    workspace: String,
+    tab: String,
+    url: String,
+}
+
+/// `GET /api/agents`'s assembly (agent-switch-drawer): every agent-backed
+/// pane on the host, grouped by the project whose D2 containment boundary
+/// claims it — walking `projects` in the caller's own order and keeping
+/// only the first project that claims a given pane id, mirroring the "first
+/// project wins" union `unassigned_panes` already applies to its own
+/// membership complement, so no pane is ever listed under two rows. A
+/// `project_panes` row whose `status` reads `"shell"` (`project_panes`'s own
+/// doc comment: no agent behind it) is dropped here — a shell holds no
+/// agent to switch to. The panes no registered project's boundary claims
+/// are appended last, straight from `unassigned_panes` — already
+/// agent-only by construction (its own doc comment: sourced from
+/// `snapshot.agents`, never `snapshot.panes`), so no separate shell filter
+/// is needed for that half. A project whose own boundary fails to
+/// construct contributes no rows here (same fail-closed rule
+/// `terminal_page_inner` applies), and — per `unassigned_panes`'s own doc
+/// comment — empties the Unassigned half too, rather than risk leaking that
+/// project's panes into it.
+fn agent_pane_rows(
+    snapshot: &herdr::Snapshot,
+    projects: &[mdview_core::domain::Project],
+) -> Vec<AgentPaneRow> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+
+    for project in projects {
+        let Ok(boundary) =
+            mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+        else {
+            continue;
+        };
+        for pane in project_panes(snapshot, &boundary) {
+            if pane.status == "shell" {
+                continue;
+            }
+            if !seen.insert(pane.pane_id.clone()) {
+                continue;
+            }
+            rows.push(AgentPaneRow {
+                project_id: Some(project.id.clone()),
+                project_name: project.name.clone(),
+                url: format!("/p/{}/_terminal/pane/{}", project.id, pane.pane_id),
+                pane_id: pane.pane_id,
+                name: pane.name,
+                status: pane.status,
+                workspace: pane.workspace,
+                tab: pane.tab,
+            });
+        }
+    }
+
+    // agent-switch-drawer-1: there is no per-pane page in the Unassigned
+    // group the way `/p/:id/_terminal/pane/:pane_id` gives each project pane
+    // one — every unassigned pane is selected client-side, from the pane
+    // strip `/_terminal/unassigned` itself renders (`views::pane_cards`),
+    // never from a distinct URL segment. `/_terminal/unassigned` is
+    // therefore the row's own url for every pane in this half; the drawer
+    // lands on the page that lists it rather than a page that does not
+    // exist.
+    for pane in unassigned_panes(snapshot, projects) {
+        if !seen.insert(pane.pane_id.clone()) {
+            continue;
+        }
+        rows.push(AgentPaneRow {
+            project_id: None,
+            project_name: "(unassigned)".to_string(),
+            url: "/_terminal/unassigned".to_string(),
+            pane_id: pane.pane_id,
+            name: pane.name,
+            status: pane.status,
+            workspace: pane.workspace,
+            tab: pane.tab,
+        });
+    }
+
+    rows
 }
 
 /// project-suggestions (D1, D4, D6): every folder an agent-backed herdr
@@ -15415,5 +15547,102 @@ mod bee_route_tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// agent-switch-drawer-1: `GET /api/agents` drops a shell row (no agent
+    /// behind it, `project_panes`'s own doc comment) and keeps the
+    /// agent-backed pane in the same project — the drawer has nothing to
+    /// switch to on a bare shell.
+    #[tokio::test]
+    async fn api_agents_skips_shell_panes_and_keeps_agent_panes() {
+        let dir = fresh_root("agent-switch-drawer-shell-filter-data");
+        enable_terminal(&dir);
+        let root = fresh_root("agent-switch-drawer-shell-filter-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let shell = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+        let agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "shell-filter");
+        let app = router(st);
+
+        let resp = get(app, "/api/agents").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+
+        assert!(
+            rows.iter().any(|r| r["pane_id"] == agent.pane_id
+                && r["project_id"] == project.id
+                && r["status"] != "shell"),
+            "the agent-backed pane must appear with its real status: {body}"
+        );
+        assert!(
+            !rows.iter().any(|r| r["pane_id"] == shell.pane_id),
+            "a bare shell pane must never appear in the switch drawer feed: {body}"
+        );
+    }
+
+    /// agent-switch-drawer-1: when a pane's cwd validates under two
+    /// registered projects' own D2 boundaries at once (a project registered
+    /// inside another project's own root), the pane appears exactly once —
+    /// under whichever project `list_projects` hands back first — never
+    /// listed a second time under the other project or under Unassigned.
+    #[tokio::test]
+    async fn api_agents_dedupes_a_pane_claimed_by_two_project_boundaries() {
+        let dir = fresh_root("agent-switch-drawer-dedupe-data");
+        enable_terminal(&dir);
+        let outer = fresh_root("agent-switch-drawer-dedupe-outer");
+        let inner = outer.join("inner-project");
+        std::fs::create_dir_all(&inner).unwrap();
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let agent = fake
+            .agent_start("w1", Some(&inner.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let outer_project = register(&st, &outer, "dedupe-outer");
+        // Registered after the outer project, so `list_projects`'s own
+        // `last_seen_at DESC` order (`mdview-core/src/repository.rs`) hands
+        // this one back first.
+        let inner_project = register(&st, &inner, "dedupe-inner");
+        let app = router(st);
+
+        let resp = get(app, "/api/agents").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+
+        let matches: Vec<&serde_json::Value> = rows
+            .iter()
+            .filter(|r| r["pane_id"] == agent.pane_id)
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "a pane claimed by two project boundaries must appear exactly once: {body}"
+        );
+        assert_eq!(
+            matches[0]["project_id"], inner_project.id,
+            "the first project `list_projects` hands back must win the claim: {body}"
+        );
+        assert_ne!(
+            matches[0]["project_id"], outer_project.id,
+            "the same pane must never also be claimed by the other project: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&outer).ok();
     }
 }
