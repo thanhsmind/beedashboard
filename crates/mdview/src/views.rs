@@ -233,9 +233,8 @@ fn register_error_message(code: &str) -> Option<&'static str> {
         "not_directory" => "That path is not a directory.",
         "denied" => "That path cannot be registered.",
         "duplicate" => "That project is already registered.",
-        "too_large" => {
-            "That directory has too many markdown files (or took too long to scan) to register."
-        }
+        "too_large" => "That directory has too many markdown files to register.",
+        "too_slow" => "That directory took too long to scan to register.",
         "failed" => "That project could not be registered. Try again.",
         _ => return None,
     })

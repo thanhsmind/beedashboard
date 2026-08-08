@@ -292,11 +292,52 @@ const INDEX_HERDR_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(2);
 const REGISTER_MAX_MARKDOWN_FILES: usize = 500;
 const REGISTER_SCAN_BUDGET: Duration = Duration::from_secs(2);
 
-#[derive(serde::Deserialize)]
 struct RegisterFlag {
     /// D10's fixed error code from a refused `register_project` redirect —
     /// never the submitted path (see `views::register_error_message`).
     register_error: Option<String>,
+}
+
+// `#[derive(Deserialize)]`'s generated struct visitor refuses a repeated
+// query key outright ("duplicate field"), and axum's `Query` extractor turns
+// that refusal into a 400 for the whole request — so
+// `/?register_error=a&register_error=b` turned `/` itself into a 400 rather
+// than rendering the Projects page. Nothing about this query string is
+// trusted input to begin with (D10: only a fixed code, never the submitted
+// path, ever reaches the page), so there is no reason a merely-repeated key
+// should fail closed at the extractor. A hand-written `Visitor` walks every
+// `(key, value)` pair itself and keeps the last `register_error` seen
+// instead of erroring on the second one.
+impl<'de> serde::Deserialize<'de> for RegisterFlag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct RegisterFlagVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for RegisterFlagVisitor {
+            type Value = RegisterFlag;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a query string carrying at most one register_error value")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut register_error = None;
+                while let Some((key, value)) = map.next_entry::<String, String>()? {
+                    if key == "register_error" {
+                        register_error = Some(value);
+                    }
+                }
+                Ok(RegisterFlag { register_error })
+            }
+        }
+
+        deserializer.deserialize_map(RegisterFlagVisitor)
+    }
 }
 
 async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>) -> Response {
@@ -676,33 +717,49 @@ async fn register_project(
     State(st): State<AppState>,
     Form(form): Form<RegisterProjectForm>,
 ) -> Response {
-    match validate_register_path(&st.engine, &form.path) {
-        Ok(canonical) => {
-            // ensure_project indexes inline (engine.rs:72-77), which is
-            // exactly the walk D9a exists to keep off the request thread —
-            // the pre-flight above only decided whether to index at all.
-            let engine = st.engine.clone();
-            let result =
-                tokio::task::spawn_blocking(move || engine.register(&canonical, None)).await;
-            match result {
-                Ok(Ok(_)) => Redirect::to("/").into_response(),
-                // Every named D10 refusal already returned above; a failure
-                // here is the engine/store call itself failing after every
-                // guard passed, so it gets its own generic code rather than
-                // being folded into one of the named ones.
-                Ok(Err(_)) | Err(_) => Redirect::to("/?register_error=failed").into_response(),
-            }
-        }
+    // D9a/P1: `validate_register_path` itself canonicalizes, stats, resolves
+    // the deny list, and runs the sqlite duplicate lookup, and on success
+    // walks the tree up to `REGISTER_SCAN_BUDGET` (2s) — every bit of that is
+    // filesystem or sqlite work, and this route is unauthenticated. Running
+    // it (and the register call it gates) inline on the async request thread
+    // would let concurrent POSTs each pin a tokio worker for up to two
+    // seconds and stall every other route including `/`; the whole
+    // validate-then-register sequence runs in one `spawn_blocking` so none of
+    // it ever touches the async thread.
+    let engine = st.engine.clone();
+    let code: Result<(), &'static str> = tokio::task::spawn_blocking(move || {
+        let canonical = validate_register_path(&engine, &form.path)?;
+        // ensure_project indexes inline (engine.rs:72-77), which is exactly
+        // the walk D9a exists to keep off the request thread — the
+        // pre-flight above only decided whether to index at all.
+        //
+        // Every named D10 refusal already returned above; a failure here is
+        // the engine/store call itself failing after every guard passed, so
+        // it gets its own generic code rather than being folded into one of
+        // the named ones.
+        engine
+            .register(&canonical, None)
+            .map(|_| ())
+            .map_err(|_| "failed")
+    })
+    .await
+    .unwrap_or(Err("failed"));
+
+    match code {
+        Ok(()) => Redirect::to("/").into_response(),
         Err(code) => Redirect::to(&format!("/?register_error={code}")).into_response(),
     }
 }
 
-/// The ordered D9a/D10 gate a submitted path must pass before
+/// The ordered D9a/D9b/D10 gate a submitted path must pass before
 /// `Engine::register` ever runs. Fail-closed throughout: any ambiguity is a
 /// refusal, never a best-effort accept. Returns the canonical path on
 /// success, so `register_project` never re-resolves it, or one of D10's
 /// fixed error codes on refusal — never the raw submitted string, which
-/// `views::register_error_message` never receives either.
+/// `views::register_error_message` never receives either. Filesystem and
+/// sqlite calls throughout (canonicalize, the deny-list check, the
+/// duplicate lookup, the bounded scan) make this a blocking function —
+/// callers run it inside `spawn_blocking`, never directly on an async task.
 fn validate_register_path(engine: &Engine, raw: &str) -> Result<PathBuf, &'static str> {
     let raw_path = std::path::Path::new(raw);
     // Empty, relative, and any raw `.`/`..` component are refused before
@@ -725,25 +782,42 @@ fn validate_register_path(engine: &Engine, raw: &str) -> Result<PathBuf, &'stati
     if !canonical.is_dir() {
         return Err("not_directory");
     }
-    // D9a: the deny-list, absolute-path, and traversal gate all in one
+    // D9a/D9b: the deny-list, absolute-path, and traversal gate all in one
     // call — refuses a root on `paths_boundary::hard_deny_list` (e.g.
     // `$HOME/.ssh`) without this handler ever seeing, let alone
     // duplicating, that list (`paths_boundary.rs:101-125`).
-    if mdview_core::paths_boundary::Boundary::new(vec![canonical.clone()]).is_err() {
+    // `Boundary::new` alone only answers "is this root inside a denied
+    // root" (its `check_denied`/`is_within_allowed` machinery is built for
+    // an already-constructed boundary's *allowed* side), so a root that
+    // *contains* a denied directory — `$HOME` containing `$HOME/.ssh`, or
+    // `/` and `/home` containing it transitively — passed that gate alone
+    // and went on to index (and later serve, unauthenticated) markdown
+    // under `~/.ssh`, `~/.aws` and `~/.gnupg`. `is_denied_root` closes the
+    // other direction; both run so neither guard's own coverage regresses
+    // silently if the other is ever removed.
+    if mdview_core::paths_boundary::Boundary::new(vec![canonical.clone()]).is_err()
+        || mdview_core::paths_boundary::is_denied_root(&canonical)
+    {
         return Err("denied");
     }
     // D10: look up the CANONICAL path, never the raw submitted string — a
     // symlink to, or a trailing-slash form of, an already-registered root
     // canonicalizes to the same value and must be caught here too, rather
-    // than falling through to `ensure_project` as a silent success.
+    // than falling through to `ensure_project` as a silent success. A store
+    // failure here is not a path decision at all — it gets the same generic
+    // `"failed"` code `register_project` uses for `Engine::register`'s own
+    // failure, never folded into `"denied"` (see this function's own doc).
     match engine.store.find_project_by_root(&canonical) {
         Ok(Some(_)) => return Err("duplicate"),
         Ok(None) => {}
-        Err(_) => return Err("denied"),
+        Err(_) => return Err("failed"),
     }
     // D9a: bound the work before doing it — the same `WalkBuilder` settings
     // `scan_markdown_files` uses, aborted at a file cap or a wall-clock
-    // budget rather than walked to completion.
+    // budget rather than walked to completion. The two bounds get distinct
+    // codes: folding them into one `"too_large"` would let a route-level
+    // test meant to prove the *file* cap pass instead via a slow walk
+    // crossing the *time* budget, without ever proving the cap it claims to.
     match mdview_core::indexer::bounded_scan_markdown_files(
         &canonical,
         &engine.config.indexing.exclude_patterns,
@@ -751,8 +825,8 @@ fn validate_register_path(engine: &Engine, raw: &str) -> Result<PathBuf, &'stati
         REGISTER_SCAN_BUDGET,
     ) {
         mdview_core::indexer::ScanBudget::Ok(_) => Ok(canonical),
-        mdview_core::indexer::ScanBudget::TooManyFiles
-        | mdview_core::indexer::ScanBudget::TooSlow => Err("too_large"),
+        mdview_core::indexer::ScanBudget::TooManyFiles => Err("too_large"),
+        mdview_core::indexer::ScanBudget::TooSlow => Err("too_slow"),
     }
 }
 
@@ -9550,32 +9624,62 @@ mod bee_route_tests {
         );
     }
 
-    /// projects-home-1 (D6), tightened by projects-home-2: the badges
-    /// family switch is the same `terminal_family_enabled` gate every other
-    /// terminal route already checks — off, `index_page` must never make a
-    /// herdr call at all. `FakeHerdr` always answers immediately, so it can
-    /// only prove "no badge markup reached the body" — a stray `snapshot()`
-    /// call made despite the switch being off would still pass silently
-    /// under it. `HangingHerdr`'s `snapshot()` never resolves
-    /// (`std::future::pending`), so that same bug would hang this test
-    /// instead of passing: the switch-off path here holds only if
-    /// `index_page` never calls herdr in the first place.
+    /// projects-home-1 (D6), tightened by projects-home-2, restored to full
+    /// strength by projects-home-3: the badges family switch is the same
+    /// `terminal_family_enabled` gate every other terminal route already
+    /// checks — off, `index_page` must never make a herdr call at all, and
+    /// no pane id, program name, or badge markup of any kind may reach `/`.
+    /// `HangingHerdr`'s `snapshot()` never resolves (`std::future::pending`),
+    /// so a stray call despite the switch being off would still hit
+    /// `index_page`'s own `INDEX_HERDR_SNAPSHOT_TIMEOUT` (`server.rs:280`)
+    /// before answering `None` — projects-home-2 swapped onto this double for
+    /// exactly that reason, but then deleted the three assertions that would
+    /// have proven anything real leaked, leaving only
+    /// `!body.contains("proj-row__badges")`, which the timed-out `None` path
+    /// also satisfies. Restored here, plus the elapsed-time assertion
+    /// projects-home-2 never added: without it, a stray call still passes
+    /// this test, just slowly (after the ~2s timeout) — only a fast response
+    /// proves the switch was checked before herdr was ever touched.
+    /// `started`'s pane comes from a *separate* `FakeHerdr` never wired into
+    /// `st.herdr` — it exists only to give this test real values to assert
+    /// absent, since `HangingHerdr` itself tracks no panes.
     #[tokio::test]
     async fn home_page_carries_no_pane_badges_when_terminal_switch_is_off() {
+        use crate::herdr::fake::FakeHerdr;
+
         let dir = fresh_root("home-badges-switch-off");
         let scratch = fresh_root("home-badges-switch-off-scratch");
         let root = scratch.join("demo");
         std::fs::create_dir_all(&root).unwrap();
+
+        let fixture = std::sync::Arc::new(FakeHerdr::new());
+        let started = fixture
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = Arc::new(HangingHerdr);
         register(&st, &root, "demo");
         let app = router(st);
 
+        let start = std::time::Instant::now();
         let body = body_string(get(app, "/").await).await;
+        let elapsed = start.elapsed();
+
         assert!(
-            !body.contains("proj-row__badges"),
-            "the switch off must carry no badge markup: {body}"
+            !body.contains("proj-row__badges")
+                && !body.contains(&started.pane_id)
+                && !body.contains("claude"),
+            "the switch off must carry no pane id, program name, or badge markup: {body}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "the switch off must never reach herdr at all — a stray call \
+             behind it would still return `None` after \
+             INDEX_HERDR_SNAPSHOT_TIMEOUT and let the assertion above pass \
+             anyway, so only a fast response proves the switch was honoured: \
+             took {elapsed:?}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -13056,6 +13160,113 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// D9b: `Boundary::new` alone only answers "is this root inside a denied
+    /// root", so `POST path=$HOME` passed that gate and went on to index
+    /// (and later serve, unauthenticated) markdown under `~/.ssh`, `~/.aws`
+    /// and `~/.gnupg` — the credential-directory case D9a exists to close.
+    /// `/` and `$HOME` both *contain* a hard-deny-listed directory without
+    /// sitting inside one, which is exactly the direction
+    /// `paths_boundary::is_denied_root` adds.
+    #[tokio::test]
+    async fn register_project_refuses_a_root_that_contains_a_denied_directory() {
+        let dir = fresh_root("register-deny-containment");
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let before = engine.list_projects().unwrap().len();
+        let app = router(st.clone());
+
+        // "/" contains /etc (and every other hard-deny-listed root) — refused
+        // regardless of what $HOME happens to be in this environment.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("path=%2F"))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/?register_error=denied",
+            "/ contains a denied directory and must be refused"
+        );
+
+        // $HOME contains $HOME/.ssh, $HOME/.aws, etc — refused even though
+        // $HOME itself is never named on the deny list.
+        if let Some(home) = std::env::var_os("HOME") {
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/projects/register")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "path={}",
+                    urlencoding_lite(&home.to_string_lossy())
+                )))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.headers().get(header::LOCATION).unwrap(),
+                "/?register_error=denied",
+                "$HOME contains a denied directory and must be refused"
+            );
+        }
+
+        assert_eq!(
+            engine.list_projects().unwrap().len(),
+            before,
+            "neither / nor $HOME may register, and nothing gets indexed"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D9b's containment refusal is not an allow-list in disguise: an
+    /// ordinary directory under the home directory — sharing no path
+    /// component with any hard-deny-listed entry beyond `$HOME` itself —
+    /// still registers.
+    #[tokio::test]
+    async fn register_project_still_registers_an_ordinary_directory_under_home() {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let dir = fresh_root("register-under-home");
+        let root = std::path::PathBuf::from(&home)
+            .join("mdview-bee-test-register-under-home-projects-home-3");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let app = router(st);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "path={}",
+                urlencoding_lite(&root.to_string_lossy())
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            "/",
+            "an ordinary directory under home must still register — D9b denies containment, not the whole home tree"
+        );
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        assert!(
+            engine
+                .list_projects()
+                .unwrap()
+                .iter()
+                .any(|p| p.root_path == canonical),
+            "the ordinary under-home directory must actually be registered"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// D10: re-registering an already-registered root is refused with the
     /// duplicate code, and so is its trailing-slash form — a raw-string
     /// comparison against the stored `root_path` would miss the
@@ -13247,6 +13458,28 @@ mod bee_route_tests {
             "GET must never reach the register handler"
         );
         assert_eq!(engine.list_projects().unwrap().len(), before);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D10: `#[derive(Deserialize)]`'s generated struct visitor refuses a
+    /// repeated query key outright, and nothing about a redirect target rules
+    /// one out — a bookmarked or hand-edited URL, or a client that appends
+    /// rather than replaces a query parameter, can send
+    /// `register_error` twice. That must render the Projects page, never
+    /// turn `/` itself into a 400.
+    #[tokio::test]
+    async fn duplicated_register_error_query_key_still_renders_the_page() {
+        let dir = fresh_root("register-flag-duplicate-key");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let resp = get(app, "/?register_error=a&register_error=b").await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a duplicated register_error query key must still render the Projects page"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
