@@ -319,6 +319,7 @@ pub fn project_home_page(project: &Project, entry: Option<&str>, bee: bool) -> S
                 "<span class=\"crumb\">{name}</span>",
                 name = esc(&project.name)
             ),
+            "",
             &project_tabs(&project.id, "overview"),
         ),
         tab_style = PROJECT_TAB_STYLE,
@@ -743,6 +744,7 @@ pub fn terminal_page(
                 "<span class=\"crumb\">{name} · terminal</span>",
                 name = esc(&project.name)
             ),
+            "",
             &project_tabs(&project.id, "terminal"),
         ),
         tab_style = PROJECT_TAB_STYLE,
@@ -812,6 +814,7 @@ pub fn transcript_page(project: &Project, panes: &[TerminalPaneView], selected: 
                 "<span class=\"crumb\">{name} · transcript</span>",
                 name = esc(&project.name)
             ),
+            "",
             &project_tabs(&project.id, "transcript"),
         ),
         tab_style = PROJECT_TAB_STYLE,
@@ -998,6 +1001,7 @@ pub fn terminal_down_page(project: &Project) -> String {
                 "<span class=\"crumb\">{name} · terminal</span>",
                 name = esc(&project.name)
             ),
+            "",
             &project_tabs(&project.id, "terminal"),
         ),
         tab_style = PROJECT_TAB_STYLE,
@@ -2793,6 +2797,7 @@ pub fn file_page(
                 rel = esc(&file.rel_path),
             ),
             copy_md_button(),
+            "",
         ),
         tree = tree,
         breadcrumb = breadcrumb,
@@ -2959,25 +2964,49 @@ fn copy_md_button() -> &'static str {
 /// empty), the Settings link, and the theme toggle. Keeps the Settings link on
 /// all pages and stops each view re-inventing its own header.
 fn topbar(center: &str) -> String {
-    topbar_full("", center, "")
+    topbar_full("", center, "", "")
 }
 
-/// Full top bar: an optional `lead` slot (before the brand) and an optional
-/// `actions` slot (page-specific buttons before the theme toggle, e.g. the
-/// copy-page-as-Markdown button on file pages).
-fn topbar_full(lead: &str, center: &str, actions: &str) -> String {
+/// Full top bar: an optional `lead` slot (before the brand), an optional
+/// `actions` slot (page-specific buttons that stay on the bar at every width,
+/// e.g. the copy-page-as-Markdown button on file pages), and an optional
+/// `nav` slot for links that navigate away from this page.
+///
+/// The nav slot and the Settings link share one menu. On a wide screen the
+/// stylesheet hides its control and lays the panel out inline, so the bar
+/// reads exactly as it did before this existed. On a narrow one the control
+/// becomes the only visible affordance and the panel drops full-width under
+/// the bar.
+///
+/// The open state is a checkbox rather than a `<details>` — deliberately.
+/// `<details>` looked like the obvious fit, but a *closed* one has its
+/// content hidden by the browser itself (`::details-content`), which no
+/// `display` rule of ours overrides, so the wide-screen bar rendered with no
+/// navigation at all. A checkbox keeps the panel an ordinary element that CSS
+/// alone decides about, at both widths, and still needs no JavaScript:
+/// `assets/app.js` only adds the two conveniences the markup has no opinion
+/// about — closing on Escape and on a press outside the panel.
+fn topbar_full(lead: &str, center: &str, actions: &str, nav: &str) -> String {
     format!(
         r#"<header class="topbar">
   {lead}
   <a href="/" class="home">mdview</a>
   {center}
   {actions}
-  <a class="nav-link" href="/settings">Settings</a>
+  <div class="topbar-menu">
+    <input type="checkbox" id="topbar-menu-toggle" class="topbar-menu__toggle">
+    <label class="topbar-menu__button" for="topbar-menu-toggle" title="Menu"><span class="topbar-menu__label">Menu</span><span aria-hidden="true">☰</span></label>
+    <div class="topbar-menu__panel">
+      {nav}
+      <a class="nav-link" href="/settings">Settings</a>
+    </div>
+  </div>
   {toggle}
 </header>"#,
         lead = lead,
         center = center,
         actions = actions,
+        nav = nav,
         toggle = theme_toggle(),
     )
 }
@@ -3518,6 +3547,71 @@ mod tests {
         assert!(
             html[row_start..row_end].contains("class=\"term-create__pane\""),
             "New shell must share the pane strip's row: {html}"
+        );
+    }
+
+    /// Everything in the bar that navigates away from this page — the section
+    /// tabs and the Settings link — lives inside one menu. The theme toggle
+    /// is not in it: it changes this page rather than leaving it, and stays
+    /// reachable in one press at every width.
+    #[test]
+    fn the_bars_navigation_sits_in_one_no_script_menu() {
+        let project = sample_project();
+        let html = terminal_page(&project, &[], None, &[]);
+        let menu_start = html
+            .find(r#"<div class="topbar-menu">"#)
+            .expect("no top bar menu");
+        let menu_end = html[menu_start..]
+            .find("</header>")
+            .map(|i| menu_start + i)
+            .expect("unclosed top bar");
+        let menu = &html[menu_start..menu_end];
+        assert!(
+            menu.contains("class=\"proj-tabs\"") && menu.contains(r#"href="/settings""#),
+            "the section tabs and Settings must both sit in the menu: {html}"
+        );
+        assert!(
+            !menu.contains("class=\"topbar-menu__panel\"")
+                || !menu[menu.find("class=\"topbar-menu__panel\"").unwrap()..]
+                    .contains("class=\"theme-toggle\""),
+            "the theme toggle changes this page rather than leaving it, so it stays on the bar: {html}"
+        );
+        // The open state is the checkbox's own, so the menu still works on a
+        // page whose script never loaded. A plain button plus a handler
+        // would leave it dead there.
+        assert!(
+            menu.contains(r#"<input type="checkbox" id="topbar-menu-toggle" class="topbar-menu__toggle">"#)
+                && menu.contains(r#"<label class="topbar-menu__button" for="topbar-menu-toggle""#),
+            "the menu must open from its own checkbox, not from script: {html}"
+        );
+    }
+
+    /// The menu is a menu only on a narrow screen: the stylesheet hides its
+    /// control by default and reveals it under the breakpoint, so a desktop
+    /// bar renders exactly as it did before the menu existed. `<details>`
+    /// cannot do this — a closed one has its content hidden by the browser
+    /// itself, so the wide bar would carry no navigation at all.
+    #[test]
+    fn the_bar_menu_is_flat_until_the_narrow_breakpoint() {
+        let css = include_str!("../assets/app.css");
+        let default_hidden = css
+            .find(".topbar-menu__toggle,\n.topbar-menu__button {\n  display: none;\n}")
+            .expect("the menu control must be hidden by default (wide screens)");
+        let default_panel = css
+            .find(".topbar-menu__panel {\n  display: flex;")
+            .expect("the panel must lay out inline by default (wide screens)");
+        let query = css
+            .find("@media (max-width: 720px) {")
+            .expect("no narrow-screen block");
+        assert!(
+            default_hidden < query && default_panel < query,
+            "the wide-screen defaults must come before the narrow override, or it wins everywhere"
+        );
+        let narrow = &css[query..];
+        assert!(
+            narrow.contains(".topbar-menu__panel {\n    display: none;")
+                && narrow.contains(".topbar-menu__toggle:checked ~ .topbar-menu__panel"),
+            "under the breakpoint the panel must be closed until the toggle is checked"
         );
     }
 

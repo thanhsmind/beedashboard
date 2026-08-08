@@ -58,10 +58,107 @@ main.fg-page {
   white-space: nowrap;
 }
 .nav-link {
-  margin-left: auto;
   font-family: var(--type-body-sm-font);
   font-size: var(--type-body-sm-size);
   color: var(--color-text-muted);
+}
+/* ── Top bar menu ────────────────────────────────────────────────────
+   One group holds everything that navigates away from this page — the
+   project's section tabs and the Settings link. On a wide screen it is
+   not a menu at all: the control is hidden and the panel lays out
+   inline, so the bar reads exactly as it did before it existed. The
+   `auto` margin lives here rather than on `.nav-link` so the whole
+   group, not just Settings, is what gets pushed to the right edge.
+
+   The open state is a checkbox, not a `<details>`: a closed `<details>`
+   has its content hidden by the browser (`::details-content`), which no
+   `display` rule here overrides, so the wide bar came out with no
+   navigation at all. A checkbox leaves the panel an ordinary element
+   that these rules alone decide about. */
+.topbar-menu {
+  margin-left: auto;
+}
+.topbar-menu__toggle,
+.topbar-menu__button {
+  display: none;
+}
+.topbar-menu__panel {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+/* The control's text label is for screen readers; sighted users get the
+   glyph beside it. */
+.topbar-menu__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+/* Below the narrow breakpoint the summary becomes the only visible
+   control and the panel drops full-width under the bar rather than
+   sliding in from a side: the bar is already the full width, so the
+   panel that belongs to it starts where it ends. `absolute` inside the
+   sticky bar keeps it pinned to the bar while the page scrolls under. */
+@media (max-width: 720px) {
+  .topbar-menu__button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border: var(--border-width-hairline) solid var(--color-border);
+    border-radius: var(--btn-radius);
+    color: var(--color-text);
+    font-size: var(--type-ui-size);
+    cursor: pointer;
+  }
+  .topbar-menu__toggle:focus-visible + .topbar-menu__button,
+  .topbar-menu__toggle:checked + .topbar-menu__button {
+    background: var(--color-surface-hover);
+  }
+  .topbar-menu__panel {
+    display: none;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    z-index: var(--z-nav);
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: var(--space-2) var(--space-5);
+    border-bottom: var(--border-width-hairline) solid var(--color-border);
+    background: var(--color-surface-raised);
+    box-shadow: 0 4px 12px rgb(0 0 0 / 0.35);
+  }
+  .topbar-menu__toggle:checked ~ .topbar-menu__panel {
+    display: flex;
+  }
+  /* Every row is a full-width touch target, and the active section keeps
+     the underline it carries on the bar — turned into a left rule, which
+     is what reads as "you are here" in a vertical list. */
+  .topbar-menu__panel > .proj-tabs {
+    flex-direction: column;
+    gap: 0;
+  }
+  .topbar-menu__panel .proj-tab,
+  .topbar-menu__panel .nav-link {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 var(--space-2);
+    border-bottom: 0;
+    border-left: 2px solid transparent;
+  }
+  .topbar-menu__panel .proj-tab--active {
+    border-bottom: 0;
+    border-left-color: var(--color-action);
+  }
 }
 .theme-toggle {
   margin-left: var(--space-3);

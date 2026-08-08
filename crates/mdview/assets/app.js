@@ -1196,4 +1196,22 @@
       });
     });
   })();
+  // Top bar menu: the checkbox already owns open/closed, so this only adds
+  // the two things the markup has no opinion about — Escape, and a press
+  // outside the panel. Without this script the menu still opens and closes
+  // from its own label.
+  (function () {
+    var menu = document.querySelector(".topbar-menu");
+    var toggle = menu && menu.querySelector(".topbar-menu__toggle");
+    if (!toggle) return;
+    function close() {
+      if (toggle.checked) toggle.checked = false;
+    }
+    document.addEventListener("click", function (e) {
+      if (toggle.checked && !menu.contains(e.target)) close();
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") close();
+    });
+  })();
 })();
