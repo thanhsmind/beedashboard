@@ -477,14 +477,15 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    the card is too narrow to hold both groups. */
 .term-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: 0; }
 .term-keys { display: flex; flex-wrap: wrap; gap: var(--space-1); }
-.term-keys button { padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
-/* D5: the four screen-moving arrows are pressed repeatedly while reading a
-   screen, often with a thumb, so they get a real 44px target with the glyph
-   at body size. They are picked out by their own `--move` modifier rather
-   than by position: once both groups share one row, "the direct child of
-   `.term-controls`" reaches the named keys too. Enter, Esc and Tab are
-   pressed occasionally and deliberately and keep the smaller box. */
-.term-keys--move button { min-width: 44px; min-height: 44px; font-size: var(--type-body-size); }
+.term-keys button { padding: var(--space-1) var(--space-2); min-height: 44px; border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); }
+/* D5, amended 2026-08-08: every key in the row stands 44px tall so the row
+   reads as one control band — Enter, Esc and Tab match the arrows. The
+   arrows alone keep the 44px minimum WIDTH and the body-size glyph (pressed
+   repeatedly, often with a thumb); the named keys keep their padding-driven
+   width. The `--move` modifier picks the arrows out rather than position:
+   once both groups share one row, "the direct child of `.term-controls`"
+   reaches the named keys too. */
+.term-keys--move button { min-width: 44px; font-size: var(--type-body-size); }
 /* The two screen-moving controls belong to the screen, not to the keys that
    type into the pane, so they ride on it: centred, wholly inside its lower
    edge rather than straddling it. `sticky` keeps them reachable while a tall
@@ -3854,23 +3855,26 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"), "{html}");
     }
 
-    /// D5 (terminal-pane-scope): the four screen-moving arrows are pressed
-    /// repeatedly while reading a screen, often with a thumb — they get a
-    /// 44px minimum box with the glyph at body size. Now that they share one
-    /// row with the named keys, they are picked out by their own
-    /// `.term-keys--move` modifier rather than by being a direct child of
-    /// `.term-controls`, which since the merge reaches the named keys too.
-    /// The named keys, the scroll pair (`.term-scroll`) and the reply buttons
+    /// D5 (terminal-pane-scope), amended 2026-08-08 (term-key-height):
+    /// every key in the row — Enter, Esc, Tab and the arrows — stands 44px
+    /// tall, so the row reads as one band. The arrows alone keep the 44px
+    /// minimum WIDTH and the body-size glyph (pressed repeatedly, often
+    /// with a thumb); they are picked out by their own `.term-keys--move`
+    /// modifier rather than by being a direct child of `.term-controls`,
+    /// which since the merge reaches the named keys too. The scroll pair
+    /// (`.term-scroll`) and the reply buttons
     /// (`.term-reply__send`/`.term-reply__stage`) carry no such rule.
     #[test]
-    fn terminal_arrow_keys_get_a_larger_minimum_box_than_the_named_keys_row() {
+    fn terminal_key_rows_share_one_height_and_arrows_keep_the_wider_box() {
         let project = sample_project();
         let html = terminal_page(&project, &[], None, &[]);
         assert!(
-            html.contains(
-                ".term-keys--move button { min-width: 44px; min-height: 44px; font-size: var(--type-body-size); }"
-            ),
-            "the arrow group must carry a 44px minimum box at body-size type: {html}"
+            html.contains(".term-keys button { padding: var(--space-1) var(--space-2); min-height: 44px;"),
+            "the whole key row must stand 44px tall: {html}"
+        );
+        assert!(
+            html.contains(".term-keys--move button { min-width: 44px; font-size: var(--type-body-size); }"),
+            "the arrow group must keep its 44px minimum width at body-size type: {html}"
         );
         // The markup carrying that modifier is pinned by the route test
         // `terminal_page_renders_the_reply_bar_and_key_buttons`; this fixture
