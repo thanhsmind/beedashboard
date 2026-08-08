@@ -164,10 +164,13 @@ anyone who can reach the daemon.
   mdview — the project list, a project's markdown pages, search, the
   settings page itself, and the plain status/configuration views all remain
   reachable to anyone who can reach the server, exactly as before this
-  feature. The project list in particular reveals no agent name and no
-  working directory to any visitor; opening it, or opening the Unassigned
-  agents page's presence marker, never adds anything to the registered
-  project list either.
+  feature. The project list reveals no agent name and no working directory to
+  any visitor; opening it, or opening the Unassigned agents page's presence
+  marker, never adds anything to the registered project list either. It does,
+  however, mark each project row with its own sessions — their state and the
+  program each runs — and that marking follows this switch: off, the list
+  behaves as though the feature did not exist and asks this host nothing (see
+  the Web interface spec).
 - **Off answers:** a page route (the Terminal tab, the Transcript tab, the
   Unassigned agents page) gets mdview's ordinary not-found page — the same
   page an unregistered project id gets, never a blank or typeless response.

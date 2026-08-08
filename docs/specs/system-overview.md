@@ -44,7 +44,9 @@ launcher — CLI, MCP, future desktop — coordinates through `~/.mdview/daemon.
   Light/Dark color scheme the operator can toggle (OS-default on first load,
   remembered per browser). Scheme swaps only the color layer; the interface is
   fully self-contained (no external appearance assets). See the Appearance spec.
-- **Web interface** — a project list, and per-file pages with a file tree,
+- **Web interface** — a project list that registers a folder, marks each
+  project with the coding sessions running inside it, and links into per-file
+  pages with a file tree,
   themed rendering, and live reload. Non-markdown assets (images referenced
   from a rendered file, or any other file inside a registered project) are
   served from disk only when the file's extension is on a fixed, short

@@ -39,7 +39,9 @@ content itself.
 | 5 | Chapter focus (file pages) | Which single folder the sidebar is currently showing | a folder within the project; starts at the viewed file's folder |
 | 6 | Chapter breadcrumb | The ancestor path of the focused folder, each segment selectable | project root → … → focused folder |
 | 7 | File label | How a file is named in the sidebar | its title (first H1); the file name when it has no title |
-| 8 | Project card (project list) | One registered project | a card linking to the project — its name, indexed markdown file count, and when it was last seen (never the filesystem path, per R5) — with a delete control that unregisters it |
+| 8 | Project row (project list) | One registered project | a row linking to the project — its name, indexed markdown file count, and when it was last seen (never the filesystem path, per R5) — with a delete control that unregisters it. A worktree of a registered project sits indented under it, labelled by its branch alone |
+| 8a | Session marker (project row) | One coding session running inside that project | a small marker per session, carrying its state and the program it is running; absent entirely when the terminal switch is off (per R6) |
+| 8b | Add-project field | Where the operator names a folder to register | one absolute folder path; the project's name is taken from the folder's own name |
 | 9 | Reading breadcrumb (file pages) | Orientation trail above the article, distinct from the chapter sidebar's zoom breadcrumb | project name → each path segment of the file, in order; segments are not independently clickable (orientation only) |
 | 10 | "On this page" (TOC) | Right-hand list of the current file's headings (levels 1-4) | one entry per heading, indented by level, linking to that heading |
 | 11 | "Linked from" (backlinks) | Right-hand list of other files that link to the one being viewed | empty when nothing links here; hidden entirely when both this and the TOC are empty |
@@ -50,21 +52,41 @@ content itself.
 ### Project list
 
 - **Triggers:** opening `/` or clicking the brand from anywhere.
-- **What it shows:** one card per registered project (a responsive grid, so it
-  wraps cleanly on phones/tablets). A card links to the project's default file
-  and shows its name, file count, and last-seen time — never the filesystem
-  path (per R5). Each card carries a delete control (top-right) that
-  unregisters the project.
+- **What it shows:** one row per registered project, every name on the same
+  left edge. A row links to the project's default file and shows its name,
+  file count, and last-seen time — never the filesystem path (per R5). Each
+  row carries a delete control that unregisters the project. A worktree of a
+  registered project is indented under the project it branches from and
+  labelled by its branch alone, so one repository with three checkouts reads
+  as one project with three branches rather than four unrelated entries; a
+  worktree whose parent is not registered stands on its own under its full
+  name.
+- **Which sessions are running where:** each row also carries one marker per
+  coding session whose folder sits inside that project, each showing the
+  session's state and the program it runs, and each opening that session's
+  own terminal view. Every session in the project is marked, whatever its
+  state — a stuck one is the one most worth seeing. A worktree row marks its
+  own sessions, not its parent's. The markers are drawn when the page loads
+  and do not move on their own; seeing a change means reloading. When the
+  terminal switch is off, or the session host cannot be reached or does not
+  answer promptly, rows render exactly as they otherwise would — no markers,
+  no error, no empty space (per R6).
+- **Add a project:** the list carries a single field for a folder path. Naming
+  a folder registers it and returns to the refreshed list, with the project
+  taking the folder's own name. Refusals — a path that is not absolute, does
+  not exist, is not a folder, is already registered, sits in or around a
+  protected folder, or holds too much to index — are each reported on the page
+  in fixed words, and the list is never left silently unchanged (per R7).
 - **Unassigned agents card:** when both the terminal switch and the
   Unassigned group's own switch are on (see the Agent terminal spec), one
-  extra card, "Unassigned agents," sits alongside the project cards and
+  extra card, "Unassigned agents," sits below the project rows and
   opens a page listing coding agents that fall outside every registered
   project's root. The card itself is a bare presence marker — it carries no
   agent name and no working directory. With either switch off, the card
   does not appear at all — showing it while the group itself is switched
   off would disclose that this host has a host-wide pane group configured,
   with nothing left to gate that disclosure.
-- **Delete / unregister:** activating a card's delete control asks the operator
+- **Delete / unregister:** activating a row's delete control asks the operator
   to confirm, then removes the project from the registry and returns to the
   list. This removes only the registry entry and its index — **the files on
   disk are untouched**, and re-registering re-scans them. The endpoint is
@@ -212,6 +234,28 @@ consumes it.
   supported mode (settings.md R3), so the operator's local path is treated
   the same way as any other local-only detail: never exposed to whoever can
   reach the page.
+- **R6 (per D d356af5d, D bc3bf3bb, D 7810e5ee).** The session markers on a
+  project row obey the terminal switch and nothing else: switch off, the page
+  behaves as though the feature did not exist, and it does not ask the session
+  host anything. Switch on, a marker names the session's state and the program
+  it runs — never the agent's own generated identifier, and never a folder
+  path, so R5 still holds. The markers are read once per page load; the page
+  never polls, so there is nothing to keep open. The reading is bounded: a
+  session host that is down, or that accepts and then does not answer, leaves
+  the rows plain rather than delaying the page.
+- **R7 (per D 6c41879e, D 4fcbe3fb).** Registering a folder from the page is
+  open to whoever can reach it, exactly as unregistering is (R5's reasoning) —
+  there is no list of permitted locations and no restriction to the local
+  machine. Three refusals bound it. A folder that is, sits inside, or contains
+  one of the system's protected locations — credential and configuration
+  folders, and the machine-wide roots that hold them — is refused, so the home
+  folder itself and the filesystem root are both refused while an ordinary
+  folder inside the home folder registers normally. A folder holding more
+  markdown than a registration is meant to take on, or taking too long to
+  survey, is refused before anything is indexed. A folder already registered is
+  refused as a duplicate, recognised through the folder's real location, so a
+  shortcut to it or a trailing separator is caught too. Every refusal names its
+  reason in fixed words and never repeats back what the operator typed.
 
 ## Edge Cases Settled
 
@@ -249,6 +293,12 @@ snapshot under `docs/specs/visuals/web-interface/` is an open item.
   (chapter sidebar: ships the file list as JSON + focus data), `project_list_page`,
   `breadcrumb()` (reading breadcrumb), `right_panel()` (TOC + backlinks), page
   functions.
+- `crates/mdview/src/server.rs` — `index_page` (one timeout-bounded herdr
+  snapshot behind the terminal switch, matched per project through
+  `paths_boundary::Boundary` + `project_panes`), `register_project` and its
+  `validate_register_path` guard chain (`paths_boundary::is_denied_root`, the
+  canonical duplicate lookup, `indexer::bounded_scan_markdown_files`), all of
+  it inside one `spawn_blocking`.
 - `crates/mdview/assets/app.js` — chapter renderer (breadcrumb zoom in/out,
   files by title), TOC scrollspy (`IntersectionObserver` over the article's
   headings, toggles the matching TOC link's active state).
