@@ -2581,6 +2581,17 @@ async fn unassigned_terminal_keys(
 /// unknown feature name — none of its cells live in any bucket, none
 /// archived, and it never shipped — resolves to a clean not-found, same as
 /// an unknown cell id.
+///
+/// feature-titles D2: the Terminal tab's own panes come from the exact same
+/// D2-boundary-filtered list `terminal_page_inner` computes — `herdr`'s own
+/// snapshot, narrowed by `project_panes` to this project's root — fetched
+/// fresh here rather than carried on `BeeSnapshot` (the `.bee/` read has no
+/// idea herdr even exists). Anything that would keep that list from being
+/// trustworthy — the D7 `terminal.enabled` switch off, or a silent/errored
+/// herdr socket — folds to the same empty `panes` list `project_panes`'s own
+/// "fail closed to zero, not a crash" rule already uses elsewhere; this
+/// route adds no new write endpoint of its own, only a read of the same
+/// list the terminal family's own routes already serve.
 async fn bee_feature_detail(
     State(st): State<AppState>,
     Path((id, feature)): Path<(String, String)>,
@@ -2683,6 +2694,23 @@ async fn bee_feature_detail(
         .cloned()
         .collect();
 
+    let docs = snapshot.feature_docs.get(&feature);
+
+    // feature-titles D2: this project's own terminal panes, the same
+    // fail-closed-to-empty list `terminal_page_inner` builds — the switch
+    // off or a silent herdr both fold to an empty `panes`, never a crash
+    // and never a laxer check than the terminal family's own routes apply.
+    let panes: Vec<views::TerminalPaneView> = if terminal_family_enabled(&st) {
+        match st.herdr.snapshot().await {
+            Ok(herdr_snapshot) => mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+                .map(|boundary| project_panes(&herdr_snapshot, &boundary))
+                .unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
     Html(views::bee_feature_page(
         &project,
         &feature,
@@ -2693,8 +2721,9 @@ async fn bee_feature_detail(
         &snapshot.worktrees,
         &snapshot.workspaces,
         &decisions,
-        &snapshot.running_workers,
+        &panes,
         gates,
+        docs,
     ))
     .into_response()
 }
@@ -5028,13 +5057,13 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(body.contains(r#"<div class="bee-tabs" data-tabs="1">"#), "tab shell container missing: {body}");
-        for id in ["bee-tab-activity", "bee-tab-todos", "bee-tab-subagents"] {
+        for id in ["bee-tab-activity", "bee-tab-todos", "bee-tab-terminal"] {
             assert!(
                 body.contains(&format!(r#"id="{id}""#)),
                 "tab radio control {id} missing: {body}"
             );
         }
-        for (id, label) in [("bee-tab-activity", "Activity"), ("bee-tab-todos", "Todos"), ("bee-tab-subagents", "Sub-agents")] {
+        for (id, label) in [("bee-tab-activity", "Activity"), ("bee-tab-todos", "Todos"), ("bee-tab-terminal", "Terminal")] {
             assert!(
                 body.contains(&format!(r#"<label class="bee-tabs__label" for="{id}">{label}</label>"#)),
                 "tab nav label {label} missing: {body}"
@@ -5091,7 +5120,7 @@ mod bee_route_tests {
     /// archived capped ones. The feature page must still render them and
     /// its header must read "Closed" with the done count, never the "Not
     /// shipped yet" banner a feature with truly zero cells would get — and
-    /// every tab (Todos, Sub-agents) and the worktree chip must be as fully
+    /// every tab (Todos, Terminal) and the worktree chip must be as fully
     /// populated as a live feature's, per feature-hub-2's own "archived
     /// features fully populated" requirement.
     #[tokio::test]
@@ -5145,8 +5174,10 @@ mod bee_route_tests {
             body.contains("fg-chip--success\">Merged</span>"),
             "a closed feature with no active worktree grant but a leftover workspace record naming its own branch must read Merged: {body}"
         );
-        assert!(body.contains("bee-subagents"), "sub-agents tab must be populated for a closed feature: {body}");
-        assert!(body.contains("2 cells capped"), "sub-agent capped count missing: {body}");
+        assert!(
+            body.contains("No terminal panes running for this project right now."),
+            "the Terminal tab must render its honest empty state (no herdr panes seeded) for a closed feature: {body}"
+        );
         assert!(
             body.contains("bee-todo--done"),
             "both archived cells must render struck-through on the Todos tab: {body}"
@@ -5265,83 +5296,66 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (happy, D2) The Sub-agents tab groups by worker nickname: a worker
-    /// touching two of this feature's cells (one capped, one still
-    /// claimed) reports its own capped-cell count, and a live session
-    /// sharing its nickname carries a heartbeat marker.
+    /// (happy, feature-titles D2) The Terminal tab lists this project's
+    /// own terminal panes — the same D2-boundary-filtered list
+    /// `terminal_page` itself renders — each one linking to its own live
+    /// page (`terminal_page_for_pane`'s route).
     #[tokio::test]
-    async fn feature_detail_subagents_tab_shows_capped_count_and_live_heartbeat() {
-        let root = fresh_root("subagents-happy");
-        write(&root, ".bee/cells/sa-done.json", &cell_json("sa-done", "capped", &[], "kf1-worker"));
-        write(&root, ".bee/cells/sa-claimed.json", &cell_json("sa-claimed", "claimed", &[], "kf1-worker"));
+    async fn feature_detail_terminal_tab_lists_and_links_project_panes() {
+        let dir = fresh_root("terminal-tab-happy-config");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-tab-happy");
         write(
             &root,
-            ".bee/state.json",
-            &state_json_with_workers(&worker_json("kf1-worker", "sa-claimed", "generation", "running")),
-        );
-        write(
-            &root,
-            ".bee/sessions/kf1-worker.json",
-            &session_json("kf1-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
+            ".bee/cells/a.json",
+            &feature_cell_json("tt-1", "terminal-tab-feature", "open", None, None),
         );
 
-        let st = build_state();
-        let project = register(&st, &root, "subagents-happy");
-        // `cell_json` fixes its own feature at "demo" (matches `state.json`'s
-        // own active feature above, same precedent `running_worker_with_live_session_...` uses).
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/demo", project.id)).await;
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let pane = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "terminal-tab-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/terminal-tab-feature", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("bee-subagents"), "sub-agents tab body missing: {body}");
-        assert!(body.contains("kf1-worker"), "worker nickname missing: {body}");
-        assert!(body.contains("1 cell capped"), "capped-cell count missing: {body}");
         assert!(
-            body.contains("fg-chip fg-chip--success bee-subagent__live\">live ·"),
-            "the live heartbeat marker is missing: {body}"
+            body.contains(&format!("href=\"/p/{}/_terminal/pane/{}\"", project.id, pane.pane_id)),
+            "the Terminal tab must link this project's own pane to its live page: {body}"
         );
 
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (edge, D2) A feature whose cells all carry no `trace.worker` at all
-    /// renders an honest empty Sub-agents state, never a guessed nickname.
+    /// (edge, feature-titles D2) With no terminal panes for this project's
+    /// root (here, the terminal family switch is off, the same fail-closed
+    /// path a silent herdr or a genuinely idle project would also take),
+    /// the Terminal tab renders an honest empty state, never a guessed pane
+    /// or a blank body.
     #[tokio::test]
-    async fn feature_detail_subagents_tab_honest_empty_state_when_no_worker_named() {
-        let root = fresh_root("subagents-empty");
+    async fn feature_detail_terminal_tab_honest_empty_state_when_no_panes() {
+        let root = fresh_root("terminal-tab-empty");
         write(
             &root,
-            ".bee/cells/no-worker.json",
-            r#"{
-                "id": "no-worker",
-                "feature": "workerless-feature",
-                "lane": "standard",
-                "title": "Cell no-worker",
-                "action": "do the thing",
-                "verify": "cargo test",
-                "files": [],
-                "read_first": [],
-                "deps": [],
-                "decisions": [],
-                "must_haves": {},
-                "behavior_change": false,
-                "change_class": "behavior",
-                "pbi": null,
-                "status": "open",
-                "tier": "generation",
-                "trace": {}
-            }"#,
+            ".bee/cells/a.json",
+            &feature_cell_json("tt-2", "terminal-empty-feature", "open", None, None),
         );
 
         let st = build_state();
-        let project = register(&st, &root, "subagents-empty");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/workerless-feature", project.id)).await;
+        let project = register(&st, &root, "terminal-tab-empty");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/terminal-empty-feature", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
         assert!(
-            body.contains("No sub-agents recorded for this feature."),
-            "the empty Sub-agents state must say so honestly: {body}"
+            body.contains("No terminal panes running for this project right now."),
+            "the empty Terminal state must say so honestly: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -5467,7 +5481,7 @@ mod bee_route_tests {
         );
         assert!(body.contains("No activity recorded yet."), "{body}");
         assert!(body.contains("No cells recorded for this feature."), "{body}");
-        assert!(body.contains("No sub-agents recorded for this feature."), "{body}");
+        assert!(body.contains("No terminal panes running for this project right now."), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6595,6 +6609,189 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    // ── feature-titles: human titles + descriptions from CONTEXT.md, docs
+    // links on the feature detail page — see `mdview_core::bee::read_feature_docs`
+    // and its own doc comment. ──────
+
+    /// A feature whose `docs/history/<feature>/CONTEXT.md` exists renders
+    /// its human title (H1, " — Context" suffix stripped) and its
+    /// "## Feature Boundary" paragraph on both the hub card and the detail
+    /// header, and the detail page's own docs row links `CONTEXT.md` and
+    /// `plan.md` (both present in this fixture) through the viewer's own
+    /// document routes, never a bare filesystem path.
+    #[tokio::test]
+    async fn feature_with_context_md_renders_title_description_and_docs_links() {
+        let root = fresh_root("feature-docs-present");
+        write(
+            &root,
+            "docs/history/demo/CONTEXT.md",
+            "# Demo Feature — Context\n\n## Feature Boundary\n\nOne clamped line describing the demo feature.\n\n## Locked Decisions\n",
+        );
+        write(&root, "docs/history/demo/plan.md", "the plan body");
+        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#);
+        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "demo", "open", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-docs-present");
+        let app = router(st);
+
+        let hub_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(hub_resp.status(), StatusCode::OK);
+        let hub_body = body_string(hub_resp).await;
+        assert!(hub_body.contains("Demo Feature"), "hub card must show the human title: {hub_body}");
+        assert!(
+            hub_body.contains("One clamped line describing the demo feature."),
+            "hub card must show the boundary description: {hub_body}"
+        );
+        assert!(
+            hub_body.contains(r#"class="bee-hub__slug">demo<"#),
+            "hub card must show the slug as a small muted subtitle: {hub_body}"
+        );
+
+        let detail_resp = get(app, &format!("/p/{}/_bee/feature/demo", project.id)).await;
+        assert_eq!(detail_resp.status(), StatusCode::OK);
+        let detail_body = body_string(detail_resp).await;
+        assert!(
+            detail_body.contains("<h2 class=\"fg-pagehead__title\">Demo Feature</h2>"),
+            "detail header must show the human title big: {detail_body}"
+        );
+        assert!(
+            detail_body.contains(r#"class="bee-detail-slug">demo<"#),
+            "detail header must show the slug subtitle under the title: {detail_body}"
+        );
+        assert!(
+            detail_body.contains("One clamped line describing the demo feature."),
+            "detail header must show the boundary description: {detail_body}"
+        );
+        assert!(
+            detail_body.contains(&format!(
+                r#"href="/p/{}/docs/history/demo/CONTEXT.md">CONTEXT.md</a>"#,
+                project.id
+            )),
+            "docs row must link CONTEXT.md through the viewer's own document route: {detail_body}"
+        );
+        assert!(
+            detail_body.contains(&format!(r#"href="/p/{}/docs/history/demo/plan.md">plan.md</a>"#, project.id)),
+            "docs row must link plan.md through the viewer's own document route when it exists: {detail_body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A feature with no `docs/history/<feature>/CONTEXT.md` renders
+    /// slug-only on both the hub card and the detail header, and the
+    /// detail page carries no docs row at all — the reader never guesses a
+    /// title or fabricates a link to a file that does not exist.
+    #[tokio::test]
+    async fn feature_without_context_md_falls_back_to_slug_with_no_docs_row() {
+        let root = fresh_root("feature-docs-absent");
+        write(&root, ".bee/state.json", r#"{"feature":"no-docs-feature","phase":"exploring","mode":"standard"}"#);
+        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "no-docs-feature", "open", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-docs-absent");
+        let app = router(st);
+
+        let hub_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(hub_resp.status(), StatusCode::OK);
+        let hub_body = body_string(hub_resp).await;
+        assert!(hub_body.contains("no-docs-feature"), "hub card must still show the slug: {hub_body}");
+        assert!(
+            !hub_body.contains(r#"class="bee-hub__slug""#),
+            "a title-less card must never render a redundant slug subtitle: {hub_body}"
+        );
+
+        let detail_resp = get(app, &format!("/p/{}/_bee/feature/no-docs-feature", project.id)).await;
+        assert_eq!(detail_resp.status(), StatusCode::OK);
+        let detail_body = body_string(detail_resp).await;
+        assert!(
+            detail_body.contains("<h2 class=\"fg-pagehead__title\">no-docs-feature</h2>"),
+            "detail header must fall back to the slug: {detail_body}"
+        );
+        assert!(
+            !detail_body.contains(r#"class="bee-detail-docs""#),
+            "a feature with no CONTEXT.md must render no docs row: {detail_body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An absolute path embedded in a `CONTEXT.md` boundary paragraph must
+    /// never survive into the hub card or the detail header verbatim — the
+    /// same scrub every other free-text field in the snapshot already gets
+    /// (`mdview_core::bee::scrub_paths`), proven here against the reader
+    /// this cell adds. Named against the fixture's own root and
+    /// `std::env::temp_dir()`, per
+    /// `docs/history/learnings/20260805-toothless-security-assertions.md`,
+    /// never a production literal like `/home/`.
+    #[tokio::test]
+    async fn feature_docs_never_leak_an_absolute_path_from_context_md() {
+        let root = fresh_root("feature-docs-abs-leak");
+        let root_str = root.to_string_lossy().into_owned();
+        let outside_abs = std::env::temp_dir()
+            .join("mdview-server-feature-docs-outside.rs")
+            .to_string_lossy()
+            .into_owned();
+        write(
+            &root,
+            "docs/history/demo/CONTEXT.md",
+            &format!(
+                "# Demo — Context\n\n## Feature Boundary\n\nSee {root_str}/src/inside.rs and {outside_abs} for detail.\n"
+            ),
+        );
+        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#);
+        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "demo", "open", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-docs-abs-leak");
+        let app = router(st);
+
+        let hub_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        let hub_body = body_string(hub_resp).await;
+        assert!(!hub_body.contains(&root_str), "hub card leaked the fixture root: {hub_body}");
+        assert!(!hub_body.contains(&outside_abs), "hub card leaked an absolute path outside the root: {hub_body}");
+
+        let detail_resp = get(app, &format!("/p/{}/_bee/feature/demo", project.id)).await;
+        let detail_body = body_string(detail_resp).await;
+        assert!(!detail_body.contains(&root_str), "detail header leaked the fixture root: {detail_body}");
+        assert!(
+            !detail_body.contains(&outside_abs),
+            "detail header leaked an absolute path outside the root: {detail_body}"
+        );
+        assert!(detail_body.contains("src/inside.rs"), "the in-root path must survive relativized: {detail_body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (read-only) Reading `docs/history/<feature>/CONTEXT.md` and
+    /// `plan.md` for the hub and detail pages changes nothing on disk —
+    /// same D4 guarantee every other reader in this module already proves.
+    #[tokio::test]
+    async fn feature_docs_read_never_writes_the_fixtures_tree() {
+        let root = fresh_root("feature-docs-read-only");
+        write(
+            &root,
+            "docs/history/demo/CONTEXT.md",
+            "# Demo — Context\n\n## Feature Boundary\n\nBoundary text.\n",
+        );
+        write(&root, "docs/history/demo/plan.md", "plan body");
+        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#);
+        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "demo", "open", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-docs-read-only");
+        let before = snapshot_tree(&root);
+
+        let app = router(st);
+        let _ = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        let _ = get(app, &format!("/p/{}/_bee/feature/demo", project.id)).await;
+
+        let after = snapshot_tree(&root);
+        assert_eq!(before, after, "reading feature docs must never write to the fixture tree");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     // ── bee-board-ux-3: "running now" — bbp-16 folded this into the
     // "Working on now" card's own "Running now" subsection
     // (`bee_running_workers_section`, `views.rs`); board-declutter retires
@@ -6602,10 +6799,12 @@ mod bee_route_tests {
     // no longer renders a live worker's cell link, its discrepancy note, or
     // a flagged-unknown-cell note anywhere — the tests that pinned that
     // row-level markup retire with it. `snapshot.running_workers` itself
-    // (`mdview_core::bee`) is untouched and still feeds the feature detail
-    // page's own Sub-agents tab; what survives below proves the D7 buckets
-    // stay unaffected by worker presence and that reading a fixture with
-    // live workers/sessions is still read-only and leak-free. ──────
+    // (`mdview_core::bee`) is untouched — feature-titles retired its last
+    // reader, the feature detail page's own Sub-agents tab, replacing it
+    // with a Terminal tab that reads live terminal panes instead (D2); what
+    // survives below proves the D7 buckets stay unaffected by worker
+    // presence and that reading a fixture with live workers/sessions is
+    // still read-only and leak-free. ──────
 
     fn state_json_with_workers(workers_json: &str) -> String {
         format!(r#"{{"phase":"exploring","feature":"demo","mode":"standard","workers":[{workers_json}]}}"#)

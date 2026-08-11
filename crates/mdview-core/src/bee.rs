@@ -848,6 +848,14 @@ pub struct BeeSnapshot {
     /// see [`promote_proposals_path`] — is never looked up and is simply
     /// absent as a key here, never a false `false`.
     pub promote_proposals: std::collections::BTreeMap<String, bool>,
+    /// A feature's own human-readable docs (feature-titles), read from
+    /// `docs/history/<feature>/CONTEXT.md` when present — keyed the same
+    /// way as `promote_proposals` (every distinct feature name this
+    /// snapshot has seen, deduplicated before any of them is joined onto a
+    /// filesystem path). A feature with no `CONTEXT.md`, or whose name
+    /// fails [`validate_feature_name`], is simply absent as a key here —
+    /// the caller's own slug-only fallback, never a guessed title.
+    pub feature_docs: std::collections::BTreeMap<String, BeeFeatureDocs>,
     /// `.bee/review-candidates.jsonl` joined against `.bee/reviews/*.json`
     /// (bbp-13) — see [`BeeReview`] and [`compute_review`].
     pub review: BeeReview,
@@ -900,6 +908,7 @@ impl BeeSnapshot {
             handoff: None,
             config: None,
             promote_proposals: std::collections::BTreeMap::new(),
+            feature_docs: std::collections::BTreeMap::new(),
             review: BeeReview::default(),
             capture_queue: BeeCaptureQueue::default(),
             scribing_debt: Vec::new(),
@@ -1013,6 +1022,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     for cell in &all_cells {
         feature_names.insert(cell.feature.as_str());
     }
+    let feature_docs = read_feature_docs_all(root, feature_names.iter().copied());
     let promote_proposals = read_promote_proposals(root, feature_names.into_iter());
 
     // bbp-13: review join, capture queue, scribing debt — see the
@@ -1060,6 +1070,7 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         handoff,
         config,
         promote_proposals,
+        feature_docs,
         review,
         capture_queue,
         scribing_debt,
@@ -2654,6 +2665,116 @@ fn read_promote_proposals<'a>(
         }
     }
     out
+}
+
+/// A feature's own human-readable docs (feature-titles), read from
+/// `docs/history/<feature>/CONTEXT.md` when present — the H1 title (its
+/// own trailing " — Context" suffix stripped, per that file's own
+/// convention), the first paragraph under "## Feature Boundary" as a
+/// one-line description, and whether a sibling `plan.md` exists. Each
+/// field is `None`/`false` on its own when its own source has nothing to
+/// report — a `CONTEXT.md` with no H1, or no "## Feature Boundary"
+/// section, still reports whatever it does have, never a guessed
+/// substitute. See [`BeeSnapshot::feature_docs`].
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct BeeFeatureDocs {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub has_plan: bool,
+}
+
+/// Join `feature` onto its docs-history directory under `root` — the ONLY
+/// place [`read_feature_docs`] joins a `feature` string onto a filesystem
+/// path. `None`, building no [`PathBuf`] at all, when [`validate_feature_name`]
+/// rejects `feature`, matching [`promote_proposals_path`]'s own guard.
+fn feature_docs_dir(root: &Path, feature: &str) -> Option<PathBuf> {
+    if !validate_feature_name(feature) {
+        return None;
+    }
+    Some(root.join("docs").join("history").join(feature))
+}
+
+/// One feature's own `CONTEXT.md`, read and extracted (feature-titles).
+/// `None` when [`feature_docs_dir`] built no path (an invalid name) or the
+/// file itself is absent/unreadable — the caller's own slug-only fallback.
+/// Read-only: [`fs::read_to_string`] and [`Path::is_file`] are the only
+/// filesystem calls this makes.
+fn read_feature_docs(root: &Path, feature: &str) -> Option<BeeFeatureDocs> {
+    let dir = feature_docs_dir(root, feature)?;
+    let text = fs::read_to_string(dir.join("CONTEXT.md")).ok()?;
+    let title = extract_context_title(&text).map(|t| scrub_paths(&t, root));
+    let description = extract_feature_boundary_paragraph(&text).map(|d| scrub_paths(&d, root));
+    let has_plan = dir.join("plan.md").is_file();
+    Some(BeeFeatureDocs { title, description, has_plan })
+}
+
+/// [`read_feature_docs`] for every distinct `feature` name in `features` —
+/// the same union [`read_promote_proposals`] already computes over, keyed
+/// identically (a name the reader could not build a path for is simply
+/// absent, never a rejected-lookup marker).
+fn read_feature_docs_all<'a>(
+    root: &Path,
+    features: impl Iterator<Item = &'a str>,
+) -> std::collections::BTreeMap<String, BeeFeatureDocs> {
+    let mut out = std::collections::BTreeMap::new();
+    for feature in features {
+        if let Some(docs) = read_feature_docs(root, feature) {
+            out.entry(feature.to_string()).or_insert(docs);
+        }
+    }
+    out
+}
+
+/// The H1 title of a `CONTEXT.md`-shaped doc, its own trailing
+/// " — Context" suffix stripped (e.g. "# Feature Hub — Context" →
+/// "Feature Hub"). Only a line starting with a bare "# " (a literal hash,
+/// then a space) counts — an "## " line's own second character is another
+/// hash, never a space, so it can never match. `None` when no such line
+/// exists, or the line has no text left after stripping the marker.
+fn extract_context_title(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("# ") {
+            let rest = rest.trim();
+            let title = rest.strip_suffix(" — Context").unwrap_or(rest).trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The first paragraph under a "## Feature Boundary" heading, its own
+/// wrapped lines joined with a single space into one logical line — this
+/// function never truncates the text itself, the caller renders it
+/// visually clamped to one line via CSS. `None` when the heading itself
+/// is absent, or nothing but blank lines/another heading follows it.
+fn extract_feature_boundary_paragraph(text: &str) -> Option<String> {
+    let mut lines = text.lines();
+    let found = lines.by_ref().any(|line| line.trim() == "## Feature Boundary");
+    if !found {
+        return None;
+    }
+    let mut paragraph: Vec<&str> = Vec::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if paragraph.is_empty() {
+                continue;
+            }
+            break;
+        }
+        if trimmed.starts_with('#') {
+            break;
+        }
+        paragraph.push(trimmed);
+    }
+    if paragraph.is_empty() {
+        None
+    } else {
+        Some(paragraph.join(" "))
+    }
 }
 
 // --- bbp-13: review join, capture queue, scribing debt ---
@@ -5682,6 +5803,122 @@ mod tests {
         let snap = read_snapshot(&root);
         assert_eq!(snap.promote_proposals.get("has-proposals"), Some(&true), "{:?}", snap.promote_proposals);
         assert_eq!(snap.promote_proposals.get("no-proposals"), Some(&false), "{:?}", snap.promote_proposals);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- feature-titles: CONTEXT.md title/description/plan reader ---
+
+    #[test]
+    fn extract_context_title_strips_the_context_suffix() {
+        assert_eq!(
+            extract_context_title("# Feature Hub — Context\n\nbody"),
+            Some("Feature Hub".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_context_title_leaves_a_plain_h1_untouched() {
+        assert_eq!(extract_context_title("# Plain Title\n\nbody"), Some("Plain Title".to_string()));
+    }
+
+    #[test]
+    fn extract_context_title_never_matches_an_h2() {
+        assert_eq!(extract_context_title("## Not An H1\n\nbody"), None);
+    }
+
+    #[test]
+    fn extract_context_title_is_none_with_no_h1_at_all() {
+        assert_eq!(extract_context_title("no heading here\njust text"), None);
+    }
+
+    #[test]
+    fn extract_feature_boundary_paragraph_joins_wrapped_lines() {
+        let text = "# Demo — Context\n\n## Feature Boundary\n\nFirst line of the\nboundary paragraph, wrapped.\n\n## Locked Decisions\n";
+        assert_eq!(
+            extract_feature_boundary_paragraph(text),
+            Some("First line of the boundary paragraph, wrapped.".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_feature_boundary_paragraph_is_none_without_the_heading() {
+        assert_eq!(extract_feature_boundary_paragraph("# Demo\n\nno boundary section here"), None);
+    }
+
+    #[test]
+    fn extract_feature_boundary_paragraph_is_none_when_heading_has_no_body() {
+        let text = "## Feature Boundary\n\n## Locked Decisions\n";
+        assert_eq!(extract_feature_boundary_paragraph(text), None);
+    }
+
+    #[test]
+    fn read_feature_docs_reports_title_description_and_plan_presence() {
+        let root = fresh_root("feature-docs-full");
+        write(
+            &root,
+            "docs/history/demo/CONTEXT.md",
+            "# Demo Feature — Context\n\n## Feature Boundary\n\nWhat this feature covers, in one paragraph.\n\n## Locked Decisions\n",
+        );
+        write(&root, "docs/history/demo/plan.md", "plan body");
+
+        let docs = read_feature_docs(&root, "demo").expect("CONTEXT.md present must read Some");
+        assert_eq!(docs.title, Some("Demo Feature".to_string()));
+        assert_eq!(docs.description, Some("What this feature covers, in one paragraph.".to_string()));
+        assert!(docs.has_plan);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_feature_docs_is_none_without_a_context_file() {
+        let root = fresh_root("feature-docs-missing");
+        assert_eq!(read_feature_docs(&root, "no-such-feature"), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_feature_docs_reports_no_plan_when_only_context_exists() {
+        let root = fresh_root("feature-docs-no-plan");
+        write(&root, "docs/history/demo/CONTEXT.md", "# Demo — Context\n\nno boundary section\n");
+        let docs = read_feature_docs(&root, "demo").expect("CONTEXT.md present must read Some");
+        assert_eq!(docs.title, Some("Demo".to_string()));
+        assert_eq!(docs.description, None);
+        assert!(!docs.has_plan);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_feature_docs_rejects_a_traversal_shaped_feature_name() {
+        let root = fresh_root("feature-docs-traversal");
+        assert_eq!(
+            read_feature_docs(&root, "../../etc"),
+            None,
+            "a rejected name must never be looked up, not even reported as absent"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn feature_docs_present_and_absent_reported_correctly_end_to_end() {
+        let root = fresh_root("feature-docs-e2e");
+        write(
+            &root,
+            "docs/history/has-docs/CONTEXT.md",
+            "# Has Docs — Context\n\n## Feature Boundary\n\nBoundary text for the fixture.\n",
+        );
+        write(&root, ".bee/state.json", r#"{"feature":"has-docs","phase":"swarming"}"#);
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("a", "no-docs", "capped", Some("2026-01-01T00:00:00Z"), Some("2026-01-02T00:00:00Z")),
+        );
+
+        let snap = read_snapshot(&root);
+        let docs = snap.feature_docs.get("has-docs").expect("has-docs must have a feature_docs entry");
+        assert_eq!(docs.title, Some("Has Docs".to_string()));
+        assert_eq!(docs.description, Some("Boundary text for the fixture.".to_string()));
+        assert!(snap.feature_docs.get("no-docs").is_none(), "a feature with no CONTEXT.md must have no entry");
 
         std::fs::remove_dir_all(&root).ok();
     }

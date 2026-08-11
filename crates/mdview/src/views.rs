@@ -5,7 +5,7 @@
 use mdview_core::bee::{
     feature_cell_span, list_archived_feature_dirs, read_archived_cells, BeeApprovedGates,
     BeeBacklog, BeeBuckets, BeeCell, BeeDecisionSummary, BeeFeaturePhase, BeePbi, BeeReview,
-    BeeReviewStatus, BeeRunningWorker, BeeShippedFeature, BeeSnapshot, BeeState, BeeWorkspace,
+    BeeReviewStatus, BeeShippedFeature, BeeSnapshot, BeeState, BeeWorkspace,
     BeeWorktree,
 };
 use mdview_core::config::Config;
@@ -1407,6 +1407,19 @@ html[data-scheme="dark"] .bee-hub-theme {{
 .bee-hub__chips {{ display: flex; flex-wrap: wrap; gap: var(--space-1); }}
 .bee-hub__progress-label {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
 .bee-hub__reason {{ font-style: italic; }}
+/* feature-titles: the card's own slug subtitle (shown only alongside a
+   human title read from CONTEXT.md — a title-less card already shows the
+   slug as its own title) and its boundary-description line, clamped to a
+   single line so no card grows taller than its neighbors. */
+.bee-hub__slug {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
+.bee-hub__desc {{ margin: 0; font-size: var(--type-body-sm-size); color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+/* feature-titles: the detail header's own title/slug/description stack,
+   and the docs row beneath the chip row linking CONTEXT.md/plan.md
+   through the viewer's own document routes. */
+.bee-detail-slug {{ margin: var(--space-1) 0 0 0; font-size: var(--type-body-sm-size); color: var(--color-text-subtle); }}
+.bee-detail-desc {{ margin: var(--space-1) 0 0 0; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }}
+.bee-detail-docs {{ display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-4) 0; }}
+.bee-detail-docs a {{ color: var(--color-link); font-size: var(--type-body-sm-size); }}
 .bee-done-summary {{ cursor: pointer; list-style: none; padding: var(--space-2) 0; font-weight: var(--weight-strong); color: var(--color-text); }}
 .bee-done-summary::-webkit-details-marker {{ display: none; }}
 .bee-done-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-2); padding-top: var(--space-2); }}
@@ -1444,18 +1457,18 @@ html[data-scheme="dark"] .bee-hub-theme {{
 .bee-tabs__panel {{ display: none; }}
 #bee-tab-activity:checked ~ .bee-tabs__nav label[for="bee-tab-activity"],
 #bee-tab-todos:checked ~ .bee-tabs__nav label[for="bee-tab-todos"],
-#bee-tab-subagents:checked ~ .bee-tabs__nav label[for="bee-tab-subagents"] {{
+#bee-tab-terminal:checked ~ .bee-tabs__nav label[for="bee-tab-terminal"] {{
   color: var(--color-action);
   border-bottom-color: var(--color-action);
 }}
 #bee-tab-activity:checked ~ .bee-tabs__body #bee-panel-activity,
 #bee-tab-todos:checked ~ .bee-tabs__body #bee-panel-todos,
-#bee-tab-subagents:checked ~ .bee-tabs__body #bee-panel-subagents {{
+#bee-tab-terminal:checked ~ .bee-tabs__body #bee-panel-terminal {{
   display: block;
 }}
 #bee-tab-activity:focus-visible ~ .bee-tabs__nav label[for="bee-tab-activity"],
 #bee-tab-todos:focus-visible ~ .bee-tabs__nav label[for="bee-tab-todos"],
-#bee-tab-subagents:focus-visible ~ .bee-tabs__nav label[for="bee-tab-subagents"] {{
+#bee-tab-terminal:focus-visible ~ .bee-tabs__nav label[for="bee-tab-terminal"] {{
   outline: var(--focus-width) solid var(--focus-color);
   outline-offset: var(--focus-offset);
 }}
@@ -1474,8 +1487,8 @@ html[data-scheme="dark"] .bee-hub-theme {{
 .bee-todo--blocked .bee-todo__mark {{ color: var(--color-danger); }}
 .bee-todo--blocked {{ border-color: var(--color-danger); }}
 .bee-todo__badge {{ flex: none; }}
-.bee-subagents {{ display: flex; flex-direction: column; gap: var(--space-2); }}
-.bee-subagent__live {{ margin-left: var(--space-1); }}
+.bee-terminal-panes {{ display: flex; flex-direction: column; gap: var(--space-2); }}
+.bee-terminal-pane {{ text-decoration: none; }}
 /* Narrow-screen pass (bbp-17): every multi-column grid this board declares
    collapses to one column below this breakpoint (matches the sidebar
    breakpoint in app.css) so a phone never needs the page itself to scroll
@@ -1623,6 +1636,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
             };
             let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
             let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
+            let docs = snapshot.feature_docs.get(f.feature.as_str());
             waiting_cards.push_str(&bee_hub_card(
                 &project.id,
                 &f.feature,
@@ -1632,11 +1646,13 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
                 last_activity.as_deref(),
                 &worktree,
                 Some(&reason),
+                docs,
             ));
         } else if live > 0 {
             in_progress_count += 1;
             let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
             let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
+            let docs = snapshot.feature_docs.get(f.feature.as_str());
             in_progress_cards.push_str(&bee_hub_card(
                 &project.id,
                 &f.feature,
@@ -1646,6 +1662,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
                 last_activity.as_deref(),
                 &worktree,
                 None,
+                docs,
             ));
         } else if f.phase.as_deref() == Some("compounding-complete") || archived_features.contains(f.feature.as_str())
         {
@@ -1654,6 +1671,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
             let (done, total) = bee_hub_archived_counts(&archived);
             let last_activity = bee_hub_latest_activity(archived.iter());
             let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, true);
+            let docs = snapshot.feature_docs.get(f.feature.as_str());
             finished_cards.push_str(&bee_hub_card(
                 &project.id,
                 &f.feature,
@@ -1663,6 +1681,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
                 last_activity.as_deref(),
                 &worktree,
                 None,
+                docs,
             ));
         }
         // else: no live work, no gate/handoff pull, and neither
@@ -1682,6 +1701,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
         let (done, total) = bee_hub_archived_counts(&archived);
         let last_activity = bee_hub_latest_activity(archived.iter());
         let worktree = bee_hub_worktree_chip(&feature, &snapshot.worktrees, &snapshot.workspaces, true);
+        let docs = snapshot.feature_docs.get(feature.as_str());
         finished_cards.push_str(&bee_hub_card(
             &project.id,
             &feature,
@@ -1691,6 +1711,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
             last_activity.as_deref(),
             &worktree,
             None,
+            docs,
         ));
     }
 
@@ -1808,7 +1829,12 @@ fn bee_hub_group_label(key: &str) -> (&'static str, &'static str) {
 /// ([`bee_hub_worktree_chip`]) and its own group status chip
 /// ([`bee_hub_group_label`]). `reason` carries the Waiting group's own
 /// "why" line (its current-stop gate, or a paused handoff) — `None` for
-/// every other group, which has no such single reason to name.
+/// every other group, which has no such single reason to name. `docs`
+/// (feature-titles) carries this feature's own `CONTEXT.md` reader result:
+/// present with a title, the card's name becomes that human title with the
+/// slug demoted to a small muted subtitle beneath it, plus the boundary
+/// description as one clamped line; `None`, or a title-less record, falls
+/// back to the slug alone, exactly as before this feature.
 fn bee_hub_card(
     project_id: &str,
     feature: &str,
@@ -1818,8 +1844,22 @@ fn bee_hub_card(
     last_activity: Option<&str>,
     worktree: &(String, &'static str),
     reason: Option<&str>,
+    docs: Option<&mdview_core::bee::BeeFeatureDocs>,
 ) -> String {
     let (group_label, group_tone) = bee_hub_group_label(group_key);
+    let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
+    let name_html = match title {
+        Some(t) => format!(
+            r#"<div class="fg-card__title">{title}</div><div class="bee-hub__slug">{feature}</div>"#,
+            title = esc(t),
+            feature = esc(feature),
+        ),
+        None => format!(r#"<div class="fg-card__title">{feature}</div>"#, feature = esc(feature)),
+    };
+    let desc_html = match docs.and_then(|d| d.description.as_deref()).filter(|d| !d.is_empty()) {
+        Some(d) => format!(r#"<p class="bee-hub__desc">{}</p>"#, esc(d)),
+        None => String::new(),
+    };
     let progress_html = if total == 0 {
         r#"<p class="fg-empty">No cells recorded.</p>"#.to_string()
     } else {
@@ -1845,15 +1885,16 @@ fn bee_hub_card(
     };
     let (wt_label, wt_tone) = worktree;
     format!(
-        r#"<a class="fg-card bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}"><div class="fg-card__title">{feature}</div><div class="bee-hub__chips"><span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{progress_html}{reason_html}{activity_html}</a>"#,
+        r#"<a class="fg-card bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}<div class="bee-hub__chips"><span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{desc_html}{progress_html}{reason_html}{activity_html}</a>"#,
         group_key = group_key,
         pid = esc(project_id),
         feature_href = esc(feature),
-        feature = esc(feature),
+        name_html = name_html,
         group_tone = group_tone,
         group_label = group_label,
         wt_tone = wt_tone,
         wt_label = esc(wt_label),
+        desc_html = desc_html,
         progress_html = progress_html,
         reason_html = reason_html,
         activity_html = activity_html,
@@ -2497,7 +2538,7 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
 /// The read-only feature detail page (D2/D4, feature-hub-2): a header
 /// naming the feature and whether it has shipped (D10, cycle time D11) or
 /// closed (archive-visibility), a chip row, and three CSS-only tabs —
-/// Activity, Todos, Sub-agents. Reached from the feature hub's cards
+/// Activity, Todos, Terminal. Reached from the feature hub's cards
 /// (feature-hub-1) or from a cell page's feature link.
 ///
 /// `buckets` already carries any archived cells the caller merged in
@@ -2519,10 +2560,20 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
 /// rather than "Main", see that function's own doc comment).
 /// `decisions` is already filtered to this feature's own `scope` by the
 /// caller (`snapshot.decisions.recent`, itself bounded — see
-/// `mdview_core::bee::BeeDecisions`). `running_workers` is the project's
-/// full live-session worker list (Sub-agents joins it by nickname).
-/// `gates` is the same lane-record-or-active-state source `lane_label`
-/// reads, for the Activity tab's gate stamps.
+/// `mdview_core::bee::BeeDecisions`). `panes` (feature-titles D2) is this
+/// project's own D2-containment-boundary-filtered terminal pane list
+/// (`server.rs::project_panes`, the same list `terminal_page` renders) —
+/// the Terminal tab links each one straight to its own live page
+/// (`terminal_page_for_pane`'s route) rather than re-implementing any of
+/// the interactive surface here. `gates` is the same lane-record-or-active-state source `lane_label`
+/// reads, for the Activity tab's gate stamps. `docs` (feature-titles) is
+/// this feature's own `CONTEXT.md` reader result: present with a title,
+/// the header's own name becomes that human title with the slug demoted
+/// to a subtitle beneath it, plus the boundary description as one
+/// clamped line, and a docs row linking `CONTEXT.md` (and `plan.md` when
+/// it also exists) through this viewer's own document routes; `None`
+/// falls back to the slug alone with no docs row, exactly as before this
+/// feature.
 #[allow(clippy::too_many_arguments)]
 pub fn bee_feature_page(
     project: &Project,
@@ -2534,8 +2585,9 @@ pub fn bee_feature_page(
     worktrees: &[BeeWorktree],
     workspaces: &[BeeWorkspace],
     decisions: &[BeeDecisionSummary],
-    running_workers: &[BeeRunningWorker],
+    panes: &[TerminalPaneView],
     gates: Option<&BeeApprovedGates>,
+    docs: Option<&mdview_core::bee::BeeFeatureDocs>,
 ) -> String {
     let status_banner = match shipped {
         Some(f) => {
@@ -2587,17 +2639,36 @@ pub fn bee_feature_page(
     let tabs = bee_feature_tabs(
         &bee_feature_activity_tab(&project.id, buckets, decisions, gates),
         &bee_feature_todos_tab(&project.id, buckets),
-        &bee_feature_subagents_tab(buckets, running_workers),
+        &bee_feature_terminal_tab(&project.id, panes),
     );
+
+    let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
+    let head_name_html = match title {
+        Some(t) => format!(
+            r#"<h2 class="fg-pagehead__title">{title}</h2><p class="bee-detail-slug">{feature}</p>"#,
+            title = esc(t),
+            feature = esc(feature),
+        ),
+        None => format!(r#"<h2 class="fg-pagehead__title">{feature}</h2>"#, feature = esc(feature)),
+    };
+    let desc_html = match docs.and_then(|d| d.description.as_deref()).filter(|d| !d.is_empty()) {
+        Some(d) => format!(r#"<p class="bee-detail-desc">{}</p>"#, esc(d)),
+        None => String::new(),
+    };
+    let docs_row = bee_feature_docs_row(&project.id, feature, docs);
 
     let body = format!(
         r#"{topbar}
 {style}
 <main class="fg-page bee-hub-theme">
   <div class="bee-detail-head">
-    <h2 class="fg-pagehead__title">{feature}</h2>
+    <div>
+      {head_name_html}
+      {desc_html}
+    </div>
     {status_banner}
   </div>
+  {docs_row}
   {chip_row}
   {tabs}
 </main>"#,
@@ -2607,12 +2678,43 @@ pub fn bee_feature_page(
             feature = esc(feature),
         )),
         style = bee_hub_style(),
-        feature = esc(feature),
+        head_name_html = head_name_html,
+        desc_html = desc_html,
         status_banner = status_banner,
+        docs_row = docs_row,
         chip_row = chip_row,
         tabs = tabs,
     );
     layout(&format!("{} · {}", feature, project.name), "", &body)
+}
+
+/// D2's detail header docs row (feature-titles): links to `CONTEXT.md`
+/// (and `plan.md` when [`mdview_core::bee::BeeFeatureDocs::has_plan`] is
+/// true), each through this viewer's own document route
+/// (`/p/<id>/docs/history/<feature>/…`, the same project-relative shape
+/// [`file_page`]'s own links already use) — never a bare filesystem path.
+/// Empty when `docs` is `None`: [`read_feature_docs`] only ever returns
+/// `Some` when `CONTEXT.md` itself exists, so a `None` here means there is
+/// nothing to link.
+fn bee_feature_docs_row(project_id: &str, feature: &str, docs: Option<&mdview_core::bee::BeeFeatureDocs>) -> String {
+    let Some(docs) = docs else {
+        return String::new();
+    };
+    let pid = esc(project_id);
+    let feature_href = esc(feature);
+    let mut links = format!(
+        r#"<a href="/p/{pid}/docs/history/{feature_href}/CONTEXT.md">CONTEXT.md</a>"#,
+        pid = pid,
+        feature_href = feature_href,
+    );
+    if docs.has_plan {
+        links.push_str(&format!(
+            r#"<a href="/p/{pid}/docs/history/{feature_href}/plan.md">plan.md</a>"#,
+            pid = pid,
+            feature_href = feature_href,
+        ));
+    }
+    format!(r#"<div class="bee-detail-docs">{links}</div>"#, links = links)
 }
 
 /// D2's chip row: this feature's own lane classification when known, its
@@ -2669,26 +2771,26 @@ fn bee_feature_chip_row(
 /// `topbar_full`'s own doc comment explains (a `<details>` element hides
 /// its content past any `display` override; a plain input needs none of
 /// that). No JavaScript.
-fn bee_feature_tabs(activity_html: &str, todos_html: &str, subagents_html: &str) -> String {
+fn bee_feature_tabs(activity_html: &str, todos_html: &str, terminal_html: &str) -> String {
     format!(
         r#"<div class="bee-tabs" data-tabs="1">
   <input type="radio" name="bee-detail-tab" id="bee-tab-activity" class="bee-tabs__radio" checked>
   <input type="radio" name="bee-detail-tab" id="bee-tab-todos" class="bee-tabs__radio">
-  <input type="radio" name="bee-detail-tab" id="bee-tab-subagents" class="bee-tabs__radio">
+  <input type="radio" name="bee-detail-tab" id="bee-tab-terminal" class="bee-tabs__radio">
   <div class="bee-tabs__nav">
     <label class="bee-tabs__label" for="bee-tab-activity">Activity</label>
     <label class="bee-tabs__label" for="bee-tab-todos">Todos</label>
-    <label class="bee-tabs__label" for="bee-tab-subagents">Sub-agents</label>
+    <label class="bee-tabs__label" for="bee-tab-terminal">Terminal</label>
   </div>
   <div class="bee-tabs__body">
     <div class="bee-tabs__panel" id="bee-panel-activity">{activity}</div>
     <div class="bee-tabs__panel" id="bee-panel-todos">{todos}</div>
-    <div class="bee-tabs__panel" id="bee-panel-subagents">{subagents}</div>
+    <div class="bee-tabs__panel" id="bee-panel-terminal">{terminal}</div>
   </div>
 </div>"#,
         activity = activity_html,
         todos = todos_html,
-        subagents = subagents_html,
+        terminal = terminal_html,
     )
 }
 
@@ -2865,77 +2967,38 @@ fn bee_todo_item(project_id: &str, cell: &BeeCell) -> String {
     )
 }
 
-/// D2's Sub-agents tab: every worker named in `trace.worker` on any of the
-/// feature's own cells (already merged with any archived ones by the
-/// caller), grouped by nickname — its own capped-cell count for this
-/// feature, its own most-recently-touched cell's tier (overridden by
-/// `running_workers`'s own tier when that worker is currently live, the
-/// fresher signal), and a live heartbeat marker when `running_workers`
-/// names a session for it. Nicknames sort alphabetically for a
-/// deterministic read. An honest empty state when no cell names a worker
-/// at all.
-fn bee_feature_subagents_tab(buckets: &BeeBuckets, running_workers: &[BeeRunningWorker]) -> String {
-    let rfc3339 = time::format_description::well_known::Rfc3339;
-    let mut agg: std::collections::BTreeMap<&str, (usize, Option<time::OffsetDateTime>, Option<String>)> =
-        std::collections::BTreeMap::new();
-    let all = buckets
-        .doing
-        .iter()
-        .chain(buckets.waiting.iter())
-        .chain(buckets.stuck.iter())
-        .chain(buckets.done.iter());
-    for c in all {
-        let Some(w) = c.worker.as_deref() else { continue };
-        let entry = agg.entry(w).or_insert((0, None, None));
-        if c.status == "capped" {
-            entry.0 += 1;
-        }
-        for ts in [c.claimed_at.as_deref(), c.capped_at.as_deref()].into_iter().flatten() {
-            if let Ok(t) = time::OffsetDateTime::parse(ts, &rfc3339) {
-                let newer = entry.1.map(|cur| t > cur).unwrap_or(true);
-                if newer {
-                    entry.1 = Some(t);
-                    entry.2 = c.tier.clone();
-                }
-            }
-        }
-        // No cell this worker has touched so far carried a parseable
-        // timestamp to prefer by freshness — still worth reporting SOME
-        // tier rather than none, so the first one seen stands until a
-        // timestamped cell can outrank it.
-        if entry.1.is_none() && entry.2.is_none() {
-            entry.2 = c.tier.clone();
-        }
-    }
-    if agg.is_empty() {
-        return r#"<p class="fg-empty">No sub-agents recorded for this feature.</p>"#.to_string();
+/// D2's Terminal tab (feature-titles): the project's own agent-terminal
+/// panes — the same D2-containment-boundary-filtered list `project_panes`
+/// computes for `terminal_page` itself, handed in already resolved so this
+/// module never reaches herdr directly. Each entry links straight to that
+/// pane's own live page (`/p/<id>/_terminal/pane/<pane_id>`,
+/// `terminal_page_for_pane`'s route) — the interactive surface (screen,
+/// reply form, key buttons) already lives there; this tab adds no input of
+/// its own, only the map from "which panes exist" to "where to drive one".
+/// An honest empty state when `panes` is empty — whether that is because
+/// herdr is down, the terminal family switch is off, or the project
+/// genuinely has no panes running right now, the caller has already
+/// folded all three into the same fail-closed-to-empty list (matching
+/// `project_panes`'s own "fail closed to zero, not a crash" rule), so this
+/// tab draws no distinction between them.
+fn bee_feature_terminal_tab(project_id: &str, panes: &[TerminalPaneView]) -> String {
+    if panes.is_empty() {
+        return r#"<p class="fg-empty">No terminal panes running for this project right now.</p>"#.to_string();
     }
 
     let mut rows = String::new();
-    for (nickname, (capped, _, tier)) in agg {
-        let live = running_workers.iter().find(|w| w.nickname == nickname);
-        let tier_label = live.and_then(|w| w.tier.clone()).or(tier);
-        let tier_chip = match tier_label {
-            Some(t) => format!(r#"<span class="fg-chip fg-chip--neutral">tier: {}</span>"#, esc(&t)),
-            None => String::new(),
-        };
-        let live_chip = match live {
-            Some(w) => format!(
-                r#"<span class="fg-chip fg-chip--success bee-subagent__live">live · {}</span>"#,
-                esc(&bee_relative_minutes(w.heartbeat_age_minutes)),
-            ),
-            None => String::new(),
-        };
+    for p in panes {
         rows.push_str(&format!(
-            r#"<div class="fg-card bee-cell"><div class="fg-card__title">{nickname}</div><div class="bee-cell__meta">{capped} cell{plural} capped</div><div class="bee-hub__chips">{tier_chip}{live_chip}</div></div>"#,
-            nickname = esc(nickname),
-            capped = capped,
-            plural = if capped == 1 { "" } else { "s" },
-            tier_chip = tier_chip,
-            live_chip = live_chip,
+            r#"<a class="fg-card bee-cell bee-terminal-pane" href="/p/{pid}/_terminal/pane/{pane_id}"><div class="fg-card__title">{workspace} · {tab}</div><div class="bee-cell__meta">{program}</div><div class="bee-hub__chips">{status_pill}</div></a>"#,
+            pid = esc(project_id),
+            pane_id = esc(&p.pane_id),
+            workspace = esc(&p.workspace),
+            tab = esc(&p.tab),
+            program = esc(&p.kind),
+            status_pill = status_pill(&p.status),
         ));
     }
-    format!(r#"<div class="bee-subagents">{rows}</div>"#)
+    format!(r#"<div class="bee-terminal-panes">{rows}</div>"#)
 }
 
 pub fn file_page(
