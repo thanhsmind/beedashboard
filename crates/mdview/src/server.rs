@@ -4425,80 +4425,6 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// bee-cockpit-6 / bbp-11 (happy, split — see above), reshaped by
-    /// sessions-panel-noise-1: only a LIVE session earns a card (plain
-    /// relative heartbeat language, never a raw timestamp); a stale one is
-    /// absorbed into the single "N stale session(s) · newest <age>" line.
-    #[tokio::test]
-    async fn sessions_panel_states_liveness_in_plain_language() {
-        let root = fresh_root("panels-happy-sessions");
-        write(
-            &root,
-            ".bee/sessions/live.json",
-            &session_json("sess-live", &rfc3339_minutes_ago(4), "/home/x/transcript-live.json", "ws-1", "claude"),
-        );
-        write(
-            &root,
-            ".bee/sessions/stale.json",
-            &session_json("sess-stale", &rfc3339_minutes_ago(120), "/home/x/transcript-stale.json", "ws-2", "codex"),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "panels-happy-sessions");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("sess-live"), "{body}");
-        assert!(body.contains("live"), "{body}");
-        assert!(body.contains("4 minutes ago"), "{body}");
-        assert!(
-            !body.contains("sess-stale"),
-            "stale session should have no card of its own: {body}"
-        );
-        assert!(
-            body.contains("1 stale session · newest 2 hours ago"),
-            "stale sessions should collapse into one count line: {body}"
-        );
-        assert!(!body.contains("T04:"), "raw ISO timestamp leaked into a heartbeat: {body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// sessions-panel-noise-1 (edge): a store holding only stale sessions
-    /// keeps an honest body — "No live sessions." plus the collapsed stale
-    /// count — instead of a wall of dead-session cards.
-    #[tokio::test]
-    async fn sessions_panel_all_stale_shows_no_live_plus_count() {
-        let root = fresh_root("panels-all-stale-sessions");
-        write(
-            &root,
-            ".bee/sessions/stale-a.json",
-            &session_json("sess-stale-a", &rfc3339_minutes_ago(120), "/home/x/ta.json", "ws-1", "claude"),
-        );
-        write(
-            &root,
-            ".bee/sessions/stale-b.json",
-            &session_json("sess-stale-b", &rfc3339_minutes_ago(300), "/home/x/tb.json", "ws-2", "codex"),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "panels-all-stale-sessions");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("No live sessions."), "{body}");
-        assert!(
-            body.contains("2 stale sessions · newest 2 hours ago"),
-            "{body}"
-        );
-        assert!(!body.contains("sess-stale-a"), "{body}");
-        assert!(!body.contains("sess-stale-b"), "{body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
     /// bee-cockpit-6 (happy): 25 findings exceed `RECENT_DETAIL_CAP` (20), so
     /// the findings panel must state its true total (25) alongside the
     /// capped count actually shown, not just the visible subset.
@@ -4589,24 +4515,6 @@ mod bee_route_tests {
 
         assert!(body.contains("No backlog items yet."), "{body}");
         assert!(body.contains("No findings yet."), "{body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// bee-cockpit-6 / bbp-11 (edge, split — see above): no sessions.
-    #[tokio::test]
-    async fn absent_sessions_renders_honest_empty_state() {
-        let root = fresh_root("panels-empty-sessions");
-        write(&root, "README.md", "# hi");
-        std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
-
-        let st = build_state();
-        let project = register(&st, &root, "panels-empty-sessions");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("No sessions recorded."), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4936,49 +4844,13 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// bee-cockpit-6 (security): a session's `transcript_path` must never
-    /// reach the body, and no absolute path — the fixture root itself, or a
-    /// workspace's absolute `root` field — may survive verbatim either.
-    /// Named against the fixture's own root and `std::env::temp_dir()`, per
-    /// `docs/history/learnings/20260805-toothless-security-assertions.md`,
-    /// never a production literal like `/home/`.
-    #[tokio::test]
-    async fn panels_leak_no_transcript_path_and_no_absolute_path() {
-        let root = fresh_root("panels-security");
-        let root_str = root.to_string_lossy().into_owned();
-        let transcript_abs = root.join(".bee/sessions/leaky-transcript.json").to_string_lossy().into_owned();
-        let outside_workspace_root = std::env::temp_dir()
-            .join("mdview-server-bee-panels-outside-workspace")
-            .to_string_lossy()
-            .into_owned();
-
-        write(
-            &root,
-            ".bee/sessions/leaky.json",
-            &session_json("sess-leaky", &rfc3339_minutes_ago(1), &transcript_abs, "ws-out", "claude"),
-        );
-        write(
-            &root,
-            ".bee/runtime/workspaces/ws-out.json",
-            &workspace_json("ws-out", &outside_workspace_root, "wt/leaky", &[]),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "panels-security");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(!body.contains(&transcript_abs), "transcript_path leaked into the body: {body}");
-        assert!(!body.contains(&root_str), "response body leaked the fixture root: {body}");
-        assert!(
-            !body.contains(&outside_workspace_root),
-            "response body leaked an absolute workspace root: {body}"
-        );
-        assert!(body.contains("sess-leaky"), "{body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
+    // board-trim (D1) retires the Sessions panel, the only surface on this
+    // page that ever rendered a session's own id or derived content — the
+    // security assertion that used to live here (no `transcript_path` or
+    // absolute workspace root in the body) has nothing left to exercise, so
+    // it retires with the panel. `mdview_core::bee`'s own
+    // `no_transcript_path_and_no_absolute_workspace_root_survive_into_snapshot`
+    // proves the same guarantee at the data layer and stays green.
 
     /// bee-cockpit-6 (read-only): the panels read the same on-disk sources
     /// (`backlog.jsonl`, `sessions/`, `lanes/`, `runtime/workspaces/`) as
@@ -5744,13 +5616,14 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (board-declutter) The Feature Hub is the first main section on the
-    /// board page — the very next `<section` after `<main>` — and none of
-    /// the five removed sections (the lifecycle stepper, the headline KPI
-    /// tiles, Ship velocity, Needs attention, and the Working-on-now card)
-    /// render anywhere in the body, in any state (a feature that is active,
-    /// gated and has live work exercises every one of those five sections'
-    /// old trigger conditions at once).
+    /// (board-declutter, board-trim) Layout regression pinning the full
+    /// board page order — top bar, Feature Hub, Finished, Backlog & review
+    /// panel, nothing else — and the absence of every section this board
+    /// has retired so far. The fixture populates a live session, a granted
+    /// worktree and a populated `reservations.json`/`config.json`
+    /// (`gate_bypass`) alongside the pre-existing gated/blocked feature, so
+    /// board-trim's own removed panels' old trigger conditions (bbp-16) are
+    /// exercised at the same time as board-declutter's five.
     #[tokio::test]
     async fn board_hub_is_first_main_section_and_removed_sections_are_absent() {
         let root = fresh_root("board-hub-first");
@@ -5768,6 +5641,28 @@ mod bee_route_tests {
                 "next_action": "Invoke bee-shaping."
             }"#,
         );
+        write(
+            &root,
+            ".bee/sessions/board-trim-layout-session.json",
+            &session_json(
+                "board-trim-layout-session",
+                &rfc3339_minutes_ago(1),
+                "/home/x/t.jsonl",
+                "main",
+                "startup",
+            ),
+        );
+        let sibling = make_worktree_sibling("board-trim-layout-wt");
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"hub-first-feature","mode":"standard"}"#);
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["board-trim-layout-wt"]));
+        write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
+        write(
+            &root,
+            ".bee/reservations.json",
+            r#"{"reservations": [
+                {"agent": "w1", "cell": "hub-first-cell", "path": "src/lib.rs", "kind": "lease", "session": "board-trim-layout-session", "reserved_at": "2026-08-06T00:00:00.000Z", "released_at": null}
+            ]}"#,
+        );
 
         let st = build_state();
         let project = register(&st, &root, "board-hub-first");
@@ -5776,14 +5671,29 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         let main_start = body.find("<main class=\"fg-page bee-hub-theme\">").expect("main tag");
-        let first_section = body[main_start..].find("<section").expect("a section inside main");
-        let after_main = &body[main_start + first_section..];
+        let after_main = &body[main_start..];
+        let hub_at = after_main.find(r#"<section class="fg-card bee-hub" data-feature-hub="1">"#).expect("hub section");
+        let finished_at = after_main.find(r#"<section class="fg-card bee-finished""#).expect("finished section");
+        let panels_at = after_main.find(r#"<div class="bee-panels">"#).expect("panels wrapper");
+        let backlog_at =
+            after_main.find(r#"<h3 class="bee-panel__head">Backlog &amp; Review</h3>"#).expect("backlog panel");
         assert!(
-            after_main.starts_with(r#"<section class="fg-card bee-hub" data-feature-hub="1">"#),
-            "the Feature Hub must be the first main section after the top bar: {body}"
+            hub_at < finished_at && finished_at < panels_at && panels_at < backlog_at,
+            "the board page must render, in order, the Feature Hub, the Finished list, then the panels wrapper carrying only Backlog & review: {body}"
+        );
+        // Backlog & review is the only card inside the panels wrapper — no
+        // sibling `<section` opens between the wrapper and the closing
+        // `</main>`.
+        let panels_html = &after_main[panels_at..];
+        let main_close = panels_html.find("</main>").expect("main close");
+        assert_eq!(
+            panels_html[..main_close].matches("<section").count(),
+            1,
+            "the panels wrapper must carry exactly one card (Backlog & review): {body}"
         );
 
         for marker in [
+            // board-declutter (five sections retired before this cell).
             "bee-stepper",
             "bee-stats",
             "bee-now-grid",
@@ -5791,14 +5701,27 @@ mod bee_route_tests {
             "Needs attention",
             "Working on now",
             "Running now",
+            // board-trim (D1): Sessions/Worktrees/Workspaces and Process
+            // health, and every marker only those two panels ever rendered.
+            "Where work is happening",
+            "Process health",
+            "File-lock contention",
+            "Model tier mix",
+            "Gate bypass",
+            "class=\"fg-card bee-panel bee-sessions\"",
+            "class=\"fg-card bee-panel bee-process-health\"",
+            "board-trim-layout-session",
+            "board-trim-layout-wt",
+            "src/lib.rs",
         ] {
             assert!(
                 !body.contains(marker),
-                "board-declutter removed this marker from the board page, but it still renders: {marker}\n{body}"
+                "this board page has retired the marker, but it still renders: {marker}\n{body}"
             );
         }
 
         std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
     }
 
     /// (happy) The board's Finished section groups finished features — one
@@ -6159,9 +6082,14 @@ mod bee_route_tests {
     /// board request whose fixture CONTAINS a populated `.bee/config.json` —
     /// the pre-existing read-only tests each use a fixture with no config
     /// file, so they would pass green without the config reader ever
-    /// running. This one exercises it: the reader must open the file, parse
-    /// it and report the recorded `gate_bypass` level without ever writing
-    /// back to it, and without opening `.bee/config.local.json` at all.
+    /// running. This one exercises it: the reader must open the file and
+    /// parse it without ever writing back to it, and without opening
+    /// `.bee/config.local.json` at all. board-trim retired the board's own
+    /// Process health panel, which used to be this test's proof the
+    /// `gate_bypass` reader actually ran (rather than short-circuiting) —
+    /// `mdview_core::bee::read_config`/`normalize_gate_bypass` stay covered
+    /// by their own unit tests there; this test now only proves the
+    /// read-only invariant over a populated fixture.
     #[tokio::test]
     async fn board_reading_is_read_only_with_a_populated_config_present() {
         let root = fresh_root("config-read-only");
@@ -6178,12 +6106,6 @@ mod bee_route_tests {
 
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = body_string(resp).await;
-        assert!(
-            body.contains("recorded") && body.contains("total"),
-            "the recorded gate-bypass level should surface as an attention item: body missing expected text"
-        );
 
         let after = snapshot_tree(&root);
         assert_eq!(
@@ -6323,11 +6245,11 @@ mod bee_route_tests {
     /// a fixture with no reservations file, so they would pass green
     /// without the reservations reader ever running. This one exercises
     /// it: the reader must open the file and parse its array without ever
-    /// writing back to it. bbp-16 adds the process-health panel that
-    /// renders `reservations` (see `process_health_panel_renders_lock_contention_tier_mix_and_gate_bypass`
-    /// for the fuller happy-path assertions); this test now also proves the
-    /// unreleased lock actually surfaces here, not only that reading it is
-    /// safe.
+    /// writing back to it. board-trim retired the board's own Process
+    /// health panel, which used to render `reservations` and prove the
+    /// unreleased lock surfaced — `mdview_core::bee`'s own reservations
+    /// reader stays covered by its own unit tests there; this test now only
+    /// proves the read-only invariant over a populated fixture.
     #[tokio::test]
     async fn board_reading_is_read_only_with_a_populated_reservations_file_present() {
         let root = fresh_root("reservations-read-only");
@@ -6350,88 +6272,11 @@ mod bee_route_tests {
 
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-        assert!(
-            body.contains("src/lib.rs"),
-            "the process-health panel must render the unreleased reservation: {body}"
-        );
 
         let after = snapshot_tree(&root);
         assert_eq!(
             before, after,
             ".bee/ tree changed after a request whose fixture carries a populated reservations.json"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (happy, bbp-16) Process health renders all three of bbp-15's
-    /// derivations at once: an unreleased reservation as file-lock
-    /// contention, the tier-mix chips, and the recorded `gate_bypass`
-    /// setting worded exactly as `compute_attention_items`' own gate-bypass
-    /// rule words it (`mdview_core::bee`) — `Gate bypass recorded as
-    /// "{level}"` — so the panel and the attention item never drift into
-    /// disagreeing phrasing for the same fact.
-    #[tokio::test]
-    async fn process_health_panel_renders_lock_contention_tier_mix_and_gate_bypass() {
-        let root = fresh_root("process-health-happy");
-        write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
-        write(
-            &root,
-            ".bee/reservations.json",
-            r#"{"reservations": [
-                {"agent": "lastband", "cell": "kf-1", "path": "src/lib.rs", "kind": "lease", "session": "s1", "reserved_at": "2026-08-06T00:00:00.000Z", "released_at": null},
-                {"agent": "other", "cell": "kf-2", "path": "src/old.rs", "kind": "lease", "session": "s2", "reserved_at": "2026-08-05T00:00:00.000Z", "released_at": "2026-08-05T01:00:00.000Z"}
-            ]}"#,
-        );
-        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "open", &[], "w1"));
-
-        let st = build_state();
-        let project = register(&st, &root, "process-health-happy");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("Process health"), "{body}");
-        assert!(
-            body.contains("src/lib.rs") && body.contains("lastband"),
-            "the still-locked reservation must render: {body}"
-        );
-        assert!(
-            !body.contains("src/old.rs"),
-            "a released reservation is not contention and must not render: {body}"
-        );
-        assert!(body.contains("generation: 1"), "the tier-mix chip must render: {body}");
-        assert!(
-            body.contains("Gate bypass recorded as \"total\""),
-            "the recorded bypass level must be worded exactly as the attention rule words it: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (edge, bbp-16) A store with `read_errors` (a malformed
-    /// `.bee/lanes/*.json` file here) shows them on the page — a partly-
-    /// unreadable store must be visible, never silently thinner. Both the
-    /// attention panel's own summary line and the process-health panel's
-    /// own detailed list carry this, since `bee_read_errors` (`views.rs`)
-    /// now renders inside the process-health panel.
-    #[tokio::test]
-    async fn process_health_panel_shows_read_errors_from_a_malformed_store_file() {
-        let root = fresh_root("process-health-read-errors");
-        write(&root, ".bee/lanes/broken.json", "{ not valid json");
-        write(&root, ".bee/cells/a.json", &cell_json("a", "open", &[], "w1"));
-
-        let st = build_state();
-        let project = register(&st, &root, "process-health-read-errors");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("Could not read"), "{body}");
-        assert!(
-            body.contains(".bee/lanes/broken.json"),
-            "the specific unreadable file must be named: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -6812,43 +6657,14 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (security) The running section must leak no transcript path, no
-    /// absolute path and no occurrence of the fixture root — named against
-    /// the fixture's own root and `Path::is_absolute`, never a production
-    /// literal (`docs/history/learnings/20260805-toothless-security-assertions.md`).
-    #[tokio::test]
-    async fn running_section_leaks_no_absolute_path_or_transcript() {
-        let root = fresh_root("running-security");
-        let root_str = root.to_string_lossy().into_owned();
-        let transcript_abs = root.join(".bee/sessions/kf1-worker.json").to_string_lossy().into_owned();
-
-        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "claimed", &[], "w1"));
-        write(
-            &root,
-            ".bee/state.json",
-            &state_json_with_workers(&worker_json("kf1-worker", "kf-1", "generation", "running")),
-        );
-        write(
-            &root,
-            ".bee/sessions/kf1-worker.json",
-            &session_json("kf1-worker", &rfc3339_minutes_ago(1), &transcript_abs, "main", "startup"),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "running-security");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(!body.contains(&transcript_abs), "transcript path leaked into the body: {body}");
-        assert!(!body.contains(&root_str), "response body leaked the fixture root: {body}");
-        assert!(
-            body.contains("kf1-worker"),
-            "the security assertions above must exercise the running section, not skip it: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
+    // The old "running section" this test's own security assertion targeted
+    // was retired by board-declutter; the assertion kept exercising real
+    // coverage only because the (also now-retired) Sessions panel happened
+    // to render this fixture's session id too. board-trim (D1) removes that
+    // panel — nothing on this page renders session-derived content anymore,
+    // so the assertion has nothing left to exercise. `mdview_core::bee`'s
+    // own `no_transcript_path_and_no_absolute_workspace_root_survive_into_snapshot`
+    // proves the same no-leak guarantee at the data layer and stays green.
 
     /// (read-only) Reading the board with live workers/sessions present must
     /// not touch the fixture's `.bee/` tree (D4).
@@ -6881,9 +6697,24 @@ mod bee_route_tests {
     }
 
     // --- bee-board-ux-4: each granted worktree, its own lifecycle record —
-    // bbp-16 folds this section into `bee_sessions_panel`'s own "Worktrees"
-    // subhead (`bee_worktrees_body`, `views.rs`); the row-level markup these
-    // assertions check is otherwise unchanged, only its wrapper moved. ---
+    // bbp-16 folded this into `bee_sessions_panel`'s own "Worktrees" subhead
+    // (`bee_worktrees_body`, `views.rs`); board-trim (D1) retires that whole
+    // panel. The row-level rendering assertions this block used to carry
+    // (each grant's feature/phase/branch, live-vs-quiet sort order, a
+    // dangling grant's unresolved marking, the no-grants quiet line, and
+    // the no-absolute-path security check) are retired with it — every one
+    // of those facts is already proven at the data layer by
+    // `mdview_core::bee`'s own worktree unit tests
+    // (`each_granted_worktree_renders_own_feature_phase_branch`,
+    // `live_worktree_sorts_ahead_of_quiet_one_with_relative_heartbeat_age`,
+    // `worktree_directory_missing_is_reported_unresolved_not_dropped`,
+    // `worktree_state_json_malformed_is_reported_unresolved_not_fatal`,
+    // `no_grants_file_yields_empty_worktrees_no_read_error`,
+    // `no_absolute_worktree_root_survives_into_snapshot`), which stay green.
+    // What survives here is the read-only guarantee (still exercised end to
+    // end through the HTTP route below) and the buckets/shipped-set
+    // isolation regression, neither of which depends on this page still
+    // rendering worktree rows. ---
 
     /// Sibling worktree directories sit beside `fresh_root`'s temp parent —
     /// the exact shape `mdview_core::bee::resolve_worktree` expects: `<temp
@@ -6904,92 +6735,6 @@ mod bee_route_tests {
         format!("{{{entries}}}")
     }
 
-    /// (happy) A fixture with two granted worktrees renders each with its
-    /// own feature, phase and branch.
-    #[tokio::test]
-    async fn worktree_section_shows_each_granted_worktree_with_own_feature_phase_branch() {
-        let root = fresh_root("wt-two");
-        let alpha = make_worktree_sibling("bee-board-ux-4-srv-wt-alpha");
-        let beta = make_worktree_sibling("bee-board-ux-4-srv-wt-beta");
-        write(&alpha, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-alpha","mode":"standard"}"#);
-        write(&beta, ".bee/state.json", r#"{"phase":"planning","feature":"feat-beta","mode":"small"}"#);
-
-        write(
-            &root,
-            ".bee/runtime/worktree-grants.json",
-            &grants_json(&["bee-board-ux-4-srv-wt-alpha", "bee-board-ux-4-srv-wt-beta"]),
-        );
-        write(
-            &root,
-            ".bee/runtime/workspaces/alpha.json",
-            &workspace_json("bee-board-ux-4-srv-wt-alpha", &alpha.to_string_lossy(), "wt/alpha", &[]),
-        );
-        write(
-            &root,
-            ".bee/runtime/workspaces/beta.json",
-            &workspace_json("bee-board-ux-4-srv-wt-beta", &beta.to_string_lossy(), "wt/beta", &[]),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "wt-two");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("feature: feat-alpha"), "{body}");
-        assert!(body.contains("phase: swarming"), "{body}");
-        assert!(body.contains("branch: wt/alpha"), "{body}");
-        assert!(body.contains("feature: feat-beta"), "{body}");
-        assert!(body.contains("phase: planning"), "{body}");
-        assert!(body.contains("branch: wt/beta"), "{body}");
-
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&alpha).ok();
-        std::fs::remove_dir_all(&beta).ok();
-    }
-
-    /// (happy) A worktree holding a live session is presented as live with a
-    /// relative heartbeat age and sorts ahead of one that is not.
-    #[tokio::test]
-    async fn worktree_with_live_session_sorts_before_quiet_and_shows_heartbeat_age() {
-        let root = fresh_root("wt-live-sort");
-        let live = make_worktree_sibling("bee-board-ux-4-srv-wt-live");
-        let quiet = make_worktree_sibling("bee-board-ux-4-srv-wt-quiet");
-        write(&live, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-live","mode":"standard"}"#);
-        write(&quiet, ".bee/state.json", r#"{"phase":"idle","feature":"feat-quiet","mode":"standard"}"#);
-        write(
-            &live,
-            ".bee/sessions/s1.json",
-            &session_json("s1", &rfc3339_minutes_ago(2), "/home/x/t.jsonl", "main", "startup"),
-        );
-
-        write(
-            &root,
-            ".bee/runtime/worktree-grants.json",
-            // "quiet" listed first in the source file — the sort must still
-            // put the live one ahead regardless of grant order.
-            &grants_json(&["bee-board-ux-4-srv-wt-quiet", "bee-board-ux-4-srv-wt-live"]),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "wt-live-sort");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        let live_pos = body.find("feat-live").expect("live worktree must render");
-        let quiet_pos = body.find("feat-quiet").expect("quiet worktree must render");
-        assert!(live_pos < quiet_pos, "live worktree must render before the quiet one: {body}");
-        assert!(
-            body.contains("fg-chip--success\">live<"),
-            "the live worktree must carry a live chip: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&live).ok();
-        std::fs::remove_dir_all(&quiet).ok();
-    }
-
     /// (happy) Worktree cell files present in the fixture change NEITHER
     /// this project's own feature-hub counts NOR its shipped set — the
     /// regression that motivated this test, re-expressed against
@@ -6997,9 +6742,7 @@ mod bee_route_tests {
     /// `compute_feature_cell_counts` (`mdview_core::bee`) only ever see
     /// this project's own `.bee/cells/*.json`, so a worktree's own capped
     /// cell can never move this project's own "demo" card, and its cell id
-    /// never appears on this board at all. The worktree's own *feature
-    /// name* legitimately still appears — in the Worktrees panel, naming
-    /// which feature that worktree runs — this test asserts only that its
+    /// never appears on this board at all — this test asserts only that its
     /// cell never merges into this project's own counts.
     #[tokio::test]
     async fn worktree_cell_files_do_not_change_buckets_or_shipped_set() {
@@ -7072,114 +6815,6 @@ mod bee_route_tests {
                 "trace": {{"worker": "w1", "claimed_at": {claimed_json}, "capped_at": {capped_json}}}
             }}"#
         )
-    }
-
-    /// (edge) A granted id whose directory does not exist is reported as
-    /// unresolved and the page still renders.
-    #[tokio::test]
-    async fn worktree_directory_missing_is_unresolved_and_page_still_renders() {
-        let root = fresh_root("wt-dir-missing");
-        std::fs::remove_dir_all(worktree_sibling_root("bee-board-ux-4-srv-wt-ghost-dir")).ok();
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-srv-wt-ghost-dir"]));
-
-        let st = build_state();
-        let project = register(&st, &root, "wt-dir-missing");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("bee-board-ux-4-srv-wt-ghost-dir"), "{body}");
-        assert!(body.contains("unresolved"), "a dangling grant must be marked unresolved: {body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (edge) A granted id whose state.json is malformed is reported as
-    /// unresolved, not fatal.
-    #[tokio::test]
-    async fn worktree_state_json_malformed_is_unresolved_not_fatal() {
-        let root = fresh_root("wt-state-malformed");
-        let sibling = make_worktree_sibling("bee-board-ux-4-srv-wt-malformed");
-        write(&sibling, ".bee/state.json", "{ not valid json");
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-srv-wt-malformed"]));
-
-        let st = build_state();
-        let project = register(&st, &root, "wt-state-malformed");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("bee-board-ux-4-srv-wt-malformed"), "{body}");
-        assert!(body.contains("unresolved"), "a malformed state.json must be marked unresolved, not crash the page: {body}");
-
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&sibling).ok();
-    }
-
-    /// (edge) A project with no grants file renders the quiet one-line
-    /// state, not an empty panel.
-    #[tokio::test]
-    async fn no_grants_file_renders_quiet_line_not_empty_panel() {
-        let root = fresh_root("wt-no-grants");
-        write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
-
-        let st = build_state();
-        let project = register(&st, &root, "wt-no-grants");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("No worktrees granted."), "{body}");
-        assert!(
-            !body.contains("class=\"fg-card bee-panel bee-worktrees\""),
-            "bbp-16 retired the standalone worktrees section — this class must never render again, from any state",
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (security) The body contains no absolute worktree root, no transcript
-    /// path and no occurrence of the fixture root — named against the
-    /// fixture's own root and `Path::is_absolute`, never the literal
-    /// `/home/` (`docs/history/learnings/20260805-toothless-security-assertions.md`).
-    #[tokio::test]
-    async fn worktree_section_leaks_no_absolute_path_or_fixture_root() {
-        let root = fresh_root("wt-security");
-        let root_str = root.to_string_lossy().into_owned();
-        let sibling = make_worktree_sibling("bee-board-ux-4-srv-wt-security");
-        let sibling_str = sibling.to_string_lossy().into_owned();
-        let transcript_abs = sibling.join(".bee/sessions/s1.json").to_string_lossy().into_owned();
-
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-sec","mode":"standard"}"#);
-        write(
-            &sibling,
-            ".bee/sessions/s1.json",
-            &session_json("s1", &rfc3339_minutes_ago(2), &transcript_abs, "main", "startup"),
-        );
-
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-srv-wt-security"]));
-        write(
-            &root,
-            ".bee/runtime/workspaces/w1.json",
-            &workspace_json("bee-board-ux-4-srv-wt-security", &sibling_str, "wt/security", &[]),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "wt-security");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(!body.contains(&root_str), "response body leaked the fixture root: {body}");
-        assert!(!body.contains(&sibling_str), "response body leaked the worktree's own absolute sibling root: {body}");
-        assert!(!body.contains(&transcript_abs), "response body leaked a transcript path: {body}");
-        assert!(
-            body.contains("feat-sec") && body.contains("bee-board-ux-4-srv-wt-security"),
-            "the security assertions above must exercise the worktree section, not skip it: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-        std::fs::remove_dir_all(&sibling).ok();
     }
 
     /// (read-only) Both the project's and the worktree's own `.bee/` tree

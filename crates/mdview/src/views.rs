@@ -4,9 +4,9 @@
 
 use mdview_core::bee::{
     feature_cell_span, list_archived_feature_dirs, read_archived_cells, BeeApprovedGates,
-    BeeBacklog, BeeBuckets, BeeCell, BeeConfig, BeeDecisionSummary, BeeFeaturePhase, BeePbi,
-    BeeReservation, BeeReview, BeeReviewStatus, BeeRunningWorker, BeeShippedFeature, BeeSnapshot,
-    BeeState, BeeTierMix, BeeWorkspace, BeeWorktree,
+    BeeBacklog, BeeBuckets, BeeCell, BeeDecisionSummary, BeeFeaturePhase, BeePbi, BeeReview,
+    BeeReviewStatus, BeeRunningWorker, BeeShippedFeature, BeeSnapshot, BeeState, BeeWorkspace,
+    BeeWorktree,
 };
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
@@ -1284,13 +1284,20 @@ pub fn terminal_down_page(project: &Project) -> String {
 /// untouched; the feature detail page and other consumers still read them
 /// from `BeeSnapshot`, this page just stops rendering them. `{top}` — now
 /// just the page title and "Read <as-of>" line — is followed directly by
-/// [`bee_feature_hub_section`] as this page's first main section. Worktrees,
-/// and `.bee/runtime/workspaces/*.json` alongside them, fold into
-/// [`bee_sessions_panel`] within `{panels}`, unchanged by this cell. Process
-/// health — file-lock contention, the model-tier spread and the recorded
-/// gate-bypass setting — stays in `{panels}` too ([`bee_process_health_panel`]),
-/// carrying `read_errors`: a store that failed to read one of its own files
-/// is a process-health signal in its own right, not a separate footer.
+/// [`bee_feature_hub_section`] as this page's first main section, then
+/// [`bee_finished_section`]'s standalone shipped-features list, unmoved by
+/// this cell.
+///
+/// board-trim (D1) drops the rest of `{panels}`'s own contents down to a
+/// single card: the Sessions panel (`bee_sessions_panel`: sessions,
+/// worktrees, workspaces) and the Process health panel
+/// (`bee_process_health_panel`: file-lock contention, model tier mix, gate
+/// bypass, `read_errors`) are gone, along with the view functions and CSS
+/// that only ever rendered them. `mdview_core`'s readers for that data
+/// (sessions, worktrees, workspaces, reservations, tier mix, config) are
+/// untouched — the feature detail page and other consumers still read them
+/// from `BeeSnapshot`; this page just stops rendering them. `{panels}` now
+/// carries only the Backlog & review card (`bee_backlog_panel`).
 pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
     let body = format!(
         r#"{topbar}
@@ -1518,101 +1525,6 @@ fn bee_board_asof() -> String {
         minute = now.minute(),
     )
 }
-
-/// Every granted worktree (`.bee/runtime/worktree-grants.json`), each shown
-/// by its own lifecycle record — feature, phase, branch, and whether a
-/// session there is live — never by its own `.bee/cells/`, which
-/// `mdview_core::bee::read_snapshot` deliberately never merges into this
-/// project's buckets/shipped set (see that module's doc comment). Live
-/// worktrees already sort first in `snapshot.worktrees` itself, so this view
-/// only formats what it is handed. A dangling grant (missing directory,
-/// missing or malformed `state.json`) renders plainly marked unresolved
-/// rather than being dropped. A project with no granted worktrees renders
-/// one quiet line instead of an empty bordered panel.
-///
-/// bbp-16: this used to be its own top-level board section
-/// (`bee_worktree_section`, `<section class="... bee-worktrees">`); D2
-/// folds it into [`bee_sessions_panel`] as one of that panel's subheads, so
-/// this is now a body fragment only — row markup is unchanged.
-fn bee_worktrees_body(worktrees: &[BeeWorktree]) -> String {
-    if worktrees.is_empty() {
-        return r#"<p class="fg-empty">No worktrees granted.</p>"#.to_string();
-    }
-
-    let mut rows = String::new();
-    for w in worktrees {
-        if w.resolved {
-            let feature = w.feature.as_deref().unwrap_or("—");
-            let phase = w.phase.as_deref().unwrap_or("—");
-            let branch = w.branch.as_deref().unwrap_or("—");
-            let (tone, label) = if w.live { ("success", "live") } else { ("neutral", "not live") };
-            let age_line = match (w.live, w.heartbeat_age_minutes) {
-                (true, Some(mins)) => format!(" · {}", esc(&bee_relative_minutes(mins))),
-                _ => String::new(),
-            };
-            rows.push_str(&format!(
-                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta">feature: {feature} · phase: {phase} · branch: {branch}</div><div class="bee-cell__meta"><span class="fg-chip fg-chip--{tone}">{label}</span>{age_line}</div></div>"#,
-                id = esc(&w.id),
-                feature = esc(feature),
-                phase = esc(phase),
-                branch = esc(branch),
-                tone = tone,
-                label = label,
-                age_line = age_line,
-            ));
-        } else {
-            let reason = w.unresolved_reason.as_deref().unwrap_or("unresolved");
-            rows.push_str(&format!(
-                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta"><span class="fg-chip fg-chip--danger">unresolved</span> · {reason}</div></div>"#,
-                id = esc(&w.id),
-                reason = esc(reason),
-            ));
-        }
-    }
-
-    format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
-}
-
-/// Every `.bee/runtime/workspaces/*.json` record (bbp-16, D2) — the raw
-/// workspace half of the pre-redesign lanes panel that had no home from
-/// bbp-11 onward (see the module note above [`bee_sessions_panel`]). This is
-/// a different signal from [`bee_worktrees_body`]'s `snapshot.worktrees`,
-/// which is built only from *granted* worktrees resolved against their own
-/// sibling `.bee/`: `snapshot.workspaces` carries every workspace record
-/// this project's own store knows, including the `"main"` checkout itself
-/// (never a granted worktree, so it never appears in `worktrees`), and each
-/// record's own `attached_sessions` count, which `worktrees` does not
-/// carry. `w.root` already arrives relativized (or reduced to a bare
-/// directory name when it falls outside the project root) from
-/// `mdview_core::bee::read_snapshot`, so this view only escapes for HTML
-/// safety. An empty list renders one quiet line, not an empty bordered
-/// panel.
-fn bee_workspaces_body(workspaces: &[BeeWorkspace]) -> String {
-    if workspaces.is_empty() {
-        return r#"<p class="fg-empty">No workspaces recorded.</p>"#.to_string();
-    }
-    let mut rows = String::new();
-    for w in workspaces {
-        let branch = w.branch.as_deref().unwrap_or("—");
-        // `w.root` is empty for the "main" workspace when its own root IS
-        // the project root — `relativize` returns "" for a path relative to
-        // itself. An empty trailing segment (`branch: — · `) is exactly the
-        // sort of visual defect a rendered page catches that a green suite
-        // does not, so it falls back to a plain label instead.
-        let root = if w.root.is_empty() { "this checkout" } else { &w.root };
-        rows.push_str(&format!(
-            r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta">{kind} · branch: {branch} · {root}</div><div class="bee-cell__meta">{attached} session{plural} attached</div></div>"#,
-            id = esc(&w.id),
-            kind = esc(&w.kind),
-            branch = esc(branch),
-            root = esc(root),
-            attached = w.attached_sessions,
-            plural = if w.attached_sessions == 1 { "" } else { "s" },
-        ));
-    }
-    format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
-}
-
 
 /// D1's feature-centric grouped list (fh-1), replacing the retired
 /// cell-centric Kanban board (`bee_agent_board_section`, agent-board
@@ -2108,43 +2020,23 @@ fn bee_finished_section(project_id: &str, shipped: &[BeeShippedFeature]) -> Stri
     )
 }
 
-/// Names of `.bee/` files that could not be read, if any — every path
-/// mentioned in `read_errors` already arrives relative to the project root
-/// (see `mdview_core::bee`), so this only needs HTML escaping, not redaction.
-fn bee_read_errors(errors: &[String]) -> String {
-    if errors.is_empty() {
-        return String::new();
-    }
-    let items: String = errors.iter().map(|e| format!("<li>{}</li>", esc(e))).collect();
-    format!(
-        r#"<div class="fg-card fg-card--sunken"><div class="fg-card__title">Could not read</div><ul>{items}</ul></div>"#,
-        items = items
-    )
-}
-
-/// Backlog, sessions and process-health panels (bee-cockpit-6, bbp-16),
-/// rendered below the agent board on the same page (D4/D1). Pure
-/// formatting over `BeeSnapshot` — every field already arrived
-/// relativized/redacted from `mdview_core::bee::read_snapshot`
-/// (`BeeSession` carries no `transcript_path`), so this view only formats
-/// what it is handed, never recomputes any of that logic. The sessions
-/// panel used to carry a third, `bee_lanes_panel` (`.bee/lanes/*.json` and
-/// `.bee/runtime/workspaces/*.json` side by side) — bbp-11 retired it: the
-/// lane half rendered the same features `bee_phase_board_section` now
-/// places, a second time. The workspace half had no home from bbp-11 to
-/// bbp-15; bbp-16 folds it, and the standalone worktree section, into
-/// [`bee_sessions_panel`] (D2), and adds [`bee_process_health_panel`] as a
-/// third card.
+/// Backlog & review panel (bee-cockpit-6, board-trim), rendered below the
+/// board's Finished list on the same page (D4/D1). Pure formatting over
+/// `BeeSnapshot` — every field already arrived relativized/redacted from
+/// `mdview_core::bee::read_snapshot`, so this view only formats what it is
+/// handed, never recomputes any of that logic. This wrapper used to carry
+/// two more cards, the Sessions panel (bbp-16/D2: sessions, worktrees,
+/// workspaces) and Process health (bbp-16/D5: file-lock contention, model
+/// tier mix, gate bypass, `read_errors`) — board-trim (D1) drops both,
+/// along with the view functions and CSS that only ever rendered them.
+/// `mdview_core`'s readers for that dropped data are untouched; only this
+/// page's rendering of them is gone.
 fn bee_panels_section(snapshot: &BeeSnapshot) -> String {
     format!(
         r#"<div class="bee-panels">
     {backlog}
-    {sessions}
-    {process_health}
   </div>"#,
         backlog = bee_backlog_panel(&snapshot.backlog, &snapshot.review),
-        sessions = bee_sessions_panel(snapshot),
-        process_health = bee_process_health_panel(snapshot),
     )
 }
 
@@ -2368,206 +2260,12 @@ fn bee_review_queue_body(review: &BeeReview) -> String {
     )
 }
 
-/// The Sessions panel (bbp-16, D2): "where work is happening and whether it
-/// is alive", in one card with three subheads — a session's own liveness
-/// (`.bee/sessions/*.json`: a card per LIVE session with its source,
-/// workspace, and heartbeat age in plain relative language, never a raw
-/// timestamp; stale sessions collapse into a single count line so dead
-/// sessions never bury the live ones), a granted worktree's own
-/// feature/phase/branch/liveness ([`bee_worktrees_body`], folded in from the
-/// retired standalone worktree section), and every raw workspace record
-/// this project's own store knows ([`bee_workspaces_body`], the workspace
-/// half of the pre-bbp-11 lanes panel that had no home since). Each
-/// subhead's body renders its own honest empty state independently — a
-/// quiet project with sessions but no worktrees still shows both, one
-/// populated and one honestly empty, never a hidden subhead.
-fn bee_sessions_panel(snapshot: &BeeSnapshot) -> String {
-    let sessions_body = if snapshot.sessions.is_empty() {
-        r#"<p class="fg-empty">No sessions recorded.</p>"#.to_string()
-    } else {
-        // Only live sessions earn a card; stale ones collapse into a single
-        // count line so a long-dead session list never buries the live work.
-        let mut rows = String::new();
-        let mut stale_count = 0usize;
-        let mut stale_newest_minutes = f64::INFINITY;
-        for s in &snapshot.sessions {
-            if !s.live {
-                stale_count += 1;
-                stale_newest_minutes = stale_newest_minutes.min(s.heartbeat_age_minutes);
-                continue;
-            }
-            let source = s.source.as_deref().unwrap_or("—");
-            let workspace = s.workspace_id.as_deref().unwrap_or("—");
-            rows.push_str(&format!(
-                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta"><span class="fg-chip fg-chip--success">live</span> · {source} · {workspace} · {age}</div></div>"#,
-                id = esc(&s.id),
-                source = esc(source),
-                workspace = esc(workspace),
-                age = esc(&bee_fmt_heartbeat_age(s.heartbeat_age_minutes)),
-            ));
-        }
-        let mut body = if rows.is_empty() {
-            r#"<p class="fg-empty">No live sessions.</p>"#.to_string()
-        } else {
-            format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
-        };
-        if stale_count > 0 {
-            let plural = if stale_count == 1 { "" } else { "s" };
-            body.push_str(&format!(
-                r#"<p class="bee-cell__meta">{stale_count} stale session{plural} · newest {age}</p>"#,
-                age = esc(&bee_fmt_heartbeat_age(stale_newest_minutes)),
-            ));
-        }
-        body
-    };
-
-    format!(
-        r#"<section class="fg-card bee-panel bee-sessions">
-  <h3 class="bee-panel__head">Where work is happening</h3>
-  <h4 class="bee-panel__subhead">Sessions</h4>
-  {sessions_body}
-  <h4 class="bee-panel__subhead">Worktrees</h4>
-  {worktrees_body}
-  <h4 class="bee-panel__subhead">Workspaces</h4>
-  {workspaces_body}
-</section>"#,
-        sessions_body = sessions_body,
-        worktrees_body = bee_worktrees_body(&snapshot.worktrees),
-        workspaces_body = bee_workspaces_body(&snapshot.workspaces),
-    )
-}
-
-/// Process health (bbp-16, D5): the panel over what bbp-15 already put on
-/// the snapshot — `snapshot.reservations` (file-lock contention),
-/// `snapshot.tier_mix` (the model-tier spread), `snapshot.config`'s recorded
-/// `gate_bypass` — plus `snapshot.read_errors` (a partly-unreadable store is
-/// itself a process-health signal, not a separate footer). This view only
-/// renders those already-computed values; it never re-derives them (see
-/// `mdview_core::bee::compute_tier_mix` and the reservations reader for the
-/// actual computation).
-fn bee_process_health_panel(snapshot: &BeeSnapshot) -> String {
-    format!(
-        r#"<section class="fg-card bee-panel bee-process-health">
-  <h3 class="bee-panel__head">Process health</h3>
-  <h4 class="bee-panel__subhead">File-lock contention</h4>
-  {contention}
-  <h4 class="bee-panel__subhead">Model tier mix</h4>
-  {tiers}
-  <h4 class="bee-panel__subhead">Gate bypass</h4>
-  {bypass}
-  {errors}
-</section>"#,
-        contention = bee_lock_contention_body(&snapshot.reservations),
-        tiers = bee_tier_mix_body(snapshot.tier_mix.as_ref()),
-        bypass = bee_gate_bypass_body(snapshot.config.as_ref()),
-        errors = bee_read_errors(&snapshot.read_errors),
-    )
-}
-
-/// File-lock contention: `.bee/reservations.json`'s own `reservations[]`
-/// (`snapshot.reservations`, already read and parsed by
-/// `mdview_core::bee::read_snapshot`), filtered to the entries still
-/// unreleased (`released_at` is `None`) — that filter is the only thing
-/// this view does; it never re-derives which agent holds which path. A
-/// released reservation is history, not contention, so it is left out here
-/// rather than inflating a "locked right now" count with locks nobody still
-/// holds. An empty result renders one honest line, matching every other
-/// empty-state convention on this board — neither live store this reader
-/// was verified against holds an active lock, so this is the common case.
-fn bee_lock_contention_body(reservations: &[BeeReservation]) -> String {
-    let active: Vec<&BeeReservation> =
-        reservations.iter().filter(|r| r.released_at.is_none()).collect();
-    if active.is_empty() {
-        return r#"<p class="fg-empty">No files are currently locked.</p>"#.to_string();
-    }
-    let mut rows = String::new();
-    for r in active {
-        let path = r.path.as_deref().unwrap_or("—");
-        let agent = r.agent.as_deref().unwrap_or("—");
-        let cell = r.cell.as_deref().unwrap_or("—");
-        rows.push_str(&format!(
-            r#"<div class="fg-card bee-cell"><div class="fg-card__title">{path}</div><div class="bee-cell__meta">{agent} · {cell}</div></div>"#,
-            path = esc(path),
-            agent = esc(agent),
-            cell = esc(cell),
-        ));
-    }
-    format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
-}
-
-/// The model-tier spread: `snapshot.tier_mix`
-/// (`mdview_core::bee::compute_tier_mix`), rendered verbatim — one chip per
-/// tier value the store actually used (never limited to the three named
-/// tiers bee's own rubric defines, so an unrecognized value still shows
-/// rather than vanishing), plus an `untiered` chip when at least one cell
-/// carries no tier. `None` (no cells at all to measure) and a zero-tiered
-/// store (every cell untiered, so there is no tiered share to take)  each
-/// render their own honest line rather than a fabricated `0%`.
-fn bee_tier_mix_body(tier_mix: Option<&BeeTierMix>) -> String {
-    let Some(mix) = tier_mix else {
-        return r#"<p class="fg-empty">No cells to measure yet.</p>"#.to_string();
-    };
-    let mut chips = String::new();
-    for (tier, count) in &mix.counts {
-        chips.push_str(&format!(
-            r#"<span class="fg-chip fg-chip--neutral">{tier}: {count}</span>"#,
-            tier = esc(tier),
-            count = count,
-        ));
-    }
-    if mix.untiered > 0 {
-        chips.push_str(&format!(
-            r#"<span class="fg-chip fg-chip--neutral">untiered: {n}</span>"#,
-            n = mix.untiered,
-        ));
-    }
-    let share_line = match mix.expensive_tier_share {
-        Some(share) => format!(
-            r#"<p class="bee-cell__meta">{pct:.0}% of tiered cells are on the ceiling tier.</p>"#,
-            pct = share * 100.0,
-        ),
-        None => r#"<p class="fg-empty">No tiered cells to measure a ceiling-tier share from.</p>"#
-            .to_string(),
-    };
-    format!(
-        r#"<div class="bee-panel__chips">{chips}</div>{share_line}"#,
-        chips = chips,
-        share_line = share_line,
-    )
-}
-
-/// The recorded `gate_bypass` setting: `snapshot.config`
-/// (`.bee/config.json`, `mdview_core::bee::read_config`/
-/// `normalize_gate_bypass`). The non-off case is worded **exactly** as
-/// `compute_attention_items`' own gate-bypass rule words it
-/// (`mdview_core::bee`) — `Gate bypass recorded as "{level}"` — so the two
-/// surfaces never drift into disagreeing phrasing for the same fact.
-/// `config` itself being `None` (no `.bee/config.json`, or it failed to
-/// parse) is a distinct, honest "unknown" state, never presented as "off":
-/// off is something the file positively recorded.
-fn bee_gate_bypass_body(config: Option<&BeeConfig>) -> String {
-    match config {
-        None => {
-            r#"<p class="fg-empty">No <code>.bee/config.json</code> is recorded — bypass setting unknown.</p>"#
-                .to_string()
-        }
-        Some(c) => match c.gate_bypass.as_deref() {
-            None => r#"<p class="bee-cell__meta">Gate bypass recorded as off.</p>"#.to_string(),
-            Some(level) => format!(
-                r#"<p class="bee-cell__meta"><span class="fg-chip fg-chip--warning">Gate bypass recorded as "{level}"</span></p>"#,
-                level = esc(level),
-            ),
-        },
-    }
-}
-
 /// A signed minute count, rendered as plain relative language ("4 minutes
-/// ago", "2 hours ago") — the shared core of `bee_fmt_heartbeat_age` (a
-/// session's `last_heartbeat`) and `bee_fmt_trace_time` (a cell's
-/// `claimed_at`/`capped_at`), so both read the same way. A negative age
-/// (somehow in the future) reads as "just now" rather than a confusing
-/// negative duration; a non-finite value reads "unknown" rather than
-/// crashing the format.
+/// ago", "2 hours ago") — used by `bee_fmt_trace_time` (a cell's
+/// `claimed_at`/`capped_at`) and the worktree chip's own heartbeat age. A
+/// negative age (somehow in the future) reads as "just now" rather than a
+/// confusing negative duration; a non-finite value reads "unknown" rather
+/// than crashing the format.
 fn bee_relative_minutes(minutes: f64) -> String {
     if !minutes.is_finite() {
         return "unknown".to_string();
@@ -2587,17 +2285,11 @@ fn bee_relative_minutes(minutes: f64) -> String {
     }
 }
 
-/// A heartbeat age in minutes, rendered as plain relative language. See
-/// `bee_relative_minutes`.
-fn bee_fmt_heartbeat_age(minutes: f64) -> String {
-    bee_relative_minutes(minutes)
-}
-
 /// A cell trace timestamp (`claimed_at`/`capped_at`, an RFC 3339 string),
-/// rendered as plain relative language exactly like a session's heartbeat
-/// (`bee_fmt_heartbeat_age`) — never the raw ISO string. A value that fails
-/// to parse falls back to the raw string itself rather than hiding it: an
-/// oddly-shaped-but-present timestamp is still more useful than "unknown".
+/// rendered as plain relative language via `bee_relative_minutes` — never
+/// the raw ISO string. A value that fails to parse falls back to the raw
+/// string itself rather than hiding it: an oddly-shaped-but-present
+/// timestamp is still more useful than "unknown".
 fn bee_fmt_trace_time(iso: &str) -> String {
     match time::OffsetDateTime::parse(iso, &time::format_description::well_known::Rfc3339) {
         Ok(t) => {
@@ -3849,20 +3541,20 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_age_reads_as_plain_relative_language_not_a_timestamp() {
-        assert_eq!(bee_fmt_heartbeat_age(0.2), "just now");
-        assert_eq!(bee_fmt_heartbeat_age(4.0), "4 minutes ago");
-        assert_eq!(bee_fmt_heartbeat_age(1.0), "1 minute ago");
-        assert_eq!(bee_fmt_heartbeat_age(120.0), "2 hours ago");
-        assert_eq!(bee_fmt_heartbeat_age(60.0), "1 hour ago");
-        assert_eq!(bee_fmt_heartbeat_age(60.0 * 24.0 * 3.0), "3 days ago");
+    fn relative_minutes_reads_as_plain_relative_language_not_a_timestamp() {
+        assert_eq!(bee_relative_minutes(0.2), "just now");
+        assert_eq!(bee_relative_minutes(4.0), "4 minutes ago");
+        assert_eq!(bee_relative_minutes(1.0), "1 minute ago");
+        assert_eq!(bee_relative_minutes(120.0), "2 hours ago");
+        assert_eq!(bee_relative_minutes(60.0), "1 hour ago");
+        assert_eq!(bee_relative_minutes(60.0 * 24.0 * 3.0), "3 days ago");
         // A heartbeat somehow in the future reads as "just now", never a
         // negative duration.
-        assert_eq!(bee_fmt_heartbeat_age(-5.0), "just now");
-        assert_eq!(bee_fmt_heartbeat_age(f64::NAN), "unknown");
+        assert_eq!(bee_relative_minutes(-5.0), "just now");
+        assert_eq!(bee_relative_minutes(f64::NAN), "unknown");
         // Never a raw ISO-8601 shape anywhere in the output.
         for mins in [0.0, 4.0, 90.0, 60.0 * 30.0] {
-            assert!(!bee_fmt_heartbeat_age(mins).contains('T'));
+            assert!(!bee_relative_minutes(mins).contains('T'));
         }
     }
 
