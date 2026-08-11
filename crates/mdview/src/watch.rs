@@ -25,8 +25,10 @@ pub fn spawn_watchers(
     let mut debouncer = new_debouncer(debounce, None, move |res: DebounceEventResult| {
         if let Ok(events) = res {
             let paths: Vec<_> = events.into_iter().flat_map(|e| e.paths.clone()).collect();
-            if reindex_paths(&cb_engine, &paths) {
-                let _ = reload_tx.send("reload".to_string());
+            let changed = reindex_paths(&cb_engine, &paths);
+            if !changed.is_empty() {
+                let payload = serde_json::json!({ "changed": changed }).to_string();
+                let _ = reload_tx.send(payload);
             }
         }
     })?;
@@ -44,10 +46,12 @@ pub fn spawn_watchers(
     Ok(debouncer)
 }
 
-/// Reindex the given paths incrementally. Returns true if anything relevant changed.
-fn reindex_paths(engine: &Engine, paths: &[std::path::PathBuf]) -> bool {
+/// Reindex the given paths incrementally. Returns the changed documents as
+/// `<project_id>/<repo-relative-path>` entries (slash-separated on every
+/// platform) — the reload payload clients match their own URL against.
+fn reindex_paths(engine: &Engine, paths: &[std::path::PathBuf]) -> Vec<String> {
     let projects = engine.list_projects().unwrap_or_default();
-    let mut changed = false;
+    let mut changed = Vec::new();
 
     for path in paths {
         if !is_markdown(path) {
@@ -56,16 +60,24 @@ fn reindex_paths(engine: &Engine, paths: &[std::path::PathBuf]) -> bool {
         let Some(project) = projects.iter().find(|p| path.starts_with(&p.root_path)) else {
             continue;
         };
-        if path.exists() {
+        let indexed = if path.exists() {
             // Reindex the file and refresh its outgoing links (keeps backlinks live).
-            if engine.index_file_incremental(project, path).is_ok() {
-                changed = true;
-            }
+            engine.index_file_incremental(project, path).is_ok()
         } else {
             // Removed/renamed away — drop from index (survives atomic-save because
             // the debounced batch also carries the recreated path).
             let _ = engine.remove_file(project, path);
-            changed = true;
+            true
+        };
+        if indexed {
+            if let Ok(rel) = path.strip_prefix(&project.root_path) {
+                let rel = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                changed.push(format!("{}/{}", project.id, rel));
+            }
         }
     }
     changed

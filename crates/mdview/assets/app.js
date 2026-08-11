@@ -747,12 +747,40 @@
     headings.forEach(function (h) { observer.observe(h); });
   })();
 
-  // Live reload: reload-signal over WebSocket, full-page reload (PRD FR-19, Phase 1).
+  // Live reload, targeted (PRD FR-19): the watcher broadcasts
+  // {"changed":["<project_id>/<rel_path>", ...]}. A file page reloads only
+  // when its own document is in the list; project-scoped pages (home,
+  // search, bee board) reload on any change within their project because
+  // the tree and backlinks they render shift with every edit; the root
+  // index reloads on any change. Terminal/transcript pages never reload
+  // from a markdown edit — they poll their own endpoints and a forced
+  // reload would drop in-progress input.
+  function shouldReload(changed) {
+    var m = location.pathname.match(/^\/p\/([^\/]+)\/(.*)$/);
+    if (!m) return true;
+    var pid, rest;
+    try {
+      pid = decodeURIComponent(m[1]);
+      rest = decodeURIComponent(m[2]);
+    } catch (e) {
+      return true;
+    }
+    if (/^_(terminal|transcript)(\/|$)/.test(rest)) return false;
+    if (!rest || rest.charAt(0) === "_") {
+      return changed.some(function (c) { return c.indexOf(pid + "/") === 0; });
+    }
+    return changed.indexOf(pid + "/" + rest) !== -1;
+  }
   function connect() {
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
     var ws = new WebSocket(proto + "//" + location.host + "/ws");
     ws.onmessage = function (ev) {
-      if (ev.data === "reload") location.reload();
+      if (ev.data === "reload") { location.reload(); return; }
+      var msg;
+      try { msg = JSON.parse(ev.data); } catch (e) { return; }
+      if (msg && Array.isArray(msg.changed) && shouldReload(msg.changed)) {
+        location.reload();
+      }
     };
     ws.onclose = function () { setTimeout(connect, 3000); };
     ws.onerror = function () { try { ws.close(); } catch (e) {} };
