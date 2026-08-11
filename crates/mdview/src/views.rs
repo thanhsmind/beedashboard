@@ -18,7 +18,7 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} · mdview</title>
+<title>{title} · Bee Artifact</title>
 <script>
 // No-flash: apply saved scheme before body renders.
 (function() {{
@@ -109,7 +109,7 @@ pub fn project_list_page(
     register_error: Option<&str>,
 ) -> String {
     let listing = if projects.is_empty() {
-        "<p class=\"fg-empty\">Chưa có project nào. Đăng ký: <code>mdview register &lt;dir&gt;</code> hoặc gọi MCP <code>mdview_view_file</code>.</p>".to_string()
+        "<p class=\"fg-empty\">Chưa có project nào trong Bee Artifact. Đăng ký: <code>mdview register &lt;dir&gt;</code> hoặc gọi MCP <code>mdview_view_file</code>.</p>".to_string()
     } else {
         // One row per project, not a grid of cards: a card's width was spent on
         // air while the names — which is what the eye is actually scanning for —
@@ -162,7 +162,7 @@ pub fn project_list_page(
   </a>
   {badges}
   <form class="proj-row__delete" method="post" action="/api/projects/{id}/unregister" data-project="{name}">
-    <button type="submit" class="proj-card__del" aria-label="Remove {name} from mdview" title="Remove from mdview">✕</button>
+    <button type="submit" class="proj-card__del" aria-label="Remove {name} from Bee Artifact" title="Remove from Bee Artifact">✕</button>
   </form>
 </li>"#,
                 row_class = row_class,
@@ -1214,7 +1214,7 @@ pub fn unassigned_terminal_down_page() -> String {
   <h2 class="fg-pagehead__title">Unassigned agents</h2>
   <div class="fg-card term-pane">
     <div class="fg-card__title">herdr is not running</div>
-    <div class="term-pane__meta">Start herdr, then reload this page — mdview does not start it for you unless the herdr supervisor is switched on in Settings.</div>
+    <div class="term-pane__meta">Start herdr, then reload this page — Bee Artifact does not start it for you unless the herdr supervisor is switched on in Settings.</div>
   </div>
 </main>"#,
         topbar = topbar("<span class=\"crumb\">Unassigned agents</span>"),
@@ -1235,7 +1235,7 @@ pub fn terminal_down_page(project: &Project) -> String {
   <h2 class="fg-pagehead__title">{name}</h2>
   <div class="fg-card term-pane">
     <div class="fg-card__title">herdr is not running</div>
-    <div class="term-pane__meta">Start herdr, then reload this page — mdview does not start it for you unless the herdr supervisor is switched on in Settings.</div>
+    <div class="term-pane__meta">Start herdr, then reload this page — Bee Artifact does not start it for you unless the herdr supervisor is switched on in Settings.</div>
   </div>
 </main>"#,
         topbar = topbar_full(
@@ -3554,7 +3554,7 @@ fn topbar_full(lead: &str, center: &str, actions: &str, nav: &str) -> String {
     format!(
         r#"<header class="topbar">
   {lead}
-  <a href="/" class="home">mdview</a>
+  <a href="/" class="home">Bee Artifact</a>
   {center}
   {actions}
   <div class="topbar-menu js-menu">

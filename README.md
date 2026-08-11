@@ -1,4 +1,4 @@
-<h1 align="center">mdview</h1>
+<h1 align="center">Bee Artifact</h1>
 
 <p align="center">
   <strong>The markdown viewer built for the docs your AI agent actually writes.</strong>
@@ -26,13 +26,13 @@
 
 ---
 
-## Why mdview?
+## Why Bee Artifact?
 
 AI coding agents generate docs like a firehose: nested folders, `../src/api/README.md`
 links, Mermaid diagrams, tables, long code blocks. Open that in a typical single-folder
 viewer and half the links 404, there's no search, and every edit means a manual refresh.
 
-mdview indexes the **whole project** — at any folder depth — rewrites every internal link
+Bee Artifact (CLI binary: `mdview`) indexes the **whole project** — at any folder depth — rewrites every internal link
 into its own URL namespace, and live-reloads on save. The docs your agent generates just… work.
 
 | | |
@@ -130,7 +130,7 @@ live-reload the page.
 ssh -L 7700:localhost:7700 user@host   # then open http://localhost:7700
 ```
 
-> mdview can also bind your LAN (`mdview serve --host 0.0.0.0`) to read from a phone or
+> Bee Artifact can also bind your LAN (`mdview serve --host 0.0.0.0`) to read from a phone or
 > another machine. It has **no authentication** outside the agent terminal's token gate
 > (off by default — see [Agent terminal](#agent-terminal) below), so only expose it on
 > networks you trust — details in the [usage guide](docs/usage.md).
@@ -173,13 +173,13 @@ and pushes a reload signal over WebSocket.
 
 Every registered project also gets a **Terminal** tab (watch and reply to the coding
 agents running under that project) and a **Transcript** tab (each agent's own activity
-log). This is mdview's successor to [herdr-go](https://github.com/vantt/herdr-go), which
-is now retired — mdview absorbs it whole.
+log). This is Bee Artifact's successor to [herdr-go](https://github.com/vantt/herdr-go), which
+is now retired — Bee Artifact absorbs it whole.
 
 It needs a running [herdr](https://github.com/ogulcancelik/herdr) to talk to; without one,
 the tab explains that plainly instead of hiding or breaking. It is **off until you switch
 it on** from the settings page, where an access token is generated for it — that token is
-the only part of mdview gated by authentication; everything else stays exactly as
+the only part of Bee Artifact gated by authentication; everything else stays exactly as
 described above. Two more duties (keeping herdr alive, notifying on status change) are
 opt-in and off by default too.
 
@@ -195,7 +195,7 @@ UX are working end-to-end; a native desktop shell (Tauri) is experimental. See
 
 ## Credits
 
-mdview is an independent project, but its design leans on ideas and hard-won lessons from two
+Bee Artifact is an independent project, but its design leans on ideas and hard-won lessons from two
 prior open-source markdown servers. Grateful thanks to both:
 
 - **[mdserve](https://github.com/jfernandez/mdserve)** — Jose Fernandez, MIT. Watcher
