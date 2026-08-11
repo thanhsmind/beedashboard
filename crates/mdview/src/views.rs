@@ -3230,11 +3230,20 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
 /// cells grouped into the same four D7 buckets the board uses — each cell
 /// card links to its own detail page. Reached from the board's shipped/open
 /// feature lists or from a cell page's feature link.
+///
+/// `buckets` already carries any archived cells the caller merged in
+/// (archive-visibility) alongside the live ones. `is_closed` is true when
+/// the feature has no live open/claimed work left and at least one of its
+/// cells came from the archive — distinct from `shipped` (D10), which only
+/// ever looks at live cells and so reads `None` for a feature whose every
+/// cell has moved to `archive/`. `is_closed` is ignored once `shipped` is
+/// `Some`.
 pub fn bee_feature_page(
     project: &Project,
     feature: &str,
     buckets: &BeeBuckets,
     shipped: Option<&BeeShippedFeature>,
+    is_closed: bool,
 ) -> String {
     let status_banner = match shipped {
         Some(f) => {
@@ -3248,6 +3257,14 @@ pub fn bee_feature_page(
                 count = f.cell_count,
                 plural = if f.cell_count == 1 { "" } else { "s" },
                 cycle = esc(&cycle),
+            )
+        }
+        None if is_closed => {
+            let count = buckets.done.len();
+            format!(
+                r#"<div class="fg-card fg-card--sunken"><div class="fg-card__title">Closed · {count} cell{plural} done</div></div>"#,
+                count = count,
+                plural = if count == 1 { "" } else { "s" },
             )
         }
         None => {

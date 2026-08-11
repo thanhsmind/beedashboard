@@ -991,9 +991,12 @@ async fn bee_board(State(st): State<AppState>, Path(id): Path<String>) -> Respon
 
 /// `GET /p/:id/_bee/cell/:cell_id` — one cell in full (D4): title, action,
 /// verify, lane, status, its files/read_first lists, the decisions it
-/// cites, its must_haves, and its whole trace. A missing project, an absent
-/// `.bee/`, or an unknown cell id each resolve to the same clean not-found
-/// (D3), never a blank page.
+/// cites, its must_haves, and its whole trace. A cell whose feature has
+/// closed and moved to `.bee/cells/archive/<feature>/` still resolves here
+/// (archive-visibility) — a board or feature-page card links to this route
+/// regardless of whether the cell is live or archived. A missing project,
+/// an absent `.bee/`, or an unknown cell id (live or archived) each
+/// resolve to the same clean not-found (D3), never a blank page.
 async fn bee_cell_detail(
     State(st): State<AppState>,
     Path((id, cell_id)): Path<(String, String)>,
@@ -1004,7 +1007,9 @@ async fn bee_cell_detail(
     if !is_bee_project(&project) {
         return not_found("this project has no .bee/ store");
     }
-    match find_cell_full(&project.root_path, &cell_id) {
+    let cell = find_cell_full(&project.root_path, &cell_id)
+        .or_else(|| find_archived_cell_full(&project.root_path, &cell_id));
+    match cell {
         Some(cell) => Html(views::bee_cell_page(&project, &cell)).into_response(),
         None => not_found("cell not found"),
     }
@@ -2569,9 +2574,13 @@ async fn unassigned_terminal_keys(
 
 /// `GET /p/:id/_bee/feature/:feature` — one feature's cells grouped into the
 /// same four D7 buckets the board uses, plus its shipped state (D10) and
-/// cycle time (D11) when timed. An unknown feature name — none of its cells
-/// live in any bucket, and it never shipped — resolves to a clean not-found,
-/// same as an unknown cell id.
+/// cycle time (D11) when timed. Cells `bee close` moved to
+/// `.bee/cells/archive/<feature>/` are merged into these buckets too
+/// (archive-visibility) — otherwise a closed feature's cells vanish from
+/// its own detail page even though the feature clearly did ship. An
+/// unknown feature name — none of its cells live in any bucket, none
+/// archived, and it never shipped — resolves to a clean not-found, same as
+/// an unknown cell id.
 async fn bee_feature_detail(
     State(st): State<AppState>,
     Path((id, feature)): Path<(String, String)>,
@@ -2587,13 +2596,38 @@ async fn bee_feature_detail(
     let by_feature = |cells: &[mdview_core::bee::BeeCell]| -> Vec<mdview_core::bee::BeeCell> {
         cells.iter().filter(|c| c.feature == feature).cloned().collect()
     };
-    let buckets = mdview_core::bee::BeeBuckets {
+    let mut buckets = mdview_core::bee::BeeBuckets {
         doing: by_feature(&snapshot.buckets.doing),
         waiting: by_feature(&snapshot.buckets.waiting),
         stuck: by_feature(&snapshot.buckets.stuck),
         done: by_feature(&snapshot.buckets.done),
     };
     let shipped = snapshot.shipped.iter().find(|f| f.feature == feature);
+
+    // archive-visibility: closed distinct from shipped — `shipped` (D10)
+    // only ever looks at *live* cells, so a feature whose every cell moved
+    // to `archive/` reads as `None` there, not because it never shipped
+    // but because none of its cells are live to ask. "Closed" is this
+    // page's own read of that same fact: archived cells exist, and no live
+    // open/claimed work is left. Computed before the archive merge below,
+    // over the live-only buckets — an archived cell that happens to carry
+    // a stale "open"/"claimed" status (legacy data, not an active claim)
+    // must never keep the header from reading Closed.
+    let archived_cells = mdview_core::bee::read_archived_cells(&project.root_path, &feature);
+    let has_archived = !archived_cells.is_empty();
+    let is_closed = has_archived && buckets.doing.is_empty() && buckets.waiting.is_empty() && shipped.is_none();
+
+    for cell in archived_cells {
+        match cell.status.as_str() {
+            "claimed" => buckets.doing.push(cell),
+            "open" => buckets.waiting.push(cell),
+            "blocked" => buckets.stuck.push(cell),
+            "capped" => buckets.done.push(cell),
+            // "dropped" and any unrecognized status: no bucket, matching
+            // the live D7 rule (`read_snapshot`).
+            _ => {}
+        }
+    }
 
     // bbp-11: the by-phase board links every entry of `phase_board` to this
     // route, including a feature whose lane record survives with zero live
@@ -2606,6 +2640,7 @@ async fn bee_feature_detail(
     // board itself just placed a card for, so a feature this route now
     // shows a card for must resolve here too.
     let known_feature = shipped.is_some()
+        || has_archived
         || !buckets.doing.is_empty()
         || !buckets.waiting.is_empty()
         || !buckets.stuck.is_empty()
@@ -2615,7 +2650,7 @@ async fn bee_feature_detail(
         return not_found("feature not found");
     }
 
-    Html(views::bee_feature_page(&project, &feature, &buckets, shipped)).into_response()
+    Html(views::bee_feature_page(&project, &feature, &buckets, shipped, is_closed)).into_response()
 }
 
 /// Render `s` relative to `root` when it names a path under `root`; reduce
@@ -2642,7 +2677,9 @@ fn relativize_detail_path(s: &str, root: &std::path::Path) -> String {
 /// JSON object whose own `"id"` field matches `cell_id` — filenames are not
 /// guaranteed to match a cell's id (see `bee_route_tests::cell_json`, which
 /// deliberately writes `a.json`/`b.json` carrying ids like `c-open`), so a
-/// direct `<cells_dir>/<cell_id>.json` lookup would miss real cells.
+/// direct `<cells_dir>/<cell_id>.json` lookup would miss real cells. A cell
+/// found only in the archive is not this function's job — the caller falls
+/// back to [`find_archived_cell_full`] when this returns `None`.
 fn find_cell_full(root: &std::path::Path, cell_id: &str) -> Option<views::BeeCellFull> {
     let cells_dir = root.join(".bee").join("cells");
     if !cells_dir.is_dir() {
@@ -2664,6 +2701,47 @@ fn find_cell_full(root: &std::path::Path, cell_id: &str) -> Option<views::BeeCel
             continue;
         }
         return Some(cell_full_from_json(&v, root));
+    }
+    None
+}
+
+/// The archive-visibility fallback `bee_cell_detail` tries once
+/// [`find_cell_full`] finds nothing live: walk every feature directory
+/// under `.bee/cells/archive/` for the JSON object whose own `"id"` field
+/// matches `cell_id`, same id-not-filename lookup `find_cell_full` does,
+/// same raw-JSON-to-[`views::BeeCellFull`] shape via [`cell_full_from_json`]
+/// — a closed feature's cell renders exactly as full as a live one's.
+/// Read-only, like every other reader here.
+fn find_archived_cell_full(root: &std::path::Path, cell_id: &str) -> Option<views::BeeCellFull> {
+    let archive_dir = root.join(".bee").join("cells").join("archive");
+    if !archive_dir.is_dir() {
+        return None;
+    }
+    let feature_dirs = std::fs::read_dir(&archive_dir).ok()?;
+    for feature_entry in feature_dirs.filter_map(|e| e.ok()) {
+        let feature_path = feature_entry.path();
+        if !feature_path.is_dir() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&feature_path) else {
+            continue;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            if v.get("id").and_then(serde_json::Value::as_str) != Some(cell_id) {
+                continue;
+            }
+            return Some(cell_full_from_json(&v, root));
+        }
     }
     None
 }
@@ -4963,6 +5041,194 @@ mod bee_route_tests {
         assert!(body.contains("data-bucket=\"waiting\" data-count=\"1\""), "{body}");
         assert!(body.contains("data-bucket=\"stuck\" data-count=\"1\""), "{body}");
         assert!(body.contains("data-bucket=\"done\" data-count=\"0\""), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (archive-visibility, happy) `bee close` moves a feature's cells into
+    /// `.bee/cells/archive/<feature>/` and none of them stay live — this
+    /// fixture has no live cells at all for the feature, only two archived
+    /// capped ones. The feature page must still render them (merged into
+    /// the Done bucket) and its header must read "Closed" with the done
+    /// count, never the "Not shipped yet" banner a feature with truly zero
+    /// cells would get.
+    #[tokio::test]
+    async fn feature_detail_page_merges_archived_cells_and_shows_closed_header() {
+        let root = fresh_root("feature-detail-archived");
+        write(
+            &root,
+            ".bee/cells/archive/closed-feature/a.json",
+            &timed_cell_json(
+                "ca1",
+                "closed-feature",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+        write(
+            &root,
+            ".bee/cells/archive/closed-feature/b.json",
+            &timed_cell_json(
+                "ca2",
+                "closed-feature",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:24:00Z",
+                "2026-08-04T08:40:00Z",
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-detail-archived");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/closed-feature", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Closed"), "closed header missing: {body}");
+        assert!(body.contains("2 cells done"), "done count missing: {body}");
+        assert!(!body.contains("Not shipped yet"), "wrong empty-state banner: {body}");
+        assert!(body.contains("data-bucket=\"done\" data-count=\"2\""), "{body}");
+        assert!(body.contains("Cell ca1"), "archived cell card missing: {body}");
+        assert!(body.contains("Cell ca2"), "archived cell card missing: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (archive-visibility, happy) A live open cell keeps a feature out of
+    /// the Closed state even when it also has archived cells — Closed means
+    /// no live open/claimed work is left, not merely "has some archive".
+    #[tokio::test]
+    async fn feature_detail_page_with_live_open_cell_and_archived_ones_is_not_closed() {
+        let root = fresh_root("feature-detail-archived-still-open");
+        write(
+            &root,
+            ".bee/cells/live.json",
+            &timed_cell_json("live-1", "still-open-feature", "open", &[], "w1", "x", "y"),
+        );
+        write(
+            &root,
+            ".bee/cells/archive/still-open-feature/a.json",
+            &timed_cell_json(
+                "sa1",
+                "still-open-feature",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-detail-archived-still-open");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/still-open-feature", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Not shipped yet"), "{body}");
+        assert!(!body.contains("Closed"), "wrongly reported closed: {body}");
+        assert!(body.contains("data-bucket=\"waiting\" data-count=\"1\""), "{body}");
+        assert!(body.contains("data-bucket=\"done\" data-count=\"1\""), "the archived cell should still merge into Done: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (archive-visibility, happy) A cell whose feature has closed — moved
+    /// entirely to `.bee/cells/archive/<feature>/`, nothing left live — is
+    /// still reachable by id at its own detail route with its full trace,
+    /// same as a live cell.
+    #[tokio::test]
+    async fn cell_detail_page_resolves_a_cell_found_only_in_the_archive() {
+        let root = fresh_root("cell-detail-archived");
+        write(
+            &root,
+            ".bee/cells/archive/closed-feature/a.json",
+            &full_cell_json("archived-7", "closed-feature", "capped", &[], &[]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "cell-detail-archived");
+        let resp = get(router(st), &format!("/p/{}/_bee/cell/archived-7", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Cell archived-7"), "title missing: {body}");
+        assert!(body.contains("capped"), "status missing: {body}");
+        assert!(body.contains("do the full thing"), "action missing: {body}");
+        assert!(body.contains("worker-1"), "trace worker missing: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (archive-visibility) An id that resolves in neither the live tree
+    /// nor any archived feature directory still gets the ordinary
+    /// not-found page (D3), never a panic or a blank page.
+    #[tokio::test]
+    async fn cell_detail_page_404s_when_id_is_in_neither_live_nor_archived_tree() {
+        let root = fresh_root("cell-detail-nowhere");
+        write(
+            &root,
+            ".bee/cells/archive/some-feature/a.json",
+            &full_cell_json("real-archived-cell", "some-feature", "capped", &[], &[]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "cell-detail-nowhere");
+        let resp = get(router(st), &format!("/p/{}/_bee/cell/no-such-cell", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (archive-visibility, D9) The main board (`/p/:id/_bee`) reads the
+    /// snapshot-wide KPIs and buckets, which must stay archive-free per D9
+    /// — a closed feature's cells belong on its own detail page, not the
+    /// board. A live open cell and an archived capped cell coexist here;
+    /// the board must show only the live one.
+    #[tokio::test]
+    async fn main_board_excludes_archived_cells_from_kpis_and_buckets() {
+        let root = fresh_root("board-excludes-archive");
+        write(
+            &root,
+            ".bee/cells/live.json",
+            &timed_cell_json("live-open-1", "some-feature", "open", &[], "w1", "x", "y"),
+        );
+        write(
+            &root,
+            ".bee/cells/archive/closed-feature/archived.json",
+            &timed_cell_json(
+                "archived-only-cell",
+                "closed-feature",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "board-excludes-archive");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            !body.contains("archived-only-cell"),
+            "archived cell id leaked onto the main board: {body}"
+        );
+        assert!(
+            !body.contains("Cell archived-only-cell"),
+            "archived cell card leaked onto the main board: {body}"
+        );
+        assert!(
+            body.contains(r#"<div class="bee-stat__value">0</div><div class="bee-stat__label">Done</div>"#),
+            "the archived capped cell must not count toward the Done KPI: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
