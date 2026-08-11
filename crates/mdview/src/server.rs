@@ -2650,7 +2650,52 @@ async fn bee_feature_detail(
         return not_found("feature not found");
     }
 
-    Html(views::bee_feature_page(&project, &feature, &buckets, shipped, is_closed)).into_response()
+    // feature-hub-2's chip row and Activity tab both need this feature's
+    // own lane classification and gate record — its own `.bee/lanes/`
+    // record when one exists, else `state.json` when this is the globally
+    // active feature (the only feature `state.json` can ever speak for) —
+    // and neither when this feature is known only through its cells or the
+    // archive, exactly the "when present" the cell's own action names.
+    let is_active_feature = snapshot.state.as_ref().and_then(|s| s.feature.as_deref()) == Some(feature.as_str());
+    let lane_record = snapshot.lanes.iter().find(|l| l.feature == feature);
+    let lane_label: Option<String> = lane_record
+        .and_then(|l| l.route.as_ref())
+        .and_then(|r| r.lane.clone())
+        .or_else(|| {
+            is_active_feature
+                .then(|| snapshot.state.as_ref().and_then(|s| s.route.as_ref()).and_then(|r| r.lane.clone()))
+                .flatten()
+        });
+    let gates: Option<&mdview_core::bee::BeeApprovedGates> = lane_record
+        .and_then(|l| l.approved_gates.as_ref())
+        .or_else(|| {
+            is_active_feature.then(|| snapshot.state.as_ref().and_then(|s| s.approved_gates.as_ref())).flatten()
+        });
+
+    // Activity's timeline: `.bee/decisions.jsonl`'s own recent-decide window
+    // (`snapshot.decisions.recent`, already bounded by `read_snapshot`),
+    // narrowed to this feature's own `scope` — no new file read.
+    let decisions: Vec<mdview_core::bee::BeeDecisionSummary> = snapshot
+        .decisions
+        .recent
+        .iter()
+        .filter(|d| d.scope.as_deref() == Some(feature.as_str()))
+        .cloned()
+        .collect();
+
+    Html(views::bee_feature_page(
+        &project,
+        &feature,
+        &buckets,
+        shipped,
+        is_closed,
+        lane_label.as_deref(),
+        &snapshot.worktrees,
+        &decisions,
+        &snapshot.running_workers,
+        gates,
+    ))
+    .into_response()
 }
 
 /// Render `s` relative to `root` when it names a path under `root`; reduce
@@ -5001,9 +5046,9 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (happy) The feature page returns 200, carries the feature's cells
-    /// grouped by the four D7 buckets, and its shipped state (D10) plus
-    /// cycle time (D11).
+    /// (happy) The feature page returns 200, carries the feature's cells on
+    /// its Todos checklist, and its shipped state (D10) plus cycle time
+    /// (D11).
     #[tokio::test]
     async fn feature_detail_page_shows_shipped_state_and_bucket_grouping() {
         let root = fresh_root("feature-detail-happy");
@@ -5029,17 +5074,15 @@ mod bee_route_tests {
 
         assert!(body.contains("Shipped"), "shipped banner missing: {body}");
         assert!(body.contains("0.4h to finish"), "cycle time missing: {body}");
-        assert!(body.contains("data-bucket=\"done\" data-count=\"1\""), "{body}");
-        assert!(body.contains("data-bucket=\"doing\" data-count=\"0\""), "{body}");
-        assert!(body.contains("data-bucket=\"waiting\" data-count=\"0\""), "{body}");
-        assert!(body.contains("data-bucket=\"stuck\" data-count=\"0\""), "{body}");
+        assert!(body.contains("1/1 cell done"), "chip-row cell count missing: {body}");
+        assert!(body.contains("bee-todo--done"), "capped cell must render struck-through in Todos: {body}");
         assert!(body.contains("Cell f1"), "cell title missing: {body}");
 
         std::fs::remove_dir_all(&root).ok();
     }
 
     /// A feature with a live cell in each of Doing/Waiting/Stuck and none
-    /// capped groups correctly into all four buckets and is honestly
+    /// capped renders each with its own Todos marker and is honestly
     /// reported as not shipped (D10 requires every non-dropped cell capped).
     #[tokio::test]
     async fn feature_detail_page_groups_across_all_four_buckets_when_not_shipped() {
@@ -5067,21 +5110,27 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(body.contains("Not shipped yet"), "{body}");
-        assert!(body.contains("data-bucket=\"doing\" data-count=\"1\""), "{body}");
-        assert!(body.contains("data-bucket=\"waiting\" data-count=\"1\""), "{body}");
-        assert!(body.contains("data-bucket=\"stuck\" data-count=\"1\""), "{body}");
-        assert!(body.contains("data-bucket=\"done\" data-count=\"0\""), "{body}");
+        assert!(body.contains("0/3 cells done"), "chip-row cell count missing: {body}");
+        assert!(body.contains("bee-todo--claimed"), "claimed cell missing its Todos marker: {body}");
+        assert!(body.contains("bee-todo--open"), "open cell missing its Todos marker: {body}");
+        assert!(body.contains("bee-todo--blocked"), "blocked cell missing its red Todos marker: {body}");
+        assert!(
+            body.contains("fg-chip fg-chip--accent bee-todo__badge\">w1</span>"),
+            "claimed cell must carry its own worker as an agent badge: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (archive-visibility, happy) `bee close` moves a feature's cells into
-    /// `.bee/cells/archive/<feature>/` and none of them stay live — this
-    /// fixture has no live cells at all for the feature, only two archived
-    /// capped ones. The feature page must still render them (merged into
-    /// the Done bucket) and its header must read "Closed" with the done
-    /// count, never the "Not shipped yet" banner a feature with truly zero
-    /// cells would get.
+    /// (archive-visibility, happy, D2) `bee close` moves a feature's cells
+    /// into `.bee/cells/archive/<feature>/` and none of them stay live —
+    /// this fixture has no live cells at all for the feature, only two
+    /// archived capped ones. The feature page must still render them and
+    /// its header must read "Closed" with the done count, never the "Not
+    /// shipped yet" banner a feature with truly zero cells would get — and
+    /// every tab (Todos, Sub-agents) and the worktree chip must be as fully
+    /// populated as a live feature's, per feature-hub-2's own "archived
+    /// features fully populated" requirement.
     #[tokio::test]
     async fn feature_detail_page_merges_archived_cells_and_shows_closed_header() {
         let root = fresh_root("feature-detail-archived");
@@ -5121,9 +5170,19 @@ mod bee_route_tests {
         assert!(body.contains("Closed"), "closed header missing: {body}");
         assert!(body.contains("2 cells done"), "done count missing: {body}");
         assert!(!body.contains("Not shipped yet"), "wrong empty-state banner: {body}");
-        assert!(body.contains("data-bucket=\"done\" data-count=\"2\""), "{body}");
+        assert!(body.contains("2/2 cells done"), "chip-row cell count missing: {body}");
         assert!(body.contains("Cell ca1"), "archived cell card missing: {body}");
         assert!(body.contains("Cell ca2"), "archived cell card missing: {body}");
+        assert!(
+            body.contains("fg-chip--success\">Merged</span>"),
+            "a closed feature with no active worktree grant must read Merged: {body}"
+        );
+        assert!(body.contains("bee-subagents"), "sub-agents tab must be populated for a closed feature: {body}");
+        assert!(body.contains("2 cells capped"), "sub-agent capped count missing: {body}");
+        assert!(
+            body.contains("bee-todo--done"),
+            "both archived cells must render struck-through on the Todos tab: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5161,8 +5220,286 @@ mod bee_route_tests {
 
         assert!(body.contains("Not shipped yet"), "{body}");
         assert!(!body.contains("Closed"), "wrongly reported closed: {body}");
-        assert!(body.contains("data-bucket=\"waiting\" data-count=\"1\""), "{body}");
-        assert!(body.contains("data-bucket=\"done\" data-count=\"1\""), "the archived cell should still merge into Done: {body}");
+        assert!(body.contains("1/2 cells done"), "chip-row cell count missing: {body}");
+        assert!(body.contains("bee-todo--open"), "the live open cell must still render on Todos: {body}");
+        assert!(
+            body.contains("bee-todo--done"),
+            "the archived cell should still merge into the Todos checklist as done: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── feature-hub-2: detail page tabs + chip row ─────────────────────────
+
+    /// (happy, D2) The Activity tab joins three sources this snapshot
+    /// already read: this feature's own lane record's gate stamps (one
+    /// approved, one not), a `decide` event scoped to this feature (a
+    /// same-run event scoped to a DIFFERENT feature must not leak in), and
+    /// a capped cell's own worker + outcome + test verdict.
+    #[tokio::test]
+    async fn feature_detail_activity_tab_joins_gates_scoped_decisions_and_capped_outcome() {
+        let root = fresh_root("activity-happy");
+        write(
+            &root,
+            ".bee/lanes/activity-feature.json",
+            &lane_json(
+                "activity-feature",
+                "compounding",
+                "standard",
+                "none",
+                Some(r#""context": true, "shape": false, "execution": false, "review": false"#),
+                None,
+            ),
+        );
+        write(
+            &root,
+            ".bee/decisions.jsonl",
+            &format!(
+                "{}\n{}\n",
+                r#"{"id":"d1","type":"decide","date":"2026-08-04T08:10:00.000Z","decision":"Own the activity tab join","scope":"activity-feature"}"#,
+                r#"{"id":"d2","type":"decide","date":"2026-08-04T08:11:00.000Z","decision":"An unrelated feature decision","scope":"other-feature"}"#,
+            ),
+        );
+        write(
+            &root,
+            ".bee/cells/act1.json",
+            &full_cell_json("act-1", "activity-feature", "capped", &[], &[]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "activity-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/activity-feature", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Context approved"), "approved gate stamp missing: {body}");
+        assert!(body.contains("Shape not yet approved"), "unapproved gate stamp missing: {body}");
+        assert!(
+            body.contains("Own the activity tab join"),
+            "the feature-scoped decision must appear on the timeline: {body}"
+        );
+        assert!(
+            !body.contains("An unrelated feature decision"),
+            "a decision scoped to a different feature must not leak in: {body}"
+        );
+        assert!(body.contains("worker-1"), "capped cell's own worker missing: {body}");
+        assert!(body.contains("shipped the detail pages"), "capped cell's own outcome missing: {body}");
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/cell/act-1\"", project.id)),
+            "the timeline's capped-cell entry must link to its own cell detail page: {body}"
+        );
+        assert!(
+            body.contains("Latest verify") && body.contains("fg-chip fg-chip--success\">green</span>"),
+            "the latest verify/test state must render: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy, D2) The Sub-agents tab groups by worker nickname: a worker
+    /// touching two of this feature's cells (one capped, one still
+    /// claimed) reports its own capped-cell count, and a live session
+    /// sharing its nickname carries a heartbeat marker.
+    #[tokio::test]
+    async fn feature_detail_subagents_tab_shows_capped_count_and_live_heartbeat() {
+        let root = fresh_root("subagents-happy");
+        write(&root, ".bee/cells/sa-done.json", &cell_json("sa-done", "capped", &[], "kf1-worker"));
+        write(&root, ".bee/cells/sa-claimed.json", &cell_json("sa-claimed", "claimed", &[], "kf1-worker"));
+        write(
+            &root,
+            ".bee/state.json",
+            &state_json_with_workers(&worker_json("kf1-worker", "sa-claimed", "generation", "running")),
+        );
+        write(
+            &root,
+            ".bee/sessions/kf1-worker.json",
+            &session_json("kf1-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "subagents-happy");
+        // `cell_json` fixes its own feature at "demo" (matches `state.json`'s
+        // own active feature above, same precedent `running_worker_with_live_session_...` uses).
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/demo", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("bee-subagents"), "sub-agents tab body missing: {body}");
+        assert!(body.contains("kf1-worker"), "worker nickname missing: {body}");
+        assert!(body.contains("1 cell capped"), "capped-cell count missing: {body}");
+        assert!(
+            body.contains("fg-chip fg-chip--success bee-subagent__live\">live ·"),
+            "the live heartbeat marker is missing: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge, D2) A feature whose cells all carry no `trace.worker` at all
+    /// renders an honest empty Sub-agents state, never a guessed nickname.
+    #[tokio::test]
+    async fn feature_detail_subagents_tab_honest_empty_state_when_no_worker_named() {
+        let root = fresh_root("subagents-empty");
+        write(
+            &root,
+            ".bee/cells/no-worker.json",
+            r#"{
+                "id": "no-worker",
+                "feature": "workerless-feature",
+                "lane": "standard",
+                "title": "Cell no-worker",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "open",
+                "tier": "generation",
+                "trace": {}
+            }"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "subagents-empty");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/workerless-feature", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("No sub-agents recorded for this feature."),
+            "the empty Sub-agents state must say so honestly: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy, D2) The chip row shows this feature's own lane classification
+    /// (`route.lane` from its lane record), a still-open worktree grant's
+    /// branch, and a claim-to-cap duration derived from a timed capped cell.
+    #[tokio::test]
+    async fn feature_detail_chip_row_shows_lane_worktree_and_duration() {
+        let root = fresh_root("chips-happy");
+        write(
+            &root,
+            ".bee/lanes/chip-feature.json",
+            r#"{"feature": "chip-feature", "phase": "building", "mode": "standard", "next_action": "none", "route": {"lane": "standard"}}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/chip1.json",
+            &timed_cell_json(
+                "chip-1",
+                "chip-feature",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+        let sibling = make_worktree_sibling("feature-hub-2-wt-chip");
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"chip-feature","mode":"standard"}"#);
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["feature-hub-2-wt-chip"]));
+        write(
+            &root,
+            ".bee/runtime/workspaces/w.json",
+            &workspace_json("feature-hub-2-wt-chip", &sibling.to_string_lossy(), "wt/chip-feature", &[]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "chips-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/chip-feature", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("bee-detail-chips"), "chip row missing: {body}");
+        assert!(body.contains("lane: standard"), "lane chip missing: {body}");
+        assert!(body.contains("fg-chip--info\">Open · wt/chip-feature</span>"), "worktree chip missing: {body}");
+        assert!(body.contains("0.4h claim→cap"), "duration chip missing: {body}");
+        assert!(body.contains("1/1 cell done"), "cell-count chip missing: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// (edge, D2) A Closed feature (archive-visibility) whose worktree grant
+    /// is still open reads "Open · <branch>" on its chip row, never the
+    /// Closed group's own "Merged" fallback — the store's own record of an
+    /// unmerged worktree always wins.
+    #[tokio::test]
+    async fn feature_detail_chip_row_shows_unmerged_state_for_a_closed_feature() {
+        let root = fresh_root("chips-unmerged");
+        write(
+            &root,
+            ".bee/cells/archive/unmerged-feature/a.json",
+            &timed_cell_json(
+                "um-1",
+                "unmerged-feature",
+                "capped",
+                &[],
+                "w1",
+                "2026-08-04T08:00:00Z",
+                "2026-08-04T08:24:00Z",
+            ),
+        );
+        let sibling = make_worktree_sibling("feature-hub-2-wt-unmerged");
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"unmerged-feature","mode":"standard"}"#);
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["feature-hub-2-wt-unmerged"]));
+        write(
+            &root,
+            ".bee/runtime/workspaces/w.json",
+            &workspace_json("feature-hub-2-wt-unmerged", &sibling.to_string_lossy(), "wt/unmerged-feature", &[]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "chips-unmerged");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/unmerged-feature", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Closed"), "closed header missing: {body}");
+        assert!(
+            body.contains("fg-chip--info\">Open · wt/unmerged-feature</span>"),
+            "an unmerged worktree must win over the Closed fallback: {body}"
+        );
+        assert!(!body.contains("Merged"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// (edge, D2) A feature known only through a lane record with zero live
+    /// cells (the exact fixture `lane_only_feature_with_no_live_cells_still_resolves_its_detail_page`
+    /// pins the route for) renders every tab's own honest empty state
+    /// rather than an empty or missing section.
+    #[tokio::test]
+    async fn feature_detail_tabs_render_honest_empty_states_with_no_cells_and_no_gate_record() {
+        let root = fresh_root("detail-empty-states");
+        write(
+            &root,
+            ".bee/lanes/empty-states-feature.json",
+            &lane_json("empty-states-feature", "compounding-complete", "standard", "none", None, None),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "detail-empty-states");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/empty-states-feature", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("No gate record for this feature."),
+            "a lane record with no approved_gates key must read honestly, not as all-false: {body}"
+        );
+        assert!(body.contains("No activity recorded yet."), "{body}");
+        assert!(body.contains("No cells recorded for this feature."), "{body}");
+        assert!(body.contains("No sub-agents recorded for this feature."), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
     }

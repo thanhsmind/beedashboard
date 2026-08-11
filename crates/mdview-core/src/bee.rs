@@ -109,6 +109,17 @@ pub struct BeeCell {
     /// "not a behavior change" is the safer default for
     /// [`compute_scribing_debt`], which only ever counts `true`.
     pub behavior_change: bool,
+    /// `trace.outcome` (feature-hub-2's Activity tab: "each capped cell's
+    /// worker + outcome + capped_at") — free text, not a path field, but
+    /// scrubbed anyway since a worker's own outcome sentence has been
+    /// observed naming a file path; see [`scrub_paths`]. `None` for a cell
+    /// with no trace or no `outcome` key, the normal shape for a cell that
+    /// has not capped yet.
+    pub outcome: Option<String>,
+    /// `trace.tests` — bee's own verdict for the cell's declared `verify`
+    /// command, verbatim (`"green"`, `"red"`, or whatever a future bee
+    /// version writes). `None` when the trace carries no verdict yet.
+    pub tests: Option<String>,
 }
 
 /// The four D7 buckets. A `dropped` cell or one with an unrecognized status
@@ -487,6 +498,13 @@ pub struct BeeLane {
     /// same shape [`BeeState::last_scribing_run`] carries for the active
     /// feature; see [`compute_scribing_debt`].
     pub last_scribing_run: Option<BeeLastScribingRun>,
+    /// This lane's own `route` (feature-hub-2's chip row: "lane class from
+    /// the lane/route record when present"), same shape and same
+    /// [`parse_route`] helper `read_state` already uses for
+    /// [`BeeState::route`]. `None` when the file never carried the key — a
+    /// lane record written before a feature was ever routed, or one whose
+    /// route write raced this read.
+    pub route: Option<BeeRoute>,
 }
 
 /// One `.bee/runtime/workspaces/<id>.json` worktree/workspace record.
@@ -1395,18 +1413,7 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
                 execution: g.get("execution").and_then(Value::as_str).map(String::from),
                 review: g.get("review").and_then(Value::as_str).map(String::from),
             }),
-            route: v.get("route").and_then(Value::as_object).map(|r| BeeRoute {
-                class: r.get("class").and_then(Value::as_str).map(String::from),
-                lane: r.get("lane").and_then(Value::as_str).map(String::from),
-                flags: r
-                    .get("flags")
-                    .and_then(Value::as_array)
-                    .map(|arr| arr.iter().filter_map(|f| f.as_str().map(String::from)).collect())
-                    .unwrap_or_default(),
-                product_files: r.get("product_files").and_then(Value::as_u64),
-                rationale: r.get("rationale").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
-                updated_at: r.get("updated_at").and_then(Value::as_str).map(String::from),
-            }),
+            route: parse_route(&v, root),
             next_action: v.get("next_action").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
             last_scribing_run: parse_last_scribing_run(&v),
         }),
@@ -1428,6 +1435,26 @@ fn parse_approved_gates(v: &Value) -> Option<BeeApprovedGates> {
         shape: g.get("shape").and_then(Value::as_bool),
         execution: g.get("execution").and_then(Value::as_bool),
         review: g.get("review").and_then(Value::as_bool),
+    })
+}
+
+/// Parse a `route` object shared by `.bee/state.json` and every
+/// `.bee/lanes/<feature>.json` record (feature-hub-2) — see [`BeeRoute`].
+/// Factored out so `read_state` and `parse_lane` never drift apart on this
+/// shape, the same precedent [`parse_approved_gates`] and
+/// [`parse_last_scribing_run`] already set for their own shared shapes.
+fn parse_route(v: &Value, root: &Path) -> Option<BeeRoute> {
+    v.get("route").and_then(Value::as_object).map(|r| BeeRoute {
+        class: r.get("class").and_then(Value::as_str).map(String::from),
+        lane: r.get("lane").and_then(Value::as_str).map(String::from),
+        flags: r
+            .get("flags")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(|f| f.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        product_files: r.get("product_files").and_then(Value::as_u64),
+        rationale: r.get("rationale").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
+        updated_at: r.get("updated_at").and_then(Value::as_str).map(String::from),
     })
 }
 
@@ -1648,6 +1675,11 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
         .and_then(Value::as_str)
         .map(String::from);
     let behavior_change = v.get("behavior_change").and_then(Value::as_bool).unwrap_or(false);
+    let outcome = trace
+        .and_then(|t| t.get("outcome"))
+        .and_then(Value::as_str)
+        .map(|s| scrub_paths(s, root));
+    let tests = trace.and_then(|t| t.get("tests")).and_then(Value::as_str).map(String::from);
 
     Ok(BeeCell {
         id,
@@ -1661,6 +1693,8 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
         claimed_at,
         capped_at,
         behavior_change,
+        outcome,
+        tests,
     })
 }
 
@@ -1940,8 +1974,9 @@ fn parse_lane(path: &Path, root: &Path) -> Result<BeeLane, String> {
     let approved_gates = parse_approved_gates(&v);
     let created_at = v.get("created_at").and_then(Value::as_str).map(String::from);
     let last_scribing_run = parse_last_scribing_run(&v);
+    let route = parse_route(&v, root);
 
-    Ok(BeeLane { feature, phase, mode, next_action, approved_gates, created_at, last_scribing_run })
+    Ok(BeeLane { feature, phase, mode, next_action, approved_gates, created_at, last_scribing_run, route })
 }
 
 /// Read `.bee/runtime/workspaces/*.json` (D4). Absent yields an empty list.
@@ -2229,6 +2264,20 @@ fn compute_shipped_features(cells: &[BeeCell]) -> Vec<BeeShippedFeature> {
         });
     }
     shipped
+}
+
+/// Earliest `claimed_at` to latest `capped_at` across every cell `cells`
+/// yields — feature-hub-2's chip-row "duration from first claim to last
+/// cap", reusing the same span math [`compute_cycle_time`] already applies
+/// to a *shipped* feature's D11 cycle time, but over whatever cells a
+/// caller hands it: a feature need not be fully shipped (every cell
+/// capped) to have a duration worth showing, unlike [`BeeShippedFeature`].
+/// `None` when no cell in the set has both a parseable `claimed_at` and a
+/// parseable `capped_at` anywhere in the set — never a guessed span. Pure
+/// computation over cells this snapshot already parsed; opens no file.
+pub fn feature_cell_span<'a>(cells: impl Iterator<Item = &'a BeeCell>) -> Option<BeeCycleSpan> {
+    let refs: Vec<&BeeCell> = cells.collect();
+    compute_cycle_time(&refs)
 }
 
 /// Earliest `claimed_at` to latest `capped_at` across `live` (D11). `None`
