@@ -3494,12 +3494,13 @@ mod bee_route_tests {
     }
 
 
-    /// (edge, agent-board ab-1) An entirely empty store — no cells at all —
-    /// still renders all five agent-board columns: the three this cell
-    /// reads state their bucket honestly empty ("Nothing here."), and the
-    /// two ab-2 has not wired up yet say so plainly instead of claiming to
-    /// have read zero items (bee-board-pm D5's "sections never disappear"
-    /// rule). Replaces `empty_store_renders_honest_empty_phase_board`.
+    /// (edge, agent-board ab-1/ab-2) An entirely empty store — no cells,
+    /// no backlog, no gates, no handoff — still renders all five
+    /// agent-board columns, each stating its own honest empty line
+    /// ("Nothing here.", bee-board-pm D5's "sections never disappear"
+    /// rule). Replaces `empty_store_renders_honest_empty_phase_board`; ab-2
+    /// widens this from three real columns to all five once Backlog and
+    /// Review grew their own readers.
     #[tokio::test]
     async fn empty_store_renders_five_honest_agent_board_columns() {
         let root = fresh_root("agent-board-empty");
@@ -3513,23 +3514,246 @@ mod bee_route_tests {
 
         for key in ["backlog", "todo", "in-progress", "review", "done"] {
             assert!(
-                body.contains(&format!("data-agent-col=\"{key}\"")),
-                "column {key} must always render: {body}"
+                body.contains(&format!("data-agent-col=\"{key}\" data-agent-count=\"0\"")),
+                "column {key} must always render, honestly empty: {body}"
             );
         }
-        assert!(body.contains("data-agent-col=\"todo\" data-agent-count=\"0\""), "{body}");
-        assert!(body.contains("data-agent-col=\"in-progress\" data-agent-count=\"0\""), "{body}");
-        assert!(body.contains("data-agent-col=\"done\" data-agent-count=\"0\""), "{body}");
         assert_eq!(
             body.matches("Nothing here.").count(),
-            3,
-            "the three read columns must each state their own honest empty line: {body}"
+            5,
+            "every column must state its own honest empty line: {body}"
         );
+        assert!(
+            !body.contains("Not wired up in this build yet."),
+            "ab-2 finished both remaining readers — this placeholder line must never render again: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy, agent-board ab-2) A `proposed` PBI and a `parked` PBI each
+    /// render as one Backlog card (D2); the parked item carries its own
+    /// visible marker so it never reads as merely queued. An `in-flight`
+    /// PBI (already a cell, so already shown elsewhere on this board) and
+    /// a `done` PBI must never render here — Backlog counts only
+    /// genuinely open backlog work.
+    #[tokio::test]
+    async fn backlog_column_renders_proposed_and_marks_parked_pbis() {
+        let root = fresh_root("agent-board-backlog");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Add search\",\"status\":\"proposed\",\"feature\":\"demo\"}\n\
+             {\"kind\":\"pbi\",\"id\":\"PBI-2\",\"title\":\"Add filters\",\"status\":\"parked\",\"feature\":\"demo\"}\n\
+             {\"kind\":\"pbi\",\"id\":\"PBI-3\",\"title\":\"Already building\",\"status\":\"in-flight\",\"feature\":\"demo\"}\n\
+             {\"kind\":\"pbi\",\"id\":\"PBI-4\",\"title\":\"Shipped already\",\"status\":\"done\",\"feature\":\"demo\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "agent-board-backlog");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-agent-col=\"backlog\" data-agent-count=\"2\""), "{body}");
+        assert!(body.contains("Add search"), "the proposed PBI must render in Backlog: {body}");
+        assert!(body.contains("Add filters"), "the parked PBI must render in Backlog: {body}");
         assert_eq!(
-            body.matches("Not wired up in this build yet.").count(),
-            2,
-            "Backlog and Review must each state plainly that no reader exists yet: {body}"
+            body.matches("bee-agent-card__parked\">Parked</span>").count(),
+            1,
+            "exactly the parked PBI must carry the Parked marker: {body}"
         );
+        // The pre-existing "Backlog & Review" panel (`bee_backlog_panel`,
+        // unmoved by this cell) legitimately lists every open PBI including
+        // `in-flight` ones lower on the page, so "in-flight/done must never
+        // render" is scoped to the Kanban Backlog COLUMN alone, not the
+        // whole body.
+        let backlog_col_start = body.find("data-agent-col=\"backlog\"").expect("backlog column must render");
+        let backlog_col_end = body[backlog_col_start..]
+            .find("data-agent-col=\"todo\"")
+            .map(|i| backlog_col_start + i)
+            .expect("todo column must follow backlog");
+        let backlog_col = &body[backlog_col_start..backlog_col_end];
+        assert!(
+            !backlog_col.contains("Already building"),
+            "an in-flight PBI must never render in the Backlog column — it is already a cell elsewhere on the board: {backlog_col}"
+        );
+        assert!(
+            !backlog_col.contains("Shipped already"),
+            "a done PBI must never render in the Backlog column: {backlog_col}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy, agent-board ab-2, D4) The active feature's first
+    /// not-yet-approved gate (NOT the independent-review gate) and a
+    /// paused handoff each render exactly one Review card, both worded as
+    /// awaiting the user's own decision.
+    #[tokio::test]
+    async fn review_column_renders_unapproved_gate_and_paused_handoff() {
+        let root = fresh_root("agent-board-review");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "feature": "gate-feature",
+                "approved_gates": {"context": true, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        write(
+            &root,
+            ".bee/HANDOFF.json",
+            r#"{"written_at": "2026-08-10T09:00:00Z", "next_action": "Decide whether to resume."}"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "agent-board-review");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-agent-col=\"review\" data-agent-count=\"2\""), "{body}");
+        assert!(
+            body.contains("Shape gate awaiting your decision"),
+            "the feature's current-stop gate (shape, the first unapproved one) must render its own Review card: {body}"
+        );
+        assert!(
+            body.contains("gate-feature"),
+            "the gate card must name its own feature: {body}"
+        );
+        assert!(
+            body.contains("Work is parked, waiting on your decision"),
+            "the paused handoff must render its own Review card: {body}"
+        );
+        assert!(
+            body.contains("Decide whether to resume."),
+            "the handoff card must carry its own recorded next-action note: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge, agent-board ab-2, D4/D7) A feature whose only remaining gate
+    /// is the independent-review gate must never render a Review card for
+    /// it — that gate runs only when the user invokes it, never a
+    /// blocking stop, so the Review column would otherwise misrepresent
+    /// user-invoked review as pending automatic work.
+    #[tokio::test]
+    async fn review_column_never_treats_the_review_gate_as_a_current_stop() {
+        let root = fresh_root("agent-board-review-gate-excluded");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "feature": "three-gates-done-feature",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": false}
+            }"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "agent-board-review-gate-excluded");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("data-agent-col=\"review\" data-agent-count=\"0\""),
+            "a feature whose only open gate is the review gate must render no Review card: {body}"
+        );
+        assert!(!body.contains("gate awaiting your decision"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge, agent-board ab-2, D4) A `"planned-next"` handoff — a clean
+    /// stop with its next claim already owned — never renders a Review
+    /// card; only a genuine pause does (bbp-8's own kind convention,
+    /// reused verbatim from `compute_attention_items`).
+    #[tokio::test]
+    async fn review_column_planned_next_handoff_renders_no_card() {
+        let root = fresh_root("agent-board-review-planned-next");
+        write(
+            &root,
+            ".bee/HANDOFF.json",
+            r#"{"written_at": "2026-08-10T09:00:00Z", "next_action": "Adopt cell x next.", "kind": "planned-next"}"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "agent-board-review-planned-next");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-agent-col=\"review\" data-agent-count=\"0\""), "{body}");
+        assert!(
+            !body.contains("Work is parked, waiting on your decision"),
+            "a planned-next handoff must never render as a Review card: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge, agent-board ab-2) More capped cells than `DONE_RECENT_CAP`
+    /// (6) collapse beyond the recent cap into a `<details>` summary,
+    /// reusing the same `bee-done-summary`/`bee-done-grid`/`bee-done-line`
+    /// pattern `bee_finished_section` already uses for finished features —
+    /// the most-recently-capped cells stay visible as full cards.
+    #[tokio::test]
+    async fn done_column_overflow_collapses_into_details_summary() {
+        let root = fresh_root("agent-board-done-overflow");
+        for i in 1..=8 {
+            write(
+                &root,
+                &format!(".bee/cells/c{i}.json"),
+                &timed_cell_json(
+                    &format!("c-done-{i}"),
+                    "demo",
+                    "capped",
+                    &[],
+                    "w1",
+                    &format!("2026-08-{i:02}T08:00:00Z"),
+                    &format!("2026-08-{i:02}T09:00:00Z"),
+                ),
+            );
+        }
+
+        let st = build_state();
+        let project = register(&st, &root, "agent-board-done-overflow");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("data-agent-col=\"done\" data-agent-count=\"8\""),
+            "the Done column's own count must state the true total, uncapped: {body}"
+        );
+        assert!(
+            body.contains("class=\"bee-done-summary\">2 more done cells — show them"),
+            "the overflow beyond the recent cap of 6 must collapse into one details summary: {body}"
+        );
+        // The two oldest capped cells (c-done-1, c-done-2) render inside the
+        // collapsed name list (`Cell {id} · {id}`), never as a full card
+        // (`{id} · demo` inside a `fg-card__sub`) — `class="bee-done-line"`
+        // alone is not distinguishing enough to count on here since the
+        // Finished section below reuses the same class for its own,
+        // unrelated feature-level line.
+        for id in ["c-done-1", "c-done-2"] {
+            assert!(
+                body.contains(&format!("class=\"bee-done-line\" href=\"/p/{}/_bee/cell/{id}\">Cell {id} · {id}</a>", project.id)),
+                "the oldest capped cell {id} must render inside the collapsed name list: {body}"
+            );
+            assert!(
+                !body.contains(&format!("<div class=\"fg-card__sub\">{id} · demo</div>")),
+                "the oldest capped cell {id} must never also render as a full card: {body}"
+            );
+        }
+        for id in ["c-done-3", "c-done-4", "c-done-5", "c-done-6", "c-done-7", "c-done-8"] {
+            assert!(
+                body.contains(&format!("<div class=\"fg-card__sub\">{id} · demo</div>")),
+                "the six most-recently-capped cells must render as full cards: {body}"
+            );
+        }
 
         std::fs::remove_dir_all(&root).ok();
     }
