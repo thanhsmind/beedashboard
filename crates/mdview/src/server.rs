@@ -3988,11 +3988,14 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (bbp-14, edge) 25 PBIs exceed the backlog panel's own display cap
-    /// (20), so the visible title list must state its true total (25)
-    /// alongside the capped subset actually shown — the status count chips
-    /// above it are computed over the full, uncapped set and must still
-    /// read 25, never 20. Found by rendering `beehive`'s real 123-PBI store
+    /// (bbp-14, edge; updated backlog-open-detail-1) 25 OPEN PBIs plus 5
+    /// `done` ones exceed the backlog panel's own display cap (20), so the
+    /// visible card list must state its true total (25 — the OPEN count,
+    /// not the 30 stored) alongside the capped subset actually shown. The
+    /// status chips above it are computed over the FULL, unfiltered set and
+    /// must read `proposed: 25` and `done: 5` — this is what proves the cap
+    /// and its "Showing X of Y" note are computed AFTER the open filter,
+    /// not before it. Found by rendering `beehive`'s real 123-PBI store
     /// against an early, uncapped draft of this list, which turned the
     /// panel into exactly the unreadable per-item dump its own status chips
     /// exist to avoid.
@@ -4005,6 +4008,11 @@ mod bee_route_tests {
                 "{{\"kind\":\"pbi\",\"id\":\"PBI-{i}\",\"title\":\"Backlog item {i}\",\"status\":\"proposed\",\"feature\":\"demo\"}}\n"
             ));
         }
+        for i in 25..30 {
+            jsonl.push_str(&format!(
+                "{{\"kind\":\"pbi\",\"id\":\"PBI-{i}\",\"title\":\"Backlog item {i}\",\"status\":\"done\",\"feature\":\"demo\"}}\n"
+            ));
+        }
         write(&root, ".bee/backlog.jsonl", &jsonl);
 
         let st = build_state();
@@ -4013,10 +4021,11 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("proposed: 25"), "the status chip count must cover every PBI, capped or not: {body}");
+        assert!(body.contains("proposed: 25"), "the status chip count must cover every open PBI: {body}");
+        assert!(body.contains("done: 5"), "the status chip count must still cover done PBIs too: {body}");
         assert!(
             body.contains("Showing 20 of 25 backlog items."),
-            "the capped PBI subset must state its true total: {body}"
+            "the capped PBI subset must state its true OPEN total (25), not the stored total (30): {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -4091,9 +4100,13 @@ mod bee_route_tests {
 
     // ── bbp-14: the backlog & review panel ─────────────────────────────────
 
-    /// (happy) Each PBI's own title now renders alongside its status, not
-    /// only the per-status count — a manager reads WHAT is proposed or in
-    /// flight, not only how many.
+    /// (happy; updated backlog-open-detail-1 to the open-only filter) Each
+    /// OPEN PBI's own title still renders alongside its status, not only
+    /// the per-status count — a manager reads WHAT is proposed or in
+    /// flight, not only how many. Both fixture rows are open statuses
+    /// (`in-flight`, `proposed`) so both must show; the done/declined
+    /// exclusion itself is covered separately by
+    /// `done_and_declined_pbis_absent_from_list_but_counted_in_chips`.
     #[tokio::test]
     async fn backlog_panel_lists_each_pbi_title_under_its_status() {
         let root = fresh_root("panels-backlog-titles");
@@ -4101,7 +4114,7 @@ mod bee_route_tests {
             &root,
             ".bee/backlog.jsonl",
             "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Add search\",\"status\":\"in-flight\",\"feature\":\"demo\"}\n\
-             {\"kind\":\"pbi\",\"id\":\"PBI-2\",\"title\":\"Add filter\",\"status\":\"done\",\"feature\":\"demo\"}\n",
+             {\"kind\":\"pbi\",\"id\":\"PBI-2\",\"title\":\"Add filter\",\"status\":\"proposed\",\"feature\":\"demo\"}\n",
         );
 
         let st = build_state();
@@ -4112,6 +4125,127 @@ mod bee_route_tests {
 
         assert!(body.contains("Add search"), "PBI-1's title must render: {body}");
         assert!(body.contains("Add filter"), "PBI-2's title must render: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (bbp-14, edge; backlog-open-detail-1) `done` and `declined` PBIs are
+    /// excluded from the card list — they are already reflected in the
+    /// status chips above it — but the chips themselves must still count
+    /// them: the list is a view of open work, the chips are a census of the
+    /// whole backlog.
+    #[tokio::test]
+    async fn done_and_declined_pbis_absent_from_list_but_counted_in_chips() {
+        let root = fresh_root("panels-backlog-open-filter");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Add search\",\"status\":\"in-flight\",\"feature\":\"demo\"}\n\
+             {\"kind\":\"pbi\",\"id\":\"PBI-2\",\"title\":\"Ship the old widget\",\"status\":\"done\",\"feature\":\"demo\"}\n\
+             {\"kind\":\"pbi\",\"id\":\"PBI-3\",\"title\":\"Drop the legacy export\",\"status\":\"declined\",\"feature\":\"demo\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-backlog-open-filter");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Add search"), "the open PBI's title must still render: {body}");
+        assert!(
+            !body.contains("Ship the old widget"),
+            "a done PBI's title must not render in the card list: {body}"
+        );
+        assert!(
+            !body.contains("Drop the legacy export"),
+            "a declined PBI's title must not render in the card list: {body}"
+        );
+        assert!(body.contains("in-flight: 1"), "the chips must still count the open status: {body}");
+        assert!(body.contains("done: 1"), "the chips must still count done, even though its card is hidden: {body}");
+        assert!(body.contains("declined: 1"), "the chips must still count declined, even though its card is hidden: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (bbp-14, edge; backlog-open-detail-1) When every stored PBI is
+    /// `done` or `declined`, the open card list has nothing to show — it
+    /// must render its own honest empty-state line instead of an empty
+    /// `<div>` with no explanation, mirroring the panel's other
+    /// honest-empty-state guarantees.
+    #[tokio::test]
+    async fn all_pbis_done_or_declined_renders_honest_open_empty_state() {
+        let root = fresh_root("panels-backlog-all-closed");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Add search\",\"status\":\"done\",\"feature\":\"demo\"}\n\
+             {\"kind\":\"pbi\",\"id\":\"PBI-2\",\"title\":\"Add filter\",\"status\":\"declined\",\"feature\":\"demo\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-backlog-all-closed");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("No open backlog items."), "{body}");
+        assert!(body.contains("done: 1"), "the chips must still count the closed PBIs: {body}");
+        assert!(body.contains("declined: 1"), "the chips must still count the closed PBIs: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy; backlog-open-detail-1) A PBI's non-empty `cos` (condition-of-
+    /// satisfaction detail) text renders inside a `<details>` expander under
+    /// the card's title, escaped the same way the title itself is.
+    #[tokio::test]
+    async fn backlog_pbi_cos_renders_inside_details_expander() {
+        let root = fresh_root("panels-backlog-cos");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Add search\",\"status\":\"proposed\",\"feature\":\"demo\",\"cos\":\"Search returns results in <100ms & handles \\\"quoted\\\" terms.\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-backlog-cos");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("<details class=\"bee-cell__detail\">"), "cos must render inside a details expander: {body}");
+        assert!(
+            body.contains("Search returns results in &lt;100ms &amp; handles &quot;quoted&quot; terms."),
+            "cos text must render, HTML-escaped like title: {body}"
+        );
+        assert!(!body.contains("<100ms"), "raw unescaped cos markup leaked: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge; backlog-open-detail-1) A PBI with no `cos` field must render
+    /// its card without a `<details>` expander at all — an empty expander
+    /// would be a hidden, empty toggle with nothing behind it.
+    #[tokio::test]
+    async fn backlog_pbi_without_cos_renders_no_details_expander() {
+        let root = fresh_root("panels-backlog-no-cos");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Add search\",\"status\":\"proposed\",\"feature\":\"demo\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-backlog-no-cos");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Add search"), "{body}");
+        assert!(
+            !body.contains("<details class=\"bee-cell__detail\">"),
+            "a PBI without cos must not render a details expander: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

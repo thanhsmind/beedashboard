@@ -4,7 +4,7 @@
 
 use mdview_core::bee::{
     BeeAttentionItem, BeeAttentionSeverity, BeeBacklog, BeeBuckets, BeeCell, BeeConfig,
-    BeeFeaturePhase, BeeReservation, BeeReview, BeeReviewStatus, BeeRunningWorker,
+    BeeFeaturePhase, BeePbi, BeeReservation, BeeReview, BeeReviewStatus, BeeRunningWorker,
     BeeShippedFeature, BeeSnapshot, BeeState, BeeTierMix, BeeWorkspace, BeeWorktree,
 };
 use mdview_core::config::Config;
@@ -1303,6 +1303,9 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 .bee-cell {{ padding: var(--space-2); gap: var(--space-1); }}
 .bee-cell .fg-card__title {{ font-size: var(--type-body-sm-size); overflow-wrap: anywhere; }}
 .bee-cell__meta {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }}
+.bee-cell__detail {{ margin-top: var(--space-1); font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
+.bee-cell__detail summary {{ cursor: pointer; color: var(--color-text); }}
+.bee-cell__detail p {{ margin: var(--space-1) 0 0 0; overflow-wrap: anywhere; }}
 .bee-velocity {{ margin-bottom: var(--space-4); }}
 .bee-velocity__head {{ margin: 0 0 var(--space-3) 0; }}
 .bee-stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); margin-bottom: var(--space-4); }}
@@ -2306,15 +2309,21 @@ fn bee_panels_section(snapshot: &BeeSnapshot) -> String {
 /// bounded slice of `findings.total` (`RECENT_DETAIL_CAP` in
 /// `mdview_core::bee`) — when it is showing fewer than the true total, the
 /// panel says so instead of looking smaller than the real backlog. The PBI
-/// title list beneath the status chips is bounded the same way, at
-/// [`BACKLOG_PBI_DISPLAY_CAP`] — a live store the size of `beehive`'s (123
-/// PBIs) turned an early, uncapped draft of this list into exactly the
-/// "per-item dump" the status chips exist to avoid; capping it, and stating
-/// its true total alongside the visible subset, is what keeps this a
-/// supporting panel rather than a second scroll of the whole backlog. An
-/// empty PBI list and an empty finding set each render their own honest
-/// empty state rather than a hidden section or a bare `0`.
-/// How many PBI titles the backlog panel shows before it falls back to a
+/// card list beneath the status chips shows only OPEN work — every status
+/// except `done` and `declined` — since those two are already reflected in
+/// the chip counts and would otherwise bury the items still worth reading;
+/// the chips themselves keep counting the WHOLE backlog, unfiltered. Each
+/// card with a non-empty `cos` (condition-of-satisfaction detail) tucks it
+/// into a `<details>` expander so the default view stays scannable. The open
+/// list is bounded the same way findings are, at [`BACKLOG_PBI_DISPLAY_CAP`]
+/// — a live store the size of `beehive`'s (123 PBIs) turned an early,
+/// uncapped draft of this list into exactly the "per-item dump" the status
+/// chips exist to avoid; capping it, and stating its true total (of OPEN
+/// items) alongside the visible subset, is what keeps this a supporting
+/// panel rather than a second scroll of the whole backlog. An empty PBI
+/// list, a backlog with no open items, and an empty finding set each render
+/// their own honest empty state rather than a hidden section or a bare `0`.
+/// How many PBI cards the backlog panel shows before it falls back to a
 /// "Showing X of Y" note (bbp-14) — the same cap discipline
 /// `mdview_core::bee`'s own `RECENT_DETAIL_CAP` already applies to findings,
 /// mirrored here at the view layer since `BeeBacklog::pbis` itself is
@@ -2325,6 +2334,9 @@ fn bee_backlog_panel(backlog: &BeeBacklog, review: &BeeReview) -> String {
     let pbi_body = if backlog.pbis.is_empty() {
         "<p class=\"fg-empty\">No backlog items yet.</p>".to_string()
     } else {
+        // Status chips always count the WHOLE backlog (done and declined
+        // included) so the counts stay exact even though the card list
+        // below only shows the open subset.
         let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
         for pbi in &backlog.pbis {
             *counts.entry(pbi.status.as_str()).or_insert(0) += 1;
@@ -2339,20 +2351,39 @@ fn bee_backlog_panel(backlog: &BeeBacklog, review: &BeeReview) -> String {
                 )
             })
             .collect();
-        let total = backlog.pbis.len();
-        let shown = backlog.pbis.iter().take(BACKLOG_PBI_DISPLAY_CAP);
+        // The card list only shows OPEN work (bbp-open-detail): "done" and
+        // "declined" PBIs are already reflected in the chips above and
+        // would otherwise crowd out the items still worth reading about.
+        let open: Vec<&BeePbi> = backlog
+            .pbis
+            .iter()
+            .filter(|pbi| pbi.status != "done" && pbi.status != "declined")
+            .collect();
+        let total = open.len();
+        let shown = open.iter().take(BACKLOG_PBI_DISPLAY_CAP);
         let mut rows = String::new();
         let mut shown_count = 0usize;
         for pbi in shown {
             shown_count += 1;
+            let detail = if pbi.cos.trim().is_empty() {
+                String::new()
+            } else {
+                format!(
+                    r#"<details class="bee-cell__detail"><summary>Condition of satisfaction</summary><p>{cos}</p></details>"#,
+                    cos = esc(&pbi.cos),
+                )
+            };
             rows.push_str(&format!(
-                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{title}</div><div class="bee-cell__meta">{status} · {feature}</div></div>"#,
+                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{title}</div><div class="bee-cell__meta">{status} · {feature}</div>{detail}</div>"#,
                 title = esc(&pbi.title),
                 status = esc(&pbi.status),
                 feature = esc(&pbi.feature),
+                detail = detail,
             ));
         }
-        let list_note = if shown_count < total {
+        let list_note = if total == 0 {
+            "<p class=\"fg-empty\">No open backlog items.</p>".to_string()
+        } else if shown_count < total {
             format!(
                 r#"<p class="bee-cell__meta">Showing {shown_count} of {total} backlog items.</p>"#,
                 shown_count = shown_count,
