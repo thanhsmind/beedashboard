@@ -5022,6 +5022,73 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (happy, phase-board-legibility-1) Known lifecycle phases order the
+    /// columns left-to-right as shape → plan → build regardless of
+    /// first-seen order, and a `compounding-complete` feature leaves the
+    /// columns entirely, collapsing into the finished summary line while
+    /// keeping its feature-detail link.
+    #[tokio::test]
+    async fn phase_board_orders_lifecycle_columns_and_collapses_terminal_phase() {
+        let root = fresh_root("phase-board-order-terminal");
+        // Written in deliberately reversed lifecycle order.
+        write(&root, ".bee/lanes/gamma.json", &lane_json("gamma", "swarming", "standard", "swarm it", None, None));
+        write(&root, ".bee/lanes/alpha.json", &lane_json("alpha", "shaping", "standard", "shape it", None, None));
+        write(&root, ".bee/lanes/omega.json", &lane_json("omega", "compounding-complete", "standard", "close lane", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "phase-board-order-terminal");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        let shaping_at = body.find("data-phase-col=\"shaping\"").expect("shaping column");
+        let swarming_at = body.find("data-phase-col=\"swarming\"").expect("swarming column");
+        assert!(
+            shaping_at < swarming_at,
+            "lifecycle order must place shaping before swarming: {body}"
+        );
+        assert!(
+            !body.contains("data-phase-col=\"compounding-complete\""),
+            "a terminal-phase feature must not hold a column: {body}"
+        );
+        assert!(
+            body.contains("1 feature finished at compounding-complete"),
+            "the terminal feature collapses into the summary line: {body}"
+        );
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/omega\"", project.id)),
+            "the collapsed feature keeps its detail link: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (happy, phase-board-legibility-1) A phase card's next action clamps
+    /// to one line — the markup carries the clamping class and a `title`
+    /// attribute holding the full text for hover.
+    #[tokio::test]
+    async fn phase_card_next_action_is_clamped_with_full_text_on_title() {
+        let root = fresh_root("phase-board-next-clamp");
+        write(
+            &root,
+            ".bee/lanes/wordy.json",
+            &lane_json("wordy", "swarming", "standard", "CLOSED in substance - merged to main; parked pending the port", None, None),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "phase-board-next-clamp");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains(r#"class="bee-cell__meta bee-phase-card__next" title="CLOSED in substance - merged to main; parked pending the port""#),
+            "next action carries the clamp class and full-text title: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (happy) The globally active feature (`state.feature`) that also
     /// carries its own lane record still places exactly one phase card —
     /// `compute_phase_board`'s union rule (bbp-10) dedupes by feature name.
@@ -5099,8 +5166,12 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains("No live cells recorded for this feature yet."),
-            "expected an honest progress line: {body}"
+            body.contains("empty-feature"),
+            "the feature still earns its card: {body}"
+        );
+        assert!(
+            !body.contains("No live cells recorded for this feature yet."),
+            "phase-board-legibility-1: a cell-less phase card renders no filler line: {body}"
         );
         assert!(!body.contains("0/0"), "a division artifact leaked in: {body}");
 
@@ -5131,8 +5202,12 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains("No live cells recorded for this feature yet."),
-            "an all-dropped feature must show no completed work, honestly: {body}"
+            body.contains("dropped-feature"),
+            "the feature still earns its card: {body}"
+        );
+        assert!(
+            !body.contains("No live cells recorded for this feature yet."),
+            "phase-board-legibility-1: an all-dropped phase card renders no filler line: {body}"
         );
         assert!(!body.contains("0/0"), "a division artifact leaked in: {body}");
 

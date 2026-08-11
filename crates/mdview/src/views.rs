@@ -1295,6 +1295,10 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 .bee-phase-board__cols {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); overflow-x: auto; }}
 .bee-phase-col__list {{ display: flex; flex-direction: column; gap: var(--space-2); }}
 .bee-phase-card {{ display: flex; flex-direction: column; }}
+.bee-phase-card__next {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.bee-phase-done {{ margin-top: var(--space-3); }}
+.bee-phase-done > summary {{ cursor: pointer; list-style: none; color: var(--color-text-muted); font-size: var(--type-caption-size); }}
+.bee-phase-done > summary::-webkit-details-marker {{ display: none; }}
 .bee-done-summary {{ cursor: pointer; list-style: none; padding: var(--space-2) 0; font-weight: var(--weight-strong); color: var(--color-text); }}
 .bee-done-summary::-webkit-details-marker {{ display: none; }}
 .bee-done-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-2); padding-top: var(--space-2); }}
@@ -2088,6 +2092,12 @@ fn bee_bucket_section(
 /// board (no lane records and no active feature — this repo's own store,
 /// with no `.bee/lanes/` at all, is the zero-lane fixture) renders one
 /// honest line, never a hidden or fabricated section.
+///
+/// phase-board-legibility-1: features at the terminal phase alias
+/// `compounding-complete` are finished work, so they leave the columns and
+/// collapse into one summary line with a `<details>` name list; known
+/// lifecycle phases order left-to-right as shape → plan → build → capture,
+/// unknown phase strings keeping first-seen order after them.
 fn bee_phase_board_section(
     project_id: &str,
     phase_board: &[BeeFeaturePhase],
@@ -2108,19 +2118,44 @@ fn bee_phase_board_section(
             .to_string();
     }
 
-    // Group into columns by phase, preserving first-seen order — phase
-    // strings are free text from the store (`compute_phase_board`), never a
-    // closed enum this view invents or reorders.
+    // A feature whose phase reached the terminal alias is finished work,
+    // not "work happening" — it leaves the columns and collapses into one
+    // summary line below the board (phase-board-legibility-1).
+    let (done, active): (Vec<&BeeFeaturePhase>, Vec<&BeeFeaturePhase>) = in_flight
+        .iter()
+        .partition(|f| f.phase.as_deref() == Some("compounding-complete"));
+
+    // Group into columns by phase. Phase strings stay free text from the
+    // store (`compute_phase_board`) — nothing is renamed or dropped — but
+    // the KNOWN lifecycle phases render in lifecycle order so the board
+    // reads left-to-right as shape → plan → build → capture; any unknown
+    // phase keeps its first-seen position after them.
+    const LIFECYCLE_ORDER: [&str; 8] = [
+        "shaping",
+        "exploring",
+        "planning",
+        "validating",
+        "swarming",
+        "reviewing",
+        "scribing",
+        "compounding",
+    ];
     let mut order: Vec<String> = Vec::new();
     let mut cols: std::collections::HashMap<String, Vec<&BeeFeaturePhase>> =
         std::collections::HashMap::new();
-    for f in &in_flight {
+    for f in &active {
         let key = f.phase.clone().unwrap_or_else(|| "No phase recorded".to_string());
         if !cols.contains_key(&key) {
             order.push(key.clone());
         }
-        cols.entry(key).or_default().push(f);
+        cols.entry(key).or_default().push(*f);
     }
+    order.sort_by_key(|phase| {
+        LIFECYCLE_ORDER
+            .iter()
+            .position(|p| p == phase)
+            .unwrap_or(LIFECYCLE_ORDER.len())
+    });
 
     let mut cols_html = String::new();
     for phase in &order {
@@ -2138,13 +2173,42 @@ fn bee_phase_board_section(
         ));
     }
 
+    let cols_or_empty = if cols_html.is_empty() {
+        r#"<p class="fg-empty">No features are mid-flight right now.</p>"#.to_string()
+    } else {
+        format!(r#"<div class="bee-phase-board__cols">{cols_html}</div>"#, cols_html = cols_html)
+    };
+
+    let done_html = if done.is_empty() {
+        String::new()
+    } else {
+        let plural = if done.len() == 1 { "" } else { "s" };
+        let mut lines = String::new();
+        for f in &done {
+            lines.push_str(&format!(
+                r#"<a class="bee-done-line" href="/p/{pid}/_bee/feature/{feature_href}">{feature}</a>"#,
+                pid = esc(project_id),
+                feature_href = esc(&f.feature),
+                feature = esc(&f.feature),
+            ));
+        }
+        format!(
+            r#"<details class="bee-phase-done"><summary>{count} feature{plural} finished at compounding-complete — show them</summary><div class="bee-done-grid">{lines}</div></details>"#,
+            count = done.len(),
+            plural = plural,
+            lines = lines,
+        )
+    };
+
     format!(
         r#"<section class="fg-card bee-phase-board" data-phase-board-count="{total}">
   <h3 class="bee-panel__head">Work by phase</h3>
-  <div class="bee-phase-board__cols">{cols_html}</div>
+  {cols_or_empty}
+  {done_html}
 </section>"#,
         total = in_flight.len(),
-        cols_html = cols_html,
+        cols_or_empty = cols_or_empty,
+        done_html = done_html,
     )
 }
 
@@ -2160,8 +2224,11 @@ fn bee_phase_board_section(
 /// line instead of a fabricated `0/0`.
 fn bee_phase_card(project_id: &str, f: &BeeFeaturePhase) -> String {
     let counts = &f.cell_counts;
+    // A feature with no live cells shows nothing where the bar would be —
+    // the old "No live cells recorded…" filler was louder than the feature
+    // name itself and carried no information (phase-board-legibility-1).
     let progress_html = if counts.total == 0 {
-        r#"<p class="fg-empty">No live cells recorded for this feature yet.</p>"#.to_string()
+        String::new()
     } else {
         let percent = (counts.done * 100) / counts.total;
         format!(
@@ -2173,7 +2240,11 @@ fn bee_phase_card(project_id: &str, f: &BeeFeaturePhase) -> String {
         )
     };
     let next_html = match f.next_action.as_deref().filter(|n| !n.is_empty()) {
-        Some(n) => format!(r#"<p class="bee-cell__meta">{}</p>"#, esc(n)),
+        Some(n) => format!(
+            r#"<p class="bee-cell__meta bee-phase-card__next" title="{full}">{text}</p>"#,
+            full = esc(n),
+            text = esc(n),
+        ),
         None => String::new(),
     };
     format!(
