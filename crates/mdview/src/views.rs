@@ -1407,6 +1407,19 @@ html[data-scheme="dark"] .bee-hub-theme {{
 .bee-hub__chips {{ display: flex; flex-wrap: wrap; gap: var(--space-1); }}
 .bee-hub__progress-label {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
 .bee-hub__reason {{ font-style: italic; }}
+/* feature-titles: the card's own slug subtitle (shown only alongside a
+   human title read from CONTEXT.md — a title-less card already shows the
+   slug as its own title) and its boundary-description line, clamped to a
+   single line so no card grows taller than its neighbors. */
+.bee-hub__slug {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
+.bee-hub__desc {{ margin: 0; font-size: var(--type-body-sm-size); color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+/* feature-titles: the detail header's own title/slug/description stack,
+   and the docs row beneath the chip row linking CONTEXT.md/plan.md
+   through the viewer's own document routes. */
+.bee-detail-slug {{ margin: var(--space-1) 0 0 0; font-size: var(--type-body-sm-size); color: var(--color-text-subtle); }}
+.bee-detail-desc {{ margin: var(--space-1) 0 0 0; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }}
+.bee-detail-docs {{ display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-4) 0; }}
+.bee-detail-docs a {{ color: var(--color-link); font-size: var(--type-body-sm-size); }}
 .bee-done-summary {{ cursor: pointer; list-style: none; padding: var(--space-2) 0; font-weight: var(--weight-strong); color: var(--color-text); }}
 .bee-done-summary::-webkit-details-marker {{ display: none; }}
 .bee-done-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-2); padding-top: var(--space-2); }}
@@ -1623,6 +1636,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
             };
             let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
             let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
+            let docs = snapshot.feature_docs.get(f.feature.as_str());
             waiting_cards.push_str(&bee_hub_card(
                 &project.id,
                 &f.feature,
@@ -1632,11 +1646,13 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
                 last_activity.as_deref(),
                 &worktree,
                 Some(&reason),
+                docs,
             ));
         } else if live > 0 {
             in_progress_count += 1;
             let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
             let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
+            let docs = snapshot.feature_docs.get(f.feature.as_str());
             in_progress_cards.push_str(&bee_hub_card(
                 &project.id,
                 &f.feature,
@@ -1646,6 +1662,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
                 last_activity.as_deref(),
                 &worktree,
                 None,
+                docs,
             ));
         } else if f.phase.as_deref() == Some("compounding-complete") || archived_features.contains(f.feature.as_str())
         {
@@ -1654,6 +1671,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
             let (done, total) = bee_hub_archived_counts(&archived);
             let last_activity = bee_hub_latest_activity(archived.iter());
             let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, true);
+            let docs = snapshot.feature_docs.get(f.feature.as_str());
             finished_cards.push_str(&bee_hub_card(
                 &project.id,
                 &f.feature,
@@ -1663,6 +1681,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
                 last_activity.as_deref(),
                 &worktree,
                 None,
+                docs,
             ));
         }
         // else: no live work, no gate/handoff pull, and neither
@@ -1682,6 +1701,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
         let (done, total) = bee_hub_archived_counts(&archived);
         let last_activity = bee_hub_latest_activity(archived.iter());
         let worktree = bee_hub_worktree_chip(&feature, &snapshot.worktrees, &snapshot.workspaces, true);
+        let docs = snapshot.feature_docs.get(feature.as_str());
         finished_cards.push_str(&bee_hub_card(
             &project.id,
             &feature,
@@ -1691,6 +1711,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
             last_activity.as_deref(),
             &worktree,
             None,
+            docs,
         ));
     }
 
@@ -1808,7 +1829,12 @@ fn bee_hub_group_label(key: &str) -> (&'static str, &'static str) {
 /// ([`bee_hub_worktree_chip`]) and its own group status chip
 /// ([`bee_hub_group_label`]). `reason` carries the Waiting group's own
 /// "why" line (its current-stop gate, or a paused handoff) — `None` for
-/// every other group, which has no such single reason to name.
+/// every other group, which has no such single reason to name. `docs`
+/// (feature-titles) carries this feature's own `CONTEXT.md` reader result:
+/// present with a title, the card's name becomes that human title with the
+/// slug demoted to a small muted subtitle beneath it, plus the boundary
+/// description as one clamped line; `None`, or a title-less record, falls
+/// back to the slug alone, exactly as before this feature.
 fn bee_hub_card(
     project_id: &str,
     feature: &str,
@@ -1818,8 +1844,22 @@ fn bee_hub_card(
     last_activity: Option<&str>,
     worktree: &(String, &'static str),
     reason: Option<&str>,
+    docs: Option<&mdview_core::bee::BeeFeatureDocs>,
 ) -> String {
     let (group_label, group_tone) = bee_hub_group_label(group_key);
+    let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
+    let name_html = match title {
+        Some(t) => format!(
+            r#"<div class="fg-card__title">{title}</div><div class="bee-hub__slug">{feature}</div>"#,
+            title = esc(t),
+            feature = esc(feature),
+        ),
+        None => format!(r#"<div class="fg-card__title">{feature}</div>"#, feature = esc(feature)),
+    };
+    let desc_html = match docs.and_then(|d| d.description.as_deref()).filter(|d| !d.is_empty()) {
+        Some(d) => format!(r#"<p class="bee-hub__desc">{}</p>"#, esc(d)),
+        None => String::new(),
+    };
     let progress_html = if total == 0 {
         r#"<p class="fg-empty">No cells recorded.</p>"#.to_string()
     } else {
@@ -1845,15 +1885,16 @@ fn bee_hub_card(
     };
     let (wt_label, wt_tone) = worktree;
     format!(
-        r#"<a class="fg-card bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}"><div class="fg-card__title">{feature}</div><div class="bee-hub__chips"><span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{progress_html}{reason_html}{activity_html}</a>"#,
+        r#"<a class="fg-card bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}<div class="bee-hub__chips"><span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{desc_html}{progress_html}{reason_html}{activity_html}</a>"#,
         group_key = group_key,
         pid = esc(project_id),
         feature_href = esc(feature),
-        feature = esc(feature),
+        name_html = name_html,
         group_tone = group_tone,
         group_label = group_label,
         wt_tone = wt_tone,
         wt_label = esc(wt_label),
+        desc_html = desc_html,
         progress_html = progress_html,
         reason_html = reason_html,
         activity_html = activity_html,
@@ -2522,7 +2563,14 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
 /// `mdview_core::bee::BeeDecisions`). `running_workers` is the project's
 /// full live-session worker list (Sub-agents joins it by nickname).
 /// `gates` is the same lane-record-or-active-state source `lane_label`
-/// reads, for the Activity tab's gate stamps.
+/// reads, for the Activity tab's gate stamps. `docs` (feature-titles) is
+/// this feature's own `CONTEXT.md` reader result: present with a title,
+/// the header's own name becomes that human title with the slug demoted
+/// to a subtitle beneath it, plus the boundary description as one
+/// clamped line, and a docs row linking `CONTEXT.md` (and `plan.md` when
+/// it also exists) through this viewer's own document routes; `None`
+/// falls back to the slug alone with no docs row, exactly as before this
+/// feature.
 #[allow(clippy::too_many_arguments)]
 pub fn bee_feature_page(
     project: &Project,
@@ -2536,6 +2584,7 @@ pub fn bee_feature_page(
     decisions: &[BeeDecisionSummary],
     running_workers: &[BeeRunningWorker],
     gates: Option<&BeeApprovedGates>,
+    docs: Option<&mdview_core::bee::BeeFeatureDocs>,
 ) -> String {
     let status_banner = match shipped {
         Some(f) => {
@@ -2590,14 +2639,33 @@ pub fn bee_feature_page(
         &bee_feature_subagents_tab(buckets, running_workers),
     );
 
+    let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
+    let head_name_html = match title {
+        Some(t) => format!(
+            r#"<h2 class="fg-pagehead__title">{title}</h2><p class="bee-detail-slug">{feature}</p>"#,
+            title = esc(t),
+            feature = esc(feature),
+        ),
+        None => format!(r#"<h2 class="fg-pagehead__title">{feature}</h2>"#, feature = esc(feature)),
+    };
+    let desc_html = match docs.and_then(|d| d.description.as_deref()).filter(|d| !d.is_empty()) {
+        Some(d) => format!(r#"<p class="bee-detail-desc">{}</p>"#, esc(d)),
+        None => String::new(),
+    };
+    let docs_row = bee_feature_docs_row(&project.id, feature, docs);
+
     let body = format!(
         r#"{topbar}
 {style}
 <main class="fg-page bee-hub-theme">
   <div class="bee-detail-head">
-    <h2 class="fg-pagehead__title">{feature}</h2>
+    <div>
+      {head_name_html}
+      {desc_html}
+    </div>
     {status_banner}
   </div>
+  {docs_row}
   {chip_row}
   {tabs}
 </main>"#,
@@ -2607,12 +2675,43 @@ pub fn bee_feature_page(
             feature = esc(feature),
         )),
         style = bee_hub_style(),
-        feature = esc(feature),
+        head_name_html = head_name_html,
+        desc_html = desc_html,
         status_banner = status_banner,
+        docs_row = docs_row,
         chip_row = chip_row,
         tabs = tabs,
     );
     layout(&format!("{} · {}", feature, project.name), "", &body)
+}
+
+/// D2's detail header docs row (feature-titles): links to `CONTEXT.md`
+/// (and `plan.md` when [`mdview_core::bee::BeeFeatureDocs::has_plan`] is
+/// true), each through this viewer's own document route
+/// (`/p/<id>/docs/history/<feature>/…`, the same project-relative shape
+/// [`file_page`]'s own links already use) — never a bare filesystem path.
+/// Empty when `docs` is `None`: [`read_feature_docs`] only ever returns
+/// `Some` when `CONTEXT.md` itself exists, so a `None` here means there is
+/// nothing to link.
+fn bee_feature_docs_row(project_id: &str, feature: &str, docs: Option<&mdview_core::bee::BeeFeatureDocs>) -> String {
+    let Some(docs) = docs else {
+        return String::new();
+    };
+    let pid = esc(project_id);
+    let feature_href = esc(feature);
+    let mut links = format!(
+        r#"<a href="/p/{pid}/docs/history/{feature_href}/CONTEXT.md">CONTEXT.md</a>"#,
+        pid = pid,
+        feature_href = feature_href,
+    );
+    if docs.has_plan {
+        links.push_str(&format!(
+            r#"<a href="/p/{pid}/docs/history/{feature_href}/plan.md">plan.md</a>"#,
+            pid = pid,
+            feature_href = feature_href,
+        ));
+    }
+    format!(r#"<div class="bee-detail-docs">{links}</div>"#, links = links)
 }
 
 /// D2's chip row: this feature's own lane classification when known, its

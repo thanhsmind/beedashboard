@@ -2683,6 +2683,8 @@ async fn bee_feature_detail(
         .cloned()
         .collect();
 
+    let docs = snapshot.feature_docs.get(&feature);
+
     Html(views::bee_feature_page(
         &project,
         &feature,
@@ -2695,6 +2697,7 @@ async fn bee_feature_detail(
         &decisions,
         &snapshot.running_workers,
         gates,
+        docs,
     ))
     .into_response()
 }
@@ -6591,6 +6594,189 @@ mod bee_route_tests {
 
         let after = snapshot_tree(&root);
         assert_eq!(before, after, ".bee/ tree changed after a request");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── feature-titles: human titles + descriptions from CONTEXT.md, docs
+    // links on the feature detail page — see `mdview_core::bee::read_feature_docs`
+    // and its own doc comment. ──────
+
+    /// A feature whose `docs/history/<feature>/CONTEXT.md` exists renders
+    /// its human title (H1, " — Context" suffix stripped) and its
+    /// "## Feature Boundary" paragraph on both the hub card and the detail
+    /// header, and the detail page's own docs row links `CONTEXT.md` and
+    /// `plan.md` (both present in this fixture) through the viewer's own
+    /// document routes, never a bare filesystem path.
+    #[tokio::test]
+    async fn feature_with_context_md_renders_title_description_and_docs_links() {
+        let root = fresh_root("feature-docs-present");
+        write(
+            &root,
+            "docs/history/demo/CONTEXT.md",
+            "# Demo Feature — Context\n\n## Feature Boundary\n\nOne clamped line describing the demo feature.\n\n## Locked Decisions\n",
+        );
+        write(&root, "docs/history/demo/plan.md", "the plan body");
+        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#);
+        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "demo", "open", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-docs-present");
+        let app = router(st);
+
+        let hub_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(hub_resp.status(), StatusCode::OK);
+        let hub_body = body_string(hub_resp).await;
+        assert!(hub_body.contains("Demo Feature"), "hub card must show the human title: {hub_body}");
+        assert!(
+            hub_body.contains("One clamped line describing the demo feature."),
+            "hub card must show the boundary description: {hub_body}"
+        );
+        assert!(
+            hub_body.contains(r#"class="bee-hub__slug">demo<"#),
+            "hub card must show the slug as a small muted subtitle: {hub_body}"
+        );
+
+        let detail_resp = get(app, &format!("/p/{}/_bee/feature/demo", project.id)).await;
+        assert_eq!(detail_resp.status(), StatusCode::OK);
+        let detail_body = body_string(detail_resp).await;
+        assert!(
+            detail_body.contains("<h2 class=\"fg-pagehead__title\">Demo Feature</h2>"),
+            "detail header must show the human title big: {detail_body}"
+        );
+        assert!(
+            detail_body.contains(r#"class="bee-detail-slug">demo<"#),
+            "detail header must show the slug subtitle under the title: {detail_body}"
+        );
+        assert!(
+            detail_body.contains("One clamped line describing the demo feature."),
+            "detail header must show the boundary description: {detail_body}"
+        );
+        assert!(
+            detail_body.contains(&format!(
+                r#"href="/p/{}/docs/history/demo/CONTEXT.md">CONTEXT.md</a>"#,
+                project.id
+            )),
+            "docs row must link CONTEXT.md through the viewer's own document route: {detail_body}"
+        );
+        assert!(
+            detail_body.contains(&format!(r#"href="/p/{}/docs/history/demo/plan.md">plan.md</a>"#, project.id)),
+            "docs row must link plan.md through the viewer's own document route when it exists: {detail_body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A feature with no `docs/history/<feature>/CONTEXT.md` renders
+    /// slug-only on both the hub card and the detail header, and the
+    /// detail page carries no docs row at all — the reader never guesses a
+    /// title or fabricates a link to a file that does not exist.
+    #[tokio::test]
+    async fn feature_without_context_md_falls_back_to_slug_with_no_docs_row() {
+        let root = fresh_root("feature-docs-absent");
+        write(&root, ".bee/state.json", r#"{"feature":"no-docs-feature","phase":"exploring","mode":"standard"}"#);
+        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "no-docs-feature", "open", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-docs-absent");
+        let app = router(st);
+
+        let hub_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(hub_resp.status(), StatusCode::OK);
+        let hub_body = body_string(hub_resp).await;
+        assert!(hub_body.contains("no-docs-feature"), "hub card must still show the slug: {hub_body}");
+        assert!(
+            !hub_body.contains(r#"class="bee-hub__slug""#),
+            "a title-less card must never render a redundant slug subtitle: {hub_body}"
+        );
+
+        let detail_resp = get(app, &format!("/p/{}/_bee/feature/no-docs-feature", project.id)).await;
+        assert_eq!(detail_resp.status(), StatusCode::OK);
+        let detail_body = body_string(detail_resp).await;
+        assert!(
+            detail_body.contains("<h2 class=\"fg-pagehead__title\">no-docs-feature</h2>"),
+            "detail header must fall back to the slug: {detail_body}"
+        );
+        assert!(
+            !detail_body.contains(r#"class="bee-detail-docs""#),
+            "a feature with no CONTEXT.md must render no docs row: {detail_body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An absolute path embedded in a `CONTEXT.md` boundary paragraph must
+    /// never survive into the hub card or the detail header verbatim — the
+    /// same scrub every other free-text field in the snapshot already gets
+    /// (`mdview_core::bee::scrub_paths`), proven here against the reader
+    /// this cell adds. Named against the fixture's own root and
+    /// `std::env::temp_dir()`, per
+    /// `docs/history/learnings/20260805-toothless-security-assertions.md`,
+    /// never a production literal like `/home/`.
+    #[tokio::test]
+    async fn feature_docs_never_leak_an_absolute_path_from_context_md() {
+        let root = fresh_root("feature-docs-abs-leak");
+        let root_str = root.to_string_lossy().into_owned();
+        let outside_abs = std::env::temp_dir()
+            .join("mdview-server-feature-docs-outside.rs")
+            .to_string_lossy()
+            .into_owned();
+        write(
+            &root,
+            "docs/history/demo/CONTEXT.md",
+            &format!(
+                "# Demo — Context\n\n## Feature Boundary\n\nSee {root_str}/src/inside.rs and {outside_abs} for detail.\n"
+            ),
+        );
+        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#);
+        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "demo", "open", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-docs-abs-leak");
+        let app = router(st);
+
+        let hub_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        let hub_body = body_string(hub_resp).await;
+        assert!(!hub_body.contains(&root_str), "hub card leaked the fixture root: {hub_body}");
+        assert!(!hub_body.contains(&outside_abs), "hub card leaked an absolute path outside the root: {hub_body}");
+
+        let detail_resp = get(app, &format!("/p/{}/_bee/feature/demo", project.id)).await;
+        let detail_body = body_string(detail_resp).await;
+        assert!(!detail_body.contains(&root_str), "detail header leaked the fixture root: {detail_body}");
+        assert!(
+            !detail_body.contains(&outside_abs),
+            "detail header leaked an absolute path outside the root: {detail_body}"
+        );
+        assert!(detail_body.contains("src/inside.rs"), "the in-root path must survive relativized: {detail_body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (read-only) Reading `docs/history/<feature>/CONTEXT.md` and
+    /// `plan.md` for the hub and detail pages changes nothing on disk —
+    /// same D4 guarantee every other reader in this module already proves.
+    #[tokio::test]
+    async fn feature_docs_read_never_writes_the_fixtures_tree() {
+        let root = fresh_root("feature-docs-read-only");
+        write(
+            &root,
+            "docs/history/demo/CONTEXT.md",
+            "# Demo — Context\n\n## Feature Boundary\n\nBoundary text.\n",
+        );
+        write(&root, "docs/history/demo/plan.md", "plan body");
+        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#);
+        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "demo", "open", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-docs-read-only");
+        let before = snapshot_tree(&root);
+
+        let app = router(st);
+        let _ = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        let _ = get(app, &format!("/p/{}/_bee/feature/demo", project.id)).await;
+
+        let after = snapshot_tree(&root);
+        assert_eq!(before, after, "reading feature docs must never write to the fixture tree");
 
         std::fs::remove_dir_all(&root).ok();
     }
