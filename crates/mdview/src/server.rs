@@ -6678,15 +6678,18 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A feature with no `docs/history/<feature>/CONTEXT.md` renders
-    /// slug-only on both the hub card and the detail header, and the
-    /// detail page carries no docs row at all — the reader never guesses a
-    /// title or fabricates a link to a file that does not exist.
+    /// A feature with no `docs/history/<feature>/CONTEXT.md`, no decision
+    /// on record for its own `scope`, and no cell of its own (hub-fallbacks:
+    /// every fallback source empty) renders slug-only on both the hub card
+    /// and the detail header, and the detail page carries no docs row at
+    /// all — the reader never guesses a title or fabricates a link to a
+    /// file that does not exist. See
+    /// `feature_without_context_md_falls_back_to_decision_and_cell_when_present`
+    /// below for the case where a decision or a cell DOES exist.
     #[tokio::test]
     async fn feature_without_context_md_falls_back_to_slug_with_no_docs_row() {
         let root = fresh_root("feature-docs-absent");
         write(&root, ".bee/state.json", r#"{"feature":"no-docs-feature","phase":"exploring","mode":"standard"}"#);
-        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "no-docs-feature", "open", None, None));
 
         let st = build_state();
         let project = register(&st, &root, "feature-docs-absent");
@@ -6711,6 +6714,142 @@ mod bee_route_tests {
         assert!(
             !detail_body.contains(r#"class="bee-detail-docs""#),
             "a feature with no CONTEXT.md must render no docs row: {detail_body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (hub-fallbacks) A feature with no `CONTEXT.md` but a decision on
+    /// record for its own `scope` in `.bee/decisions.jsonl` shows that
+    /// decision's own text as its description, and a prettified slug —
+    /// never the bare slug — as its title, on both the hub card and the
+    /// detail header.
+    #[tokio::test]
+    async fn feature_without_context_md_falls_back_to_decision_when_present() {
+        let root = fresh_root("feature-docs-decision-fallback");
+        write(&root, ".bee/state.json", r#"{"feature":"no-docs-feature","phase":"exploring","mode":"standard"}"#);
+        write(
+            &root,
+            ".bee/decisions.jsonl",
+            r#"{"id":"d1","type":"decide","date":"2026-08-01T00:00:00Z","decision":"Ship the no-docs feature behind a flag.","scope":"no-docs-feature"}
+"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-docs-decision-fallback");
+        let app = router(st);
+
+        let hub_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        let hub_body = body_string(hub_resp).await;
+        assert!(
+            hub_body.contains("Ship the no-docs feature behind a flag."),
+            "hub card must show the decision text as its description, not a bare slug: {hub_body}"
+        );
+        assert!(
+            hub_body.contains("No Docs Feature"),
+            "hub card title must be the prettified slug: {hub_body}"
+        );
+
+        let detail_resp = get(app, &format!("/p/{}/_bee/feature/no-docs-feature", project.id)).await;
+        let detail_body = body_string(detail_resp).await;
+        assert!(
+            detail_body.contains("Ship the no-docs feature behind a flag."),
+            "detail header must show the decision text as its description: {detail_body}"
+        );
+        assert!(
+            !detail_body.contains(r#"class="bee-detail-docs""#),
+            "no docs dir exists for this fixture, so still no docs row: {detail_body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (hub-fallbacks) A feature whose docs dir holds only
+    /// `promote-proposals.md` (14 of ~40 real `docs/history/*` dirs here
+    /// carry a `CONTEXT.md`; the rest, like this fixture, do not) still
+    /// gets a Docs row linking that file, and — with a cell of its own —
+    /// a real, non-slug description too.
+    #[tokio::test]
+    async fn feature_with_only_promote_proposals_md_gets_docs_row_and_non_slug_description() {
+        let root = fresh_root("feature-docs-promote-only");
+        write(
+            &root,
+            "docs/history/promote-only-feature/promote-proposals.md",
+            "a proposal, never read for its contents by this reader",
+        );
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"promote-only-feature","phase":"exploring","mode":"standard"}"#,
+        );
+        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "promote-only-feature", "open", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-docs-promote-only");
+        let app = router(st);
+
+        let detail_resp = get(app, &format!("/p/{}/_bee/feature/promote-only-feature", project.id)).await;
+        assert_eq!(detail_resp.status(), StatusCode::OK);
+        let detail_body = body_string(detail_resp).await;
+        assert!(
+            detail_body.contains(&format!(
+                r#"href="/p/{}/docs/history/promote-only-feature/promote-proposals.md">promote-proposals.md</a>"#,
+                project.id
+            )),
+            "a docs dir with only promote-proposals.md must still render a Docs row linking it: {detail_body}"
+        );
+        assert!(
+            detail_body.contains("Cell a"),
+            "with no decision on record, the first cell's own title is the description fallback: {detail_body}"
+        );
+        assert!(
+            !detail_body.contains("<h2 class=\"fg-pagehead__title\">promote-only-feature</h2>"),
+            "the title must never render as the bare, unprettified slug once a fallback source exists: {detail_body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (hub-fallbacks) A URL route string (`/p/:id/_bee`, the shape this
+    /// project's own `CONTEXT.md` docs quote) inside a `## Feature
+    /// Boundary` paragraph must render on the hub card and the detail
+    /// header exactly as written — never replaced by the shared
+    /// `(absolute path redacted)` text a real absolute filesystem path
+    /// gets.
+    #[tokio::test]
+    async fn feature_description_with_a_route_string_renders_unredacted() {
+        let root = fresh_root("feature-docs-route-unredacted");
+        write(
+            &root,
+            "docs/history/demo/CONTEXT.md",
+            "# Demo — Context\n\n## Feature Boundary\n\nReplace the by-phase board section on `/p/:id/_bee` with a grouped view.\n",
+        );
+        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#);
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-docs-route-unredacted");
+        let app = router(st);
+
+        let hub_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
+        let hub_body = body_string(hub_resp).await;
+        assert!(
+            hub_body.contains("/p/:id/_bee"),
+            "hub card must render the route string unredacted: {hub_body}"
+        );
+        assert!(
+            !hub_body.contains("(absolute path redacted)"),
+            "a route string must never trip the absolute-path redaction: {hub_body}"
+        );
+
+        let detail_resp = get(app, &format!("/p/{}/_bee/feature/demo", project.id)).await;
+        let detail_body = body_string(detail_resp).await;
+        assert!(
+            detail_body.contains("/p/:id/_bee"),
+            "detail header must render the route string unredacted: {detail_body}"
+        );
+        assert!(
+            !detail_body.contains("(absolute path redacted)"),
+            "a route string must never trip the absolute-path redaction: {detail_body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -14208,6 +14347,65 @@ mod bee_route_tests {
         assert!(
             widest < 375,
             "the board's own stylesheet must declare no fixed pixel width \u{2265} 375 (found {widest}px): {style}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (responsive, hub-fallbacks) `.bee-hub__desc`'s old `white-space:
+    /// nowrap` had no wrap point of its own, and none of its grid/flex
+    /// ancestors broke their own default `min-width: auto` — so a long
+    /// description grew its own grid column past `minmax(260px, 1fr)`
+    /// wide and the whole page scrolled sideways on a phone. The board's
+    /// own stylesheet must instead break that chain with `min-width: 0` on
+    /// every ancestor and clamp the description itself rather than let it
+    /// run on one unbroken line.
+    #[tokio::test]
+    async fn board_hub_description_clamps_within_its_card_instead_of_forcing_page_width() {
+        let root = fresh_root("responsive-hub-desc-clamp");
+        write(&root, ".bee/cells/a.json", &cell_json("r1", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "responsive-hub-desc-clamp");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let style = board_style_block(&body);
+
+        for min_width_rule in [
+            ".bee-hub__group {",
+            ".bee-hub__cards {",
+            ".bee-hub__card {",
+        ] {
+            let start = style
+                .find(min_width_rule)
+                .unwrap_or_else(|| panic!("the board must declare {min_width_rule}: {style}"));
+            let end = style[start..].find('}').map(|i| start + i).unwrap_or(style.len());
+            assert!(
+                style[start..end].contains("min-width: 0"),
+                "{min_width_rule} must break the flex/grid item's own default min-width so a long \
+                 description cannot force it wider than its track: {rule}",
+                rule = &style[start..end]
+            );
+        }
+
+        let desc_start = style
+            .find(".bee-hub__desc {")
+            .expect("the board must declare .bee-hub__desc");
+        let desc_end = style[desc_start..].find('}').map(|i| desc_start + i).unwrap_or(style.len());
+        let desc_rule = &style[desc_start..desc_end];
+        assert!(
+            !desc_rule.contains("white-space: nowrap"),
+            "a single unbroken nowrap line has no wrap point of its own and is exactly what forced \
+             the page wide: {desc_rule}"
+        );
+        assert!(
+            desc_rule.contains("-webkit-line-clamp"),
+            ".bee-hub__desc must clamp to a bounded number of lines instead of running on: {desc_rule}"
+        );
+        assert!(
+            desc_rule.contains("overflow-wrap"),
+            ".bee-hub__desc must still guard against one unbroken long word inside it: {desc_rule}"
         );
 
         std::fs::remove_dir_all(&root).ok();

@@ -1401,21 +1401,38 @@ html[data-scheme="dark"] .bee-hub-theme {{
 }}
 .bee-hub {{ margin-bottom: var(--space-4); }}
 .bee-hub__groups {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); }}
-.bee-hub__group {{ display: flex; flex-direction: column; gap: var(--space-2); }}
-.bee-hub__cards {{ display: flex; flex-direction: column; gap: var(--space-2); }}
-.bee-hub__card {{ display: flex; flex-direction: column; gap: var(--space-1); }}
+/* hub-fallbacks: a grid/flex item's own default `min-width: auto` sizes it
+   to its content's min-content width — normally harmless, but a clamped
+   `.bee-hub__desc` below is `white-space: nowrap` at its own min-content
+   size, and without `min-width: 0` breaking that default at every level
+   of this chain (group, cards, card), a long description would still
+   force its own column wider than its `minmax(260px, 1fr)` track and push
+   the whole page into horizontal scroll on a phone — the same chain
+   `.term-panes` and its siblings already pin above for the same reason. */
+.bee-hub__group {{ display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }}
+.bee-hub__cards {{ display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }}
+.bee-hub__card {{ display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }}
 .bee-hub__chips {{ display: flex; flex-wrap: wrap; gap: var(--space-1); }}
 .bee-hub__progress-label {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
 .bee-hub__reason {{ font-style: italic; }}
 /* feature-titles: the card's own slug subtitle (shown only alongside a
    human title read from CONTEXT.md — a title-less card already shows the
-   slug as its own title) and its boundary-description line, clamped to a
-   single line so no card grows taller than its neighbors. */
+   slug as its own title) and its boundary-description line, clamped so no
+   card grows unbounded taller than its neighbors. hub-fallbacks swaps the
+   single-line `white-space: nowrap` + ellipsis clamp for a 2-line
+   `-webkit-line-clamp`: a `nowrap` line has no wrap point of its own, so on
+   a narrow card it was the box (and the grid track holding it, absent the
+   `min-width: 0` chain above) that grew instead of the text; `line-clamp`
+   wraps normally and merely cuts off after its own line count, and
+   `overflow-wrap: anywhere` still guards the one word inside it long
+   enough to overflow a single line on its own (an unbroken URL, a long
+   identifier). */
 .bee-hub__slug {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
-.bee-hub__desc {{ margin: 0; font-size: var(--type-body-sm-size); color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+.bee-hub__desc {{ margin: 0; font-size: var(--type-body-sm-size); color: var(--color-text-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }}
 /* feature-titles: the detail header's own title/slug/description stack,
-   and the docs row beneath the chip row linking CONTEXT.md/plan.md
-   through the viewer's own document routes. */
+   and the docs row beneath the chip row linking every markdown file the
+   feature's docs dir holds (hub-fallbacks; CONTEXT.md/plan.md lead when
+   present) through the viewer's own document routes. */
 .bee-detail-slug {{ margin: var(--space-1) 0 0 0; font-size: var(--type-body-sm-size); color: var(--color-text-subtle); }}
 .bee-detail-desc {{ margin: var(--space-1) 0 0 0; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }}
 .bee-detail-docs {{ display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-4) 0; }}
@@ -2566,14 +2583,16 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
 /// the Terminal tab links each one straight to its own live page
 /// (`terminal_page_for_pane`'s route) rather than re-implementing any of
 /// the interactive surface here. `gates` is the same lane-record-or-active-state source `lane_label`
-/// reads, for the Activity tab's gate stamps. `docs` (feature-titles) is
-/// this feature's own `CONTEXT.md` reader result: present with a title,
-/// the header's own name becomes that human title with the slug demoted
-/// to a subtitle beneath it, plus the boundary description as one
-/// clamped line, and a docs row linking `CONTEXT.md` (and `plan.md` when
-/// it also exists) through this viewer's own document routes; `None`
-/// falls back to the slug alone with no docs row, exactly as before this
-/// feature.
+/// reads, for the Activity tab's gate stamps. `docs` (feature-titles,
+/// extended by hub-fallbacks) is this feature's own docs reader result,
+/// title and description already run through their own fallback chain
+/// (`mdview_core::bee::BeeFeatureDocs`'s own doc comment): present with a
+/// title, the header's own name becomes that title with the slug demoted
+/// to a subtitle beneath it, plus the description as one clamped line, and
+/// a docs row linking every markdown file the feature's docs dir holds
+/// through this viewer's own document routes; `None` — every fallback
+/// source empty — falls back to the slug alone with no docs row, exactly
+/// as before this feature.
 #[allow(clippy::too_many_arguments)]
 pub fn bee_feature_page(
     project: &Project,
@@ -2688,30 +2707,32 @@ pub fn bee_feature_page(
     layout(&format!("{} · {}", feature, project.name), "", &body)
 }
 
-/// D2's detail header docs row (feature-titles): links to `CONTEXT.md`
-/// (and `plan.md` when [`mdview_core::bee::BeeFeatureDocs::has_plan`] is
-/// true), each through this viewer's own document route
-/// (`/p/<id>/docs/history/<feature>/…`, the same project-relative shape
-/// [`file_page`]'s own links already use) — never a bare filesystem path.
-/// Empty when `docs` is `None`: [`read_feature_docs`] only ever returns
-/// `Some` when `CONTEXT.md` itself exists, so a `None` here means there is
-/// nothing to link.
+/// D2's detail header docs row (feature-titles, extended by hub-fallbacks):
+/// links every markdown file [`mdview_core::bee::BeeFeatureDocs::docs`]
+/// lists (already sorted `CONTEXT.md`/`plan.md` first), each through this
+/// viewer's own document route (`/p/<id>/docs/history/<feature>/…`, the
+/// same project-relative shape [`file_page`]'s own links already use) —
+/// never a bare filesystem path. Empty when `docs` is `None` or its own
+/// `docs` list is empty: a feature with no markdown file under its docs
+/// dir at all has nothing to link, whether or not it has a title or
+/// description from another fallback tier.
 fn bee_feature_docs_row(project_id: &str, feature: &str, docs: Option<&mdview_core::bee::BeeFeatureDocs>) -> String {
     let Some(docs) = docs else {
         return String::new();
     };
+    if docs.docs.is_empty() {
+        return String::new();
+    }
     let pid = esc(project_id);
     let feature_href = esc(feature);
-    let mut links = format!(
-        r#"<a href="/p/{pid}/docs/history/{feature_href}/CONTEXT.md">CONTEXT.md</a>"#,
-        pid = pid,
-        feature_href = feature_href,
-    );
-    if docs.has_plan {
+    let mut links = String::new();
+    for file in &docs.docs {
+        let file_href = esc(file);
         links.push_str(&format!(
-            r#"<a href="/p/{pid}/docs/history/{feature_href}/plan.md">plan.md</a>"#,
+            r#"<a href="/p/{pid}/docs/history/{feature_href}/{file_href}">{file_href}</a>"#,
             pid = pid,
             feature_href = feature_href,
+            file_href = file_href,
         ));
     }
     format!(r#"<div class="bee-detail-docs">{links}</div>"#, links = links)
