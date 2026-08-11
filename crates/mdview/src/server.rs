@@ -3896,9 +3896,10 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// bee-cockpit-6 / bbp-11 (happy, split — see above): the sessions panel
-    /// states each session's liveness in plain relative language, never a
-    /// raw timestamp.
+    /// bee-cockpit-6 / bbp-11 (happy, split — see above), reshaped by
+    /// sessions-panel-noise-1: only a LIVE session earns a card (plain
+    /// relative heartbeat language, never a raw timestamp); a stale one is
+    /// absorbed into the single "N stale session(s) · newest <age>" line.
     #[tokio::test]
     async fn sessions_panel_states_liveness_in_plain_language() {
         let root = fresh_root("panels-happy-sessions");
@@ -3919,11 +3920,52 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
+        assert!(body.contains("sess-live"), "{body}");
         assert!(body.contains("live"), "{body}");
-        assert!(body.contains("stale"), "{body}");
         assert!(body.contains("4 minutes ago"), "{body}");
-        assert!(body.contains("2 hours ago"), "{body}");
+        assert!(
+            !body.contains("sess-stale"),
+            "stale session should have no card of its own: {body}"
+        );
+        assert!(
+            body.contains("1 stale session · newest 2 hours ago"),
+            "stale sessions should collapse into one count line: {body}"
+        );
         assert!(!body.contains("T04:"), "raw ISO timestamp leaked into a heartbeat: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// sessions-panel-noise-1 (edge): a store holding only stale sessions
+    /// keeps an honest body — "No live sessions." plus the collapsed stale
+    /// count — instead of a wall of dead-session cards.
+    #[tokio::test]
+    async fn sessions_panel_all_stale_shows_no_live_plus_count() {
+        let root = fresh_root("panels-all-stale-sessions");
+        write(
+            &root,
+            ".bee/sessions/stale-a.json",
+            &session_json("sess-stale-a", &rfc3339_minutes_ago(120), "/home/x/ta.json", "ws-1", "claude"),
+        );
+        write(
+            &root,
+            ".bee/sessions/stale-b.json",
+            &session_json("sess-stale-b", &rfc3339_minutes_ago(300), "/home/x/tb.json", "ws-2", "codex"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "panels-all-stale-sessions");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("No live sessions."), "{body}");
+        assert!(
+            body.contains("2 stale sessions · newest 2 hours ago"),
+            "{body}"
+        );
+        assert!(!body.contains("sess-stale-a"), "{body}");
+        assert!(!body.contains("sess-stale-b"), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
     }

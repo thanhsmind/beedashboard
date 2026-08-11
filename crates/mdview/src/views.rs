@@ -2521,9 +2521,10 @@ fn bee_review_queue_body(review: &BeeReview) -> String {
 
 /// The Sessions panel (bbp-16, D2): "where work is happening and whether it
 /// is alive", in one card with three subheads — a session's own liveness
-/// (`.bee/sessions/*.json`, unchanged from the original Sessions panel: its
-/// source, its workspace, live-or-stale, and its heartbeat age in plain
-/// relative language, never a raw timestamp), a granted worktree's own
+/// (`.bee/sessions/*.json`: a card per LIVE session with its source,
+/// workspace, and heartbeat age in plain relative language, never a raw
+/// timestamp; stale sessions collapse into a single count line so dead
+/// sessions never bury the live ones), a granted worktree's own
 /// feature/phase/branch/liveness ([`bee_worktrees_body`], folded in from the
 /// retired standalone worktree section), and every raw workspace record
 /// this project's own store knows ([`bee_workspaces_body`], the workspace
@@ -2535,22 +2536,40 @@ fn bee_sessions_panel(snapshot: &BeeSnapshot) -> String {
     let sessions_body = if snapshot.sessions.is_empty() {
         r#"<p class="fg-empty">No sessions recorded.</p>"#.to_string()
     } else {
+        // Only live sessions earn a card; stale ones collapse into a single
+        // count line so a long-dead session list never buries the live work.
         let mut rows = String::new();
+        let mut stale_count = 0usize;
+        let mut stale_newest_minutes = f64::INFINITY;
         for s in &snapshot.sessions {
-            let (tone, label) = if s.live { ("success", "live") } else { ("neutral", "stale") };
+            if !s.live {
+                stale_count += 1;
+                stale_newest_minutes = stale_newest_minutes.min(s.heartbeat_age_minutes);
+                continue;
+            }
             let source = s.source.as_deref().unwrap_or("—");
             let workspace = s.workspace_id.as_deref().unwrap_or("—");
             rows.push_str(&format!(
-                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta"><span class="fg-chip fg-chip--{tone}">{label}</span> · {source} · {workspace} · {age}</div></div>"#,
+                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{id}</div><div class="bee-cell__meta"><span class="fg-chip fg-chip--success">live</span> · {source} · {workspace} · {age}</div></div>"#,
                 id = esc(&s.id),
-                tone = tone,
-                label = label,
                 source = esc(source),
                 workspace = esc(workspace),
                 age = esc(&bee_fmt_heartbeat_age(s.heartbeat_age_minutes)),
             ));
         }
-        format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
+        let mut body = if rows.is_empty() {
+            r#"<p class="fg-empty">No live sessions.</p>"#.to_string()
+        } else {
+            format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
+        };
+        if stale_count > 0 {
+            let plural = if stale_count == 1 { "" } else { "s" };
+            body.push_str(&format!(
+                r#"<p class="bee-cell__meta">{stale_count} stale session{plural} · newest {age}</p>"#,
+                age = esc(&bee_fmt_heartbeat_age(stale_newest_minutes)),
+            ));
+        }
+        body
     };
 
     format!(
