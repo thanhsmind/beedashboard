@@ -3370,76 +3370,170 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (happy, bbp-11) The active feature's phase card states its progress
-    /// as a plain `done/total` count over its own live (non-dropped) cells —
-    /// replaces `happy_path_returns_200_with_bucket_counts`, which asserted
-    /// the four now-retired `data-bucket` attributes.
+    /// (happy, agent-board ab-1) Cells in every populated column status
+    /// render as one card each in the matching agent-board column, carrying
+    /// their agent badge (D3) — live when a `running_workers` row names the
+    /// cell, plain otherwise — and a blocked cell shares the In Progress
+    /// column with a claimed one, carrying its own visible "Blocked" marker
+    /// (CONTEXT.md's deferred question 2). Replaces
+    /// `happy_path_returns_200_with_phase_board_progress`, which asserted
+    /// the now-retired by-phase markup.
     #[tokio::test]
-    async fn happy_path_returns_200_with_phase_board_progress() {
-        let root = fresh_root("happy");
+    async fn agent_board_happy_path_places_cells_in_columns_with_badges() {
+        let root = fresh_root("agent-board-happy");
         write(&root, "README.md", "# hi");
+        write(&root, ".bee/cells/a.json", &cell_json("c-open", "open", &[], "w-todo"));
+        write(&root, ".bee/cells/b.json", &cell_json("c-claimed", "claimed", &[], "w-doing"));
+        write(&root, ".bee/cells/c.json", &cell_json("c-blocked", "blocked", &[], "w-stuck"));
+        write(&root, ".bee/cells/d.json", &cell_json("c-capped", "capped", &[], "w-done"));
         write(
             &root,
             ".bee/state.json",
-            r#"{"phase":"swarming","feature":"demo","mode":"standard"}"#,
-        );
-        write(&root, ".bee/cells/a.json", &cell_json("c-open", "open", &[], "w1"));
-        write(
-            &root,
-            ".bee/cells/b.json",
-            &cell_json("c-claimed", "claimed", &[], "w1"),
+            &state_json_with_workers(&worker_json("w-doing", "c-claimed", "generation", "running")),
         );
         write(
             &root,
-            ".bee/cells/c.json",
-            &cell_json("c-blocked", "blocked", &[], "w1"),
-        );
-        write(
-            &root,
-            ".bee/cells/d.json",
-            &cell_json("c-capped-1", "capped", &[], "w1"),
-        );
-        write(
-            &root,
-            ".bee/cells/e.json",
-            &cell_json("c-capped-2", "capped", &[], "w1"),
+            ".bee/sessions/w-doing.json",
+            &session_json("w-doing", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
         );
 
         let st = build_state();
-        let project = register(&st, &root, "happy");
+        let project = register(&st, &root, "agent-board-happy");
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
-        assert!(body.contains("data-phase-board-count=\"1\""), "{body}");
+
+        assert!(body.contains("data-agent-col=\"todo\" data-agent-count=\"1\""), "{body}");
+        assert!(body.contains("data-agent-col=\"in-progress\" data-agent-count=\"2\""), "{body}");
+        assert!(body.contains("data-agent-col=\"done\" data-agent-count=\"1\""), "{body}");
         assert!(
-            body.contains("2/5 cells done"),
-            "expected the phase card to state 2 of 5 non-dropped cells done: {body}"
+            body.contains(&format!("href=\"/p/{}/_bee/cell/c-open\"", project.id)),
+            "the Todo card must link to its own cell detail page: {body}"
+        );
+        assert_eq!(
+            body.matches("<span class=\"bee-agent-card__blocked\">Blocked</span>").count(),
+            1,
+            "exactly the blocked cell must carry the blocked marker: {body}"
+        );
+        assert!(
+            body.contains("bee-agent-card__badge bee-agent-card__badge--live\">w-doing"),
+            "the claimed cell's live worker must render a live badge: {body}"
+        );
+        assert!(
+            body.contains("<span class=\"bee-agent-card__badge\">w-todo</span>"),
+            "the open cell's worker must render a plain badge, not live: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (edge, bbp-11) No lane records and no active feature: the by-phase
-    /// board renders its own honest empty line, never a hidden section or a
-    /// zeroed board — replaces `empty_cells_dir_yields_four_zero_buckets`.
+    /// (edge, agent-board ab-1) A worker names a claimed cell in
+    /// `state.json`, but its own session's heartbeat is stale
+    /// (`mdview_core::bee`'s `SESSION_LIVE_MINUTES` window) —
+    /// `running_workers` never lists it, so the cell's badge renders plain,
+    /// never live, on evidence the process stopped reporting in.
     #[tokio::test]
-    async fn empty_store_renders_honest_empty_phase_board() {
-        let root = fresh_root("empty-cells");
+    async fn agent_board_stale_session_worker_renders_plain_not_live_badge() {
+        let root = fresh_root("agent-board-stale");
+        write(&root, ".bee/cells/a.json", &cell_json("c-claimed", "claimed", &[], "w-stale"));
+        write(
+            &root,
+            ".bee/state.json",
+            &state_json_with_workers(&worker_json("w-stale", "c-claimed", "generation", "running")),
+        );
+        write(
+            &root,
+            ".bee/sessions/w-stale.json",
+            &session_json("w-stale", &rfc3339_minutes_ago(120), "/home/x/t.jsonl", "main", "startup"),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "agent-board-stale");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            !body.contains("class=\"bee-agent-card__badge bee-agent-card__badge--live\""),
+            "a stale session's worker must never render a live badge: {body}"
+        );
+        assert!(
+            body.contains("<span class=\"bee-agent-card__badge\">w-stale</span>"),
+            "the cell must still carry its plain worker badge: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (error/edge, D7 parity) A `dropped` cell and a cell with an
+    /// unrecognized status hold no D7 bucket at all — neither ever reaches
+    /// an agent-board column, and rendering the board never panics on
+    /// either shape.
+    #[tokio::test]
+    async fn agent_board_dropped_and_unrecognized_status_cells_hold_no_column() {
+        let root = fresh_root("agent-board-dropped");
+        write(&root, ".bee/cells/a.json", &cell_json("c-dropped", "dropped", &[], "w1"));
+        write(&root, ".bee/cells/b.json", &cell_json("c-weird", "weird-status", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "agent-board-dropped");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-agent-col=\"todo\" data-agent-count=\"0\""), "{body}");
+        assert!(body.contains("data-agent-col=\"in-progress\" data-agent-count=\"0\""), "{body}");
+        assert!(body.contains("data-agent-col=\"done\" data-agent-count=\"0\""), "{body}");
+        assert!(!body.contains("c-dropped"), "a dropped cell must never render on the board: {body}");
+        assert!(
+            !body.contains("c-weird"),
+            "a cell with an unrecognized status must never render on the board: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+
+    /// (edge, agent-board ab-1) An entirely empty store — no cells at all —
+    /// still renders all five agent-board columns: the three this cell
+    /// reads state their bucket honestly empty ("Nothing here."), and the
+    /// two ab-2 has not wired up yet say so plainly instead of claiming to
+    /// have read zero items (bee-board-pm D5's "sections never disappear"
+    /// rule). Replaces `empty_store_renders_honest_empty_phase_board`.
+    #[tokio::test]
+    async fn empty_store_renders_five_honest_agent_board_columns() {
+        let root = fresh_root("agent-board-empty");
         std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
 
         let st = build_state();
-        let project = register(&st, &root, "empty-cells");
+        let project = register(&st, &root, "agent-board-empty");
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
-        assert!(body.contains("data-phase-board-count=\"0\""), "{body}");
-        assert!(
-            body.contains("No features are tracked by phase right now."),
-            "expected an honest empty state, not a hidden or zeroed board: {body}"
+
+        for key in ["backlog", "todo", "in-progress", "review", "done"] {
+            assert!(
+                body.contains(&format!("data-agent-col=\"{key}\"")),
+                "column {key} must always render: {body}"
+            );
+        }
+        assert!(body.contains("data-agent-col=\"todo\" data-agent-count=\"0\""), "{body}");
+        assert!(body.contains("data-agent-col=\"in-progress\" data-agent-count=\"0\""), "{body}");
+        assert!(body.contains("data-agent-col=\"done\" data-agent-count=\"0\""), "{body}");
+        assert_eq!(
+            body.matches("Nothing here.").count(),
+            3,
+            "the three read columns must each state their own honest empty line: {body}"
+        );
+        assert_eq!(
+            body.matches("Not wired up in this build yet.").count(),
+            2,
+            "Backlog and Review must each state plainly that no reader exists yet: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
     }
+
 
     #[tokio::test]
     async fn no_bee_dir_is_not_found_route_and_no_home_page_entry_point() {
@@ -3970,38 +4064,6 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// bee-cockpit-6 / bbp-11 (happy, split — see above): a lane record
-    /// places its feature on the by-phase board at its own recorded phase,
-    /// carrying its next action — this is the assertion that used to read
-    /// "lanes panel renders the lane record"; `bee_lanes_panel` is retired
-    /// (bbp-11), so the same lane data now surfaces through
-    /// `bee_phase_board_section` instead. The fixture's workspace
-    /// (`ws-1`/`wt/demo`) is deliberately not asserted here: worktree
-    /// workspace rendering is retired with `bee_lanes_panel` and has no
-    /// replacement in this cell — the plan (S4) folds it into the Sessions
-    /// panel as its own later slice.
-    #[tokio::test]
-    async fn phase_board_places_lane_feature_at_its_recorded_phase() {
-        let root = fresh_root("panels-happy-lanes");
-        write(&root, ".bee/lanes/demo.json", &lane_json("demo", "swarming", "standard", "run tests", None, None));
-
-        let st = build_state();
-        let project = register(&st, &root, "panels-happy-lanes");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("data-phase-board-count=\"1\""), "{body}");
-        assert!(body.contains("data-phase-col=\"swarming\""), "{body}");
-        assert!(body.contains("run tests"), "{body}");
-        assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/demo\"", project.id)),
-            "the phase card must link to the feature detail page: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
     /// bee-cockpit-6 (happy): 25 findings exceed `RECENT_DETAIL_CAP` (20), so
     /// the findings panel must state its true total (25) alongside the
     /// capped count actually shown, not just the visible subset.
@@ -4110,32 +4172,6 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(body.contains("No sessions recorded."), "{body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// bee-cockpit-6 / bbp-11 (edge, split — see above): no lane records and
-    /// no active feature. Replaces the split-out "No lanes running." /
-    /// "No worktree workspaces yet." assertions — `bee_lanes_panel` no
-    /// longer exists (bbp-11); the equivalent honest-empty-state guarantee
-    /// now belongs to `bee_phase_board_section`
-    /// (`empty_store_renders_honest_empty_phase_board`, above). The
-    /// worktree-workspace half of the old assertion has no replacement in
-    /// this cell (see `phase_board_places_lane_feature_at_its_recorded_phase`).
-    #[tokio::test]
-    async fn absent_lanes_renders_honest_empty_phase_board() {
-        let root = fresh_root("panels-empty-lanes");
-        write(&root, "README.md", "# hi");
-        std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
-
-        let st = build_state();
-        let project = register(&st, &root, "panels-empty-lanes");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("data-phase-board-count=\"0\""), "{body}");
-        assert!(body.contains("No features are tracked by phase right now."), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4707,13 +4743,13 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// `reachable_links` / bbp-11: rendering the detail pages without
-    /// linking to them does not satisfy this cell — the board body must
-    /// actually carry both kinds of link. Re-expressed against the new
-    /// markup: per-cell links no longer come from the by-phase board itself
-    /// (D3 — a phase card links only to its feature's detail page, never a
-    /// cell's), so the cell-detail link comes from the Running Now section
-    /// instead, exactly as it always has for a live worker.
+    /// `reachable_links`: rendering the detail pages without linking to
+    /// them does not satisfy this cell — the board body must actually carry
+    /// both kinds of link. The cell-detail link comes from the Running Now
+    /// section (exactly as it always has for a live worker) and from its
+    /// own agent-board card (D3 — every card links to its own cell's detail
+    /// page); the feature-detail link comes from the Working On Now card's
+    /// own header link for the active feature.
     #[tokio::test]
     async fn board_body_links_to_feature_and_running_cell_detail_routes() {
         let root = fresh_root("board-links");
@@ -4754,7 +4790,7 @@ mod bee_route_tests {
         );
         assert!(
             body.contains(&format!("href=\"/p/{}/_bee/feature/link-feature\"", project.id)),
-            "the phase board must link its feature to its detail page: {body}"
+            "the working-now card must link the active feature to its detail page: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -4763,6 +4799,11 @@ mod bee_route_tests {
     /// (happy) The board's Finished section groups finished features — one
     /// compact line per feature, not one card per cell — and states the
     /// true total number of finished cells, matching `data-finished-cells`.
+    /// The agent board's own Done column is a different, cell-level view
+    /// (D2) that legitimately carries one card per capped cell — this test
+    /// scopes its "no per-cell card" assertion to the Finished section's own
+    /// markup so it never collides with that separate, intentional card
+    /// list.
     #[tokio::test]
     async fn board_done_section_groups_by_feature_and_states_true_total() {
         let root = fresh_root("done-grouped");
@@ -4785,10 +4826,16 @@ mod bee_route_tests {
             body.contains("3 cells"),
             "board must state the true done-cell total for the feature: {body}"
         );
-        // one compact line for the feature, not one card per done cell.
-        assert!(!body.contains("Cell d1"), "{body}");
-        assert!(!body.contains("Cell d2"), "{body}");
-        assert!(!body.contains("Cell d3"), "{body}");
+        // One compact line for the feature inside the Finished section
+        // itself, not one card per done cell — scoped to that section's own
+        // markup, since the agent board's separate Done column legitimately
+        // carries one card per capped cell (D2).
+        let finished_start = body.find("class=\"fg-card bee-finished\"").expect("finished section");
+        let finished_html = &body[finished_start..];
+        let finished_html = &finished_html[..finished_html.find("</section>").expect("finished section close") ];
+        assert!(!finished_html.contains("Cell d1"), "{finished_html}");
+        assert!(!finished_html.contains("Cell d2"), "{finished_html}");
+        assert!(!finished_html.contains("Cell d3"), "{finished_html}");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4921,15 +4968,19 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        // The finished feature's name appears exactly twice — once in its
-        // line's `href`, once as the line's visible text. Before this cell,
-        // the removed `bee_shipped_list` rendered the same feature a second
-        // time (its own href + its own visible text), which would double
-        // this count to four.
+        // The finished feature's name appears exactly three times: once in
+        // the Finished section line's `href`, once as that line's visible
+        // text, and once as the capped cell's own card metadata in the
+        // agent board's Done column (D2 — a cell-level fact the Finished
+        // section's feature-level line never dedupes against; see
+        // `bee_agent_board_section`'s doc comment). Before this cell, the
+        // removed `bee_shipped_list` rendered the same feature a further,
+        // unwanted time (its own href + its own visible text), which would
+        // have pushed this count past three.
         assert_eq!(
             body.matches("solo-shipped-feature").count(),
-            2,
-            "finished feature rendered more than once (the old duplicate shipped list survived): {body}"
+            3,
+            "finished feature rendered more or fewer times than its one Finished-section line plus its one Done-column card: {body}"
         );
         // The velocity section's old per-feature card list heading is gone.
         assert!(
@@ -4946,358 +4997,19 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (happy, bbp-11) A feature that is both lane-tracked and fully shipped
-    /// renders once — in the Finished section — never also as an in-flight
-    /// phase card. This is the overlap `board_renders_finished_work_in_exactly_one_place`
-    /// (above) does not cover: that fixture's feature carries no lane at
-    /// all, so it never reaches `phase_board` in the first place. This one
-    /// exercises the dedup `bee_phase_board_section` performs against
-    /// `shipped` explicitly.
+    /// (read-only, agent-board ab-1) The agent board reads the same
+    /// `.bee/cells/*.json` files as every other bee-cockpit route (D4/D1) —
+    /// the fixture tree must stay byte-identical before and after the
+    /// request. Replaces `phase_board_read_never_writes_the_fixtures_bee_tree`.
     #[tokio::test]
-    async fn lane_tracked_feature_that_has_shipped_renders_only_once_in_finished() {
-        let root = fresh_root("finished-and-laned");
-        write(
-            &root,
-            ".bee/lanes/shipped-and-laned.json",
-            &lane_json("shipped-and-laned", "compound", "standard", "capture the moment", None, None),
-        );
-        write(
-            &root,
-            ".bee/cells/a.json",
-            &timed_cell_json(
-                "f1",
-                "shipped-and-laned",
-                "capped",
-                &[],
-                "w1",
-                "2026-08-04T08:00:00Z",
-                "2026-08-04T08:24:00Z",
-            ),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "finished-and-laned");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("data-phase-board-count=\"0\""), "{body}");
-        assert!(body.contains("data-finished-features=\"1\""), "{body}");
-        assert!(
-            !body.contains("class=\"fg-card bee-cell bee-phase-card\""),
-            "a shipped feature must never also render as an in-flight phase card: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    // --- bbp-11: the by-phase board (D5, replacing the four cell buckets) ---
-
-    /// (happy) Several features, each on their own lane at their own phase,
-    /// render as phase cards linking to their own feature detail page.
-    #[tokio::test]
-    async fn phase_board_places_several_features_on_their_own_phase() {
-        let root = fresh_root("phase-board-several");
-        write(&root, ".bee/lanes/alpha.json", &lane_json("alpha", "shaping", "standard", "shape it", None, None));
-        write(&root, ".bee/lanes/beta.json", &lane_json("beta", "swarming", "standard", "swarm it", None, None));
-
-        let st = build_state();
-        let project = register(&st, &root, "phase-board-several");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("data-phase-board-count=\"2\""), "{body}");
-        assert!(body.contains("data-phase-col=\"shaping\""), "{body}");
-        assert!(body.contains("data-phase-col=\"swarming\""), "{body}");
-        assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/alpha\"", project.id)),
-            "{body}"
-        );
-        assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/beta\"", project.id)),
-            "{body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (happy, phase-board-legibility-1) Known lifecycle phases order the
-    /// columns left-to-right as shape → plan → build regardless of
-    /// first-seen order, and a `compounding-complete` feature leaves the
-    /// columns entirely, collapsing into the finished summary line while
-    /// keeping its feature-detail link.
-    #[tokio::test]
-    async fn phase_board_orders_lifecycle_columns_and_collapses_terminal_phase() {
-        let root = fresh_root("phase-board-order-terminal");
-        // Written in deliberately reversed lifecycle order.
-        write(&root, ".bee/lanes/gamma.json", &lane_json("gamma", "swarming", "standard", "swarm it", None, None));
-        write(&root, ".bee/lanes/alpha.json", &lane_json("alpha", "shaping", "standard", "shape it", None, None));
-        write(&root, ".bee/lanes/omega.json", &lane_json("omega", "compounding-complete", "standard", "close lane", None, None));
-
-        let st = build_state();
-        let project = register(&st, &root, "phase-board-order-terminal");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        let shaping_at = body.find("data-phase-col=\"shaping\"").expect("shaping column");
-        let swarming_at = body.find("data-phase-col=\"swarming\"").expect("swarming column");
-        assert!(
-            shaping_at < swarming_at,
-            "lifecycle order must place shaping before swarming: {body}"
-        );
-        assert!(
-            !body.contains("data-phase-col=\"compounding-complete\""),
-            "a terminal-phase feature must not hold a column: {body}"
-        );
-        assert!(
-            body.contains("1 feature finished at compounding-complete"),
-            "the terminal feature collapses into the summary line: {body}"
-        );
-        assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/omega\"", project.id)),
-            "the collapsed feature keeps its detail link: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (happy, phase-board-legibility-1) A phase card's next action clamps
-    /// to one line — the markup carries the clamping class and a `title`
-    /// attribute holding the full text for hover.
-    #[tokio::test]
-    async fn phase_card_next_action_is_clamped_with_full_text_on_title() {
-        let root = fresh_root("phase-board-next-clamp");
-        write(
-            &root,
-            ".bee/lanes/wordy.json",
-            &lane_json("wordy", "swarming", "standard", "CLOSED in substance - merged to main; parked pending the port", None, None),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "phase-board-next-clamp");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            body.contains(r#"class="bee-cell__meta bee-phase-card__next" title="CLOSED in substance - merged to main; parked pending the port""#),
-            "next action carries the clamp class and full-text title: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (happy) The globally active feature (`state.feature`) that also
-    /// carries its own lane record still places exactly one phase card —
-    /// `compute_phase_board`'s union rule (bbp-10) dedupes by feature name.
-    #[tokio::test]
-    async fn active_feature_with_its_own_lane_appears_as_one_phase_card() {
-        let root = fresh_root("phase-board-active-once");
-        write(&root, ".bee/state.json", r#"{"phase":"swarming","feature":"active-feature","mode":"standard"}"#);
-        write(
-            &root,
-            ".bee/lanes/active-feature.json",
-            &lane_json("active-feature", "swarming", "standard", "keep going", None, None),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "phase-board-active-once");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("data-phase-board-count=\"1\""), "{body}");
-        assert_eq!(
-            body.matches("class=\"fg-card bee-cell bee-phase-card\"").count(),
-            1,
-            "the active feature's own lane record must not double its phase card: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (edge) A repo with no `.bee/lanes/` directory at all still places its
-    /// one active feature honestly, not an empty board — this repo's own
-    /// store is exactly this fixture shape
-    /// (`docs/history/bee-board-pm/plan.md` Discovery).
-    #[tokio::test]
-    async fn repo_with_no_lane_records_places_its_one_active_feature() {
-        let root = fresh_root("phase-board-no-lanes-dir");
-        write(&root, ".bee/state.json", r#"{"phase":"exploring","feature":"lone-active-feature","mode":"standard"}"#);
-        write(
-            &root,
-            ".bee/cells/a.json",
-            &timed_cell_json("c-open", "lone-active-feature", "open", &[], "w1", "x", "y"),
-        );
-        // Deliberately no `.bee/lanes/` directory at all.
-
-        let st = build_state();
-        let project = register(&st, &root, "phase-board-no-lanes-dir");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("data-phase-board-count=\"1\""), "{body}");
-        assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/lone-active-feature\"", project.id)),
-            "the one active feature must render honestly even with no lane records at all: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (edge) A feature placed on the board with zero live cells renders an
-    /// honest progress line, never a `0/0` division artifact.
-    #[tokio::test]
-    async fn phase_card_with_no_cells_renders_honest_progress() {
-        let root = fresh_root("phase-board-no-cells");
-        write(
-            &root,
-            ".bee/lanes/empty-feature.json",
-            &lane_json("empty-feature", "exploring", "standard", "get started", None, None),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "phase-board-no-cells");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            body.contains("empty-feature"),
-            "the feature still earns its card: {body}"
-        );
-        assert!(
-            !body.contains("No live cells recorded for this feature yet."),
-            "phase-board-legibility-1: a cell-less phase card renders no filler line: {body}"
-        );
-        assert!(!body.contains("0/0"), "a division artifact leaked in: {body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (edge, D8) A feature whose cells are all dropped shows no completed
-    /// work on its phase card — dropped cells count toward no denominator
-    /// and no total.
-    #[tokio::test]
-    async fn phase_card_with_all_dropped_cells_shows_no_completed_work() {
-        let root = fresh_root("phase-board-all-dropped");
-        write(
-            &root,
-            ".bee/lanes/dropped-feature.json",
-            &lane_json("dropped-feature", "swarming", "standard", "n/a", None, None),
-        );
-        write(
-            &root,
-            ".bee/cells/a.json",
-            &timed_cell_json("d1", "dropped-feature", "dropped", &[], "w1", "x", "y"),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "phase-board-all-dropped");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            body.contains("dropped-feature"),
-            "the feature still earns its card: {body}"
-        );
-        assert!(
-            !body.contains("No live cells recorded for this feature yet."),
-            "phase-board-legibility-1: an all-dropped phase card renders no filler line: {body}"
-        );
-        assert!(!body.contains("0/0"), "a division artifact leaked in: {body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (untrusted) A feature name and a lane's `next_action` containing
-    /// `< > & "` render as text on the phase board, never breaking the
-    /// surrounding markup.
-    #[tokio::test]
-    async fn phase_card_untrusted_feature_name_and_next_action_render_as_text() {
-        let root = fresh_root("phase-board-untrusted");
-        let untrusted_feature = "<b>bold</b> feature";
-        let lane = format!(
-            r#"{{"feature": {feature}, "phase": "swarming", "mode": "standard", "next_action": "Fix <script>alert(1)</script> & \"quote\" it."}}"#,
-            feature = serde_json::to_string(untrusted_feature).unwrap(),
-        );
-        write(&root, ".bee/lanes/untrusted.json", &lane);
-
-        let st = build_state();
-        let project = register(&st, &root, "phase-board-untrusted");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            body.contains("&lt;b&gt;bold&lt;/b&gt; feature"),
-            "untrusted feature name must render escaped, as text: {body}"
-        );
-        assert!(!body.contains("<b>bold</b>"), "the raw feature-name tag must not survive: {body}");
-        assert!(
-            body.contains("Fix &lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;quote&quot; it."),
-            "untrusted next_action must render escaped, as text: {body}"
-        );
-        assert!(
-            !body.contains("<script>alert(1)</script>"),
-            "the raw next_action script tag must not survive: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (security) An absolute path embedded mid-sentence in a lane's
-    /// `next_action` must not leak into the phase board — the same
-    /// mid-sentence scrub
-    /// `board_embedded_absolute_path_in_rationale_and_next_action_does_not_leak`
-    /// already proves for `state.json`'s fields, exercised here through a
-    /// lane record instead.
-    #[tokio::test]
-    async fn phase_card_embedded_absolute_path_in_next_action_does_not_leak() {
-        let root = fresh_root("phase-board-security-scrub");
-        let secret = root.join("src").join("secret.rs").to_string_lossy().into_owned();
-        let secret_escaped = secret.replace('\\', "\\\\");
-        let lane = format!(
-            r#"{{"feature": "scrub-feature", "phase": "swarming", "mode": "standard", "next_action": "Read {path} then continue."}}"#,
-            path = secret_escaped,
-        );
-        write(&root, ".bee/lanes/scrub-feature.json", &lane);
-
-        let st = build_state();
-        let project = register(&st, &root, "phase-board-security-scrub");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            !body.contains(&secret),
-            "the phase board leaked an absolute path embedded in a lane's next_action: {body}"
-        );
-        assert!(body.contains("src/secret.rs"), "the reduced relative path should still read: {body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (read-only) The by-phase board reads the same `.bee/lanes/*.json` and
-    /// `.bee/cells/*.json` files as every other bee-cockpit route (D4) — the
-    /// fixture tree must stay byte-identical before and after the request.
-    #[tokio::test]
-    async fn phase_board_read_never_writes_the_fixtures_bee_tree() {
-        let root = fresh_root("phase-board-read-only");
+    async fn agent_board_read_never_writes_the_fixtures_bee_tree() {
+        let root = fresh_root("agent-board-read-only");
         write(&root, "README.md", "# hi");
-        write(
-            &root,
-            ".bee/lanes/demo.json",
-            &lane_json("demo", "swarming", "standard", "run tests", None, None),
-        );
         write(&root, ".bee/cells/a.json", &cell_json("c-open", "open", &[], "w1"));
+        write(&root, ".bee/cells/b.json", &cell_json("c-capped", "capped", &[], "w1"));
 
         let st = build_state();
-        let project = register(&st, &root, "phase-board-read-only");
+        let project = register(&st, &root, "agent-board-read-only");
         let before = snapshot_tree(&root);
 
         let _ = get(router(st), &format!("/p/{}/_bee", project.id)).await;
@@ -5307,6 +5019,7 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&root).ok();
     }
+
 
     // --- bbp-5: the rebuilt top of the board (D5/D6/D7/D8/D9) ---
 
@@ -6082,18 +5795,18 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (happy) bee-board-ux-2 / bbp-11: a finished feature's line in the
-    /// Finished section still links to its feature detail page, and an
-    /// in-flight feature's phase card links to its feature detail page too
-    /// — both drill-downs the board exists to reach. Re-expressed against
-    /// the new markup: the old fixture's "live" cell carried no lane and no
-    /// active-feature record, so under bbp-11 it would never place on the
-    /// board at all; a per-cell link from a bare board card is no longer a
-    /// guarantee this cell makes (see `board_card_drops_file_list_but_cell_detail_page_keeps_it`
-    /// and `board_body_links_to_feature_and_running_cell_detail_routes` for
-    /// where cell-level links still live).
+    /// (happy) bee-board-ux-2: a finished feature's line in the Finished
+    /// section still links to its feature detail page — one of the two
+    /// drill-downs the board exists to reach. Re-expressed for agent-board
+    /// D2 (card unit is the cell, not the feature): a live, in-flight cell
+    /// links to its OWN cell detail page from its Todo card, never to its
+    /// feature's page — that second drill-down now belongs to the working-now
+    /// card for the actively routed feature (see
+    /// `board_body_links_to_feature_and_running_cell_detail_routes`) and to
+    /// `board_card_drops_file_list_but_cell_detail_page_keeps_it` for where
+    /// cell-level links live.
     #[tokio::test]
-    async fn board_links_finished_feature_and_in_flight_feature_to_their_detail_pages() {
+    async fn board_links_finished_feature_and_in_flight_cell_to_their_detail_pages() {
         let root = fresh_root("done-links");
         write(
             &root,
@@ -6133,8 +5846,8 @@ mod bee_route_tests {
             "the finished feature line must link to the feature detail page: {body}"
         );
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/live-feature\"", project.id)),
-            "an in-flight feature's phase card must link to its feature detail page: {body}"
+            body.contains(&format!("href=\"/p/{}/_bee/cell/live-cell\"", project.id)),
+            "an in-flight cell's Todo card must link to its own cell detail page: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -6168,11 +5881,10 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (regression, bbp-11) A card on the board no longer prints a cell's
-    /// file list — that detail moved to the cell detail page, which still
-    /// shows it. The fixture places its feature on the by-phase board (a
-    /// lane record) so this actually exercises `bee_phase_card`, which has
-    /// no `files` field on `BeeFeaturePhase` to print in the first place.
+    /// (regression) A card on the board no longer prints a cell's file
+    /// list — that detail moved to the cell detail page, which still shows
+    /// it. Exercises the agent-board Todo card (`bee_agent_cards`), which
+    /// carries no files field to print in the first place.
     #[tokio::test]
     async fn board_card_drops_file_list_but_cell_detail_page_keeps_it() {
         let root = fresh_root("board-no-files");
@@ -6208,17 +5920,17 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (regression, bbp-11) A feature known only through a lane record, with
-    /// no live cells at all (routine in a real store — cells archive after a
-    /// feature closes; `counter-teeth` in beehive's own store is exactly
-    /// this shape), resolves its feature detail page rather than 404ing.
-    /// Found by loading the rendered board and following a phase card's own
-    /// link, not by the suite: before this fix, `bee_feature_detail`
-    /// recognized a feature only through its live D7 buckets or `shipped`,
-    /// so every phase card for a lane-only feature 404'd — the exact link
-    /// bbp-11's `bee_phase_board_section` now renders on every phase card.
+    /// (regression) A feature known only through a lane record, with no
+    /// live cells at all (routine in a real store — cells archive after a
+    /// feature closes), still resolves its own feature detail page rather
+    /// than 404ing — `bee_feature_detail`'s `known_feature` check falls
+    /// back to `snapshot.phase_board` for exactly this case. The board no
+    /// longer links to this feature at all (agent-board D2/D5: the card
+    /// unit is the cell, and this feature has none) — that reachability
+    /// gap is a deliberate, in-scope consequence of the redesign, not a bug
+    /// this cell restores; this test only pins the route itself.
     #[tokio::test]
-    async fn lane_only_feature_with_no_live_cells_resolves_its_detail_page() {
+    async fn lane_only_feature_with_no_live_cells_still_resolves_its_detail_page() {
         let root = fresh_root("lane-only-feature-detail");
         write(
             &root,
@@ -6229,23 +5941,11 @@ mod bee_route_tests {
 
         let st = build_state();
         let project = register(&st, &root, "lane-only-feature-detail");
-        let app = router(st);
-
-        let board_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
-        let board_body = body_string(board_resp).await;
-        assert!(
-            board_body.contains(&format!(
-                "href=\"/p/{}/_bee/feature/archived-feature\"",
-                project.id
-            )),
-            "the phase board must place this lane-only feature: {board_body}"
-        );
-
-        let feature_resp = get(app, &format!("/p/{}/_bee/feature/archived-feature", project.id)).await;
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/archived-feature", project.id)).await;
         assert_eq!(
-            feature_resp.status(),
+            resp.status(),
             StatusCode::OK,
-            "a feature the board just linked to must resolve, not 404"
+            "a lane-only, cell-less feature must still resolve its detail page, not 404"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -6489,14 +6189,13 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (happy, bbp-11) The presence of a worker naming a still-open cell
-    /// must never move that cell's phase-card progress (D5's "phase
-    /// membership is a pure function of the store" rule) — re-expressed
-    /// against the new markup: `compute_phase_board`/`compute_feature_cell_counts`
-    /// (`mdview_core::bee`) never take `running_workers` as an input, so the
-    /// phase card for `state.feature` ("demo", the only feature this fixture
-    /// declares) must keep reading "0/1 cell done" even though a live
-    /// worker names its one open cell.
+    /// (happy) The presence of a worker naming a still-open cell must never
+    /// move that cell out of the D7 bucket the store itself computed for
+    /// it: `compute_d7_buckets` (`mdview_core::bee`) never takes
+    /// `running_workers` as an input, so the open cell stays in the agent
+    /// board's Todo column, and `state.feature`'s ("demo", the only feature
+    /// this fixture declares) working-now progress must keep reading
+    /// "0/1 cell done" even though a live worker names its one open cell.
     #[tokio::test]
     async fn d7_buckets_unchanged_by_worker_presence() {
         let root = fresh_root("running-buckets-untouched");
@@ -6519,8 +6218,8 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains("data-phase-board-count=\"1\""),
-            "the active feature must still place on the phase board: {body}"
+            body.contains("data-agent-col=\"todo\" data-agent-count=\"1\""),
+            "the still-open cell must stay in the Todo column: {body}"
         );
         assert!(
             body.contains("0/1 cell done"),
@@ -6804,18 +6503,17 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&quiet).ok();
     }
 
-    /// (happy, bbp-11) Worktree cell files present in the fixture change
-    /// NEITHER this project's phase-board cell counts NOR its shipped set —
-    /// the regression that motivated this cell, re-expressed against the new
-    /// markup: `compute_phase_board`/`compute_feature_cell_counts`
+    /// (happy) Worktree cell files present in the fixture change NEITHER
+    /// this project's agent-board columns NOR its shipped set — the
+    /// regression that motivated this test, re-expressed against the
+    /// Kanban markup: `compute_d7_buckets`/`compute_feature_cell_counts`
     /// (`mdview_core::bee`) only ever see this project's own
     /// `.bee/cells/*.json`, so a worktree's own capped cell can never move
-    /// this project's phase card's progress, and its cell id never appears
-    /// on this board at all (`BeeFeaturePhase` carries no cell ids). The
-    /// worktree's own *feature name* legitimately still appears — in the
-    /// Worktrees panel, naming which feature that worktree runs — this test
-    /// asserts only that its cell never merges into this project's own
-    /// counts.
+    /// this project's Todo column, and its cell id never appears on this
+    /// board at all. The worktree's own *feature name* legitimately still
+    /// appears — in the Worktrees panel, naming which feature that
+    /// worktree runs — this test asserts only that its cell never merges
+    /// into this project's own counts.
     #[tokio::test]
     async fn worktree_cell_files_do_not_change_buckets_or_shipped_set() {
         let root = fresh_root("wt-no-cell-merge");
@@ -6826,7 +6524,7 @@ mod bee_route_tests {
         write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"ghost-feature","mode":"standard"}"#);
         // A capped cell sitting only in the worktree's own store. If this
         // were ever merged into the main snapshot it would count toward this
-        // project's phase-board progress and appear as an extra shipped
+        // project's Todo/Done columns and appear as an extra shipped
         // feature.
         write(
             &sibling,
@@ -6842,10 +6540,10 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-phase-board-count=\"1\""), "{body}");
+        assert!(body.contains("data-agent-col=\"todo\" data-agent-count=\"1\""), "{body}");
         assert!(
-            body.contains("0/1 cell done"),
-            "a worktree's own capped cell must never count toward this project's phase card progress: {body}"
+            body.contains("data-agent-col=\"done\" data-agent-count=\"0\""),
+            "a worktree's own capped cell must never count toward this project's Done column: {body}"
         );
         assert!(body.contains("data-finished-features=\"0\""), "{body}");
         assert!(
@@ -14173,7 +13871,7 @@ mod bee_route_tests {
         for grid_class in [
             ".bee-stats",
             ".bee-now-grid",
-            ".bee-phase-board__cols",
+            ".bee-agent-board__cols",
             ".bee-velocity__lists",
             ".bee-panels",
             ".bee-done-grid",
@@ -14199,11 +13897,11 @@ mod bee_route_tests {
     }
 
     /// (responsive) The one genuinely wide container on the board — the
-    /// by-phase board's column row, which can grow past a phone's width
-    /// with enough phases in flight — scrolls inside itself rather than
-    /// ever pushing the page wider.
+    /// agent board's column row, which can grow past a phone's width with
+    /// five columns in play — scrolls inside itself rather than ever
+    /// pushing the page wider.
     #[tokio::test]
-    async fn board_wide_phase_columns_container_scrolls_within_itself() {
+    async fn board_wide_agent_board_columns_container_scrolls_within_itself() {
         let root = fresh_root("responsive-overflow");
         write(&root, ".bee/cells/a.json", &cell_json("r1", "open", &[], "w1"));
 
@@ -14215,8 +13913,8 @@ mod bee_route_tests {
         let style = board_style_block(&body);
 
         assert!(
-            style.contains(".bee-phase-board__cols") && style.contains("overflow-x: auto"),
-            "the phase board's wide column row must carry its own overflow rule: {style}"
+            style.contains(".bee-agent-board__cols") && style.contains("overflow-x: auto"),
+            "the agent board's wide column row must carry its own overflow rule: {style}"
         );
 
         std::fs::remove_dir_all(&root).ok();
