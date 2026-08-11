@@ -2170,16 +2170,20 @@ fn bee_open_features_list(project_id: &str, names: &[String]) -> String {
 ///   `state.json` currently names active.
 /// - **In Progress**: everything left with `doing`/`waiting`/`stuck`
 ///   cells — live work not already claimed by Waiting.
-/// - **Finished**: everything left with a lane `phase` of exactly
-///   `"terminal"`, plus every feature `.bee/cells/archive/` names that
-///   never had a lane or active-feature placement at all
-///   (`list_archived_feature_dirs`) — both sourced from
-///   `read_archived_cells` for their own done/total counts and last
-///   activity, since a finished feature's live `cell_counts` are
-///   typically zero (its cells already moved to archive). A feature that
-///   fits neither rule (a pre-build, zero-cell lane, e.g. still
-///   `exploring`) renders nowhere on this list — the pre-redesign board
-///   never showed it either, since it never held a cell of its own.
+/// - **Finished**: everything left with no live cells AND either a lane
+///   `phase` of exactly `"compounding-complete"` (bee's own terminal
+///   phase — `"terminal"` is a string bee never writes) OR a
+///   `.bee/cells/archive/<feature>/` directory of its own
+///   (`list_archived_feature_dirs`, checked once up front and reused as a
+///   set — no extra store read per feature), including every feature that
+///   directory names but never had a lane or active-feature placement at
+///   all. Both sourced from `read_archived_cells` for their own
+///   done/total counts and last activity, since a finished feature's live
+///   `cell_counts` are typically zero (its cells already moved to
+///   archive). A feature that fits neither rule (a pre-build, zero-cell
+///   lane, e.g. still `exploring`) renders nowhere on this list — the
+///   pre-redesign board never showed it either, since it never held a
+///   cell of its own.
 ///
 /// This is also D4's ghost-card fix: the retired Review column rendered a
 /// card for ANY phase_board feature sitting on an unapproved gate,
@@ -2187,8 +2191,9 @@ fn bee_open_features_list(project_id: &str, names: &[String]) -> String {
 /// archived lanes kept showing "gate awaiting your decision" for that
 /// reason. Gating Waiting on live work closes that permanently; a stale
 /// lane with zero live cells now renders in Finished once its own `phase`
-/// is stamped `"terminal"` (an orchestrator-run cleanup, out of this
-/// cell's scope), and nowhere until then — never a ghost.
+/// reaches `"compounding-complete"` or its cells land in the archive
+/// directory (an orchestrator-run cleanup, out of this cell's scope), and
+/// nowhere until then — never a ghost.
 ///
 /// Every card names its feature, links to its own detail page, its own
 /// done/total cell progress, its own last-activity age
@@ -2213,6 +2218,8 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
     let mut in_progress_count = 0usize;
     let mut finished_count = 0usize;
     let mut placed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let archived_features: std::collections::HashSet<String> =
+        list_archived_feature_dirs(&project.root_path).into_iter().collect();
 
     let mut features: Vec<&BeeFeaturePhase> = snapshot.phase_board.iter().collect();
     features.sort_by(|a, b| a.feature.cmp(&b.feature));
@@ -2234,7 +2241,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
                 None => "Work is parked, waiting on your decision".to_string(),
             };
             let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
-            let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, false);
+            let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
             waiting_cards.push_str(&bee_hub_card(
                 &project.id,
                 &f.feature,
@@ -2248,7 +2255,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
         } else if live > 0 {
             in_progress_count += 1;
             let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
-            let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, false);
+            let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
             in_progress_cards.push_str(&bee_hub_card(
                 &project.id,
                 &f.feature,
@@ -2259,12 +2266,13 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
                 &worktree,
                 None,
             ));
-        } else if f.phase.as_deref() == Some("terminal") {
+        } else if f.phase.as_deref() == Some("compounding-complete") || archived_features.contains(f.feature.as_str())
+        {
             finished_count += 1;
             let archived = read_archived_cells(&project.root_path, &f.feature);
             let (done, total) = bee_hub_archived_counts(&archived);
             let last_activity = bee_hub_latest_activity(archived.iter());
-            let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, true);
+            let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, true);
             finished_cards.push_str(&bee_hub_card(
                 &project.id,
                 &f.feature,
@@ -2276,13 +2284,13 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
                 None,
             ));
         }
-        // else: no live work, no gate/handoff pull, and not stamped
-        // terminal — a pre-build lane (still `exploring`, no cells yet).
-        // Renders nowhere, matching the pre-redesign board's own
-        // cell-only precedent.
+        // else: no live work, no gate/handoff pull, and neither
+        // `compounding-complete` nor archived — a pre-build lane (still
+        // `exploring`, no cells yet). Renders nowhere, matching the
+        // pre-redesign board's own cell-only precedent.
     }
 
-    let mut archive_only: Vec<String> = list_archived_feature_dirs(&project.root_path)
+    let mut archive_only: Vec<String> = archived_features
         .into_iter()
         .filter(|name| !placed.contains(name.as_str()))
         .collect();
@@ -2292,7 +2300,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
         let archived = read_archived_cells(&project.root_path, &feature);
         let (done, total) = bee_hub_archived_counts(&archived);
         let last_activity = bee_hub_latest_activity(archived.iter());
-        let worktree = bee_hub_worktree_chip(&feature, &snapshot.worktrees, true);
+        let worktree = bee_hub_worktree_chip(&feature, &snapshot.worktrees, &snapshot.workspaces, true);
         finished_cards.push_str(&bee_hub_card(
             &project.id,
             &feature,
@@ -2478,15 +2486,29 @@ fn bee_hub_card(
 /// A card's worktree-state chip (D1), read from `snapshot.worktrees`
 /// (`.bee/runtime/worktree-grants.json`, resolved against each grant's own
 /// sibling `.bee/state.json`): "Open · &lt;branch&gt;" when a currently
-/// granted worktree names this feature as its own active one. A grant is
-/// released on `bee worktree merge` (AGENTS.md), so its absence reads two
-/// ways depending on which group this card already landed in: `finished`
-/// reads "Merged" (the worktree that did this work has been folded back);
-/// anything else reads "Main" (this feature's work is happening directly
-/// in the main checkout — the tiny/solo-fix path AGENTS.md itself names).
-/// Never a guess at branch history beyond what this project's own
-/// worktree-grants file currently records.
-fn bee_hub_worktree_chip(feature: &str, worktrees: &[BeeWorktree], finished: bool) -> (String, &'static str) {
+/// granted worktree names this feature as its own active one.
+///
+/// A grant is released on `bee worktree merge` (AGENTS.md) — cleanup drops
+/// the worktree directory, its branch, and the grant itself, but (unlike
+/// `bee worktree prune`) never the sibling `.bee/runtime/workspaces/<id>.json`
+/// record `snapshot.workspaces` already carries. So an absent grant reads
+/// two ways, and this is never a guess beyond what that already-read record
+/// still shows: when a workspace record survives whose own `branch` matches
+/// this feature's `wt/<feature>` convention (`bee worktree new`'s own
+/// `-b wt/<feature>`), a grant for this feature genuinely existed and is
+/// now gone — `finished` reads that as "Merged" (the worktree that did this
+/// work has been folded back). Every other absent-grant case — no grant,
+/// and no leftover workspace record either — reads "Main" regardless of
+/// `finished`: a feature with no grant history was never worked in its own
+/// worktree at all (the tiny/solo-fix path AGENTS.md itself names), so
+/// "Merged" would be a fabricated history this project's own store never
+/// recorded.
+fn bee_hub_worktree_chip(
+    feature: &str,
+    worktrees: &[BeeWorktree],
+    workspaces: &[BeeWorkspace],
+    finished: bool,
+) -> (String, &'static str) {
     if let Some(w) = worktrees.iter().find(|w| w.feature.as_deref() == Some(feature)) {
         let label = match w.branch.as_deref() {
             Some(b) if !b.is_empty() => format!("Open · {b}"),
@@ -2494,7 +2516,9 @@ fn bee_hub_worktree_chip(feature: &str, worktrees: &[BeeWorktree], finished: boo
         };
         return (label, "info");
     }
-    if finished {
+    let feature_branch = format!("wt/{feature}");
+    let grant_existed = workspaces.iter().any(|w| w.branch.as_deref() == Some(feature_branch.as_str()));
+    if finished && grant_existed {
         ("Merged".to_string(), "success")
     } else {
         ("Main".to_string(), "neutral")
@@ -3332,7 +3356,10 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
 /// read from its lane record, or from `state.json` when this is the
 /// globally active feature with no lane record of its own — `None` when
 /// neither source carries one. `worktrees` is the project's full granted-
-/// worktree list (`bee_hub_worktree_chip` picks this feature's own entry).
+/// worktree list and `workspaces` its full workspace-record list
+/// (`bee_hub_worktree_chip` picks this feature's own entry from each —
+/// `workspaces` is what lets a merged-and-gone grant still read "Merged"
+/// rather than "Main", see that function's own doc comment).
 /// `decisions` is already filtered to this feature's own `scope` by the
 /// caller (`snapshot.decisions.recent`, itself bounded — see
 /// `mdview_core::bee::BeeDecisions`). `running_workers` is the project's
@@ -3348,6 +3375,7 @@ pub fn bee_feature_page(
     is_closed: bool,
     lane_label: Option<&str>,
     worktrees: &[BeeWorktree],
+    workspaces: &[BeeWorkspace],
     decisions: &[BeeDecisionSummary],
     running_workers: &[BeeRunningWorker],
     gates: Option<&BeeApprovedGates>,
@@ -3384,7 +3412,7 @@ pub fn bee_feature_page(
     // absent-grant fallback as "Merged"; anything still live reads "Main" —
     // see `bee_hub_worktree_chip`'s own doc comment (feature-hub-1).
     let finished = shipped.is_some() || is_closed;
-    let worktree = bee_hub_worktree_chip(feature, worktrees, finished);
+    let worktree = bee_hub_worktree_chip(feature, worktrees, workspaces, finished);
 
     let all_cells = || {
         buckets

@@ -2691,6 +2691,7 @@ async fn bee_feature_detail(
         is_closed,
         lane_label.as_deref(),
         &snapshot.worktrees,
+        &snapshot.workspaces,
         &decisions,
         &snapshot.running_workers,
         gates,
@@ -3498,13 +3499,14 @@ mod bee_route_tests {
     /// live open cell sitting on an unapproved (non-review) gate renders
     /// once under Waiting on you, carrying its own reason line; a feature
     /// with a live claimed cell and every gate approved renders under In
-    /// Progress; a feature known only through its own
-    /// `.bee/cells/archive/<feature>/` directory (no lane, never active)
-    /// renders under Finished with a "Merged" worktree chip (D1) — no
-    /// currently granted worktree names it, so its absence reads as "the
-    /// worktree that did this work has been folded back", never "still on
-    /// main". Replaces `agent_board_happy_path_places_cells_in_columns_with_badges`,
-    /// which asserted the now-retired Kanban markup.
+    /// Progress; a finished feature with a leftover
+    /// `.bee/runtime/workspaces/<id>.json` record naming its own
+    /// `wt/finished-feat` branch (feature-hub-3 F5: real evidence a grant
+    /// once existed for it, even though `bee worktree merge`'s own cleanup
+    /// already dropped the grant itself) renders under Finished with a
+    /// "Merged" worktree chip. Replaces
+    /// `agent_board_happy_path_places_cells_in_columns_with_badges`, which
+    /// asserted the now-retired Kanban markup.
     #[tokio::test]
     async fn feature_hub_happy_path_places_each_feature_in_its_own_group() {
         let root = fresh_root("hub-happy");
@@ -3537,7 +3539,7 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/finished-feat.json",
-            &lane_json("finished-feat", "terminal", "standard", "none", None, None),
+            &lane_json("finished-feat", "compounding-complete", "standard", "none", None, None),
         );
         write(
             &root,
@@ -3549,6 +3551,11 @@ mod bee_route_tests {
                 Some(&rfc3339_minutes_ago(120)),
                 Some(&rfc3339_minutes_ago(60)),
             ),
+        );
+        write(
+            &root,
+            ".bee/runtime/workspaces/finished-feat-wt.json",
+            &workspace_json("finished-feat-wt", "/tmp/nonexistent-finished-feat-wt", "wt/finished-feat", &[]),
         );
 
         let st = build_state();
@@ -3584,7 +3591,7 @@ mod bee_route_tests {
 
         assert!(
             body.contains("fg-chip--success\">Merged</span>"),
-            "a finished feature with no open worktree grant must read Merged: {body}"
+            "a finished feature with no open worktree grant but a leftover workspace record naming its own branch must read Merged: {body}"
         );
         assert_eq!(
             body.matches("fg-chip--neutral\">Main</span>").count(),
@@ -3602,10 +3609,12 @@ mod bee_route_tests {
     /// terminal) must never render a Waiting on you entry — the retired
     /// Review column rendered exactly this shape as "gate awaiting your
     /// decision" regardless of live work. It also has no live cells, so it
-    /// cannot land in In Progress, and its phase is not `"terminal"`, so it
-    /// cannot land in Finished either: it renders in none of the three
-    /// groups until an orchestrator-run cleanup stamps its phase, out of
-    /// this cell's own scope (CONTEXT.md).
+    /// cannot land in In Progress, and its phase is `"compounding"`, not
+    /// `"compounding-complete"`, and it has no `.bee/cells/archive/`
+    /// directory of its own, so it cannot land in Finished either: it
+    /// renders in none of the three groups until an orchestrator-run
+    /// cleanup stamps its phase or archives its cells, out of this cell's
+    /// own scope (CONTEXT.md).
     #[tokio::test]
     async fn feature_hub_stale_lane_with_no_live_cells_emits_no_waiting_entry() {
         let root = fresh_root("hub-ghost");
@@ -3686,15 +3695,64 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (edge, feature-hub fh-1, D1) A feature known only through its own
+    /// (regression, feature-hub-3 F3) Independent review found this
+    /// guarantee missing at the server level — only `mdview-core`'s own
+    /// attention-item test covered it. A `"planned-next"` handoff is a
+    /// clean stop, never a pause (AGENTS.md's own "kind" distinction:
+    /// the previous cell already capped, the next cell's claim already
+    /// owned) — `bee_feature_hub_section`'s own `handoff_is_pause` rule
+    /// must read it as such, so the globally active feature with every one
+    /// of its own gates already approved renders no Waiting on you entry
+    /// at all.
+    #[tokio::test]
+    async fn feature_hub_planned_next_handoff_renders_no_waiting_entry() {
+        let root = fresh_root("hub-handoff-planned-next");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "feature": "planned-next-feat",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
+            }"#,
+        );
+        write(
+            &root,
+            ".bee/HANDOFF.json",
+            r#"{"written_at": "2026-08-10T09:00:00Z", "next_action": "Adopt the carried claim.", "kind": "planned-next"}"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-handoff-planned-next");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"0\""), "{body}");
+        assert!(
+            !body.contains(&format!(
+                "data-hub-group=\"waiting\" href=\"/p/{}/_bee/feature/planned-next-feat\"",
+                project.id
+            )),
+            "a planned-next handoff is a clean stop, never a pause, and must render no Waiting card for its feature: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (edge, feature-hub fh-1, D1; chip rule corrected by feature-hub-3
+    /// F5) A feature known only through its own
     /// `.bee/cells/archive/<feature>/` directory — no lane record, never
-    /// the active feature — still renders under Finished
+    /// the active feature, and no `.bee/runtime/workspaces/` record naming
+    /// its own `wt/<feature>` branch either — still renders under Finished
     /// (`list_archived_feature_dirs`), with its own done/total counted from
     /// `read_archived_cells` (D7 parity: the archive's own dropped cell
-    /// counts toward neither `done` nor `total`) and a "Merged" worktree
-    /// chip.
+    /// counts toward neither `done` nor `total`). Independent review found
+    /// the old code inferred "Merged" here from `finished` alone, with no
+    /// evidence a worktree grant ever existed for this feature; this store
+    /// records none, so the corrected chip reads "Main" — a feature with no
+    /// grant history was never worked in its own worktree at all.
     #[tokio::test]
-    async fn feature_hub_archive_only_feature_renders_under_finished() {
+    async fn feature_hub_archive_only_feature_with_no_grant_history_renders_under_finished() {
         let root = fresh_root("hub-archive-only");
         write(
             &root,
@@ -3724,7 +3782,57 @@ mod bee_route_tests {
             body.contains("1/1 cell done"),
             "the dropped cell must count toward neither done nor total: {body}"
         );
-        assert!(body.contains("fg-chip--success\">Merged</span>"), "{body}");
+        assert!(
+            body.contains("fg-chip--neutral\">Main</span>"),
+            "a finished feature with no grant history at all must read Main, never a fabricated Merged: {body}"
+        );
+        assert!(!body.contains("Merged"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (regression, feature-hub-3 F1) Independent review found fh-1's
+    /// Finished predicate dead on real data: it matched a lane `phase` of
+    /// exactly `"terminal"`, a string bee never writes (bee's own terminal
+    /// phase is `"compounding-complete"`). This pins the real-store shape:
+    /// a lane whose `phase` is `"compounding"` — never stamped
+    /// `compounding-complete` — but whose cells have already moved to
+    /// `.bee/cells/archive/<feature>/` with none left live still renders
+    /// under Finished via the archive half of the corrected OR, not just
+    /// the `compounding-complete` half.
+    #[tokio::test]
+    async fn feature_hub_archived_cells_with_non_terminal_phase_render_under_finished() {
+        let root = fresh_root("hub-archived-non-terminal-phase");
+        write(
+            &root,
+            ".bee/lanes/wound-down-feat.json",
+            &lane_json("wound-down-feat", "compounding", "standard", "none", None, None),
+        );
+        write(
+            &root,
+            ".bee/cells/archive/wound-down-feat/a.json",
+            &feature_cell_json(
+                "wd-1",
+                "wound-down-feat",
+                "capped",
+                Some(&rfc3339_minutes_ago(90)),
+                Some(&rfc3339_minutes_ago(30)),
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-archived-non-terminal-phase");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""), "{body}");
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/wound-down-feat\"", project.id)),
+            "an archived feature whose lane phase never reached compounding-complete must still render under Finished: {body}"
+        );
+        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"0\""), "{body}");
+        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3739,7 +3847,7 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/wt-feat.json",
-            &lane_json("wt-feat", "terminal", "standard", "none", None, None),
+            &lane_json("wt-feat", "compounding-complete", "standard", "none", None, None),
         );
         let sibling = make_worktree_sibling("feature-hub-1-wt-still-open");
         write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"wt-feat","mode":"standard"}"#);
@@ -3801,6 +3909,46 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (regression, feature-hub-3 F2) Independent review found this
+    /// guarantee deleted from the test suite: the independent-review gate
+    /// is never a current stop (`bee_gate_current_stop`'s own `filter`,
+    /// views.rs) — the review gate is user-invoked on its own schedule,
+    /// never a blocking one. A feature with live work and every OTHER gate
+    /// approved, only `review` still outstanding, must render no Waiting
+    /// on you entry at all, landing in In Progress instead.
+    #[tokio::test]
+    async fn feature_hub_review_only_gate_with_live_cells_emits_no_waiting_entry() {
+        let root = fresh_root("hub-review-only-gate");
+        write(
+            &root,
+            ".bee/lanes/review-only-feat.json",
+            &lane_json(
+                "review-only-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": true, "execution": true, "review": false"#),
+                None,
+            ),
+        );
+        write(&root, ".bee/cells/a.json", &feature_cell_json("ro-1", "review-only-feat", "claimed", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-review-only-gate");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"0\""), "{body}");
+        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""), "{body}");
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/review-only-feat\"", project.id)),
+            "a feature with only the review gate outstanding must still render, under In Progress: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (edge, feature-hub fh-1, D4) A feature with a live claimed cell AND
     /// an unapproved non-review gate renders under Waiting on you only —
     /// "waiting wins over in-progress" — never counted in both.
@@ -3844,7 +3992,7 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/terminal-feat.json",
-            &lane_json("terminal-feat", "terminal", "standard", "none", None, None),
+            &lane_json("terminal-feat", "compounding-complete", "standard", "none", None, None),
         );
         write(
             &root,
@@ -5081,6 +5229,39 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (regression, feature-hub-3 F4) Independent review found only the
+    /// tab PANELS' content asserted, never the tab SHELL itself
+    /// (`bee_feature_tabs`, views.rs): the three radio controls that drive
+    /// the CSS-only tab pattern, and the three nav labels a reader actually
+    /// clicks.
+    #[tokio::test]
+    async fn feature_detail_page_renders_the_three_tab_controls() {
+        let root = fresh_root("feature-detail-tab-shell");
+        write(&root, ".bee/cells/a.json", &feature_cell_json("ts-1", "tab-shell-feature", "open", None, None));
+
+        let st = build_state();
+        let project = register(&st, &root, "feature-detail-tab-shell");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/tab-shell-feature", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains(r#"<div class="bee-tabs" data-tabs="1">"#), "tab shell container missing: {body}");
+        for id in ["bee-tab-activity", "bee-tab-todos", "bee-tab-subagents"] {
+            assert!(
+                body.contains(&format!(r#"id="{id}""#)),
+                "tab radio control {id} missing: {body}"
+            );
+        }
+        for (id, label) in [("bee-tab-activity", "Activity"), ("bee-tab-todos", "Todos"), ("bee-tab-subagents", "Sub-agents")] {
+            assert!(
+                body.contains(&format!(r#"<label class="bee-tabs__label" for="{id}">{label}</label>"#)),
+                "tab nav label {label} missing: {body}"
+            );
+        }
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// A feature with a live cell in each of Doing/Waiting/Stuck and none
     /// capped renders each with its own Todos marker and is honestly
     /// reported as not shipped (D10 requires every non-dropped cell capped).
@@ -5160,6 +5341,11 @@ mod bee_route_tests {
                 "2026-08-04T08:40:00Z",
             ),
         );
+        write(
+            &root,
+            ".bee/runtime/workspaces/closed-feature-wt.json",
+            &workspace_json("closed-feature-wt", "/tmp/nonexistent-closed-feature-wt", "wt/closed-feature", &[]),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "feature-detail-archived");
@@ -5175,7 +5361,7 @@ mod bee_route_tests {
         assert!(body.contains("Cell ca2"), "archived cell card missing: {body}");
         assert!(
             body.contains("fg-chip--success\">Merged</span>"),
-            "a closed feature with no active worktree grant must read Merged: {body}"
+            "a closed feature with no active worktree grant but a leftover workspace record naming its own branch must read Merged: {body}"
         );
         assert!(body.contains("bee-subagents"), "sub-agents tab must be populated for a closed feature: {body}");
         assert!(body.contains("2 cells capped"), "sub-agent capped count missing: {body}");
@@ -6784,13 +6970,11 @@ mod bee_route_tests {
     /// feature closes), still resolves its own feature detail page rather
     /// than 404ing — `bee_feature_detail`'s `known_feature` check falls
     /// back to `snapshot.phase_board` for exactly this case. This lane's
-    /// own `phase` (`compounding-complete`) is not the exact `"terminal"`
-    /// string feature-hub fh-1's Finished group looks for, and it has no
-    /// live cells to land it in Waiting or In Progress either, so the
-    /// board's own feature hub renders no entry for it at all — that
-    /// reachability gap is a deliberate, in-scope consequence of the
-    /// redesign (D4's ghost-card fix), not a bug this cell restores; this
-    /// test only pins the route itself.
+    /// own `phase` (`compounding-complete`, bee's real terminal phase) also
+    /// places it under the hub's own Finished group (feature-hub-3's fix to
+    /// fh-1's predicate); this test only pins the detail route itself, not
+    /// hub placement — see `feature_hub_happy_path_places_each_feature_in_its_own_group`
+    /// for that.
     #[tokio::test]
     async fn lane_only_feature_with_no_live_cells_still_resolves_its_detail_page() {
         let root = fresh_root("lane-only-feature-detail");

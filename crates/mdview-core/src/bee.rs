@@ -3237,6 +3237,58 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (regression, feature-hub-3 F6b) Independent review found no test
+    /// pinning `trace.outcome`'s own scrub — `parse_cell` (bee.rs:1678)
+    /// runs it through [`scrub_paths`] exactly like `title` and
+    /// `trace.worker` above, since a worker's own outcome sentence has been
+    /// observed naming a file path (`BeeCell::outcome`'s own doc comment),
+    /// but nothing exercised that path through the full read.
+    #[test]
+    fn cell_outcome_scrubs_an_embedded_absolute_path() {
+        let root = fresh_root("outcome-scrub");
+        let root_str = root.to_string_lossy().into_owned();
+        let inside_abs = root.join("src/leaky.rs").to_string_lossy().into_owned();
+
+        let body = format!(
+            r#"{{
+                "id": "leaky-outcome",
+                "feature": "demo",
+                "lane": "standard",
+                "title": "Leaky outcome cell",
+                "action": "x",
+                "verify": "x",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {{}},
+                "behavior_change": true,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "capped",
+                "tier": "generation",
+                "trace": {{"outcome": "Fixed the bug in {}, tests green."}}
+            }}"#,
+            inside_abs.replace('\\', "\\\\"),
+        );
+        write(&root, ".bee/cells/leaky-outcome.json", &body);
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.buckets.done.len(), 1);
+        let cell = &snap.buckets.done[0];
+
+        let outcome = cell.outcome.as_deref().expect("outcome must be read from trace");
+        assert!(!outcome.contains(&root_str), "leaked fixture root in outcome: {outcome}");
+        assert!(
+            outcome.contains("src/leaky.rs"),
+            "an in-root path must relativize cleanly, not vanish or reduce to a bare filename: {outcome}"
+        );
+        assert!(outcome.starts_with("Fixed the bug in "), "surrounding prose must survive byte-for-byte: {outcome}");
+        assert!(outcome.ends_with(", tests green."), "surrounding prose must survive byte-for-byte: {outcome}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn reading_never_writes_the_bee_tree() {
         let root = fresh_root("read-only");
