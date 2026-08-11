@@ -1693,6 +1693,38 @@ pub fn read_archived_cells(root: &Path, feature: &str) -> Vec<BeeCell> {
         .collect()
 }
 
+/// Every distinct feature name with its own subdirectory under
+/// `.bee/cells/archive/` (D9) — one entry per archived feature, sorted for
+/// a deterministic read, deduplicated defensively even though a directory
+/// listing cannot itself repeat a name. This is a minimal, read-only
+/// deviation from feature-hub-1's own file list (`crates/mdview-core` is
+/// out of scope for that cell except for exactly this kind of helper,
+/// recorded here rather than reinterpreted silently): the feature hub's
+/// Finished group (`bee_feature_hub_section`, `mdview::views`) needs to
+/// name every feature that is archive-only — no live lane, no active
+/// placement — and no existing reader names that set. Unlike
+/// [`read_archived_cells`] this never opens or parses a single cell file,
+/// it only names which features HAVE an archive directory; a stray file
+/// sitting beside the per-feature directories (this project's own store
+/// carries `.bee/cells/archive/summary.json`) is silently skipped, never
+/// misread as a feature name. A missing `.bee/cells/archive/` yields an
+/// empty list, matching every other optional-directory precedent in this
+/// module.
+pub fn list_archived_feature_dirs(root: &Path) -> Vec<String> {
+    let dir = root.join(".bee").join("cells").join("archive");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Read and summarize `.bee/backlog.jsonl` (D4, D9-adjacent — this file is
 /// live store, not archive). A missing file is a normal, expected shape
 /// (silent, matching `read_state`); a malformed line degrades to a

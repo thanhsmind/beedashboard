@@ -3448,390 +3448,420 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (happy, agent-board ab-1) Cells in every populated column status
-    /// render as one card each in the matching agent-board column, carrying
-    /// their agent badge (D3) — live when a `running_workers` row names the
-    /// cell, plain otherwise — and a blocked cell shares the In Progress
-    /// column with a claimed one, carrying its own visible "Blocked" marker
-    /// (CONTEXT.md's deferred question 2). Replaces
-    /// `happy_path_returns_200_with_phase_board_progress`, which asserted
-    /// the now-retired by-phase markup.
+    /// (happy, feature-hub fh-1, D1) A fixture with one feature per group
+    /// renders each in its own group, never a duplicate: a feature with a
+    /// live open cell sitting on an unapproved (non-review) gate renders
+    /// once under Waiting on you, carrying its own reason line; a feature
+    /// with a live claimed cell and every gate approved renders under In
+    /// Progress; a feature known only through its own
+    /// `.bee/cells/archive/<feature>/` directory (no lane, never active)
+    /// renders under Finished with a "Merged" worktree chip (D1) — no
+    /// currently granted worktree names it, so its absence reads as "the
+    /// worktree that did this work has been folded back", never "still on
+    /// main". Replaces `agent_board_happy_path_places_cells_in_columns_with_badges`,
+    /// which asserted the now-retired Kanban markup.
     #[tokio::test]
-    async fn agent_board_happy_path_places_cells_in_columns_with_badges() {
-        let root = fresh_root("agent-board-happy");
-        write(&root, "README.md", "# hi");
-        write(&root, ".bee/cells/a.json", &cell_json("c-open", "open", &[], "w-todo"));
-        write(&root, ".bee/cells/b.json", &cell_json("c-claimed", "claimed", &[], "w-doing"));
-        write(&root, ".bee/cells/c.json", &cell_json("c-blocked", "blocked", &[], "w-stuck"));
-        write(&root, ".bee/cells/d.json", &cell_json("c-capped", "capped", &[], "w-done"));
+    async fn feature_hub_happy_path_places_each_feature_in_its_own_group() {
+        let root = fresh_root("hub-happy");
         write(
             &root,
-            ".bee/state.json",
-            &state_json_with_workers(&worker_json("w-doing", "c-claimed", "generation", "running")),
+            ".bee/lanes/waiting-feat.json",
+            &lane_json(
+                "waiting-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": false, "execution": false, "review": false"#),
+                None,
+            ),
+        );
+        write(&root, ".bee/cells/a.json", &feature_cell_json("wf-1", "waiting-feat", "open", None, None));
+        write(
+            &root,
+            ".bee/lanes/progress-feat.json",
+            &lane_json(
+                "progress-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": true, "execution": true, "review": true"#),
+                None,
+            ),
+        );
+        write(&root, ".bee/cells/b.json", &feature_cell_json("pf-1", "progress-feat", "claimed", None, None));
+        write(
+            &root,
+            ".bee/lanes/finished-feat.json",
+            &lane_json("finished-feat", "terminal", "standard", "none", None, None),
         );
         write(
             &root,
-            ".bee/sessions/w-doing.json",
-            &session_json("w-doing", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
+            ".bee/cells/archive/finished-feat/f.json",
+            &feature_cell_json(
+                "ff-1",
+                "finished-feat",
+                "capped",
+                Some(&rfc3339_minutes_ago(120)),
+                Some(&rfc3339_minutes_ago(60)),
+            ),
         );
 
         let st = build_state();
-        let project = register(&st, &root, "agent-board-happy");
+        let project = register(&st, &root, "hub-happy");
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-agent-col=\"todo\" data-agent-count=\"1\""), "{body}");
-        assert!(body.contains("data-agent-col=\"in-progress\" data-agent-count=\"2\""), "{body}");
-        assert!(body.contains("data-agent-col=\"done\" data-agent-count=\"1\""), "{body}");
+        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"1\""), "{body}");
+        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""), "{body}");
+        assert!(body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""), "{body}");
+
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/cell/c-open\"", project.id)),
-            "the Todo card must link to its own cell detail page: {body}"
+            body.contains(&format!("href=\"/p/{}/_bee/feature/waiting-feat\"", project.id)),
+            "the waiting feature must link to its own detail page: {body}"
+        );
+        assert!(
+            body.contains("Shape gate awaiting your decision"),
+            "the waiting card must name its own current-stop gate: {body}"
+        );
+        assert!(body.contains("progress-feat"), "{body}");
+        assert!(body.contains("finished-feat"), "{body}");
+
+        assert_eq!(
+            body.matches("0/1 cell done").count(),
+            2,
+            "both the waiting and in-progress cards must show one open cell not yet done: {body}"
+        );
+        assert!(
+            body.contains("1/1 cell done"),
+            "the finished card must count its own archived capped cell: {body}"
+        );
+
+        assert!(
+            body.contains("fg-chip--success\">Merged</span>"),
+            "a finished feature with no open worktree grant must read Merged: {body}"
         );
         assert_eq!(
-            body.matches("<span class=\"bee-agent-card__blocked\">Blocked</span>").count(),
-            1,
-            "exactly the blocked cell must carry the blocked marker: {body}"
-        );
-        assert!(
-            body.contains("bee-agent-card__badge bee-agent-card__badge--live\">w-doing"),
-            "the claimed cell's live worker must render a live badge: {body}"
-        );
-        assert!(
-            body.contains("<span class=\"bee-agent-card__badge\">w-todo</span>"),
-            "the open cell's worker must render a plain badge, not live: {body}"
+            body.matches("fg-chip--neutral\">Main</span>").count(),
+            2,
+            "the waiting and in-progress cards must both read Main (no open worktree grant): {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (edge, agent-board ab-1) A worker names a claimed cell in
-    /// `state.json`, but its own session's heartbeat is stale
-    /// (`mdview_core::bee`'s `SESSION_LIVE_MINUTES` window) —
-    /// `running_workers` never lists it, so the cell's badge renders plain,
-    /// never live, on evidence the process stopped reporting in.
+    /// (edge, feature-hub fh-1, D4) The permanent fix for the six ghost
+    /// gate cards D4 names: a lane sitting on an unapproved, non-review
+    /// gate with ZERO live cells left (routine once a feature's work is
+    /// done and its cells archived, but its lane record was never stamped
+    /// terminal) must never render a Waiting on you entry — the retired
+    /// Review column rendered exactly this shape as "gate awaiting your
+    /// decision" regardless of live work. It also has no live cells, so it
+    /// cannot land in In Progress, and its phase is not `"terminal"`, so it
+    /// cannot land in Finished either: it renders in none of the three
+    /// groups until an orchestrator-run cleanup stamps its phase, out of
+    /// this cell's own scope (CONTEXT.md).
     #[tokio::test]
-    async fn agent_board_stale_session_worker_renders_plain_not_live_badge() {
-        let root = fresh_root("agent-board-stale");
-        write(&root, ".bee/cells/a.json", &cell_json("c-claimed", "claimed", &[], "w-stale"));
+    async fn feature_hub_stale_lane_with_no_live_cells_emits_no_waiting_entry() {
+        let root = fresh_root("hub-ghost");
         write(
             &root,
-            ".bee/state.json",
-            &state_json_with_workers(&worker_json("w-stale", "c-claimed", "generation", "running")),
+            ".bee/lanes/stale-feat.json",
+            &lane_json(
+                "stale-feat",
+                "compounding",
+                "standard",
+                "none",
+                Some(r#""context": true, "shape": false, "execution": false, "review": false"#),
+                None,
+            ),
         );
-        write(
-            &root,
-            ".bee/sessions/w-stale.json",
-            &session_json("w-stale", &rfc3339_minutes_ago(120), "/home/x/t.jsonl", "main", "startup"),
-        );
+        // Deliberately no `.bee/cells/*.json` for this feature at all — its
+        // work already archived elsewhere, the exact "ghost" shape D4 names.
 
         let st = build_state();
-        let project = register(&st, &root, "agent-board-stale");
+        let project = register(&st, &root, "hub-ghost");
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
+        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"0\""), "{body}");
         assert!(
-            !body.contains("class=\"bee-agent-card__badge bee-agent-card__badge--live\""),
-            "a stale session's worker must never render a live badge: {body}"
-        );
-        assert!(
-            body.contains("<span class=\"bee-agent-card__badge\">w-stale</span>"),
-            "the cell must still carry its plain worker badge: {body}"
+            !body.contains("stale-feat"),
+            "a stale lane with zero live cells must render no entry anywhere on the hub: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (error/edge, D7 parity) A `dropped` cell and a cell with an
-    /// unrecognized status hold no D7 bucket at all — neither ever reaches
-    /// an agent-board column, and rendering the board never panics on
-    /// either shape.
+    /// (happy, feature-hub fh-1, D4) The globally active feature while
+    /// `.bee/HANDOFF.json` reads as a genuine pause renders exactly once
+    /// under Waiting on you, even with every one of its own gates already
+    /// approved — the handoff note carries no feature name of its own
+    /// (`compute_attention_items`'s own doc comment), so it is folded onto
+    /// `state.feature`.
     #[tokio::test]
-    async fn agent_board_dropped_and_unrecognized_status_cells_hold_no_column() {
-        let root = fresh_root("agent-board-dropped");
-        write(&root, ".bee/cells/a.json", &cell_json("c-dropped", "dropped", &[], "w1"));
-        write(&root, ".bee/cells/b.json", &cell_json("c-weird", "weird-status", &[], "w1"));
-
-        let st = build_state();
-        let project = register(&st, &root, "agent-board-dropped");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("data-agent-col=\"todo\" data-agent-count=\"0\""), "{body}");
-        assert!(body.contains("data-agent-col=\"in-progress\" data-agent-count=\"0\""), "{body}");
-        assert!(body.contains("data-agent-col=\"done\" data-agent-count=\"0\""), "{body}");
-        assert!(!body.contains("c-dropped"), "a dropped cell must never render on the board: {body}");
-        assert!(
-            !body.contains("c-weird"),
-            "a cell with an unrecognized status must never render on the board: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-
-    /// (edge, agent-board ab-1/ab-2) An entirely empty store — no cells,
-    /// no backlog, no gates, no handoff — still renders all five
-    /// agent-board columns, each stating its own honest empty line
-    /// ("Nothing here.", bee-board-pm D5's "sections never disappear"
-    /// rule). Replaces `empty_store_renders_honest_empty_phase_board`; ab-2
-    /// widens this from three real columns to all five once Backlog and
-    /// Review grew their own readers.
-    #[tokio::test]
-    async fn empty_store_renders_five_honest_agent_board_columns() {
-        let root = fresh_root("agent-board-empty");
-        std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
-
-        let st = build_state();
-        let project = register(&st, &root, "agent-board-empty");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        for key in ["backlog", "todo", "in-progress", "review", "done"] {
-            assert!(
-                body.contains(&format!("data-agent-col=\"{key}\" data-agent-count=\"0\"")),
-                "column {key} must always render, honestly empty: {body}"
-            );
-        }
-        assert_eq!(
-            body.matches("Nothing here.").count(),
-            5,
-            "every column must state its own honest empty line: {body}"
-        );
-        assert!(
-            !body.contains("Not wired up in this build yet."),
-            "ab-2 finished both remaining readers — this placeholder line must never render again: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (happy, agent-board ab-2) A `proposed` PBI and a `parked` PBI each
-    /// render as one Backlog card (D2); the parked item carries its own
-    /// visible marker so it never reads as merely queued. An `in-flight`
-    /// PBI (already a cell, so already shown elsewhere on this board) and
-    /// a `done` PBI must never render here — Backlog counts only
-    /// genuinely open backlog work.
-    #[tokio::test]
-    async fn backlog_column_renders_proposed_and_marks_parked_pbis() {
-        let root = fresh_root("agent-board-backlog");
-        write(
-            &root,
-            ".bee/backlog.jsonl",
-            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Add search\",\"status\":\"proposed\",\"feature\":\"demo\"}\n\
-             {\"kind\":\"pbi\",\"id\":\"PBI-2\",\"title\":\"Add filters\",\"status\":\"parked\",\"feature\":\"demo\"}\n\
-             {\"kind\":\"pbi\",\"id\":\"PBI-3\",\"title\":\"Already building\",\"status\":\"in-flight\",\"feature\":\"demo\"}\n\
-             {\"kind\":\"pbi\",\"id\":\"PBI-4\",\"title\":\"Shipped already\",\"status\":\"done\",\"feature\":\"demo\"}\n",
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "agent-board-backlog");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("data-agent-col=\"backlog\" data-agent-count=\"2\""), "{body}");
-        assert!(body.contains("Add search"), "the proposed PBI must render in Backlog: {body}");
-        assert!(body.contains("Add filters"), "the parked PBI must render in Backlog: {body}");
-        assert_eq!(
-            body.matches("bee-agent-card__parked\">Parked</span>").count(),
-            1,
-            "exactly the parked PBI must carry the Parked marker: {body}"
-        );
-        // The pre-existing "Backlog & Review" panel (`bee_backlog_panel`,
-        // unmoved by this cell) legitimately lists every open PBI including
-        // `in-flight` ones lower on the page, so "in-flight/done must never
-        // render" is scoped to the Kanban Backlog COLUMN alone, not the
-        // whole body.
-        let backlog_col_start = body.find("data-agent-col=\"backlog\"").expect("backlog column must render");
-        let backlog_col_end = body[backlog_col_start..]
-            .find("data-agent-col=\"todo\"")
-            .map(|i| backlog_col_start + i)
-            .expect("todo column must follow backlog");
-        let backlog_col = &body[backlog_col_start..backlog_col_end];
-        assert!(
-            !backlog_col.contains("Already building"),
-            "an in-flight PBI must never render in the Backlog column — it is already a cell elsewhere on the board: {backlog_col}"
-        );
-        assert!(
-            !backlog_col.contains("Shipped already"),
-            "a done PBI must never render in the Backlog column: {backlog_col}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (happy, agent-board ab-2, D4) The active feature's first
-    /// not-yet-approved gate (NOT the independent-review gate) and a
-    /// paused handoff each render exactly one Review card, both worded as
-    /// awaiting the user's own decision.
-    #[tokio::test]
-    async fn review_column_renders_unapproved_gate_and_paused_handoff() {
-        let root = fresh_root("agent-board-review");
+    async fn feature_hub_paused_handoff_renders_active_feature_once_under_waiting() {
+        let root = fresh_root("hub-handoff");
         write(
             &root,
             ".bee/state.json",
             r#"{
-                "feature": "gate-feature",
-                "approved_gates": {"context": true, "shape": false, "execution": false, "review": false}
+                "feature": "handoff-feat",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
             }"#,
         );
         write(
             &root,
             ".bee/HANDOFF.json",
-            r#"{"written_at": "2026-08-10T09:00:00Z", "next_action": "Decide whether to resume."}"#,
+            r#"{"written_at": "2026-08-10T09:00:00Z", "next_action": "Decide whether to resume.", "kind": "pause"}"#,
         );
 
         let st = build_state();
-        let project = register(&st, &root, "agent-board-review");
+        let project = register(&st, &root, "hub-handoff");
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-agent-col=\"review\" data-agent-count=\"2\""), "{body}");
-        assert!(
-            body.contains("Shape gate awaiting your decision"),
-            "the feature's current-stop gate (shape, the first unapproved one) must render its own Review card: {body}"
-        );
-        assert!(
-            body.contains("gate-feature"),
-            "the gate card must name its own feature: {body}"
+        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"1\""), "{body}");
+        assert_eq!(
+            body.matches(&format!(
+                "class=\"fg-card bee-hub__card\" data-hub-group=\"waiting\" href=\"/p/{}/_bee/feature/handoff-feat\"",
+                project.id
+            ))
+            .count(),
+            1,
+            "the paused active feature must render exactly one Waiting card, never twice: {body}"
         );
         assert!(
             body.contains("Work is parked, waiting on your decision"),
-            "the paused handoff must render its own Review card: {body}"
-        );
-        assert!(
-            body.contains("Decide whether to resume."),
-            "the handoff card must carry its own recorded next-action note: {body}"
+            "its own card must carry the paused-handoff reason: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (edge, agent-board ab-2, D4/D7) A feature whose only remaining gate
-    /// is the independent-review gate must never render a Review card for
-    /// it — that gate runs only when the user invokes it, never a
-    /// blocking stop, so the Review column would otherwise misrepresent
-    /// user-invoked review as pending automatic work.
+    /// (edge, feature-hub fh-1, D1) A feature known only through its own
+    /// `.bee/cells/archive/<feature>/` directory — no lane record, never
+    /// the active feature — still renders under Finished
+    /// (`list_archived_feature_dirs`), with its own done/total counted from
+    /// `read_archived_cells` (D7 parity: the archive's own dropped cell
+    /// counts toward neither `done` nor `total`) and a "Merged" worktree
+    /// chip.
     #[tokio::test]
-    async fn review_column_never_treats_the_review_gate_as_a_current_stop() {
-        let root = fresh_root("agent-board-review-gate-excluded");
+    async fn feature_hub_archive_only_feature_renders_under_finished() {
+        let root = fresh_root("hub-archive-only");
         write(
             &root,
-            ".bee/state.json",
-            r#"{
-                "feature": "three-gates-done-feature",
-                "approved_gates": {"context": true, "shape": true, "execution": true, "review": false}
-            }"#,
+            ".bee/cells/archive/orphan-feat/a.json",
+            &feature_cell_json(
+                "of-1",
+                "orphan-feat",
+                "capped",
+                Some(&rfc3339_minutes_ago(90)),
+                Some(&rfc3339_minutes_ago(30)),
+            ),
         );
+        write(&root, ".bee/cells/archive/orphan-feat/b.json", &feature_cell_json("of-2", "orphan-feat", "dropped", None, None));
 
         let st = build_state();
-        let project = register(&st, &root, "agent-board-review-gate-excluded");
+        let project = register(&st, &root, "hub-archive-only");
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
+        assert!(body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""), "{body}");
         assert!(
-            body.contains("data-agent-col=\"review\" data-agent-count=\"0\""),
-            "a feature whose only open gate is the review gate must render no Review card: {body}"
+            body.contains(&format!("href=\"/p/{}/_bee/feature/orphan-feat\"", project.id)),
+            "the archive-only feature must still link to its own detail page: {body}"
         );
-        assert!(!body.contains("gate awaiting your decision"), "{body}");
+        assert!(
+            body.contains("1/1 cell done"),
+            "the dropped cell must count toward neither done nor total: {body}"
+        );
+        assert!(body.contains("fg-chip--success\">Merged</span>"), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (edge, agent-board ab-2, D4) A `"planned-next"` handoff — a clean
-    /// stop with its next claim already owned — never renders a Review
-    /// card; only a genuine pause does (bbp-8's own kind convention,
-    /// reused verbatim from `compute_attention_items`).
+    /// (edge, feature-hub fh-1, D1) A currently granted worktree naming a
+    /// Finished feature wins over the group's own "Merged" fallback — the
+    /// chip reads what `.bee/runtime/worktree-grants.json` actually
+    /// records, never a guess drawn from the feature's own group.
     #[tokio::test]
-    async fn review_column_planned_next_handoff_renders_no_card() {
-        let root = fresh_root("agent-board-review-planned-next");
+    async fn feature_hub_open_worktree_grant_wins_over_finished_fallback() {
+        let root = fresh_root("hub-wt-finished");
         write(
             &root,
-            ".bee/HANDOFF.json",
-            r#"{"written_at": "2026-08-10T09:00:00Z", "next_action": "Adopt cell x next.", "kind": "planned-next"}"#,
+            ".bee/lanes/wt-feat.json",
+            &lane_json("wt-feat", "terminal", "standard", "none", None, None),
+        );
+        let sibling = make_worktree_sibling("feature-hub-1-wt-still-open");
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"wt-feat","mode":"standard"}"#);
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["feature-hub-1-wt-still-open"]));
+        write(
+            &root,
+            ".bee/runtime/workspaces/w.json",
+            &workspace_json("feature-hub-1-wt-still-open", &sibling.to_string_lossy(), "wt/wt-feat", &[]),
         );
 
         let st = build_state();
-        let project = register(&st, &root, "agent-board-review-planned-next");
+        let project = register(&st, &root, "hub-wt-finished");
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-agent-col=\"review\" data-agent-count=\"0\""), "{body}");
+        assert!(body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""), "{body}");
         assert!(
-            !body.contains("Work is parked, waiting on your decision"),
-            "a planned-next handoff must never render as a Review card: {body}"
+            body.contains("fg-chip--info\">Open · wt/wt-feat</span>"),
+            "a still-granted worktree must win over the Finished group's Merged fallback: {body}"
+        );
+        assert!(!body.contains("Merged"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// (edge, feature-hub fh-1) An entirely empty store — no cells, no
+    /// lanes, no archive — still renders all three groups, each stating
+    /// its own honest, distinct empty line (bee-board-pm D5's "sections
+    /// never disappear" rule) rather than a shared line that could not say
+    /// which group came up empty. No absolute filesystem path leaks into
+    /// the body (D9).
+    #[tokio::test]
+    async fn feature_hub_empty_store_renders_three_honest_empty_groups() {
+        let root = fresh_root("hub-empty");
+        std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-empty");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        for key in ["waiting", "in-progress", "finished"] {
+            assert!(
+                body.contains(&format!("data-hub-group=\"{key}\" data-hub-count=\"0\"")),
+                "group {key} must always render, honestly empty: {body}"
+            );
+        }
+        assert!(body.contains("Nothing waiting on you."), "{body}");
+        assert!(body.contains("Nothing in progress."), "{body}");
+        assert!(body.contains("Nothing finished yet."), "{body}");
+        assert!(
+            !body.contains(root.to_string_lossy().as_ref()),
+            "no absolute filesystem path may leak into the board body: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (edge, agent-board ab-2) More capped cells than `DONE_RECENT_CAP`
-    /// (6) collapse beyond the recent cap into a `<details>` summary,
-    /// reusing the same `bee-done-summary`/`bee-done-grid`/`bee-done-line`
-    /// pattern `bee_finished_section` already uses for finished features —
-    /// the most-recently-capped cells stay visible as full cards.
+    /// (edge, feature-hub fh-1, D4) A feature with a live claimed cell AND
+    /// an unapproved non-review gate renders under Waiting on you only —
+    /// "waiting wins over in-progress" — never counted in both.
     #[tokio::test]
-    async fn done_column_overflow_collapses_into_details_summary() {
-        let root = fresh_root("agent-board-done-overflow");
-        for i in 1..=8 {
-            write(
-                &root,
-                &format!(".bee/cells/c{i}.json"),
-                &timed_cell_json(
-                    &format!("c-done-{i}"),
-                    "demo",
-                    "capped",
-                    &[],
-                    "w1",
-                    &format!("2026-08-{i:02}T08:00:00Z"),
-                    &format!("2026-08-{i:02}T09:00:00Z"),
-                ),
-            );
-        }
+    async fn feature_hub_waiting_wins_over_in_progress_for_the_same_feature() {
+        let root = fresh_root("hub-priority");
+        write(
+            &root,
+            ".bee/lanes/both-feat.json",
+            &lane_json(
+                "both-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": true, "execution": false, "review": false"#),
+                None,
+            ),
+        );
+        write(&root, ".bee/cells/a.json", &feature_cell_json("bf-1", "both-feat", "claimed", None, None));
 
         let st = build_state();
-        let project = register(&st, &root, "agent-board-done-overflow");
+        let project = register(&st, &root, "hub-priority");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"1\""), "{body}");
+        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""), "{body}");
+        assert!(body.contains("Execute gate awaiting your decision"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (guarantee, feature-hub fh-1, D5) Rendering the board never writes
+    /// into the project's own `.bee/` tree — including the new archive
+    /// directory listing (`list_archived_feature_dirs`) and per-feature
+    /// archive read (`read_archived_cells`) this cell adds.
+    #[tokio::test]
+    async fn feature_hub_read_never_writes_the_fixtures_bee_tree() {
+        let root = fresh_root("hub-read-only");
+        write(
+            &root,
+            ".bee/lanes/terminal-feat.json",
+            &lane_json("terminal-feat", "terminal", "standard", "none", None, None),
+        );
+        write(
+            &root,
+            ".bee/cells/archive/orphan-feat/a.json",
+            &feature_cell_json(
+                "of-1",
+                "orphan-feat",
+                "capped",
+                Some(&rfc3339_minutes_ago(90)),
+                Some(&rfc3339_minutes_ago(30)),
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-read-only");
+        let before = snapshot_tree(&root);
+
+        let _ = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+
+        let after = snapshot_tree(&root);
+        assert_eq!(before, after, ".bee/ tree changed after a request");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (theme, feature-hub fh-1, D3) Both scheme variants of the new
+    /// anthropic.com-inspired palette render in the board's own stylesheet
+    /// — light (scoped to `.bee-hub-theme`) and dark (scoped to
+    /// `html[data-scheme="dark"] .bee-hub-theme`, reusing the existing
+    /// no-flash `data-scheme` toggle, never a second mechanism) — and both
+    /// carry the same book-cloth coral family for their action color.
+    #[tokio::test]
+    async fn feature_hub_theme_tokens_render_for_both_light_and_dark() {
+        let root = fresh_root("hub-theme");
+        write(&root, ".bee/cells/a.json", &cell_json("r1", "open", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-theme");
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
         assert!(
-            body.contains("data-agent-col=\"done\" data-agent-count=\"8\""),
-            "the Done column's own count must state the true total, uncapped: {body}"
+            body.contains(".bee-hub-theme {") && body.contains("--color-bg: #FAF9F5;"),
+            "the light palette must define the cream page background: {body}"
         );
         assert!(
-            body.contains("class=\"bee-done-summary\">2 more done cells — show them"),
-            "the overflow beyond the recent cap of 6 must collapse into one details summary: {body}"
+            body.contains("--color-action: #CC785C;"),
+            "the light palette must use the book-cloth coral accent: {body}"
         );
-        // The two oldest capped cells (c-done-1, c-done-2) render inside the
-        // collapsed name list (`Cell {id} · {id}`), never as a full card
-        // (`{id} · demo` inside a `fg-card__sub`) — `class="bee-done-line"`
-        // alone is not distinguishing enough to count on here since the
-        // Finished section below reuses the same class for its own,
-        // unrelated feature-level line.
-        for id in ["c-done-1", "c-done-2"] {
-            assert!(
-                body.contains(&format!("class=\"bee-done-line\" href=\"/p/{}/_bee/cell/{id}\">Cell {id} · {id}</a>", project.id)),
-                "the oldest capped cell {id} must render inside the collapsed name list: {body}"
-            );
-            assert!(
-                !body.contains(&format!("<div class=\"fg-card__sub\">{id} · demo</div>")),
-                "the oldest capped cell {id} must never also render as a full card: {body}"
-            );
-        }
-        for id in ["c-done-3", "c-done-4", "c-done-5", "c-done-6", "c-done-7", "c-done-8"] {
-            assert!(
-                body.contains(&format!("<div class=\"fg-card__sub\">{id} · demo</div>")),
-                "the six most-recently-capped cells must render as full cards: {body}"
-            );
-        }
+        assert!(
+            body.contains("html[data-scheme=\"dark\"] .bee-hub-theme {"),
+            "the dark palette must be scoped through the existing data-scheme toggle: {body}"
+        );
+        assert!(
+            body.contains("--color-bg: #241E18;"),
+            "the dark palette must define its own deep warm-brown background: {body}"
+        );
+        assert!(
+            body.contains("<main class=\"fg-page bee-hub-theme\">"),
+            "the board's own <main> must carry the palette scope class: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5458,19 +5488,21 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        // The finished feature's name appears exactly three times: once in
-        // the Finished section line's `href`, once as that line's visible
-        // text, and once as the capped cell's own card metadata in the
-        // agent board's Done column (D2 — a cell-level fact the Finished
-        // section's feature-level line never dedupes against; see
-        // `bee_agent_board_section`'s doc comment). Before this cell, the
-        // removed `bee_shipped_list` rendered the same feature a further,
-        // unwanted time (its own href + its own visible text), which would
-        // have pushed this count past three.
+        // The finished feature's name appears exactly twice: once in the
+        // Finished section line's `href`, once as that line's visible text.
+        // This feature has no lane record and is never the active feature
+        // (no `.bee/state.json` at all in this fixture), so
+        // `bee_feature_hub_section` (feature-hub fh-1, which replaced the
+        // retired cell-centric Kanban board) never places it in any of its
+        // three groups either — the Finished section stays this board's
+        // only place it renders. Before this cell, the removed
+        // `bee_shipped_list` rendered the same feature a further, unwanted
+        // time (its own href + its own visible text), which would have
+        // pushed this count past two.
         assert_eq!(
             body.matches("solo-shipped-feature").count(),
-            3,
-            "finished feature rendered more or fewer times than its one Finished-section line plus its one Done-column card: {body}"
+            2,
+            "finished feature rendered more or fewer times than its one Finished-section line: {body}"
         );
         // The velocity section's old per-feature card list heading is gone.
         assert!(
@@ -6286,15 +6318,14 @@ mod bee_route_tests {
     }
 
     /// (happy) bee-board-ux-2: a finished feature's line in the Finished
-    /// section still links to its feature detail page — one of the two
-    /// drill-downs the board exists to reach. Re-expressed for agent-board
-    /// D2 (card unit is the cell, not the feature): a live, in-flight cell
-    /// links to its OWN cell detail page from its Todo card, never to its
-    /// feature's page — that second drill-down now belongs to the working-now
-    /// card for the actively routed feature (see
-    /// `board_body_links_to_feature_and_running_cell_detail_routes`) and to
-    /// `board_card_drops_file_list_but_cell_detail_page_keeps_it` for where
-    /// cell-level links live.
+    /// section still links to its feature detail page — one of the
+    /// drill-downs the board exists to reach. Re-expressed for feature-hub
+    /// fh-1 (card unit is the FEATURE, not the cell): a live, in-flight
+    /// cell's own feature now links to that feature's own detail page from
+    /// its feature-hub card too, never to the cell's own route — every
+    /// cell-level link on this board now lives only on the feature detail
+    /// and cell detail pages themselves (see
+    /// `board_card_drops_file_list_but_cell_detail_page_keeps_it`).
     #[tokio::test]
     async fn board_links_finished_feature_and_in_flight_cell_to_their_detail_pages() {
         let root = fresh_root("done-links");
@@ -6336,8 +6367,8 @@ mod bee_route_tests {
             "the finished feature line must link to the feature detail page: {body}"
         );
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/cell/live-cell\"", project.id)),
-            "an in-flight cell's Todo card must link to its own cell detail page: {body}"
+            body.contains(&format!("href=\"/p/{}/_bee/feature/live-feature\"", project.id)),
+            "an in-flight feature's own feature-hub card must link to its own feature detail page: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -6373,8 +6404,9 @@ mod bee_route_tests {
 
     /// (regression) A card on the board no longer prints a cell's file
     /// list — that detail moved to the cell detail page, which still shows
-    /// it. Exercises the agent-board Todo card (`bee_agent_cards`), which
-    /// carries no files field to print in the first place.
+    /// it. Exercises the feature hub's own card (`bee_hub_card`,
+    /// feature-hub fh-1), which carries no files field to print in the
+    /// first place.
     #[tokio::test]
     async fn board_card_drops_file_list_but_cell_detail_page_keeps_it() {
         let root = fresh_root("board-no-files");
@@ -6414,11 +6446,14 @@ mod bee_route_tests {
     /// live cells at all (routine in a real store — cells archive after a
     /// feature closes), still resolves its own feature detail page rather
     /// than 404ing — `bee_feature_detail`'s `known_feature` check falls
-    /// back to `snapshot.phase_board` for exactly this case. The board no
-    /// longer links to this feature at all (agent-board D2/D5: the card
-    /// unit is the cell, and this feature has none) — that reachability
-    /// gap is a deliberate, in-scope consequence of the redesign, not a bug
-    /// this cell restores; this test only pins the route itself.
+    /// back to `snapshot.phase_board` for exactly this case. This lane's
+    /// own `phase` (`compounding-complete`) is not the exact `"terminal"`
+    /// string feature-hub fh-1's Finished group looks for, and it has no
+    /// live cells to land it in Waiting or In Progress either, so the
+    /// board's own feature hub renders no entry for it at all — that
+    /// reachability gap is a deliberate, in-scope consequence of the
+    /// redesign (D4's ghost-card fix), not a bug this cell restores; this
+    /// test only pins the route itself.
     #[tokio::test]
     async fn lane_only_feature_with_no_live_cells_still_resolves_its_detail_page() {
         let root = fresh_root("lane-only-feature-detail");
@@ -6682,10 +6717,12 @@ mod bee_route_tests {
     /// (happy) The presence of a worker naming a still-open cell must never
     /// move that cell out of the D7 bucket the store itself computed for
     /// it: `compute_d7_buckets` (`mdview_core::bee`) never takes
-    /// `running_workers` as an input, so the open cell stays in the agent
-    /// board's Todo column, and `state.feature`'s ("demo", the only feature
-    /// this fixture declares) working-now progress must keep reading
-    /// "0/1 cell done" even though a live worker names its one open cell.
+    /// `running_workers` as an input, so the open cell stays counted as
+    /// live on `state.feature`'s own feature-hub card ("demo", the only
+    /// feature this fixture declares — landing under Waiting on you here,
+    /// since `state_json_with_workers` carries no `approved_gates` of its
+    /// own), and its own progress must keep reading "0/1 cell done" even
+    /// though a live worker names its one open cell.
     #[tokio::test]
     async fn d7_buckets_unchanged_by_worker_presence() {
         let root = fresh_root("running-buckets-untouched");
@@ -6708,8 +6745,8 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains("data-agent-col=\"todo\" data-agent-count=\"1\""),
-            "the still-open cell must stay in the Todo column: {body}"
+            body.contains("data-hub-group=\"waiting\" data-hub-count=\"1\""),
+            "the still-open cell must keep its feature counted as live work: {body}"
         );
         assert!(
             body.contains("0/1 cell done"),
@@ -6994,16 +7031,16 @@ mod bee_route_tests {
     }
 
     /// (happy) Worktree cell files present in the fixture change NEITHER
-    /// this project's agent-board columns NOR its shipped set — the
-    /// regression that motivated this test, re-expressed against the
-    /// Kanban markup: `compute_d7_buckets`/`compute_feature_cell_counts`
-    /// (`mdview_core::bee`) only ever see this project's own
-    /// `.bee/cells/*.json`, so a worktree's own capped cell can never move
-    /// this project's Todo column, and its cell id never appears on this
-    /// board at all. The worktree's own *feature name* legitimately still
-    /// appears — in the Worktrees panel, naming which feature that
-    /// worktree runs — this test asserts only that its cell never merges
-    /// into this project's own counts.
+    /// this project's own feature-hub counts NOR its shipped set — the
+    /// regression that motivated this test, re-expressed against
+    /// feature-hub fh-1's markup: `compute_d7_buckets`/
+    /// `compute_feature_cell_counts` (`mdview_core::bee`) only ever see
+    /// this project's own `.bee/cells/*.json`, so a worktree's own capped
+    /// cell can never move this project's own "demo" card, and its cell id
+    /// never appears on this board at all. The worktree's own *feature
+    /// name* legitimately still appears — in the Worktrees panel, naming
+    /// which feature that worktree runs — this test asserts only that its
+    /// cell never merges into this project's own counts.
     #[tokio::test]
     async fn worktree_cell_files_do_not_change_buckets_or_shipped_set() {
         let root = fresh_root("wt-no-cell-merge");
@@ -7030,10 +7067,10 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-agent-col=\"todo\" data-agent-count=\"1\""), "{body}");
+        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"1\""), "{body}");
         assert!(
-            body.contains("data-agent-col=\"done\" data-agent-count=\"0\""),
-            "a worktree's own capped cell must never count toward this project's Done column: {body}"
+            body.contains("0/1 cell done"),
+            "a worktree's own capped cell must never count toward this project's own \"demo\" progress: {body}"
         );
         assert!(body.contains("data-finished-features=\"0\""), "{body}");
         assert!(
@@ -14361,7 +14398,7 @@ mod bee_route_tests {
         for grid_class in [
             ".bee-stats",
             ".bee-now-grid",
-            ".bee-agent-board__cols",
+            ".bee-hub__groups",
             ".bee-velocity__lists",
             ".bee-panels",
             ".bee-done-grid",
@@ -14386,12 +14423,15 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (responsive) The one genuinely wide container on the board — the
-    /// agent board's column row, which can grow past a phone's width with
-    /// five columns in play — scrolls inside itself rather than ever
-    /// pushing the page wider.
+    /// (responsive, retired) feature-hub fh-1 retires the five-wide Kanban
+    /// column row this test's own `.bee-agent-board__cols` selector named —
+    /// the new grouped list is only ever three groups (`.bee-hub__groups`),
+    /// already named in the narrow-screen collapse list above, so no
+    /// container on this board needs its own `overflow-x: auto` scroll
+    /// escape hatch any more. This test pins that absence rather than
+    /// asserting a rule that no longer exists.
     #[tokio::test]
-    async fn board_wide_agent_board_columns_container_scrolls_within_itself() {
+    async fn board_no_longer_declares_a_wide_scrolling_container() {
         let root = fresh_root("responsive-overflow");
         write(&root, ".bee/cells/a.json", &cell_json("r1", "open", &[], "w1"));
 
@@ -14403,8 +14443,12 @@ mod bee_route_tests {
         let style = board_style_block(&body);
 
         assert!(
-            style.contains(".bee-agent-board__cols") && style.contains("overflow-x: auto"),
-            "the agent board's wide column row must carry its own overflow rule: {style}"
+            !style.contains(".bee-agent-board__cols"),
+            "the retired five-wide Kanban column row must not linger in the stylesheet: {style}"
+        );
+        assert!(
+            !style.contains("overflow-x: auto"),
+            "no group on the new three-group hub needs its own horizontal-scroll escape hatch: {style}"
         );
 
         std::fs::remove_dir_all(&root).ok();

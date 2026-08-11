@@ -3,10 +3,10 @@
 //! `/highlight.css` (syntect class-based), so themes switch without re-render.
 
 use mdview_core::bee::{
-    BeeApprovedGates, BeeAttentionItem, BeeAttentionSeverity, BeeBacklog, BeeBuckets, BeeCell,
-    BeeConfig, BeeFeaturePhase, BeeHandoff, BeePbi, BeeReservation, BeeReview, BeeReviewStatus,
-    BeeRunningWorker, BeeShippedFeature, BeeSnapshot, BeeState, BeeTierMix, BeeWorkspace,
-    BeeWorktree,
+    list_archived_feature_dirs, read_archived_cells, BeeApprovedGates, BeeAttentionItem,
+    BeeAttentionSeverity, BeeBacklog, BeeBuckets, BeeCell, BeeConfig, BeeFeaturePhase, BeePbi,
+    BeeReservation, BeeReview, BeeReviewStatus, BeeRunningWorker, BeeShippedFeature, BeeSnapshot,
+    BeeState, BeeTierMix, BeeWorkspace, BeeWorktree,
 };
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
@@ -1253,30 +1253,25 @@ pub fn terminal_down_page(project: &Project) -> String {
     layout(&format!("{} · terminal", project.name), "", &body)
 }
 
-/// The read-only bee cell board (D4/D5). agent-board D5 replaces the
-/// by-phase view (`bee_phase_board_section`, bbp-11 — now retired) with a
-/// Kanban-style agent board (`bee_agent_board_section`): a manager asks
-/// which agent is doing what, what's done, what's stuck, not which phase a
-/// feature has reached. The card unit is the cell, not the feature (D2):
-/// every cell already bucketed by D7 (`bee_headline_kpis`'s
-/// `snapshot.buckets`) renders as one card carrying an agent badge (D3) in
-/// its status column — Todo, In Progress (claimed cells plus blocked cells
-/// with a visible marker), Done — grouped left to right beside a Backlog
-/// column (ab-2: open PBI cards) and a Review column (ab-2: decision cards
-/// for everything waiting on the user's own approval, D4, reusing
-/// `snapshot.phase_board`'s lane-wins/state-fallback gate data — see
-/// `bee_agent_board_section`'s own doc comment for both). A feature that
-/// has fully shipped (D10, `snapshot.shipped`) still gets its own line in
-/// `bee_finished_section`, unrelated to and unmoved by this change — a
-/// capped cell belonging to that feature also renders in the Done column
-/// (a cell-level fact, not a feature-level one; the two views answer
-/// different questions and are never deduped against each other).
-/// `bee_lanes_panel` stays retired (bbp-11); `bee_bucket_section` itself is
-/// untouched and still backs the feature detail page (D3), which keeps its
-/// own four-bucket, per-cell view. Every path-shaped value on a `BeeCell`
-/// already arrives relativized by `mdview_core::bee::read_snapshot` (no
-/// absolute path crosses into `BeeSnapshot`'s public fields), so nothing
-/// further is redacted here — this view only escapes for HTML safety.
+/// The read-only bee cell board (D4/D5). feature-hub D1 replaces the
+/// cell-centric Kanban board (`bee_agent_board_section`, agent-board
+/// ab-1/ab-2 — now retired) with a FEATURE-centric grouped list
+/// ([`bee_feature_hub_section`]): a manager asks which feature needs them,
+/// which is moving, which is done, not which cell an agent holds. Every
+/// feature this snapshot can place renders in exactly one of three groups —
+/// Waiting on you, In Progress, Finished — see that function's own doc
+/// comment for the full membership rule and the D4 ghost-card fix it
+/// carries. A feature that has fully shipped (D10, `snapshot.shipped`)
+/// still gets its own line in `bee_finished_section` too, unrelated to and
+/// unmoved by this change — a distinct, uncapped feature-level list this
+/// board has always kept separate from whatever this cell's own Finished
+/// group shows. `bee_lanes_panel` stays retired (bbp-11); `bee_bucket_section`
+/// itself is untouched and still backs the feature detail page (D3), which
+/// keeps its own four-bucket, per-cell view. Every path-shaped value on a
+/// `BeeCell`/`BeeFeaturePhase` already arrives relativized by
+/// `mdview_core::bee::read_snapshot` (no absolute path crosses into
+/// `BeeSnapshot`'s public fields), so nothing further is redacted here —
+/// this view only escapes for HTML safety.
 ///
 /// bbp-16 closes D2's "nothing lost" promise and retires the last piece of
 /// pre-redesign markup. The standalone `{running}` and `{worktrees}` slots
@@ -1297,18 +1292,80 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         r#"{topbar}
 <style>
 .bee-finished {{ margin-bottom: var(--space-4); }}
-.bee-agent-board {{ margin-bottom: var(--space-4); }}
-.bee-agent-board__cols {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4); overflow-x: auto; }}
-.bee-agent-board__col {{ display: flex; flex-direction: column; gap: var(--space-2); }}
-.bee-agent-board__col-list {{ display: flex; flex-direction: column; gap: var(--space-2); }}
-.bee-agent-card {{ display: flex; flex-direction: column; gap: var(--space-1); }}
-.bee-agent-card__badge {{ font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
-.bee-agent-card__badge--live {{ color: var(--color-success); font-weight: var(--weight-strong); }}
-.bee-agent-card__blocked {{ font-size: var(--type-caption-size); font-weight: var(--weight-strong); color: var(--color-danger); }}
-.bee-agent-card--backlog {{ opacity: 0.75; }}
-.bee-agent-card__parked {{ font-size: var(--type-caption-size); font-weight: var(--weight-strong); color: var(--color-text-subtle); }}
-.bee-agent-card--review .fg-card__sub {{ color: var(--color-text-subtle); }}
-.bee-agent-board__col .bee-done-summary {{ padding: var(--space-1) 0; font-size: var(--type-body-sm-size); }}
+/* D3: anthropic.com-inspired palette (cream page, warm panel, near-black
+   ink, book-cloth coral accent), scoped to the bee page only via the
+   `.bee-hub-theme` class on this page's own `<main>` — every other page
+   keeps its default "atelier" theme untouched. This overrides only the
+   Tier-2 semantic tokens (`--color-*`) the existing `fg-*` components
+   already read, so no markup here or elsewhere had to change to pick it
+   up. Dark reuses the exact same toggle this page already had: the
+   no-flash head script (`layout`) sets `data-scheme` on `<html>` before
+   first paint; this only adds a scoped override keyed off that same
+   attribute, never a second toggle mechanism. */
+.bee-hub-theme {{
+  --color-bg: #FAF9F5;
+  --color-surface: #FFFFFF;
+  --color-surface-raised: #FFFFFF;
+  --color-surface-sunken: #F0EEE6;
+  --color-text: #1A1815;
+  --color-text-muted: #5A5650;
+  --color-text-subtle: #8A8478;
+  --color-border: #E4DFD3;
+  --color-border-strong: #D8D1C0;
+  --color-action: #CC785C;
+  --color-action-hover: #B3654B;
+  --color-action-press: #9C5540;
+  --color-brand: #CC785C;
+  --color-brand-tint: #F3E3DC;
+  --color-link: #CC785C;
+  --color-link-hover: #B3654B;
+  --color-on-action: #FFFFFF;
+  --color-success: #3D7A4E;
+  --color-success-tint: #E1EFE3;
+  --color-warning: #B8791A;
+  --color-warning-tint: #F5E7D0;
+  --color-danger: #C1443B;
+  --color-danger-tint: #F5DEDC;
+  --color-info: #4A7A78;
+  --color-info-tint: #DFEBEA;
+  --color-surface-hover: #F6EFE9;
+}}
+html[data-scheme="dark"] .bee-hub-theme {{
+  --color-bg: #241E18;
+  --color-surface: #2D261F;
+  --color-surface-raised: #342C24;
+  --color-surface-sunken: #1C1712;
+  --color-text: #F5F0E6;
+  --color-text-muted: #C9BFAF;
+  --color-text-subtle: #998F7E;
+  --color-border: #40372C;
+  --color-border-strong: #4E4335;
+  --color-action: #D98868;
+  --color-action-hover: #E29A7D;
+  --color-action-press: #C77552;
+  --color-brand: #D98868;
+  --color-brand-tint: #3A2B22;
+  --color-link: #D98868;
+  --color-link-hover: #E29A7D;
+  --color-on-action: #241E18;
+  --color-success: #6FB584;
+  --color-success-tint: #223226;
+  --color-warning: #D9A24E;
+  --color-warning-tint: #362912;
+  --color-danger: #E0796F;
+  --color-danger-tint: #3A211E;
+  --color-info: #7FADAB;
+  --color-info-tint: #22302F;
+  --color-surface-hover: #342C24;
+}}
+.bee-hub {{ margin-bottom: var(--space-4); }}
+.bee-hub__groups {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); }}
+.bee-hub__group {{ display: flex; flex-direction: column; gap: var(--space-2); }}
+.bee-hub__cards {{ display: flex; flex-direction: column; gap: var(--space-2); }}
+.bee-hub__card {{ display: flex; flex-direction: column; gap: var(--space-1); }}
+.bee-hub__chips {{ display: flex; flex-wrap: wrap; gap: var(--space-1); }}
+.bee-hub__progress-label {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
+.bee-hub__reason {{ font-style: italic; }}
 .bee-done-summary {{ cursor: pointer; list-style: none; padding: var(--space-2) 0; font-weight: var(--weight-strong); color: var(--color-text); }}
 .bee-done-summary::-webkit-details-marker {{ display: none; }}
 .bee-done-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-2); padding-top: var(--space-2); }}
@@ -1362,7 +1419,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 @media (max-width: 700px) {{
   .bee-stats,
   .bee-now-grid,
-  .bee-agent-board__cols,
+  .bee-hub__groups,
   .bee-velocity__lists,
   .bee-panels,
   .bee-done-grid,
@@ -1371,7 +1428,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
   }}
 }}
 </style>
-<main class="fg-page">
+<main class="fg-page bee-hub-theme">
   {top}
   {velocity}
   {board}
@@ -1384,14 +1441,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         )),
         top = bee_board_top(project, snapshot),
         velocity = bee_velocity_section(&project.id, snapshot),
-        board = bee_agent_board_section(
-            &project.id,
-            &snapshot.buckets,
-            &snapshot.running_workers,
-            &snapshot.backlog,
-            &snapshot.phase_board,
-            snapshot.handoff.as_ref(),
-        ),
+        board = bee_feature_hub_section(project, snapshot),
         finished = bee_finished_section(&project.id, &snapshot.shipped),
         panels = bee_panels_section(snapshot),
     );
@@ -2093,168 +2143,223 @@ fn bee_bucket_section(
     )
 }
 
-/// agent-board D5's Kanban board (ab-1), replacing the retired by-phase
-/// board (`bee_phase_board_section`, bbp-11). The card unit is the cell
-/// (D2), not the feature: five columns render left to right in
-/// CONTEXT.md's fixed order — Backlog, Todo, In Progress, Review, Done — a
-/// fixed shape so the board reads honestly even when one of its columns
-/// has no reader wired up yet (bee-board-pm D5's "sections never
-/// disappear" rule, extended to a column this cell has not built a reader
-/// for at all, not just one whose reader found nothing). This cell wires
-/// three of the five straight off the same D7 buckets `bee_headline_kpis`
-/// already counts: Todo from `buckets.waiting` (open cells), In Progress
-/// from `buckets.doing` (claimed cells) plus `buckets.stuck` (blocked
-/// cells, each carrying its own visible blocked marker — CONTEXT.md's
-/// deferred question 2, resolved: a stuck cell stays inside In Progress
-/// rather than holding its own column, so the D6 attention list keeps sole
-/// ownership of "stuck" as a distinct signal), Done from `buckets.done`
-/// (capped cells). `dropped` cells and any unrecognized status hold no
-/// bucket at all (D7 parity), so they never reach any column here either.
-/// Backlog (PBI cards, [`bee_agent_backlog_cards`]) and Review (decision
-/// cards, [`bee_agent_review_cards`]) are ab-2's job. Backlog renders every
-/// `backlog.pbis` entry whose status is `proposed` or `parked` — genuinely
-/// open backlog work, as opposed to `in-flight` (already a cell, and thus
-/// already elsewhere on this board), `done` or `declined` — capped the
-/// same way `bee_backlog_panel`'s own open-PBI list already is
-/// ([`BACKLOG_PBI_DISPLAY_CAP`]), and rendered visually lighter
-/// (`bee-agent-card--backlog`) than a cell card since a PBI is not yet a
-/// task an agent holds; a `parked` item carries its own visible marker.
-/// Review (D4) renders one decision card per feature in
-/// `snapshot.phase_board` (bbp-10's lane-wins/state-fallback union — the
-/// same `approved_gates` union CONTEXT.md cites as "state.approved_gates
-/// and lanes' approved_gates") whose first not-yet-approved gate, in
-/// bee's fixed order, is NOT the independent-review gate — that gate is
-/// user-invoked on its own schedule (bee-board-pm D7), never a blocking
-/// stop, so it is deliberately excluded from ever triggering a card here —
-/// plus one card for a paused `.bee/HANDOFF.json` (a kindless record or an
-/// explicit `"pause"`; never a `"planned-next"` clean stop), using the
-/// exact same kind rule `compute_attention_items` already applies. Every
-/// Review card's own copy states plainly that it is awaiting the user's
-/// decision — never independent-review-queue language. Every populated
-/// cell/PBI card links to its own detail page (bee-board-pm D3, no
-/// drawers) and a cell card carries an agent badge (D3): `cell.worker`
-/// verbatim when the cell has one, marked live
-/// (`bee-agent-card__badge--live`) when a `running_workers` row names this
-/// exact cell id (the same id join `bee_running_worker_row` already uses,
-/// never a nickname match), plain otherwise; a cell with no recorded
-/// worker carries no badge at all. Every path-shaped value on a `BeeCell`
-/// already arrives relativized by `mdview_core::bee::read_snapshot` (D9),
-/// so nothing further is redacted here — this view only escapes for HTML
+/// D1's feature-centric grouped list (fh-1), replacing the retired
+/// cell-centric Kanban board (`bee_agent_board_section`, agent-board
+/// ab-1/ab-2 — every card it rendered, and the five-column shape itself,
+/// is gone). The card unit is now the FEATURE, not the cell: every feature
+/// this snapshot can place (`phase_board`'s lanes ∪ active-feature union,
+/// plus any feature whose cells have moved entirely to
+/// `.bee/cells/archive/` with no lane of its own) renders in exactly one
+/// of three groups — Waiting on you, In Progress, Finished — never two,
+/// never a duplicate. Group membership is checked in that fixed priority
+/// order (D4's "waiting wins over in-progress; finished only when no live
+/// cells"):
+///
+/// - **Waiting on you**: a feature with live work — `doing`/`waiting`/
+///   `stuck` cells present, or this is `state.feature`, the globally
+///   active one, even with none yet — whose current-stop gate
+///   ([`bee_gate_current_stop`], reused from the retired Review column:
+///   the independent-review gate itself never counts, since that gate is
+///   user-invoked on its own schedule, never a blocking stop) is still
+///   unapproved, OR the active feature while `.bee/HANDOFF.json` reads as
+///   a genuine pause (never a `"planned-next"` clean stop) — the note
+///   carries no feature name of its own (`compute_attention_items`'s own
+///   doc comment says so), so it is folded onto whichever feature
+///   `state.json` currently names active.
+/// - **In Progress**: everything left with `doing`/`waiting`/`stuck`
+///   cells — live work not already claimed by Waiting.
+/// - **Finished**: everything left with a lane `phase` of exactly
+///   `"terminal"`, plus every feature `.bee/cells/archive/` names that
+///   never had a lane or active-feature placement at all
+///   (`list_archived_feature_dirs`) — both sourced from
+///   `read_archived_cells` for their own done/total counts and last
+///   activity, since a finished feature's live `cell_counts` are
+///   typically zero (its cells already moved to archive). A feature that
+///   fits neither rule (a pre-build, zero-cell lane, e.g. still
+///   `exploring`) renders nowhere on this list — the pre-redesign board
+///   never showed it either, since it never held a cell of its own.
+///
+/// This is also D4's ghost-card fix: the retired Review column rendered a
+/// card for ANY phase_board feature sitting on an unapproved gate,
+/// regardless of whether it had any live cells left — six merged, fully
+/// archived lanes kept showing "gate awaiting your decision" for that
+/// reason. Gating Waiting on live work closes that permanently; a stale
+/// lane with zero live cells now renders in Finished once its own `phase`
+/// is stamped `"terminal"` (an orchestrator-run cleanup, out of this
+/// cell's scope), and nowhere until then — never a ghost.
+///
+/// Every card names its feature, links to its own detail page, its own
+/// done/total cell progress, its own last-activity age
+/// ([`bee_fmt_trace_time`]), a worktree-state chip
+/// ([`bee_hub_worktree_chip`]) and a status chip naming its own group.
+/// Every path-shaped value a `BeeCell`/`BeeFeaturePhase` carries already
+/// arrives relativized by `mdview_core::bee::read_snapshot` (D9), so
+/// nothing further is redacted here — this view only escapes for HTML
 /// safety.
-fn bee_agent_board_section(
-    project_id: &str,
-    buckets: &BeeBuckets,
-    running_workers: &[BeeRunningWorker],
-    backlog: &BeeBacklog,
-    phase_board: &[BeeFeaturePhase],
-    handoff: Option<&BeeHandoff>,
-) -> String {
-    let live_cells: std::collections::HashSet<&str> =
-        running_workers.iter().filter_map(|w| w.cell.as_deref()).collect();
+fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String {
+    let active_feature = snapshot.state.as_ref().and_then(|s| s.feature.as_deref());
+    let handoff_is_pause = snapshot
+        .handoff
+        .as_ref()
+        .map(|h| !matches!(h.kind.as_deref(), Some("planned-next")))
+        .unwrap_or(false);
 
-    let (backlog_cards, backlog_count) = bee_agent_backlog_cards(&backlog.pbis);
-    let todo_cards = bee_agent_cards(project_id, &buckets.waiting, &live_cells, false);
-    let mut in_progress_cards = bee_agent_cards(project_id, &buckets.doing, &live_cells, false);
-    in_progress_cards.push_str(&bee_agent_cards(project_id, &buckets.stuck, &live_cells, true));
-    let (review_cards, review_count) = bee_agent_review_cards(project_id, phase_board, handoff);
-    let done_cards = bee_agent_done_cards(project_id, &buckets.done, &live_cells);
+    let mut waiting_cards = String::new();
+    let mut in_progress_cards = String::new();
+    let mut finished_cards = String::new();
+    let mut waiting_count = 0usize;
+    let mut in_progress_count = 0usize;
+    let mut finished_count = 0usize;
+    let mut placed: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
-    let backlog_col = bee_agent_column("Backlog", "backlog", backlog_count, &backlog_cards);
-    let todo_col = bee_agent_column("Todo", "todo", buckets.waiting.len(), &todo_cards);
-    let in_progress_col = bee_agent_column(
-        "In Progress",
-        "in-progress",
-        buckets.doing.len() + buckets.stuck.len(),
-        &in_progress_cards,
-    );
-    let review_col = bee_agent_column("Review", "review", review_count, &review_cards);
-    let done_col = bee_agent_column("Done", "done", buckets.done.len(), &done_cards);
+    let mut features: Vec<&BeeFeaturePhase> = snapshot.phase_board.iter().collect();
+    features.sort_by(|a, b| a.feature.cmp(&b.feature));
+
+    for f in features {
+        placed.insert(f.feature.as_str());
+        let live = f.cell_counts.doing + f.cell_counts.waiting + f.cell_counts.stuck;
+        let is_active = active_feature == Some(f.feature.as_str());
+        let has_live_work = live > 0 || is_active;
+
+        let gate_stop =
+            bee_gate_current_stop(f.approved_gates.as_ref()).filter(|(key, _)| *key != "review");
+        let waiting_via_handoff = is_active && handoff_is_pause;
+
+        if (has_live_work && gate_stop.is_some()) || waiting_via_handoff {
+            waiting_count += 1;
+            let reason = match gate_stop {
+                Some((_, label)) => format!("{label} gate awaiting your decision"),
+                None => "Work is parked, waiting on your decision".to_string(),
+            };
+            let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
+            let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, false);
+            waiting_cards.push_str(&bee_hub_card(
+                &project.id,
+                &f.feature,
+                "waiting",
+                f.cell_counts.done,
+                f.cell_counts.total,
+                last_activity.as_deref(),
+                &worktree,
+                Some(&reason),
+            ));
+        } else if live > 0 {
+            in_progress_count += 1;
+            let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
+            let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, false);
+            in_progress_cards.push_str(&bee_hub_card(
+                &project.id,
+                &f.feature,
+                "in-progress",
+                f.cell_counts.done,
+                f.cell_counts.total,
+                last_activity.as_deref(),
+                &worktree,
+                None,
+            ));
+        } else if f.phase.as_deref() == Some("terminal") {
+            finished_count += 1;
+            let archived = read_archived_cells(&project.root_path, &f.feature);
+            let (done, total) = bee_hub_archived_counts(&archived);
+            let last_activity = bee_hub_latest_activity(archived.iter());
+            let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, true);
+            finished_cards.push_str(&bee_hub_card(
+                &project.id,
+                &f.feature,
+                "finished",
+                done,
+                total,
+                last_activity.as_deref(),
+                &worktree,
+                None,
+            ));
+        }
+        // else: no live work, no gate/handoff pull, and not stamped
+        // terminal — a pre-build lane (still `exploring`, no cells yet).
+        // Renders nowhere, matching the pre-redesign board's own
+        // cell-only precedent.
+    }
+
+    let mut archive_only: Vec<String> = list_archived_feature_dirs(&project.root_path)
+        .into_iter()
+        .filter(|name| !placed.contains(name.as_str()))
+        .collect();
+    archive_only.sort();
+    for feature in archive_only {
+        finished_count += 1;
+        let archived = read_archived_cells(&project.root_path, &feature);
+        let (done, total) = bee_hub_archived_counts(&archived);
+        let last_activity = bee_hub_latest_activity(archived.iter());
+        let worktree = bee_hub_worktree_chip(&feature, &snapshot.worktrees, true);
+        finished_cards.push_str(&bee_hub_card(
+            &project.id,
+            &feature,
+            "finished",
+            done,
+            total,
+            last_activity.as_deref(),
+            &worktree,
+            None,
+        ));
+    }
 
     format!(
-        r#"<section class="fg-card bee-agent-board" data-agent-board="1">
-  <h3 class="bee-panel__head">Board</h3>
-  <div class="bee-agent-board__cols">
-    {backlog_col}
-    {todo_col}
-    {in_progress_col}
-    {review_col}
-    {done_col}
+        r#"<section class="fg-card bee-hub" data-feature-hub="1">
+  <h3 class="bee-panel__head">Features</h3>
+  <div class="bee-hub__groups">
+    {waiting_group}
+    {in_progress_group}
+    {finished_group}
   </div>
 </section>"#,
-        backlog_col = backlog_col,
-        todo_col = todo_col,
-        in_progress_col = in_progress_col,
-        review_col = review_col,
-        done_col = done_col,
+        waiting_group = bee_hub_group(
+            "Waiting on you",
+            "waiting",
+            waiting_count,
+            &waiting_cards,
+            "Nothing waiting on you."
+        ),
+        in_progress_group = bee_hub_group(
+            "In Progress",
+            "in-progress",
+            in_progress_count,
+            &in_progress_cards,
+            "Nothing in progress."
+        ),
+        finished_group = bee_hub_group(
+            "Finished",
+            "finished",
+            finished_count,
+            &finished_cards,
+            "Nothing finished yet."
+        ),
     )
 }
 
-/// One populated agent-board column (ab-1/ab-2): a header naming the
-/// column and its true count, then its cards — or one honest "Nothing
-/// here." line when the column is genuinely empty. Every column this
-/// board renders now has a real reader behind it (ab-2 finished Backlog
-/// and Review), so this is the board's only column shape.
-fn bee_agent_column(label: &str, key: &str, count: usize, cards_html: &str) -> String {
-    let body = if cards_html.is_empty() {
-        r#"<p class="fg-empty">Nothing here.</p>"#.to_string()
-    } else {
-        format!(r#"<div class="bee-agent-board__col-list">{cards_html}</div>"#, cards_html = cards_html)
-    };
-    format!(
-        r#"<div class="bee-agent-board__col" data-agent-col="{key}" data-agent-count="{count}"><h4 class="bee-panel__subhead">{label} <span class="fg-chip fg-chip--neutral">{count}</span></h4>{body}</div>"#,
-        key = key,
-        count = count,
-        label = label,
-        body = body,
-    )
-}
-
-/// Backlog column cards (ab-2, D2): every PBI whose status is `proposed`
-/// or `parked` — the two statuses that mean genuinely open backlog work,
-/// distinct from `in-flight` (already a cell, so already shown elsewhere
-/// on this board), `done` and `declined`. Capped at
-/// [`BACKLOG_PBI_DISPLAY_CAP`], the same display discipline
-/// `bee_backlog_panel` already applies to its own open-PBI list — a store
-/// the size of `beehive`'s (123 PBIs) would otherwise turn this column
-/// into the same per-item dump that cap exists to avoid; a "Showing X of
-/// Y" note renders when the cap actually trims the list. The returned
-/// count is the TRUE total of open PBIs, uncapped, so the column header
-/// never understates the backlog just because its card list is capped.
-fn bee_agent_backlog_cards(pbis: &[BeePbi]) -> (String, usize) {
-    let open: Vec<&BeePbi> =
-        pbis.iter().filter(|p| p.status == "proposed" || p.status == "parked").collect();
-    let total = open.len();
-
-    let mut out = String::new();
-    for pbi in open.iter().take(BACKLOG_PBI_DISPLAY_CAP) {
-        let parked = if pbi.status == "parked" {
-            r#"<span class="bee-agent-card__parked">Parked</span>"#.to_string()
-        } else {
-            String::new()
-        };
-        out.push_str(&format!(
-            r#"<div class="fg-card bee-cell bee-agent-card bee-agent-card--backlog"><div class="fg-card__title">{title}</div><div class="fg-card__sub">{status} · {feature}</div>{parked}</div>"#,
-            title = esc(&pbi.title),
-            status = esc(&pbi.status),
-            feature = esc(&pbi.feature),
-            parked = parked,
-        ));
-    }
-    if total > BACKLOG_PBI_DISPLAY_CAP {
-        out.push_str(&format!(
-            r#"<p class="bee-cell__meta">Showing {shown} of {total} backlog items.</p>"#,
-            shown = BACKLOG_PBI_DISPLAY_CAP,
-            total = total,
-        ));
-    }
-    (out, total)
+/// Every cell in the board's four D7 buckets belonging to one feature —
+/// `bee_feature_hub_section`'s own narrowing of `snapshot.buckets`, used
+/// only to find that feature's own most recent `claimed_at`/`capped_at`
+/// ([`bee_hub_latest_activity`]); it never changes which bucket a cell
+/// belongs to.
+fn bee_hub_feature_cells<'a, 'b>(
+    buckets: &'a BeeBuckets,
+    feature: &'b str,
+) -> impl Iterator<Item = &'a BeeCell> + use<'a, 'b> {
+    buckets
+        .doing
+        .iter()
+        .chain(buckets.waiting.iter())
+        .chain(buckets.stuck.iter())
+        .chain(buckets.done.iter())
+        .filter(move |c| c.feature == feature)
 }
 
 /// The first gate in bee's fixed order (context, shape, execution, review)
 /// that is not yet approved for one `approved_gates` record — `None` once
 /// every gate is approved. Mirrors `bee_lifecycle_stepper`'s own "first
 /// step not done" rule (this file, the top-of-page stepper), applied here
-/// to the Review column's per-feature decision cards instead.
+/// to a feature's own current-stop gate ([`bee_feature_hub_section`]'s
+/// Waiting on you group).
 fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static str, &'static str)> {
     const GATES: [(&str, &str); 4] = [
         ("context", "Explore"),
@@ -2276,184 +2381,165 @@ fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static s
     GATES.into_iter().find(|(key, _)| !flag(key))
 }
 
-/// Review column cards (ab-2, D4): everything genuinely waiting on the
-/// user's own decision, worded that way in every card's copy — never as
-/// an automatic independent-review queue (bee-board-pm D7, preserved by
-/// this framing). Two sources:
-///
-/// - One gate card per `phase_board` feature ([`bee_gate_current_stop`])
-///   whose first not-yet-approved gate is NOT `review` — the
-///   independent-review gate runs only when the user invokes it, never a
-///   blocking stop, so it deliberately never triggers a card here even
-///   when it is a feature's only remaining gate.
-/// - One card for a paused `.bee/HANDOFF.json`, using the exact same kind
-///   rule `compute_attention_items` (`mdview_core::bee`) already applies:
-///   a kindless record or an explicit `"pause"` reads as paused;
-///   `"planned-next"` — a clean stop with its next claim already owned —
-///   never renders a card here.
-///
-/// Returns the rendered cards plus their true count (every gate card plus
-/// 0 or 1 handoff card — this column is never large enough to need its
-/// own display cap).
-fn bee_agent_review_cards(
-    project_id: &str,
-    phase_board: &[BeeFeaturePhase],
-    handoff: Option<&BeeHandoff>,
-) -> (String, usize) {
-    let mut out = String::new();
-    let mut count = 0usize;
+/// One group column of the feature hub (`bee_feature_hub_section`): a
+/// header naming the group and its true count, then its cards, or one
+/// honest empty line when the group holds nothing right now (bee-board-pm
+/// D5's "sections never disappear" rule) — an empty group renders its own
+/// wording, never a shared "Nothing here." that could not tell a reader
+/// which group came up empty.
+fn bee_hub_group(label: &str, key: &str, count: usize, cards_html: &str, empty_line: &str) -> String {
+    let body = if cards_html.is_empty() {
+        format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_line))
+    } else {
+        format!(r#"<div class="bee-hub__cards">{cards_html}</div>"#, cards_html = cards_html)
+    };
+    format!(
+        r#"<div class="bee-hub__group" data-hub-group="{key}" data-hub-count="{count}"><h4 class="bee-panel__subhead">{label} <span class="fg-chip fg-chip--neutral">{count}</span></h4>{body}</div>"#,
+        key = key,
+        count = count,
+        label = esc(label),
+        body = body,
+    )
+}
 
-    for f in phase_board {
-        let Some((key, label)) = bee_gate_current_stop(f.approved_gates.as_ref()) else {
-            continue;
+/// A group key's own status chip tone and label — the card's D1 "status
+/// icon", rendered as the same `fg-chip` pattern every other status on
+/// this board already uses ([`bee_attention_tone`]) rather than a bespoke
+/// icon set.
+fn bee_hub_group_label(key: &str) -> (&'static str, &'static str) {
+    match key {
+        "waiting" => ("Waiting on you", "warning"),
+        "in-progress" => ("In progress", "info"),
+        _ => ("Finished", "success"),
+    }
+}
+
+/// One feature card (D1): name + link to its own detail page, its own
+/// done/total cell progress (the same `bee-progress` bar
+/// `bee_working_now_card` already uses), its own last-activity age
+/// ([`bee_fmt_trace_time`]), its own worktree-state chip
+/// ([`bee_hub_worktree_chip`]) and its own group status chip
+/// ([`bee_hub_group_label`]). `reason` carries the Waiting group's own
+/// "why" line (its current-stop gate, or a paused handoff) — `None` for
+/// every other group, which has no such single reason to name.
+fn bee_hub_card(
+    project_id: &str,
+    feature: &str,
+    group_key: &str,
+    done: usize,
+    total: usize,
+    last_activity: Option<&str>,
+    worktree: &(String, &'static str),
+    reason: Option<&str>,
+) -> String {
+    let (group_label, group_tone) = bee_hub_group_label(group_key);
+    let progress_html = if total == 0 {
+        r#"<p class="fg-empty">No cells recorded.</p>"#.to_string()
+    } else {
+        let percent = (done * 100) / total;
+        format!(
+            r#"<div class="bee-progress"><div class="bee-progress__bar" style="width: {percent}%"></div></div><p class="bee-hub__progress-label">{done}/{total} cell{plural} done</p>"#,
+            percent = percent,
+            done = done,
+            total = total,
+            plural = if total == 1 { "" } else { "s" },
+        )
+    };
+    let activity_html = match last_activity {
+        Some(iso) => format!(
+            r#"<p class="bee-cell__meta">Last activity {}</p>"#,
+            esc(&bee_fmt_trace_time(iso))
+        ),
+        None => r#"<p class="bee-cell__meta">No activity recorded.</p>"#.to_string(),
+    };
+    let reason_html = match reason {
+        Some(r) if !r.is_empty() => format!(r#"<p class="bee-cell__meta bee-hub__reason">{}</p>"#, esc(r)),
+        _ => String::new(),
+    };
+    let (wt_label, wt_tone) = worktree;
+    format!(
+        r#"<a class="fg-card bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}"><div class="fg-card__title">{feature}</div><div class="bee-hub__chips"><span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{progress_html}{reason_html}{activity_html}</a>"#,
+        group_key = group_key,
+        pid = esc(project_id),
+        feature_href = esc(feature),
+        feature = esc(feature),
+        group_tone = group_tone,
+        group_label = group_label,
+        wt_tone = wt_tone,
+        wt_label = esc(wt_label),
+        progress_html = progress_html,
+        reason_html = reason_html,
+        activity_html = activity_html,
+    )
+}
+
+/// A card's worktree-state chip (D1), read from `snapshot.worktrees`
+/// (`.bee/runtime/worktree-grants.json`, resolved against each grant's own
+/// sibling `.bee/state.json`): "Open · &lt;branch&gt;" when a currently
+/// granted worktree names this feature as its own active one. A grant is
+/// released on `bee worktree merge` (AGENTS.md), so its absence reads two
+/// ways depending on which group this card already landed in: `finished`
+/// reads "Merged" (the worktree that did this work has been folded back);
+/// anything else reads "Main" (this feature's work is happening directly
+/// in the main checkout — the tiny/solo-fix path AGENTS.md itself names).
+/// Never a guess at branch history beyond what this project's own
+/// worktree-grants file currently records.
+fn bee_hub_worktree_chip(feature: &str, worktrees: &[BeeWorktree], finished: bool) -> (String, &'static str) {
+    if let Some(w) = worktrees.iter().find(|w| w.feature.as_deref() == Some(feature)) {
+        let label = match w.branch.as_deref() {
+            Some(b) if !b.is_empty() => format!("Open · {b}"),
+            _ => "Open worktree".to_string(),
         };
-        if key == "review" {
-            continue;
-        }
-        count += 1;
-        let next_action = f
-            .next_action
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| format!(" {}", esc(s)))
-            .unwrap_or_default();
-        out.push_str(&format!(
-            r#"<a class="fg-card bee-cell bee-agent-card bee-agent-card--review" href="/p/{pid}/_bee/feature/{feature_href}"><div class="fg-card__title">{label} gate awaiting your decision</div><div class="fg-card__sub">{feature}</div><div class="bee-cell__meta">Waiting on you.{next_action}</div></a>"#,
-            pid = esc(project_id),
-            feature_href = esc(&f.feature),
-            label = esc(label),
-            feature = esc(&f.feature),
-            next_action = next_action,
-        ));
+        return (label, "info");
     }
-
-    if let Some(h) = handoff {
-        // Same rule as `compute_attention_items` (mdview_core::bee): a
-        // kindless record and an explicit "pause" both read as paused;
-        // "planned-next" never renders here.
-        let is_pause = !matches!(h.kind.as_deref(), Some("planned-next"));
-        if is_pause {
-            count += 1;
-            let when = h.written_at.as_deref().unwrap_or("an unknown time");
-            let note = h.next_action.as_deref().unwrap_or("(no note text was recorded)");
-            out.push_str(&format!(
-                r#"<div class="fg-card bee-cell bee-agent-card bee-agent-card--review"><div class="fg-card__title">Work is parked, waiting on your decision</div><div class="fg-card__sub">Written {when}</div><div class="bee-cell__meta">{note}</div></div>"#,
-                when = esc(when),
-                note = esc(note),
-            ));
-        }
+    if finished {
+        ("Merged".to_string(), "success")
+    } else {
+        ("Main".to_string(), "neutral")
     }
-
-    (out, count)
 }
 
-/// How many Done-column cards render as plain cards before the rest
-/// collapse into a `<details>` summary (ab-2) — the same
-/// `bee-done-summary`/`bee-done-grid`/`bee-done-line` pattern
-/// `bee_finished_section` (and, before it, the retired by-phase board's
-/// own "compounding-complete" collapse) already uses, so a store with a
-/// long capped history never turns the Done column into an ever-growing
-/// scroll.
-const DONE_RECENT_CAP: usize = 6;
-
-/// Done column cards (ab-2): the same per-cell card `bee_agent_cards`
-/// renders elsewhere on this board, most-recently-capped first
-/// (`capped_at` descending; a cell with no recorded `capped_at` sorts
-/// after every timestamped one — unknown recency, never assumed oldest or
-/// newest, and never a fabricated timestamp), showing up to
-/// [`DONE_RECENT_CAP`] as full cards and collapsing the rest into one
-/// `<details>` name list, reusing the exact collapse pattern
-/// `bee_finished_section` already uses for finished features.
-fn bee_agent_done_cards(
-    project_id: &str,
-    cells: &[BeeCell],
-    live_cells: &std::collections::HashSet<&str>,
-) -> String {
-    let mut ordered: Vec<&BeeCell> = cells.iter().collect();
-    ordered.sort_by(|a, b| match (&a.capped_at, &b.capped_at) {
-        (Some(x), Some(y)) => y.cmp(x),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
-
-    let split = ordered.len().min(DONE_RECENT_CAP);
-    let (recent, rest) = ordered.split_at(split);
-
-    let recent_cells: Vec<BeeCell> = recent.iter().map(|c| (*c).clone()).collect();
-    let mut out = bee_agent_cards(project_id, &recent_cells, live_cells, false);
-
-    if !rest.is_empty() {
-        let n = rest.len();
-        let noun = if n == 1 { "cell" } else { "cells" };
-        let mut lines = String::new();
-        for c in rest {
-            lines.push_str(&format!(
-                r#"<a class="bee-done-line" href="/p/{pid}/_bee/cell/{cid_href}">{title} · {id}</a>"#,
-                pid = esc(project_id),
-                cid_href = esc(&c.id),
-                title = esc(&c.title),
-                id = esc(&c.id),
-            ));
-        }
-        out.push_str(&format!(
-            r#"<details class="bee-done-details"><summary class="bee-done-summary">{n} more done {noun} — show them</summary><div class="bee-done-grid">{lines}</div></details>"#,
-            n = n,
-            noun = noun,
-            lines = lines,
-        ));
-    }
-
-    out
-}
-
-/// One column's cell cards (ab-1): every cell in `cells`, each linking to
-/// its own detail page (D3), carrying its feature and id as card metadata
-/// (D2) and its agent badge (D3, [`bee_agent_card_badge`]). `blocked`
-/// marks every card with a visible "Blocked" chip — used for
-/// `buckets.stuck` cells sharing the In Progress column with
-/// `buckets.doing` (CONTEXT.md's deferred question 2).
-fn bee_agent_cards(
-    project_id: &str,
-    cells: &[BeeCell],
-    live_cells: &std::collections::HashSet<&str>,
-    blocked: bool,
-) -> String {
-    let mut out = String::new();
+/// A feature's most recent `claimed_at`/`capped_at` across the cells
+/// handed to it (`bee_hub_feature_cells` for a live feature,
+/// `read_archived_cells` for a finished one) — the later of the two RFC
+/// 3339 timestamps a cell carries, across every cell in the slice; `None`
+/// when none of them parse or the slice is empty, never a fabricated
+/// "just now".
+fn bee_hub_latest_activity<'a>(cells: impl Iterator<Item = &'a BeeCell>) -> Option<String> {
+    let mut latest: Option<(time::OffsetDateTime, String)> = None;
     for c in cells {
-        let badge = bee_agent_card_badge(c, live_cells.contains(c.id.as_str()));
-        let blocked_html = if blocked {
-            r#"<span class="bee-agent-card__blocked">Blocked</span>"#.to_string()
-        } else {
-            String::new()
-        };
-        out.push_str(&format!(
-            r#"<a class="fg-card bee-cell bee-agent-card" href="/p/{pid}/_bee/cell/{cid_href}"><div class="fg-card__title">{title}</div><div class="fg-card__sub">{id} · {feature}</div>{badge}{blocked}</a>"#,
-            pid = esc(project_id),
-            cid_href = esc(&c.id),
-            title = esc(&c.title),
-            id = esc(&c.id),
-            feature = esc(&c.feature),
-            badge = badge,
-            blocked = blocked_html,
-        ));
+        for ts in [c.claimed_at.as_deref(), c.capped_at.as_deref()].into_iter().flatten() {
+            if let Ok(t) = time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339) {
+                let newer = latest.as_ref().map(|(lt, _)| t > *lt).unwrap_or(true);
+                if newer {
+                    latest = Some((t, ts.to_string()));
+                }
+            }
+        }
     }
-    out
+    latest.map(|(_, s)| s)
 }
 
-/// A cell's agent badge (D3): `cell.worker` verbatim when set, marked live
-/// (`bee-agent-card__badge--live`) when `live` is true — the caller already
-/// decided that off the same cell-id join `bee_running_worker_row` uses,
-/// never a nickname comparison. A cell with no recorded worker renders no
-/// badge at all — never a fabricated "unassigned" chip.
-fn bee_agent_card_badge(cell: &BeeCell, live: bool) -> String {
-    match cell.worker.as_deref() {
-        Some(w) if live => {
-            format!(r#"<span class="bee-agent-card__badge bee-agent-card__badge--live">{w} · live</span>"#, w = esc(w))
+/// D7-style done/total over one feature's archived cells
+/// (`read_archived_cells`) — the same bucket rule `read_snapshot`'s own D7
+/// buckets and `compute_feature_cell_counts` (`mdview_core::bee`) already
+/// apply: `dropped` and any unrecognized status count toward neither
+/// `done` nor `total`, so a fully-dropped archive reports an honest
+/// `(0, 0)` rather than a fabricated complete or a division by zero.
+fn bee_hub_archived_counts(cells: &[BeeCell]) -> (usize, usize) {
+    let mut done = 0usize;
+    let mut total = 0usize;
+    for c in cells {
+        match c.status.as_str() {
+            "capped" => {
+                done += 1;
+                total += 1;
+            }
+            "claimed" | "open" | "blocked" => total += 1,
+            _ => {}
         }
-        Some(w) => format!(r#"<span class="bee-agent-card__badge">{w}</span>"#, w = esc(w)),
-        None => String::new(),
     }
+    (done, total)
 }
 
 /// The board's Finished list (D5/D10), rendered as a native
