@@ -390,6 +390,11 @@ pub struct BeePbi {
     /// carrying this `id`, never the first.
     pub status: String,
     pub feature: String,
+    /// Condition-of-satisfaction detail text. Free text, not a path field —
+    /// scrubbed of any embedded absolute path before it reaches this
+    /// struct, exactly like `title`; see [`scrub_paths`]. A missing `cos`
+    /// field folds to an empty string, same as a missing `title`.
+    pub cos: String,
 }
 
 /// Per-severity finding counts (`P1`/`P2`/`P3`) over the *whole* backlog,
@@ -1718,7 +1723,9 @@ fn read_backlog(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> B
             let title = scrub_paths(title, root);
             let status = v.get("status").and_then(Value::as_str).unwrap_or_default().to_string();
             let feature = v.get("feature").and_then(Value::as_str).unwrap_or_default().to_string();
-            pbis.insert(id.clone(), BeePbi { id, title, status, feature });
+            let cos = v.get("cos").and_then(Value::as_str).unwrap_or_default();
+            let cos = scrub_paths(cos, root);
+            pbis.insert(id.clone(), BeePbi { id, title, status, feature, cos });
         } else {
             finding_total += 1;
             let severity = v.get("severity").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -3434,9 +3441,9 @@ mod tests {
     fn pbi_folds_to_last_status_not_first() {
         let root = fresh_root("pbi-fold");
         let lines = [
-            r#"{"kind":"pbi","id":"P1","title":"Widget","status":"proposed","feature":"demo"}"#,
-            r#"{"kind":"pbi","id":"P1","title":"Widget","status":"in-flight","feature":"demo"}"#,
-            r#"{"kind":"pbi","id":"P1","title":"Widget","status":"done","feature":"demo"}"#,
+            r#"{"kind":"pbi","id":"P1","title":"Widget","status":"proposed","feature":"demo","cos":"first cut"}"#,
+            r#"{"kind":"pbi","id":"P1","title":"Widget","status":"in-flight","feature":"demo","cos":"second cut"}"#,
+            r#"{"kind":"pbi","id":"P1","title":"Widget","status":"done","feature":"demo","cos":"final cut"}"#,
         ];
         write(&root, ".bee/backlog.jsonl", &lines.join("\n"));
 
@@ -3448,6 +3455,20 @@ mod tests {
             snap.backlog.pbis
         );
         assert_eq!(snap.backlog.pbis[0].status, "done", "must fold to the LAST status, not the first");
+        assert_eq!(snap.backlog.pbis[0].cos, "final cut", "cos must fold to the LAST event too, not the first");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn pbi_missing_cos_folds_to_empty_string() {
+        let root = fresh_root("pbi-cos-missing");
+        let lines = [r#"{"kind":"pbi","id":"P1","title":"Widget","status":"proposed","feature":"demo"}"#];
+        write(&root, ".bee/backlog.jsonl", &lines.join("\n"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.backlog.pbis.len(), 1);
+        assert_eq!(snap.backlog.pbis[0].cos, "", "a missing cos field must fold to an empty string, like title");
 
         std::fs::remove_dir_all(&root).ok();
     }
