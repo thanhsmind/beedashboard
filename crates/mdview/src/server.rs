@@ -4230,96 +4230,6 @@ mod bee_route_tests {
         )
     }
 
-    /// bee-cockpit-4 (happy): a fixture with one fully-capped, timed feature
-    /// (24 minutes claim-to-cap → 0.4h, matching the ground-truth beehive
-    /// numbers) plus one still-open feature. The body must carry all three
-    /// headline numbers in plain language and both feature lists.
-    #[tokio::test]
-    async fn velocity_headline_numbers_and_feature_lists_render_for_shipped_work() {
-        let root = fresh_root("velocity-happy");
-        write(
-            &root,
-            ".bee/cells/shipped.json",
-            &timed_cell_json(
-                "s1",
-                "demo",
-                "capped",
-                &[],
-                "w1",
-                "2026-08-04T08:00:00Z",
-                "2026-08-04T08:24:00Z",
-            ),
-        );
-        // `cell_json`'s fixed "demo" feature would collide with the shipped
-        // one above and hide the "still open" case, so this uses
-        // `timed_cell_json` with a distinct feature instead (its timestamps
-        // are unused while the cell stays "open").
-        write(
-            &root,
-            ".bee/cells/open.json",
-            &timed_cell_json(
-                "o1",
-                "still-cooking",
-                "open",
-                &[],
-                "w1",
-                "2026-08-04T09:00:00Z",
-                "2026-08-04T09:00:00Z",
-            ),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "velocity-happy");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("Shipped per working day"), "{body}");
-        assert!(body.contains("Shipped per week"), "{body}");
-        assert!(body.contains("Typical time to finish"), "{body}");
-        assert!(body.contains("0.4h"), "median cycle time missing: {body}");
-        assert!(body.contains("demo"), "shipped feature name missing: {body}");
-        assert!(
-            body.contains("still-cooking"),
-            "open feature name missing: {body}"
-        );
-        assert!(!body.contains("NaN"), "{body}");
-        assert!(!body.contains("Infinity"), "{body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// bee-cockpit-4 (edge): nothing has shipped. The section must render an
-    /// honest empty state — no zeroed-out numbers, no NaN, no Infinity, no
-    /// division artifact anywhere in the body.
-    #[tokio::test]
-    async fn no_shipped_features_renders_honest_empty_state_not_zeros() {
-        let root = fresh_root("velocity-empty");
-        write(&root, ".bee/cells/a.json", &cell_json("a", "open", &[], "w1"));
-        write(
-            &root,
-            ".bee/cells/b.json",
-            &cell_json("b", "blocked", &[], "w1"),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "velocity-empty");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            body.contains("No features have shipped yet"),
-            "expected an honest empty state: {body}"
-        );
-        assert!(!body.contains("NaN"), "{body}");
-        assert!(!body.contains("Infinity"), "{body}");
-        assert!(!body.contains("0.0"), "a zero stat leaked in: {body}");
-        assert!(!body.contains("0/0"), "a division artifact leaked in: {body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
     /// bee-cockpit-4 / bee-board-ux-2 (security): a finished ("capped") cell
     /// still carries the same path-leak risk as any other cell — this proves
     /// the collapsed Done section (`bee_done_section`, the sole surviving
@@ -5738,12 +5648,15 @@ mod bee_route_tests {
     }
 
     /// (archive-visibility, D9) The main board (`/p/:id/_bee`) reads the
-    /// snapshot-wide KPIs and buckets, which must stay archive-free per D9
-    /// — a closed feature's cells belong on its own detail page, not the
-    /// board. A live open cell and an archived capped cell coexist here;
-    /// the board must show only the live one.
+    /// snapshot-wide buckets, which must stay archive-free per D9 — an
+    /// archived cell's own id and per-cell card belong on its feature's own
+    /// detail page, not the board (the feature itself legitimately still
+    /// earns a summary line in the Finished group, unrelated to this
+    /// prohibition). board-declutter retired this page's own headline KPI
+    /// tiles entirely (`bee_headline_kpis`), so this test no longer has a
+    /// "Done" KPI count of its own to check against.
     #[tokio::test]
-    async fn main_board_excludes_archived_cells_from_kpis_and_buckets() {
+    async fn main_board_excludes_archived_cell_ids_and_cards() {
         let root = fresh_root("board-excludes-archive");
         write(
             &root,
@@ -5778,23 +5691,19 @@ mod bee_route_tests {
             !body.contains("Cell archived-only-cell"),
             "archived cell card leaked onto the main board: {body}"
         );
-        assert!(
-            body.contains(r#"<div class="bee-stat__value">0</div><div class="bee-stat__label">Done</div>"#),
-            "the archived capped cell must not count toward the Done KPI: {body}"
-        );
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// `reachable_links`: rendering the detail pages without linking to
-    /// them does not satisfy this cell — the board body must actually carry
-    /// both kinds of link. The cell-detail link comes from the Running Now
-    /// section (exactly as it always has for a live worker) and from its
-    /// own agent-board card (D3 — every card links to its own cell's detail
-    /// page); the feature-detail link comes from the Working On Now card's
-    /// own header link for the active feature.
+    /// `reachable_links`: rendering the feature detail page without ever
+    /// linking to it does not satisfy this cell — the board body must
+    /// actually carry a reachable link, from the active feature's own hub
+    /// card. board-declutter retired the Working-on-now card (whose own
+    /// header used to carry this link) and the standalone Running Now
+    /// section (whose own worker row used to link a live worker's cell to
+    /// its own detail page) — this test now only proves the surviving link.
     #[tokio::test]
-    async fn board_body_links_to_feature_and_running_cell_detail_routes() {
+    async fn board_body_links_to_the_active_features_detail_route() {
         let root = fresh_root("board-links");
         write(
             &root,
@@ -5828,13 +5737,66 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/cell/link-cell\"", project.id)),
-            "the running-now section must link a live worker's cell to its detail page: {body}"
-        );
-        assert!(
             body.contains(&format!("href=\"/p/{}/_bee/feature/link-feature\"", project.id)),
-            "the working-now card must link the active feature to its detail page: {body}"
+            "the active feature's own hub card must link to its detail page: {body}"
         );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (board-declutter) The Feature Hub is the first main section on the
+    /// board page — the very next `<section` after `<main>` — and none of
+    /// the five removed sections (the lifecycle stepper, the headline KPI
+    /// tiles, Ship velocity, Needs attention, and the Working-on-now card)
+    /// render anywhere in the body, in any state (a feature that is active,
+    /// gated and has live work exercises every one of those five sections'
+    /// old trigger conditions at once).
+    #[tokio::test]
+    async fn board_hub_is_first_main_section_and_removed_sections_are_absent() {
+        let root = fresh_root("board-hub-first");
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &timed_cell_json("hub-first-cell", "hub-first-feature", "blocked", &[], "w1", "x", "y"),
+        );
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{
+                "feature": "hub-first-feature",
+                "approved_gates": {"context": true, "shape": false, "execution": false, "review": false},
+                "next_action": "Invoke bee-shaping."
+            }"#,
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "board-hub-first");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        let main_start = body.find("<main class=\"fg-page bee-hub-theme\">").expect("main tag");
+        let first_section = body[main_start..].find("<section").expect("a section inside main");
+        let after_main = &body[main_start + first_section..];
+        assert!(
+            after_main.starts_with(r#"<section class="fg-card bee-hub" data-feature-hub="1">"#),
+            "the Feature Hub must be the first main section after the top bar: {body}"
+        );
+
+        for marker in [
+            "bee-stepper",
+            "bee-stats",
+            "bee-now-grid",
+            "bee-velocity",
+            "Needs attention",
+            "Working on now",
+            "Running now",
+        ] {
+            assert!(
+                !body.contains(marker),
+                "board-declutter removed this marker from the board page, but it still renders: {marker}\n{body}"
+            );
+        }
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6066,250 +6028,15 @@ mod bee_route_tests {
     }
 
 
-    // --- bbp-5: the rebuilt top of the board (D5/D6/D7/D8/D9) ---
-
-    /// (happy) The board names the active feature, the lifecycle stepper's
-    /// state (a done step, a current step, and a pending step all present),
-    /// and the recorded next action.
-    #[tokio::test]
-    async fn board_names_active_feature_stepper_state_and_next_action() {
-        let root = fresh_root("top-happy");
-        write(
-            &root,
-            ".bee/state.json",
-            r#"{
-                "phase": "shaping",
-                "feature": "pm-view-feature",
-                "mode": "standard",
-                "approved_gates": {"context": true, "shape": false, "execution": false, "review": false},
-                "next_action": "Invoke bee-shaping to lock the shape gate."
-            }"#,
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "top-happy");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("pm-view-feature"), "active feature name missing: {body}");
-        assert!(
-            body.contains("Invoke bee-shaping to lock the shape gate."),
-            "next action missing: {body}"
-        );
-        assert!(
-            body.contains("class=\"bee-step bee-step--done\""),
-            "expected at least one done step: {body}"
-        );
-        assert!(
-            body.contains("class=\"bee-step bee-step--current\""),
-            "expected a current step: {body}"
-        );
-        assert!(
-            body.contains("class=\"bee-step bee-step--pending\""),
-            "expected at least one pending step: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (happy) A feature with three of four gates approved renders exactly
-    /// three done steps, and the review step — never approved here — reads
-    /// as something the human invokes, never as pending automatic work
-    /// (D7).
-    #[tokio::test]
-    async fn board_three_of_four_gates_done_review_rendered_as_user_invoked() {
-        let root = fresh_root("top-three-gates");
-        write(
-            &root,
-            ".bee/state.json",
-            r#"{
-                "feature": "three-gates-feature",
-                "approved_gates": {"context": true, "shape": true, "execution": true, "review": false}
-            }"#,
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "top-three-gates");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert_eq!(
-            body.matches("class=\"bee-step bee-step--done\"").count(),
-            3,
-            "expected exactly three done steps: {body}"
-        );
-        assert!(
-            !body.contains("class=\"bee-step bee-step--done\" data-step=\"review\""),
-            "review must never render as done here: {body}"
-        );
-        assert!(
-            body.contains("Runs only when you invoke it — never automatic."),
-            "the review step must read as user-invoked, never pending automatic work: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (regression, bbp-7 — the live defect) A gate that is currently
-    /// approved renders as approved (done), whatever `gate_revoked_at`
-    /// records — `gate_revoked_at` is bee's append-style historical anchor
-    /// for advisor staleness, not a current-state flag, and a revocation
-    /// recorded on an earlier day must never contradict a `true`
-    /// `approved_gates` entry recorded after it. This replaces
-    /// `board_revoked_execution_gate_does_not_render_as_approved`, which
-    /// encoded the opposite (wrong) rule from bbp-5: it asserted that
-    /// `approved_gates.execution: true` plus a `gate_revoked_at.execution`
-    /// entry rendered Execute as NOT done and carrying "Approved, then
-    /// revoked." — exactly this repo's own live board bug.
-    #[tokio::test]
-    async fn board_currently_approved_gate_renders_approved_despite_earlier_revocation() {
-        let root = fresh_root("top-approved-despite-revocation");
-        write(
-            &root,
-            ".bee/state.json",
-            r#"{
-                "feature": "revoked-then-reapproved-feature",
-                "approved_gates": {"context": true, "shape": true, "execution": true, "review": false},
-                "gate_revoked_at": {"execution": "2026-08-05T09:51:47.038Z"}
-            }"#,
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "top-approved-despite-revocation");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            body.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
-            "an execution gate that is currently approved must render as done, whatever an earlier gate_revoked_at records: {body}"
-        );
-        assert!(
-            !body.contains("Approved, then revoked."),
-            "a currently-approved gate must never carry the revoked wording: {body}"
-        );
-        assert_eq!(
-            body.matches("class=\"bee-step bee-step--done\"").count(),
-            3,
-            "context, shape and execution are all cleanly approved: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (happy) A gate that is NOT currently approved and carries a
-    /// `gate_revoked_at` entry renders as revoked — distinguishable from a
-    /// step that was simply never approved (bbp-7).
-    #[tokio::test]
-    async fn board_unapproved_gate_with_revocation_renders_as_revoked() {
-        let root = fresh_root("top-unapproved-revoked-gate");
-        write(
-            &root,
-            ".bee/state.json",
-            r#"{
-                "feature": "genuinely-revoked-feature",
-                "approved_gates": {"context": true, "shape": true, "execution": false, "review": false},
-                "gate_revoked_at": {"execution": "2026-08-05T09:51:47.038Z"}
-            }"#,
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "top-unapproved-revoked-gate");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            !body.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
-            "an unapproved execution gate must not render as done: {body}"
-        );
-        assert!(
-            body.contains("Approved, then revoked."),
-            "an unapproved gate carrying a revocation must read as revoked, not merely unreached: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (happy) A gate that is NOT approved and carries no `gate_revoked_at`
-    /// entry renders as not yet reached — never as revoked (bbp-7 honest
-    /// empty case).
-    #[tokio::test]
-    async fn board_unapproved_gate_with_no_revocation_renders_as_not_yet_reached() {
-        let root = fresh_root("top-unapproved-never-revoked-gate");
-        write(
-            &root,
-            ".bee/state.json",
-            r#"{
-                "feature": "never-approved-feature",
-                "approved_gates": {"context": true, "shape": true, "execution": false, "review": false}
-            }"#,
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "top-unapproved-never-revoked-gate");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            !body.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
-            "an unapproved execution gate must not render as done: {body}"
-        );
-        assert!(
-            body.contains("Not yet approved."),
-            "an unapproved gate with no revocation must read as not yet reached: {body}"
-        );
-        assert!(
-            !body.contains("Approved, then revoked."),
-            "a gate with no revocation on record must never carry the revoked wording: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (edge) A `gate_revoked_at` entry naming a different gate does not
-    /// affect this gate's rendering (bbp-7).
-    #[tokio::test]
-    async fn board_revocation_on_a_different_gate_does_not_affect_this_gate() {
-        let root = fresh_root("top-revocation-different-gate");
-        write(
-            &root,
-            ".bee/state.json",
-            r#"{
-                "feature": "unrelated-revocation-feature",
-                "approved_gates": {"context": true, "shape": false, "execution": false, "review": false},
-                "gate_revoked_at": {"context": "2026-08-05T09:51:47.038Z"}
-            }"#,
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "top-revocation-different-gate");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            body.contains("class=\"bee-step bee-step--done\" data-step=\"context\""),
-            "the context gate is currently approved and must render as done despite carrying its own revocation history: {body}"
-        );
-        assert!(
-            !body.contains("class=\"bee-step bee-step--done\" data-step=\"shape\""),
-            "the shape gate was never approved: {body}"
-        );
-        assert!(
-            !body.contains("Approved, then revoked."),
-            "the shape gate carries no gate_revoked_at entry of its own, so a context-gate revocation must not leak into it: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
+    // --- bbp-5 rebuilt this section's top-of-board stack; board-declutter
+    // retires most of it (D5/D6/D7/D8/D9) ---
 
     /// (edge) A feature whose cells are all `dropped` renders an honest
-    /// progress state — no division artifact, per D8 (dropped cells count
-    /// toward neither the numerator nor the denominator).
+    /// progress state on its own hub card — no division artifact, per D8
+    /// (dropped cells count toward neither the numerator nor the
+    /// denominator). board-declutter retired the Working-on-now card whose
+    /// own progress bar this test used to exercise; the same D8 guarantee
+    /// now lives in [`bee_hub_card`]'s progress bar instead, reused here.
     #[tokio::test]
     async fn board_feature_with_all_dropped_cells_renders_honest_progress_no_division_artifact() {
         let root = fresh_root("top-all-dropped");
@@ -6328,134 +6055,10 @@ mod bee_route_tests {
 
         assert!(body.contains("all-dropped-feature"), "{body}");
         assert!(
-            body.contains("No live cells recorded for this feature yet."),
-            "expected an honest progress state: {body}"
+            body.contains("No cells recorded."),
+            "expected the hub card's own honest progress state: {body}"
         );
         assert!(!body.contains("0/0"), "a division artifact leaked in: {body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (edge) An empty attention list renders one honest line, never an
-    /// empty bordered panel.
-    #[tokio::test]
-    async fn board_empty_attention_list_renders_one_honest_line() {
-        let root = fresh_root("top-attention-empty");
-        write(&root, ".bee/cells/a.json", &cell_json("a", "open", &[], "w1"));
-
-        let st = build_state();
-        let project = register(&st, &root, "top-attention-empty");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            body.contains("Nothing needs attention right now."),
-            "expected the honest empty-attention line: {body}"
-        );
-        assert!(
-            !body.contains("bee-cell bee-attention__item"),
-            "no attention items should render when the list is empty: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (untrusted) A cell title (rendered inside the attention panel's
-    /// "blocked" item, via `compute_attention_items`) and a `next_action`
-    /// (rendered inside the "working on now" card) each containing
-    /// `< > & "` render as text and never break the surrounding markup.
-    #[tokio::test]
-    async fn board_untrusted_cell_title_and_next_action_render_as_text() {
-        let root = fresh_root("top-untrusted");
-        write(
-            &root,
-            ".bee/state.json",
-            r#"{"feature": "untrusted-feature", "next_action": "Fix <script>alert(1)</script> & \"quote\" it."}"#,
-        );
-        let untrusted_title = "<b>bold</b> & \"quoted\" title";
-        let untrusted_cell = format!(
-            r#"{{
-                "id": "untrusted-cell",
-                "feature": "untrusted-feature",
-                "lane": "standard",
-                "title": {title},
-                "action": "do the thing",
-                "verify": "cargo test",
-                "files": [],
-                "read_first": [],
-                "deps": [],
-                "decisions": [],
-                "must_haves": {{}},
-                "behavior_change": false,
-                "change_class": "behavior",
-                "pbi": null,
-                "status": "blocked",
-                "tier": "generation",
-                "trace": {{"worker": "w1"}}
-            }}"#,
-            title = serde_json::to_string(untrusted_title).unwrap(),
-        );
-        write(&root, ".bee/cells/a.json", &untrusted_cell);
-
-        let st = build_state();
-        let project = register(&st, &root, "top-untrusted");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            body.contains("&lt;b&gt;bold&lt;/b&gt; &amp; &quot;quoted&quot; title"),
-            "untrusted cell title must render escaped, as text: {body}"
-        );
-        assert!(!body.contains("<b>bold</b>"), "the raw title tag must not survive: {body}");
-        assert!(
-            body.contains("Fix &lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;quote&quot; it."),
-            "untrusted next_action must render escaped, as text: {body}"
-        );
-        assert!(
-            !body.contains("<script>alert(1)</script>"),
-            "the raw next_action script tag must not survive: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (security) An absolute path embedded mid-sentence in `route.rationale`
-    /// and in `next_action` — the two new free-text fields this cell renders
-    /// — must not leak into the board body. The existing leak tests only
-    /// cover wholly-path fields; this closes the gap the plan named.
-    #[tokio::test]
-    async fn board_embedded_absolute_path_in_rationale_and_next_action_does_not_leak() {
-        let root = fresh_root("top-security-scrub");
-        let secret = root.join("src").join("secret.rs").to_string_lossy().into_owned();
-        let secret_escaped = secret.replace('\\', "\\\\");
-        let state = format!(
-            r#"{{
-                "feature": "security-feature",
-                "route": {{
-                    "class": "feature",
-                    "lane": "standard",
-                    "flags": [],
-                    "product_files": 1,
-                    "rationale": "See {rationale_path} before merging.",
-                    "updated_at": "2026-08-01T00:00:00.000Z"
-                }},
-                "next_action": "Read {next_action_path} then continue."
-            }}"#,
-            rationale_path = secret_escaped,
-            next_action_path = secret_escaped,
-        );
-        write(&root, ".bee/state.json", &state);
-
-        let st = build_state();
-        let project = register(&st, &root, "top-security-scrub");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(!body.contains(&secret), "the board leaked an absolute path embedded in free text: {body}");
-        assert!(body.contains("src/secret.rs"), "the reduced relative path should still read: {body}");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6512,7 +6115,12 @@ mod bee_route_tests {
     /// six pre-existing read-only tests each use a fixture with no handoff
     /// file, so they would pass green without the handoff reader ever
     /// running. This one exercises it: the reader must open the file, parse
-    /// it and scrub it without ever writing back to it.
+    /// it and scrub it without ever writing back to it. board-declutter
+    /// retired the board's own attention panel, which used to be this
+    /// test's proof the reader actually ran (rather than short-circuiting)
+    /// — `mdview_core::bee::compute_attention_items` still surfaces a pause
+    /// handoff and stays covered by its own unit tests there; this test now
+    /// only proves the read-only invariant over a populated fixture.
     #[tokio::test]
     async fn board_reading_is_read_only_with_a_populated_handoff_present() {
         let root = fresh_root("handoff-read-only");
@@ -6537,9 +6145,6 @@ mod bee_route_tests {
 
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = body_string(resp).await;
-        assert!(body.contains("parked"), "the pause handoff should surface as an attention item: body missing expected text");
 
         let after = snapshot_tree(&root);
         assert_eq!(
@@ -6596,7 +6201,10 @@ mod bee_route_tests {
     /// green without the review-candidates reader ever running. This one
     /// exercises it: the reader must open the file, parse it and join it
     /// (unreviewed, since no `.bee/reviews/` session exists here) without
-    /// ever writing back to it.
+    /// ever writing back to it. board-declutter retired the board's own
+    /// attention panel, which used to be this test's proof the reader
+    /// actually ran (rather than short-circuiting) — this test now only
+    /// proves the read-only invariant over a populated fixture.
     #[tokio::test]
     async fn board_reading_is_read_only_with_a_populated_review_candidates_file_present() {
         let root = fresh_root("review-candidates-read-only");
@@ -6618,12 +6226,6 @@ mod bee_route_tests {
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = body_string(resp).await;
-        assert!(
-            body.contains("high-risk"),
-            "the unreviewed high-risk candidate should surface as an attention item: body missing expected text"
-        );
-
         let after = snapshot_tree(&root);
         assert_eq!(
             before, after,
@@ -6640,7 +6242,10 @@ mod bee_route_tests {
     /// would pass green without the review-session reader ever running.
     /// This one exercises it: the reader must open the directory, parse
     /// the session and count its open P1 finding without ever writing back
-    /// to it.
+    /// to it. board-declutter retired the board's own attention panel,
+    /// which used to be this test's proof the reader actually ran (rather
+    /// than short-circuiting) — this test now only proves the read-only
+    /// invariant over a populated fixture.
     #[tokio::test]
     async fn board_reading_is_read_only_with_a_populated_review_session_present() {
         let root = fresh_root("review-session-read-only");
@@ -6662,12 +6267,6 @@ mod bee_route_tests {
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let body = body_string(resp).await;
-        assert!(
-            body.contains("P1"),
-            "the open P1 finding should surface as an attention item: body missing expected text"
-        );
-
         let after = snapshot_tree(&root);
         assert_eq!(
             before, after,
@@ -6684,6 +6283,10 @@ mod bee_route_tests {
     /// without the capture-queue reader ever running. This one exercises
     /// it: the reader must open the file, parse it and net the waiting
     /// stubs against any flush without ever writing back to it.
+    /// board-declutter retired the board's own attention panel, which used
+    /// to be this test's proof the reader actually ran (rather than
+    /// short-circuiting) — this test now only proves the read-only
+    /// invariant over a populated fixture.
     #[tokio::test]
     async fn board_reading_is_read_only_with_a_populated_capture_queue_present() {
         let root = fresh_root("capture-queue-read-only");
@@ -6704,12 +6307,6 @@ mod bee_route_tests {
 
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
-
-        let body = body_string(resp).await;
-        assert!(
-            body.contains("knowledge-debt"),
-            "the waiting capture stub should surface as a knowledge-debt attention item: body missing expected text"
-        );
 
         let after = snapshot_tree(&root);
         assert_eq!(
@@ -7153,11 +6750,17 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    // ── bee-board-ux-3: "running now" — bbp-16 folds this into the
+    // ── bee-board-ux-3: "running now" — bbp-16 folded this into the
     // "Working on now" card's own "Running now" subsection
-    // (`bee_running_workers_section`, `views.rs`); the assertions below are
-    // otherwise unchanged, since that row-level markup itself did not
-    // change, only its home. ──────────────────────────
+    // (`bee_running_workers_section`, `views.rs`); board-declutter retires
+    // that whole card, `bee_running_workers_section` included, so the board
+    // no longer renders a live worker's cell link, its discrepancy note, or
+    // a flagged-unknown-cell note anywhere — the tests that pinned that
+    // row-level markup retire with it. `snapshot.running_workers` itself
+    // (`mdview_core::bee`) is untouched and still feeds the feature detail
+    // page's own Sub-agents tab; what survives below proves the D7 buckets
+    // stay unaffected by worker presence and that reading a fixture with
+    // live workers/sessions is still read-only and leak-free. ──────
 
     fn state_json_with_workers(workers_json: &str) -> String {
         format!(r#"{{"phase":"exploring","feature":"demo","mode":"standard","workers":[{workers_json}]}}"#)
@@ -7165,74 +6768,6 @@ mod bee_route_tests {
 
     fn worker_json(nickname: &str, cell: &str, tier: &str, status: &str) -> String {
         format!(r#"{{"nickname":"{nickname}","cell":"{cell}","tier":"{tier}","status":"{status}"}}"#)
-    }
-
-    /// (happy) A worker names a cell the store already calls `claimed`, and
-    /// a session sharing the worker's nickname is live: the running section
-    /// must show that worker's nickname, and it must link the cell it names
-    /// to that cell's own detail page.
-    #[tokio::test]
-    async fn running_worker_with_live_session_links_to_its_cell_detail_page() {
-        let root = fresh_root("running-happy");
-        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "claimed", &[], "w1"));
-        write(
-            &root,
-            ".bee/state.json",
-            &state_json_with_workers(&worker_json("kf1-worker", "kf-1", "generation", "running")),
-        );
-        write(
-            &root,
-            ".bee/sessions/kf1-worker.json",
-            &session_json("kf1-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "running-happy");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("Running now"), "{body}");
-        assert!(body.contains("kf1-worker"), "worker nickname must appear: {body}");
-        assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/cell/kf-1\"", project.id)),
-            "the named cell must link to its own detail page: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (happy) A worker names a cell the store still calls `open` (the
-    /// exact shape reported live: a claim never made it into the cell
-    /// file). The running section must state that disagreement explicitly
-    /// rather than hiding it.
-    #[tokio::test]
-    async fn running_worker_on_still_open_cell_shows_discrepancy_note() {
-        let root = fresh_root("running-discrepancy");
-        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "open", &[], "w1"));
-        write(
-            &root,
-            ".bee/state.json",
-            &state_json_with_workers(&worker_json("kf1-worker", "kf-1", "generation", "running")),
-        );
-        write(
-            &root,
-            ".bee/sessions/kf1-worker.json",
-            &session_json("kf1-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "running-discrepancy");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            body.contains("store still calls kf-1 open"),
-            "the page must say the store still calls this cell open: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
     }
 
     /// (happy) The presence of a worker naming a still-open cell must never
@@ -7272,102 +6807,6 @@ mod bee_route_tests {
         assert!(
             body.contains("0/1 cell done"),
             "an open cell must keep reading as not-done even though a live worker names it: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (edge) No workers and no live session: one quiet line, not an empty
-    /// bordered panel.
-    #[tokio::test]
-    async fn no_workers_and_no_live_session_renders_quiet_line() {
-        let root = fresh_root("running-quiet");
-        write(&root, ".bee/cells/a.json", &cell_json("a", "open", &[], "w1"));
-
-        let st = build_state();
-        let project = register(&st, &root, "running-quiet");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("Nothing running right now."), "{body}");
-        assert!(
-            !body.contains("class=\"fg-card bee-panel bee-running\""),
-            "bbp-16 retired the standalone running-now section entirely — this class must never render again, from any state",
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (edge) A worker names a cell id that does not exist anywhere in the
-    /// live cell store — it must be flagged, not silently dropped, and the
-    /// page must still render.
-    #[tokio::test]
-    async fn worker_naming_nonexistent_cell_is_flagged_and_page_still_renders() {
-        let root = fresh_root("running-ghost-cell");
-        write(
-            &root,
-            ".bee/state.json",
-            &state_json_with_workers(&worker_json("ghost-worker", "does-not-exist", "generation", "running")),
-        );
-        write(
-            &root,
-            ".bee/sessions/ghost-worker.json",
-            &session_json("ghost-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "running-ghost-cell");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(body.contains("ghost-worker"), "{body}");
-        assert!(
-            body.contains("store has no cell named does-not-exist"),
-            "a worker naming an unknown cell must be flagged, not dropped: {body}"
-        );
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// (edge) A worker whose matching session has gone stale must not be
-    /// presented as running.
-    #[tokio::test]
-    async fn worker_with_stale_session_not_presented_as_running() {
-        let root = fresh_root("running-stale-session");
-        write(&root, ".bee/cells/kl-1.json", &cell_json("kl-1", "claimed", &[], "w1"));
-        write(
-            &root,
-            ".bee/state.json",
-            &state_json_with_workers(&worker_json("kl1-worker", "kl-1", "generation", "running")),
-        );
-        // 2 hours old: stale (session_live threshold is 30 minutes).
-        write(
-            &root,
-            ".bee/sessions/kl1-worker.json",
-            &session_json("kl1-worker", &rfc3339_minutes_ago(120), "/home/x/t.jsonl", "main", "startup"),
-        );
-
-        let st = build_state();
-        let project = register(&st, &root, "running-stale-session");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
-        assert!(
-            body.contains("Nothing running right now."),
-            "a worker backed only by a stale session must not be presented as running: {body}"
-        );
-        // The Sessions panel legitimately still lists a stale session
-        // (unrelated pre-existing behavior, now folded into
-        // `bee_sessions_panel`); what must be absent is any worker card for
-        // it in the working-now card's own "Running now" subsection — and,
-        // per bbp-16, the standalone running-now section's class must never
-        // render again at all.
-        assert!(
-            !body.contains("class=\"fg-card bee-panel bee-running\""),
-            "a stale-session worker must not produce a running panel: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -14917,13 +14356,9 @@ mod bee_route_tests {
             "the board must declare a narrow-screen breakpoint: {style}"
         );
         for grid_class in [
-            ".bee-stats",
-            ".bee-now-grid",
             ".bee-hub__groups",
-            ".bee-velocity__lists",
             ".bee-panels",
             ".bee-done-grid",
-            ".bee-stepper",
         ] {
             assert!(
                 style.contains(grid_class),

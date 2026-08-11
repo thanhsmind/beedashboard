@@ -4,10 +4,9 @@
 
 use mdview_core::bee::{
     feature_cell_span, list_archived_feature_dirs, read_archived_cells, BeeApprovedGates,
-    BeeAttentionItem, BeeAttentionSeverity, BeeBacklog, BeeBuckets, BeeCell, BeeConfig,
-    BeeDecisionSummary, BeeFeaturePhase, BeePbi, BeeReservation, BeeReview, BeeReviewStatus,
-    BeeRunningWorker, BeeShippedFeature, BeeSnapshot, BeeState, BeeTierMix, BeeWorkspace,
-    BeeWorktree,
+    BeeBacklog, BeeBuckets, BeeCell, BeeConfig, BeeDecisionSummary, BeeFeaturePhase, BeePbi,
+    BeeReservation, BeeReview, BeeReviewStatus, BeeRunningWorker, BeeShippedFeature, BeeSnapshot,
+    BeeState, BeeTierMix, BeeWorkspace, BeeWorktree,
 };
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
@@ -1276,19 +1275,21 @@ pub fn terminal_down_page(project: &Project) -> String {
 /// `BeeSnapshot`'s public fields), so nothing further is redacted here —
 /// this view only escapes for HTML safety.
 ///
-/// bbp-16 closes D2's "nothing lost" promise and retires the last piece of
-/// pre-redesign markup. The standalone `{running}` and `{worktrees}` slots
-/// this format used to carry are gone: a live worker's cell link, its
-/// store-disagreement note, and an unknown/stale-session worker's handling
-/// now live inside [`bee_working_now_card`] (see its own doc comment) —
-/// rendering the same worker twice, once in its own section and once in the
-/// working-now card, is exactly the duplication the board's standing rule
-/// forbids. Worktrees, and `.bee/runtime/workspaces/*.json` alongside them,
-/// now fold into [`bee_sessions_panel`] within `{panels}`. Delivery speed
-/// (`{velocity}`) keeps its own block, unmoved. Process health — file-lock
-/// contention, the model-tier spread and the recorded gate-bypass setting —
-/// is new in `{panels}` too ([`bee_process_health_panel`]), and now also
-/// carries `read_errors`: a store that failed to read one of its own files
+/// board-declutter drops the pre-hub top-of-board stack entirely: the
+/// lifecycle stepper, the headline KPI tiles, the Ship velocity section, the
+/// Needs attention panel and the Working-on-now card (its own Running now
+/// subsection included) are gone, along with the view functions and CSS
+/// that only ever rendered them — `mdview_core`'s readers for that data
+/// (velocity, attention, running workers, the D7 bucket counts) are
+/// untouched; the feature detail page and other consumers still read them
+/// from `BeeSnapshot`, this page just stops rendering them. `{top}` — now
+/// just the page title and "Read <as-of>" line — is followed directly by
+/// [`bee_feature_hub_section`] as this page's first main section. Worktrees,
+/// and `.bee/runtime/workspaces/*.json` alongside them, fold into
+/// [`bee_sessions_panel`] within `{panels}`, unchanged by this cell. Process
+/// health — file-lock contention, the model-tier spread and the recorded
+/// gate-bypass setting — stays in `{panels}` too ([`bee_process_health_panel`]),
+/// carrying `read_errors`: a store that failed to read one of its own files
 /// is a process-health signal in its own right, not a separate footer.
 pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
     let body = format!(
@@ -1296,7 +1297,6 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
 {style}
 <main class="fg-page bee-hub-theme">
   {top}
-  {velocity}
   {board}
   {finished}
   {panels}
@@ -1306,8 +1306,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
             name = esc(&project.name)
         )),
         style = bee_hub_style(),
-        top = bee_board_top(project, snapshot),
-        velocity = bee_velocity_section(&project.id, snapshot),
+        top = bee_board_top(project),
         board = bee_feature_hub_section(project, snapshot),
         finished = bee_finished_section(&project.id, &snapshot.shipped),
         panels = bee_panels_section(snapshot),
@@ -1412,16 +1411,6 @@ html[data-scheme="dark"] .bee-hub-theme {{
 .bee-cell__detail {{ margin-top: var(--space-1); font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
 .bee-cell__detail summary {{ cursor: pointer; color: var(--color-text); }}
 .bee-cell__detail p {{ margin: var(--space-1) 0 0 0; overflow-wrap: anywhere; }}
-.bee-velocity {{ margin-bottom: var(--space-4); }}
-.bee-velocity__head {{ margin: 0 0 var(--space-3) 0; }}
-.bee-stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: var(--space-3); margin-bottom: var(--space-4); }}
-.bee-stat {{ padding: var(--space-3); align-items: flex-start; gap: var(--space-1); }}
-.bee-stat__value {{ font-family: var(--type-heading-font); font-size: var(--type-figure-lg-size); line-height: var(--type-figure-lg-leading); }}
-.bee-stat--empty .bee-stat__value {{ color: var(--color-text-subtle); }}
-.bee-stat__label {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); }}
-.bee-velocity__lists {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4); }}
-.bee-velocity__subhead {{ margin: 0 0 var(--space-2) 0; font-size: var(--type-heading-sm-size); }}
-.bee-velocity__open-list {{ margin: 0; padding-left: var(--space-4); color: var(--color-text-subtle); }}
 .bee-panels {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }}
 .bee-panel__head {{ display: flex; align-items: center; gap: var(--space-2); margin: 0; }}
 .bee-panel__subhead {{ margin: var(--space-3) 0 var(--space-2) 0; font-size: var(--type-heading-sm-size); }}
@@ -1429,22 +1418,8 @@ html[data-scheme="dark"] .bee-hub-theme {{
 .bee-panel__list {{ display: flex; flex-direction: column; gap: var(--space-2); }}
 .bee-severity--p1 {{ font-weight: var(--weight-strong); }}
 .bee-asof {{ color: var(--color-text-subtle); font-size: var(--type-body-sm-size); }}
-.bee-stepper {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); list-style: none; margin: 0 0 var(--space-4) 0; padding: 0; }}
-.bee-step {{ display: flex; flex-direction: column; gap: var(--space-1); padding: var(--space-3); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--card-radius); background: var(--color-surface); }}
-.bee-step__mark {{ display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: var(--radius-pill); font-size: var(--type-caption-size); font-weight: var(--weight-strong); background: var(--color-surface-sunken); color: var(--color-text-subtle); }}
-.bee-step__label {{ font-weight: var(--weight-strong); color: var(--color-text); }}
-.bee-step__note {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); }}
-.bee-step--done .bee-step__mark {{ background: var(--color-success-tint); color: var(--color-success); }}
-.bee-step--current {{ border-color: var(--color-action); }}
-.bee-step--current .bee-step__mark {{ background: var(--color-info-tint); color: var(--color-info); }}
-.bee-now-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-4); margin-bottom: var(--space-4); }}
-.bee-working-now {{ display: flex; flex-direction: column; gap: var(--space-2); }}
 .bee-progress {{ height: 8px; border-radius: var(--radius-pill); background: var(--color-surface-sunken); overflow: hidden; }}
 .bee-progress__bar {{ height: 100%; background: var(--color-success); }}
-.bee-next-action {{ padding: var(--space-2) var(--space-3); }}
-.bee-attention__item--danger {{ border-color: var(--color-danger); background: var(--color-danger-tint); }}
-.bee-attention__item--warning {{ border-color: var(--color-warning); background: var(--color-warning-tint); }}
-.bee-attention__action {{ font-style: italic; }}
 .bee-done-summary:focus-visible {{ outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }}
 /* feature-hub-2: the feature detail page's own header, chip row and
    CSS-only tab pattern — no JS framework, same checkbox/radio-plus-label
@@ -1500,13 +1475,9 @@ html[data-scheme="dark"] .bee-hub-theme {{
    sideways — a genuinely wide container (the agent board's columns) keeps
    its own `overflow-x` above instead of forcing the page wider. */
 @media (max-width: 700px) {{
-  .bee-stats,
-  .bee-now-grid,
   .bee-hub__groups,
-  .bee-velocity__lists,
   .bee-panels,
-  .bee-done-grid,
-  .bee-stepper {{
+  .bee-done-grid {{
     grid-template-columns: 1fr;
   }}
 }}
@@ -1514,30 +1485,20 @@ html[data-scheme="dark"] .bee-hub-theme {{
     )
 }
 
-/// D5's fixed top-of-board order, rebuilt in this cell (bbp-5): a header
-/// line naming the project and when this snapshot was read, then the
-/// lifecycle stepper, the headline numbers, and finally "working on now"
-/// beside "needs attention". Everything below this — `{running}` onward in
-/// [`bee_board_page`] — is untouched, existing markup; this function only
-/// replaces the old two-chip pagehead.
-fn bee_board_top(project: &Project, snapshot: &BeeSnapshot) -> String {
+/// The board's own header: the project name and when this snapshot was
+/// read. board-declutter retires the rest of what this used to carry — the
+/// lifecycle stepper, the headline KPI tiles, and the working-on-now/
+/// needs-attention row — leaving this a plain page header, immediately
+/// followed by [`bee_feature_hub_section`] as the page's first main
+/// section.
+fn bee_board_top(project: &Project) -> String {
     format!(
         r#"<div class="fg-pagehead">
     <h2 class="fg-pagehead__title">{name}</h2>
     <div class="fg-pagehead__aside"><span class="bee-asof">Read {asof}</span></div>
-  </div>
-  {stepper}
-  {kpis}
-  <div class="bee-now-grid">
-    {working_now}
-    {attention}
   </div>"#,
         name = esc(&project.name),
         asof = esc(&bee_board_asof()),
-        stepper = bee_lifecycle_stepper(snapshot.state.as_ref()),
-        kpis = bee_headline_kpis(snapshot),
-        working_now = bee_working_now_card(&project.id, snapshot),
-        attention = bee_attention_panel(&snapshot.attention),
     )
 }
 
@@ -1555,365 +1516,6 @@ fn bee_board_asof() -> String {
         day = now.day(),
         hour = now.hour(),
         minute = now.minute(),
-    )
-}
-
-/// The lifecycle stepper (D5/D7): the four gates `.bee/state.json` actually
-/// tracks — context, shape, execution, review — each rendered as one step.
-/// A step is `done` whenever its gate is `approved_gates.<gate> ==
-/// Some(true)`, full stop — `gate_revoked_at` is bee's append-style
-/// historical anchor for advisor staleness, not a current-state flag, and
-/// it never overrides a currently-true `approved_gates` entry (a gate
-/// revoked yesterday and re-approved today is approved, today's truth
-/// beating yesterday's history). `current` is the first step not done, in
-/// gate order. `gate_revoked_at` only changes what an undone step says: an
-/// undone gate that carries a revocation reads as "approved, then
-/// revoked" — it was taken away, not merely never reached — while an
-/// undone gate with no revocation on record reads as "not yet approved".
-/// The review step's undone note is always the D7 wording instead —
-/// independent review is something a human invokes, never automatic
-/// pending work — regardless of which of those two histories it carries.
-/// No `state.json` at all renders one honest line rather than four steps
-/// all reading "not yet approved", which would misstate "we have no
-/// record" as "record says no".
-fn bee_lifecycle_stepper(state: Option<&BeeState>) -> String {
-    let Some(state) = state else {
-        return r#"<p class="fg-empty">No lifecycle data recorded yet.</p>"#.to_string();
-    };
-
-    const GATES: [(&str, &str); 4] = [
-        ("context", "Explore"),
-        ("shape", "Shape"),
-        ("execution", "Execute"),
-        ("review", "Independent review"),
-    ];
-
-    let approved_flag = |key: &str| -> bool {
-        state
-            .approved_gates
-            .as_ref()
-            .and_then(|g| match key {
-                "context" => g.context,
-                "shape" => g.shape,
-                "execution" => g.execution,
-                "review" => g.review,
-                _ => None,
-            })
-            .unwrap_or(false)
-    };
-    let revoked_flag = |key: &str| -> bool {
-        state
-            .gate_revoked_at
-            .as_ref()
-            .and_then(|g| match key {
-                "context" => g.context.as_deref(),
-                "shape" => g.shape.as_deref(),
-                "execution" => g.execution.as_deref(),
-                "review" => g.review.as_deref(),
-                _ => None,
-            })
-            .is_some()
-    };
-
-    let done: Vec<bool> = GATES.iter().map(|(key, _)| approved_flag(key)).collect();
-    let current_idx = done.iter().position(|&d| !d);
-
-    let mut items = String::new();
-    for (i, (key, label)) in GATES.iter().enumerate() {
-        let is_done = done[i];
-        let is_current = current_idx == Some(i);
-        let is_review = *key == "review";
-        // Revocation only tells a story about an *undone* gate: was it
-        // taken away (revoked) or has it simply never gotten there. A gate
-        // that is currently approved ignores `gate_revoked_at` entirely —
-        // see the doc comment above.
-        let was_revoked = !is_done && revoked_flag(key);
-
-        let state_cls = if is_done {
-            "bee-step--done"
-        } else if is_current {
-            "bee-step--current"
-        } else {
-            "bee-step--pending"
-        };
-        let mark = if is_done {
-            "\u{2713}".to_string()
-        } else if is_current {
-            "\u{25b6}".to_string()
-        } else {
-            (i + 1).to_string()
-        };
-        let note = if is_done {
-            "Approved".to_string()
-        } else if is_review {
-            "Runs only when you invoke it — never automatic.".to_string()
-        } else if was_revoked {
-            "Approved, then revoked.".to_string()
-        } else {
-            "Not yet approved.".to_string()
-        };
-
-        items.push_str(&format!(
-            r#"<li class="bee-step {state_cls}" data-step="{key}"><span class="bee-step__mark">{mark}</span><span class="bee-step__label">{label}</span><span class="bee-step__note">{note}</span></li>"#,
-            state_cls = state_cls,
-            key = key,
-            mark = esc(&mark),
-            label = esc(label),
-            note = esc(&note),
-        ));
-    }
-
-    format!(r#"<ol class="bee-stepper">{items}</ol>"#, items = items)
-}
-
-/// The headline numbers row (D5): the four D7 bucket counts plus how many
-/// features have shipped, reusing [`bee_stat_card`] so every tile matches
-/// the ship-velocity stats below it. Each is a real count, never a "nothing
-/// to measure" absence — a bucket genuinely holding zero cells is honest
-/// data, not the missing-data case `bee_stat_card`'s `None` branch exists
-/// for.
-fn bee_headline_kpis(snapshot: &BeeSnapshot) -> String {
-    let b = &snapshot.buckets;
-    format!(
-        r#"<div class="bee-stats">
-    {doing}
-    {waiting}
-    {stuck}
-    {done}
-    {shipped}
-  </div>"#,
-        doing = bee_stat_card("Doing", Some(b.doing.len().to_string())),
-        waiting = bee_stat_card("Waiting", Some(b.waiting.len().to_string())),
-        stuck = bee_stat_card("Stuck", Some(b.stuck.len().to_string())),
-        done = bee_stat_card("Done", Some(b.done.len().to_string())),
-        shipped = bee_stat_card("Shipped features", Some(snapshot.shipped.len().to_string())),
-    )
-}
-
-/// "Working on now" (D5): the active feature named by `state.feature` only
-/// — never derived from cell data, which would risk naming the same
-/// feature a second time next to the Done section below (see
-/// `board_renders_finished_work_in_exactly_one_place`). Carries the route's
-/// rationale, progress over this feature's own live (non-dropped) cells
-/// with the numerator and denominator both drawn from the D7 buckets —
-/// which already exclude `dropped` and unrecognized statuses (D8) — and the
-/// recorded next action. No active feature, no route, no live cells or no
-/// next action each render their own honest line rather than a fabricated
-/// zero or a hidden section.
-///
-/// bbp-16 retires the standalone "Running now" section
-/// (`bee_running_now_section`, bee-board-ux-3) into this card's own
-/// `Running now` subsection, via [`bee_running_workers_section`] — the
-/// live-worker half of what that section carried (a live worker's own cell
-/// link, an explicit store/worker disagreement, a worker naming an unknown
-/// cell flagged rather than dropped, and a worker on a stale session never
-/// presented as running: `compute_running_workers`,
-/// `mdview_core::bee`, already filters that last case out of
-/// `snapshot.running_workers` entirely). The live-session half of the old
-/// section is not carried here — every session, live or stale, already has
-/// a home in the Sessions panel (`bee_sessions_panel`) below. This
-/// subsection renders unconditionally, active feature or not: "what is
-/// running" is a cluster-wide question, independent of which single
-/// feature (if any) is currently active.
-fn bee_working_now_card(project_id: &str, snapshot: &BeeSnapshot) -> String {
-    let running_html = bee_running_workers_section(project_id, &snapshot.running_workers);
-
-    let feature = snapshot.state.as_ref().and_then(|s| s.feature.as_deref());
-    let Some(feature) = feature else {
-        return format!(
-            r#"<section class="fg-card bee-panel bee-working-now">
-  <h3 class="bee-panel__head">Working on now</h3>
-  <p class="fg-empty">No feature is currently active.</p>
-  <h4 class="bee-panel__subhead">Running now</h4>
-  {running_html}
-</section>"#,
-            running_html = running_html,
-        );
-    };
-
-    let rationale = snapshot
-        .state
-        .as_ref()
-        .and_then(|s| s.route.as_ref())
-        .and_then(|r| r.rationale.as_deref())
-        .filter(|r| !r.is_empty());
-    let rationale_html = match rationale {
-        Some(r) => format!(r#"<p class="bee-cell__meta">{}</p>"#, esc(r)),
-        None => r#"<p class="fg-empty">No route rationale recorded.</p>"#.to_string(),
-    };
-
-    let doing = snapshot.buckets.doing.iter().filter(|c| c.feature == feature).count();
-    let waiting = snapshot.buckets.waiting.iter().filter(|c| c.feature == feature).count();
-    let stuck = snapshot.buckets.stuck.iter().filter(|c| c.feature == feature).count();
-    let done = snapshot.buckets.done.iter().filter(|c| c.feature == feature).count();
-    let total = doing + waiting + stuck + done;
-
-    let progress_html = if total == 0 {
-        r#"<p class="fg-empty">No live cells recorded for this feature yet.</p>"#.to_string()
-    } else {
-        let percent = (done * 100) / total;
-        format!(
-            r#"<div class="bee-progress"><div class="bee-progress__bar" style="width: {percent}%"></div></div><p class="bee-cell__meta">{done}/{total} cell{plural} done</p>"#,
-            percent = percent,
-            done = done,
-            total = total,
-            plural = if total == 1 { "" } else { "s" },
-        )
-    };
-
-    let next_action = snapshot
-        .state
-        .as_ref()
-        .and_then(|s| s.next_action.as_deref())
-        .filter(|n| !n.is_empty());
-    let next_action_html = match next_action {
-        Some(n) => format!(
-            r#"<div class="fg-card fg-card--sunken bee-next-action"><div class="fg-card__title">Next action</div><p>{}</p></div>"#,
-            esc(n)
-        ),
-        None => r#"<p class="fg-empty">No next action recorded.</p>"#.to_string(),
-    };
-
-    format!(
-        r#"<section class="fg-card bee-panel bee-working-now">
-  <h3 class="bee-panel__head">Working on now · <a href="/p/{pid}/_bee/feature/{feature_href}">{feature}</a></h3>
-  {rationale_html}
-  {progress_html}
-  {next_action_html}
-  <h4 class="bee-panel__subhead">Running now</h4>
-  {running_html}
-</section>"#,
-        pid = esc(project_id),
-        feature_href = esc(feature),
-        feature = esc(feature),
-        rationale_html = rationale_html,
-        progress_html = progress_html,
-        next_action_html = next_action_html,
-        running_html = running_html,
-    )
-}
-
-/// The working-now card's "Running now" subsection body (bbp-16) — every
-/// worker `state.json` names whose own session is currently live
-/// (`snapshot.running_workers`, already joined and session-verified by
-/// `mdview_core::bee::read_snapshot`), each linking to the cell it names.
-/// Formerly `bee_running_now_section`'s worker half, unchanged in content:
-/// only its home moved. Empty renders one quiet line, matching every other
-/// honest-empty-state convention on this board, never an empty bordered
-/// list.
-fn bee_running_workers_section(project_id: &str, workers: &[BeeRunningWorker]) -> String {
-    if workers.is_empty() {
-        return r#"<p class="fg-empty">Nothing running right now.</p>"#.to_string();
-    }
-    let mut rows = String::new();
-    for w in workers {
-        rows.push_str(&bee_running_worker_row(project_id, w));
-    }
-    format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
-}
-
-/// A `BeeAttentionSeverity`'s chip tone — reuses the same `fg-chip--*`
-/// tones the rest of the board already uses (`fg-chip--warning`,
-/// `fg-chip--danger`), never inventing a new palette. `Serious` and
-/// `Critical` share the `danger` tone; `Critical` additionally carries
-/// `bee-severity--p1`'s bold weight (already used for P1 backlog findings)
-/// so the heaviest items are visually heavier, not just first in order.
-fn bee_attention_tone(sev: BeeAttentionSeverity) -> &'static str {
-    match sev {
-        BeeAttentionSeverity::Warning => "warning",
-        BeeAttentionSeverity::Serious => "danger",
-        BeeAttentionSeverity::Critical => "danger",
-    }
-}
-
-/// The plain-English label for a `BeeAttentionSeverity`, shown inside its
-/// chip (D1 — English labels throughout).
-fn bee_attention_severity_label(sev: BeeAttentionSeverity) -> &'static str {
-    match sev {
-        BeeAttentionSeverity::Warning => "warning",
-        BeeAttentionSeverity::Serious => "serious",
-        BeeAttentionSeverity::Critical => "critical",
-    }
-}
-
-/// D6's "needs attention" panel: `snapshot.attention` rendered verbatim, in
-/// the order `compute_attention_items` (`mdview_core::bee`) already sorted
-/// it — this view never recomputes or reorders the list, only formats it.
-/// An empty list renders one honest line, never an empty bordered panel.
-fn bee_attention_panel(items: &[BeeAttentionItem]) -> String {
-    if items.is_empty() {
-        return r#"<section class="fg-card bee-panel bee-attention">
-  <h3 class="bee-panel__head">Needs attention</h3>
-  <p class="fg-empty">Nothing needs attention right now.</p>
-</section>"#
-            .to_string();
-    }
-
-    let mut rows = String::new();
-    for item in items {
-        let tone = bee_attention_tone(item.severity);
-        let title_cls = if item.severity == BeeAttentionSeverity::Critical {
-            " bee-severity--p1"
-        } else {
-            ""
-        };
-        rows.push_str(&format!(
-            r#"<div class="fg-card bee-cell bee-attention__item bee-attention__item--{tone}"><div class="fg-card__title{title_cls}"><span class="fg-chip fg-chip--{tone}">{sev_label}</span> {title}</div><div class="bee-cell__meta">{detail}</div><div class="bee-cell__meta bee-attention__action">{action}</div></div>"#,
-            tone = tone,
-            title_cls = title_cls,
-            sev_label = bee_attention_severity_label(item.severity),
-            title = esc(&item.title),
-            detail = esc(&item.detail),
-            action = esc(&item.suggested_action),
-        ));
-    }
-
-    format!(
-        r#"<section class="fg-card bee-panel bee-attention">
-  <h3 class="bee-panel__head">Needs attention <span class="fg-chip fg-chip--neutral">{count}</span></h3>
-  <div class="bee-panel__list">{rows}</div>
-</section>"#,
-        count = items.len(),
-        rows = rows,
-    )
-}
-
-/// One [`bee_running_workers_section`] worker row: the cell it names (linked
-/// to that cell's detail page when the cell was actually found; plain text
-/// when it names a cell that does not exist, per must-have "flagged, not
-/// dropped") plus, when the store disagrees with the running process
-/// (`w.discrepancy`), an explicit note naming what the store still says.
-/// bbp-16: this row's own markup is unchanged from the retired
-/// `bee_running_now_section` — only its caller moved.
-fn bee_running_worker_row(project_id: &str, w: &BeeRunningWorker) -> String {
-    let cell_ref = match (&w.cell, w.cell_found) {
-        (Some(cid), true) => format!(
-            r#"<a href="/p/{pid}/_bee/cell/{cid_href}">{cid}</a>"#,
-            pid = esc(project_id),
-            cid_href = esc(cid),
-            cid = esc(cid),
-        ),
-        (Some(cid), false) => esc(cid),
-        (None, _) => "no cell named".to_string(),
-    };
-    let discrepancy = if !w.discrepancy {
-        String::new()
-    } else {
-        let note = match (&w.cell, w.cell_found, w.cell_status.as_deref()) {
-            (Some(cid), true, Some(status)) => {
-                format!("store still calls {cid} {status}", cid = esc(cid), status = esc(status))
-            }
-            (Some(cid), false, _) => format!("store has no cell named {cid}", cid = esc(cid)),
-            _ => "worker names no cell".to_string(),
-        };
-        format!(r#"<div class="bee-cell__meta"><span class="fg-chip fg-chip--danger">{note}</span></div>"#)
-    };
-    format!(
-        r#"<div class="fg-card bee-cell"><div class="fg-card__title">{nickname}</div><div class="bee-cell__meta">{cell_ref} · {age}</div>{discrepancy}</div>"#,
-        nickname = esc(&w.nickname),
-        cell_ref = cell_ref,
-        age = esc(&bee_relative_minutes(w.heartbeat_age_minutes)),
-        discrepancy = discrepancy,
     )
 }
 
@@ -2009,139 +1611,6 @@ fn bee_workspaces_body(workspaces: &[BeeWorkspace]) -> String {
         ));
     }
     format!(r#"<div class="bee-panel__list">{rows}</div>"#, rows = rows)
-}
-
-/// Ship-velocity section (D10/D11 downstream): the three headline numbers the
-/// user asked for — "1 ngày ship được bao nhiêu, 1 tuần ship được bao nhiêu" —
-/// in plain language, followed by the list of features still open — the
-/// short thing worth seeing here. The shipped-feature list used to render a
-/// second time in this section too (one uncapped `fg-card` per feature,
-/// stacked in a narrow column — 23 cards running off the screen on the real
-/// beehive store, the thing a user complained about). That duplicate is
-/// gone; the shipped/finished list now lives exactly once, collapsed by
-/// default, in the board's Done section (`bee_done_section`) below the D7
-/// buckets. Rendered above the four D7 buckets on the same page. A project
-/// with nothing shipped yet gets an honest empty state instead of zeroed-out
-/// or NaN numbers — the headline stats are computed only over
-/// shipped-and-timed features (see `BeeVelocity`), so a `None` here means
-/// "not enough data", never "zero".
-fn bee_velocity_section(project_id: &str, snapshot: &BeeSnapshot) -> String {
-    let open_features = bee_open_feature_names(snapshot);
-
-    if snapshot.shipped.is_empty() {
-        return format!(
-            r#"<section class="fg-card bee-velocity">
-  <h3 class="bee-velocity__head">Ship velocity</h3>
-  <p class="fg-empty">No features have shipped yet — nothing to measure.</p>
-  <div class="bee-velocity__lists">
-    {open}
-  </div>
-</section>"#,
-            open = bee_open_features_list(project_id, &open_features),
-        );
-    }
-
-    let v = &snapshot.velocity;
-    let stats = format!(
-        r#"<div class="bee-stats">
-    {rate_day}
-    {rate_week}
-    {cycle}
-  </div>"#,
-        rate_day = bee_stat_card("Shipped per working day", bee_fmt_rate(v.features_per_active_day)),
-        rate_week = bee_stat_card("Shipped per week", bee_fmt_rate(v.features_per_week)),
-        cycle = bee_stat_card("Typical time to finish", bee_fmt_hours(v.median_cycle_time_hours)),
-    );
-
-    format!(
-        r#"<section class="fg-card bee-velocity">
-  <h3 class="bee-velocity__head">Ship velocity</h3>
-  {stats}
-  <div class="bee-velocity__lists">
-    {open}
-  </div>
-</section>"#,
-        stats = stats,
-        open = bee_open_features_list(project_id, &open_features),
-    )
-}
-
-/// One headline stat card. `value` is already formatted for display;
-/// `None` renders an honest "—" (not enough data yet), never a `0` or a
-/// division artifact — the caller (`bee_fmt_rate`/`bee_fmt_hours`) is the
-/// only place a `None` is manufactured, and only from a `None`/non-finite
-/// upstream value.
-fn bee_stat_card(label: &str, value: Option<String>) -> String {
-    match value {
-        Some(v) => format!(
-            r#"<div class="fg-card bee-stat"><div class="bee-stat__value">{v}</div><div class="bee-stat__label">{label}</div></div>"#,
-            v = esc(&v),
-            label = esc(label),
-        ),
-        None => format!(
-            r#"<div class="fg-card bee-stat bee-stat--empty"><div class="bee-stat__value">—</div><div class="bee-stat__label">{label}</div></div>"#,
-            label = esc(label),
-        ),
-    }
-}
-
-/// A rate (features per day/week), one decimal place. `None` for a missing
-/// or non-finite value — defensive against surfacing a NaN/Infinity even if
-/// an upstream invariant ever slipped (division-by-zero is already guarded
-/// in `mdview_core::bee::compute_velocity`, but the view never trusts that
-/// alone).
-fn bee_fmt_rate(v: Option<f64>) -> Option<String> {
-    v.filter(|x| x.is_finite()).map(|x| format!("{x:.1}"))
-}
-
-/// An hours duration, one decimal place, suffixed `h`. Same finiteness
-/// guard as `bee_fmt_rate`.
-fn bee_fmt_hours(v: Option<f64>) -> Option<String> {
-    v.filter(|x| x.is_finite()).map(|x| format!("{x:.1}h"))
-}
-
-/// Distinct feature names still open: any feature with at least one live
-/// (non-dropped) cell in Doing, Waiting or Stuck that has not shipped (D10).
-/// A feature that has shipped never appears here even if it also happens to
-/// have a stray cell in one of those buckets — shipped status wins.
-fn bee_open_feature_names(snapshot: &BeeSnapshot) -> Vec<String> {
-    let shipped: std::collections::BTreeSet<&str> =
-        snapshot.shipped.iter().map(|f| f.feature.as_str()).collect();
-    let names: std::collections::BTreeSet<&str> = snapshot
-        .buckets
-        .doing
-        .iter()
-        .chain(snapshot.buckets.waiting.iter())
-        .chain(snapshot.buckets.stuck.iter())
-        .map(|c| c.feature.as_str())
-        .filter(|f| !shipped.contains(f))
-        .collect();
-    names.into_iter().map(String::from).collect()
-}
-
-/// Each still-open feature name links to its detail page, same as the
-/// shipped list above.
-fn bee_open_features_list(project_id: &str, names: &[String]) -> String {
-    let body = if names.is_empty() {
-        "<p class=\"fg-empty\">Nothing open right now.</p>".to_string()
-    } else {
-        let items: String = names
-            .iter()
-            .map(|n| {
-                format!(
-                    r#"<li><a href="/p/{pid}/_bee/feature/{n_href}">{n}</a></li>"#,
-                    pid = esc(project_id),
-                    n_href = esc(n),
-                    n = esc(n),
-                )
-            })
-            .collect();
-        format!(r#"<ul class="bee-velocity__open-list">{items}</ul>"#)
-    };
-    format!(
-        r#"<div class="bee-velocity__col"><h4 class="bee-velocity__subhead">Still open</h4>{body}</div>"#,
-        body = body,
-    )
 }
 
 
@@ -2366,10 +1835,8 @@ fn bee_hub_feature_cells<'a, 'b>(
 
 /// The first gate in bee's fixed order (context, shape, execution, review)
 /// that is not yet approved for one `approved_gates` record — `None` once
-/// every gate is approved. Mirrors `bee_lifecycle_stepper`'s own "first
-/// step not done" rule (this file, the top-of-page stepper), applied here
-/// to a feature's own current-stop gate ([`bee_feature_hub_section`]'s
-/// Waiting on you group).
+/// every gate is approved. Applied here to a feature's own current-stop gate
+/// ([`bee_feature_hub_section`]'s Waiting on you group).
 fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static str, &'static str)> {
     const GATES: [(&str, &str); 4] = [
         ("context", "Explore"),
@@ -2413,9 +1880,8 @@ fn bee_hub_group(label: &str, key: &str, count: usize, cards_html: &str, empty_l
 }
 
 /// A group key's own status chip tone and label — the card's D1 "status
-/// icon", rendered as the same `fg-chip` pattern every other status on
-/// this board already uses ([`bee_attention_tone`]) rather than a bespoke
-/// icon set.
+/// icon", rendered as the same `fg-chip` pattern every other status chip on
+/// this board already uses rather than a bespoke icon set.
 fn bee_hub_group_label(key: &str) -> (&'static str, &'static str) {
     match key {
         "waiting" => ("Waiting on you", "warning"),
@@ -2425,8 +1891,7 @@ fn bee_hub_group_label(key: &str) -> (&'static str, &'static str) {
 }
 
 /// One feature card (D1): name + link to its own detail page, its own
-/// done/total cell progress (the same `bee-progress` bar
-/// `bee_working_now_card` already uses), its own last-activity age
+/// done/total cell progress (a `bee-progress` bar), its own last-activity age
 /// ([`bee_fmt_trace_time`]), its own worktree-state chip
 /// ([`bee_hub_worktree_chip`]) and its own group status chip
 /// ([`bee_hub_group_label`]). `reason` carries the Waiting group's own
@@ -4354,7 +3819,6 @@ pub const MERMAID_JS: &str = include_str!("../assets/mermaid.min.js");
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mdview_core::bee::{BeeApprovedGates, BeeGateRevocations};
 
     /// Every page's stylesheet and script URL carries the asset's own content
     /// fingerprint, so an edit to either lands on a browser that has the old
@@ -4381,130 +3845,6 @@ mod tests {
             asset_fingerprint("a"),
             asset_fingerprint("b"),
             "different content must fingerprint differently"
-        );
-    }
-
-    /// (regression, bbp-7 — the live defect, view-level) A gate that is
-    /// currently approved renders its step as done, whatever
-    /// `gate_revoked_at` records — a revocation recorded before the
-    /// current approval is history, not a contradiction of it.
-    #[test]
-    fn lifecycle_stepper_renders_currently_approved_gate_as_done_despite_earlier_revocation() {
-        let state = BeeState {
-            approved_gates: Some(BeeApprovedGates {
-                context: Some(true),
-                shape: Some(true),
-                execution: Some(true),
-                review: Some(false),
-            }),
-            gate_revoked_at: Some(BeeGateRevocations {
-                context: None,
-                shape: None,
-                execution: Some("2026-08-05T09:51:47.038Z".to_string()),
-                review: None,
-            }),
-            ..Default::default()
-        };
-        let html = bee_lifecycle_stepper(Some(&state));
-        assert!(
-            html.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
-            "the execution step must render as done: {html}"
-        );
-        assert!(
-            !html.contains("Approved, then revoked."),
-            "a currently-approved gate must never carry the revoked wording: {html}"
-        );
-    }
-
-    /// (happy, view-level) A gate that is not approved and carries a
-    /// revocation reads as revoked — distinguishable from a step that was
-    /// simply never approved.
-    #[test]
-    fn lifecycle_stepper_renders_unapproved_revoked_gate_as_revoked() {
-        let state = BeeState {
-            approved_gates: Some(BeeApprovedGates {
-                context: Some(true),
-                shape: Some(true),
-                execution: Some(false),
-                review: Some(false),
-            }),
-            gate_revoked_at: Some(BeeGateRevocations {
-                context: None,
-                shape: None,
-                execution: Some("2026-08-05T09:51:47.038Z".to_string()),
-                review: None,
-            }),
-            ..Default::default()
-        };
-        let html = bee_lifecycle_stepper(Some(&state));
-        assert!(
-            !html.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
-            "an unapproved execution gate must not render as done: {html}"
-        );
-        assert!(
-            html.contains("Approved, then revoked."),
-            "an unapproved gate carrying a revocation must read as revoked: {html}"
-        );
-    }
-
-    /// (happy, view-level; bbp-7 honest_empty) A gate that is not approved
-    /// and carries no revocation reads as not yet reached, never as
-    /// revoked.
-    #[test]
-    fn lifecycle_stepper_renders_unapproved_never_revoked_gate_as_not_yet_reached() {
-        let state = BeeState {
-            approved_gates: Some(BeeApprovedGates {
-                context: Some(true),
-                shape: Some(true),
-                execution: Some(false),
-                review: Some(false),
-            }),
-            gate_revoked_at: None,
-            ..Default::default()
-        };
-        let html = bee_lifecycle_stepper(Some(&state));
-        assert!(
-            !html.contains("class=\"bee-step bee-step--done\" data-step=\"execution\""),
-            "an unapproved execution gate must not render as done: {html}"
-        );
-        assert!(
-            html.contains("Not yet approved."),
-            "an unapproved gate with no revocation on record must read as not yet reached: {html}"
-        );
-        assert!(
-            !html.contains("Approved, then revoked."),
-            "no revocation is on record, so the revoked wording must never appear: {html}"
-        );
-    }
-
-    /// (edge, view-level) A `gate_revoked_at` entry naming a different gate
-    /// does not affect this gate's rendering.
-    #[test]
-    fn lifecycle_stepper_revocation_on_another_gate_does_not_leak() {
-        let state = BeeState {
-            approved_gates: Some(BeeApprovedGates {
-                context: Some(true),
-                shape: Some(false),
-                execution: Some(false),
-                review: Some(false),
-            }),
-            gate_revoked_at: Some(BeeGateRevocations {
-                context: Some("2026-08-05T09:51:47.038Z".to_string()),
-                shape: None,
-                execution: None,
-                review: None,
-            }),
-            ..Default::default()
-        };
-        let html = bee_lifecycle_stepper(Some(&state));
-        assert!(
-            html.contains("class=\"bee-step bee-step--done\" data-step=\"context\""),
-            "context is currently approved and must render as done, whatever its own revocation history: {html}"
-        );
-        let revoked_count = html.matches("Approved, then revoked.").count();
-        assert_eq!(
-            revoked_count, 0,
-            "shape's own gate_revoked_at entry is absent, so context's revocation must not leak into it: {html}"
         );
     }
 
