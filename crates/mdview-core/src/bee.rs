@@ -1022,7 +1022,12 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     for cell in &all_cells {
         feature_names.insert(cell.feature.as_str());
     }
-    let feature_docs = read_feature_docs_all(root, feature_names.iter().copied());
+    // hub-fallbacks: every feature's own most recent decision, keyed by
+    // `scope`, read once and reused across the whole `feature_names` set —
+    // see `latest_decisions_by_scope`'s own doc comment for why this is not
+    // simply `decisions.recent` filtered by scope.
+    let decision_scopes = latest_decisions_by_scope(&bee_dir, root);
+    let feature_docs = read_feature_docs_all(root, feature_names.iter().copied(), &decision_scopes, &all_cells);
     let promote_proposals = read_promote_proposals(root, feature_names.into_iter());
 
     // bbp-13: review join, capture queue, scribing debt — see the
@@ -2528,12 +2533,29 @@ const PATH_WRAP_OPENERS: &[char] = &['(', '"', '\'', '`', '[', '<'];
 /// period or semicolon.
 const PATH_WRAP_CLOSERS: &[char] = &[')', '"', '\'', '`', ']', '>', ',', '.', ';'];
 
+/// Whether `s` is shaped like an `axum`-router route path rather than a
+/// real filesystem path (hub-fallbacks) — the `:name` placeholder syntax
+/// this project's own `CONTEXT.md` docs quote verbatim mid-sentence, e.g.
+/// `` `/p/:id/_bee` `` and `` `/p/:id/_bee/feature/:feature` ``. A real
+/// absolute filesystem path is never written with a bare `:placeholder`
+/// path segment, so [`is_absolute_path_str`] must not mistake a route for
+/// one — six of this project's own live descriptions were reading
+/// `(absolute path redacted)` for exactly this reason before this check
+/// existed.
+fn is_route_shaped(s: &str) -> bool {
+    s.starts_with('/') && s.split('/').any(|seg| seg.starts_with(':') && seg.len() > 1)
+}
+
 /// Whether `s` is an absolute path — POSIX (`Path::is_absolute`, which also
 /// covers a native Windows target) or Windows-shaped (a drive letter,
 /// a colon, then `\` or `/`) so a Windows path is still recognised when
 /// scrubbing runs on a POSIX host, as a snapshot committed on Windows can
-/// be read on either.
+/// be read on either. A route-shaped string ([`is_route_shaped`]) is never
+/// absolute here, whatever its leading `/` would otherwise suggest.
 fn is_absolute_path_str(s: &str) -> bool {
+    if is_route_shaped(s) {
+        return false;
+    }
     Path::new(s).is_absolute() || is_windows_drive_absolute(s)
 }
 
@@ -2667,20 +2689,42 @@ fn read_promote_proposals<'a>(
     out
 }
 
-/// A feature's own human-readable docs (feature-titles), read from
-/// `docs/history/<feature>/CONTEXT.md` when present — the H1 title (its
-/// own trailing " — Context" suffix stripped, per that file's own
-/// convention), the first paragraph under "## Feature Boundary" as a
-/// one-line description, and whether a sibling `plan.md` exists. Each
-/// field is `None`/`false` on its own when its own source has nothing to
-/// report — a `CONTEXT.md` with no H1, or no "## Feature Boundary"
-/// section, still reports whatever it does have, never a guessed
-/// substitute. See [`BeeSnapshot::feature_docs`].
+/// A feature's own human-readable docs (feature-titles, extended by
+/// hub-fallbacks), read from `docs/history/<feature>/` when present. Only
+/// 14 of ~40 real features here carry a `CONTEXT.md`, so `title` and
+/// `description` each fall back through a fixed chain rather than reading
+/// `CONTEXT.md` alone:
+///
+/// - `title`: the `CONTEXT.md` H1 (its own trailing " — Context" suffix
+///   stripped), else `feature` itself prettified — dashes become spaces,
+///   each word title-cased ([`prettify_feature_slug`]) — whenever there is
+///   anything else to show alongside it (a description or a doc file);
+///   with truly nothing to report, `title` is `None` and the caller's own
+///   slug-only fallback applies exactly as before this feature.
+/// - `description`: the first paragraph under "## Feature Boundary", else
+///   this feature's own most recent `decide`-event text from
+///   `.bee/decisions.jsonl` (matched by `scope`), else this feature's
+///   first cell's own `title` (`all_cells`, in the same directory-listing
+///   order [`read_snapshot`] already parsed them in).
+/// - `docs`: every `*.md` file present directly under
+///   `docs/history/<feature>/`, sorted with `CONTEXT.md` and `plan.md`
+///   first (in that order) and the rest alphabetically — so a feature
+///   whose docs dir holds only `promote-proposals.md` still gets a Docs
+///   row, even with no `CONTEXT.md` of its own.
+///
+/// Each field reports `None`/empty on its own when every one of its
+/// sources has nothing — never a guessed substitute. See
+/// [`BeeSnapshot::feature_docs`].
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct BeeFeatureDocs {
     pub title: Option<String>,
     pub description: Option<String>,
-    pub has_plan: bool,
+    /// Every markdown file under this feature's own docs dir, `CONTEXT.md`
+    /// and `plan.md` first — see [`list_feature_doc_files`]. Empty when the
+    /// dir is absent or holds no `.md` file; the caller renders no Docs row
+    /// in that case, exactly as an absent `CONTEXT.md` used to mean before
+    /// this feature.
+    pub docs: Vec<String>,
 }
 
 /// Join `feature` onto its docs-history directory under `root` — the ONLY
@@ -2694,33 +2738,157 @@ fn feature_docs_dir(root: &Path, feature: &str) -> Option<PathBuf> {
     Some(root.join("docs").join("history").join(feature))
 }
 
-/// One feature's own `CONTEXT.md`, read and extracted (feature-titles).
-/// `None` when [`feature_docs_dir`] built no path (an invalid name) or the
-/// file itself is absent/unreadable — the caller's own slug-only fallback.
-/// Read-only: [`fs::read_to_string`] and [`Path::is_file`] are the only
-/// filesystem calls this makes.
-fn read_feature_docs(root: &Path, feature: &str) -> Option<BeeFeatureDocs> {
+/// Turn a feature slug into a human-readable fallback title
+/// (hub-fallbacks): every `-`-separated word is title-cased and rejoined
+/// with a plain space — `"hub-fallbacks"` → `"Hub Fallbacks"`. Used only
+/// when `CONTEXT.md` carries no H1 of its own; a slug with no `-` at all
+/// still title-cases its single word. An empty `feature` (already refused
+/// by [`validate_feature_name`] well before this ever runs) would produce
+/// an empty string here too, never a panic.
+fn prettify_feature_slug(feature: &str) -> String {
+    feature
+        .split('-')
+        .filter(|w| !w.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Sort key for one filename inside [`list_feature_doc_files`]: `CONTEXT.md`
+/// and `plan.md` are pinned first, in that order; everything else sorts
+/// alphabetically (case-insensitively) after them.
+fn feature_doc_sort_key(name: &str) -> (u8, String) {
+    match name {
+        "CONTEXT.md" => (0, String::new()),
+        "plan.md" => (1, String::new()),
+        other => (2, other.to_lowercase()),
+    }
+}
+
+/// Every `*.md` file directly under `dir` (hub-fallbacks) — not recursive,
+/// matching every other reader in this module that only ever looks at one
+/// feature's own top-level docs. Sorted via [`feature_doc_sort_key`] so
+/// `CONTEXT.md` and `plan.md` always lead when present. Empty, never an
+/// error, when `dir` does not exist or holds no `.md` file — the normal
+/// shape for most of this project's own ~40 `docs/history/*` dirs.
+fn list_feature_doc_files(dir: &Path) -> Vec<String> {
+    let mut files: Vec<String> = match fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+            .filter_map(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    files.sort_by(|a, b| feature_doc_sort_key(a).cmp(&feature_doc_sort_key(b)));
+    files
+}
+
+/// One feature's own docs (hub-fallbacks): `CONTEXT.md` when present, every
+/// markdown file in its docs dir, its own most recent decision (by
+/// `scope`) and its own first cell — see [`BeeFeatureDocs`]'s own doc
+/// comment for the exact fallback chain each field runs. `None` only when
+/// [`feature_docs_dir`] built no path (an invalid name) or every source is
+/// empty: no docs dir, no `CONTEXT.md`, no decision for this scope and no
+/// cell for this feature — the caller's own slug-only fallback in that
+/// case, unchanged from before this feature. Read-only:
+/// [`fs::read_to_string`] and [`fs::read_dir`] are the only filesystem
+/// calls this makes.
+fn read_feature_docs(
+    root: &Path,
+    feature: &str,
+    decision_scopes: &std::collections::BTreeMap<String, String>,
+    all_cells: &[BeeCell],
+) -> Option<BeeFeatureDocs> {
     let dir = feature_docs_dir(root, feature)?;
-    let text = fs::read_to_string(dir.join("CONTEXT.md")).ok()?;
-    let title = extract_context_title(&text).map(|t| scrub_paths(&t, root));
-    let description = extract_feature_boundary_paragraph(&text).map(|d| scrub_paths(&d, root));
-    let has_plan = dir.join("plan.md").is_file();
-    Some(BeeFeatureDocs { title, description, has_plan })
+    let docs = list_feature_doc_files(&dir);
+
+    let context_text = fs::read_to_string(dir.join("CONTEXT.md")).ok();
+    let context_title = context_text.as_deref().and_then(extract_context_title).map(|t| scrub_paths(&t, root));
+    let context_description =
+        context_text.as_deref().and_then(extract_feature_boundary_paragraph).map(|d| scrub_paths(&d, root));
+
+    let fallback_description = decision_scopes
+        .get(feature)
+        .cloned()
+        .or_else(|| all_cells.iter().find(|c| c.feature == feature).map(|c| c.title.clone()));
+
+    let description = context_description.or(fallback_description);
+    let title = context_title.or_else(|| {
+        (!docs.is_empty() || description.is_some()).then(|| prettify_feature_slug(feature))
+    });
+
+    if title.is_none() && description.is_none() && docs.is_empty() {
+        return None;
+    }
+    Some(BeeFeatureDocs { title, description, docs })
 }
 
 /// [`read_feature_docs`] for every distinct `feature` name in `features` —
 /// the same union [`read_promote_proposals`] already computes over, keyed
-/// identically (a name the reader could not build a path for is simply
-/// absent, never a rejected-lookup marker).
+/// identically (a name the reader could not build a path for, or one with
+/// nothing to report at all, is simply absent, never a rejected-lookup
+/// marker).
 fn read_feature_docs_all<'a>(
     root: &Path,
     features: impl Iterator<Item = &'a str>,
+    decision_scopes: &std::collections::BTreeMap<String, String>,
+    all_cells: &[BeeCell],
 ) -> std::collections::BTreeMap<String, BeeFeatureDocs> {
     let mut out = std::collections::BTreeMap::new();
     for feature in features {
-        if let Some(docs) = read_feature_docs(root, feature) {
+        if let Some(docs) = read_feature_docs(root, feature, decision_scopes, all_cells) {
             out.entry(feature.to_string()).or_insert(docs);
         }
+    }
+    out
+}
+
+/// This project's own most recent `decide`-event `decision` text
+/// (scrubbed, see [`scrub_paths`]) for every distinct `scope` named
+/// anywhere in `.bee/decisions.jsonl` (hub-fallbacks' description
+/// fallback, [`read_feature_docs`]) — independent of [`read_decisions`]'
+/// own [`RECENT_DETAIL_CAP`]-bounded `recent` list, since one feature's
+/// latest decision is easily older than another's, so that global recent
+/// slice is not guaranteed to still hold it. The file is append-ordered,
+/// so a later match for the same `scope` simply overwrites the earlier one
+/// as this reads forward — the map ends up holding each scope's true
+/// latest. Empty, never an error, when the file is absent/unreadable; a
+/// malformed line is skipped, matching every other best-effort fallback
+/// this module reads (never pushed to `read_errors` — a missing decision
+/// is not a store defect).
+fn latest_decisions_by_scope(bee_dir: &Path, root: &Path) -> std::collections::BTreeMap<String, String> {
+    let path = bee_dir.join("decisions.jsonl");
+    let mut out = std::collections::BTreeMap::new();
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return out;
+    };
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("decide") {
+            continue;
+        }
+        let Some(scope) = v.get("scope").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(decision) = v.get("decision").and_then(Value::as_str) else {
+            continue;
+        };
+        out.insert(scope.to_string(), scrub_paths(decision, root));
     }
     out
 }
@@ -4745,6 +4913,37 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (hub-fallbacks) An `axum`-router route string quoted in prose — the
+    /// same shape this project's own `CONTEXT.md` docs carry mid-sentence
+    /// (`` `/p/:id/_bee` ``) — must survive `scrub_paths` unredacted: its
+    /// leading `/` alone must never be enough to read it as a real
+    /// filesystem path.
+    #[test]
+    fn scrub_paths_leaves_a_url_route_placeholder_unredacted() {
+        let root = fresh_root("scrub-route-placeholder");
+        let text = "Replace the by-phase board section on `/p/:id/_bee` with a Kanban-style agent board.";
+
+        assert_eq!(scrub_paths(text, &root), text);
+        assert!(
+            !scrub_paths(text, &root).contains(ABSOLUTE_PATH_REDACTED),
+            "a route string must never be reduced to the shared redaction text"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (hub-fallbacks) A route string with more than one `:placeholder`
+    /// segment, unwrapped and mid-sentence, survives the same way.
+    #[test]
+    fn scrub_paths_leaves_a_multi_segment_route_unredacted() {
+        let root = fresh_root("scrub-route-multi-segment");
+        let text = "See /p/:id/_bee/feature/:feature for the detail page's own route.";
+
+        assert_eq!(scrub_paths(text, &root), text);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     // --- bbp-3: state.json gates, route and next_action ---
 
     #[test]
@@ -5852,8 +6051,16 @@ mod tests {
         assert_eq!(extract_feature_boundary_paragraph(text), None);
     }
 
+    /// An empty map/slice pair standing in for "no decisions, no cells" —
+    /// the shape most direct `read_feature_docs` unit tests below want,
+    /// since they are only exercising the `CONTEXT.md` tier of the
+    /// fallback chain.
+    fn no_fallback_sources() -> (std::collections::BTreeMap<String, String>, Vec<BeeCell>) {
+        (std::collections::BTreeMap::new(), Vec::new())
+    }
+
     #[test]
-    fn read_feature_docs_reports_title_description_and_plan_presence() {
+    fn read_feature_docs_reports_title_description_and_docs_list() {
         let root = fresh_root("feature-docs-full");
         write(
             &root,
@@ -5862,40 +6069,112 @@ mod tests {
         );
         write(&root, "docs/history/demo/plan.md", "plan body");
 
-        let docs = read_feature_docs(&root, "demo").expect("CONTEXT.md present must read Some");
+        let (scopes, cells) = no_fallback_sources();
+        let docs = read_feature_docs(&root, "demo", &scopes, &cells).expect("CONTEXT.md present must read Some");
         assert_eq!(docs.title, Some("Demo Feature".to_string()));
         assert_eq!(docs.description, Some("What this feature covers, in one paragraph.".to_string()));
-        assert!(docs.has_plan);
+        assert_eq!(docs.docs, vec!["CONTEXT.md".to_string(), "plan.md".to_string()]);
 
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn read_feature_docs_is_none_without_a_context_file() {
+    fn read_feature_docs_is_none_without_context_decisions_or_cells() {
         let root = fresh_root("feature-docs-missing");
-        assert_eq!(read_feature_docs(&root, "no-such-feature"), None);
+        let (scopes, cells) = no_fallback_sources();
+        assert_eq!(read_feature_docs(&root, "no-such-feature", &scopes, &cells), None);
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn read_feature_docs_reports_no_plan_when_only_context_exists() {
+    fn read_feature_docs_lists_only_context_when_no_other_md_exists() {
         let root = fresh_root("feature-docs-no-plan");
         write(&root, "docs/history/demo/CONTEXT.md", "# Demo — Context\n\nno boundary section\n");
-        let docs = read_feature_docs(&root, "demo").expect("CONTEXT.md present must read Some");
+        let (scopes, cells) = no_fallback_sources();
+        let docs = read_feature_docs(&root, "demo", &scopes, &cells).expect("CONTEXT.md present must read Some");
         assert_eq!(docs.title, Some("Demo".to_string()));
         assert_eq!(docs.description, None);
-        assert!(!docs.has_plan);
+        assert_eq!(docs.docs, vec!["CONTEXT.md".to_string()]);
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn read_feature_docs_rejects_a_traversal_shaped_feature_name() {
         let root = fresh_root("feature-docs-traversal");
+        let (scopes, cells) = no_fallback_sources();
         assert_eq!(
-            read_feature_docs(&root, "../../etc"),
+            read_feature_docs(&root, "../../etc", &scopes, &cells),
             None,
             "a rejected name must never be looked up, not even reported as absent"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (hub-fallbacks) A feature whose docs dir holds only
+    /// `promote-proposals.md` — no `CONTEXT.md` — still gets a `docs` entry
+    /// (the Docs row this feeds), and with a decision on record for its own
+    /// `scope`, a real, non-slug description too.
+    #[test]
+    fn read_feature_docs_lists_promote_proposals_only_dir_and_uses_decision_fallback() {
+        let root = fresh_root("feature-docs-promote-only");
+        write(&root, "docs/history/demo/promote-proposals.md", "proposal body");
+
+        let mut scopes = std::collections::BTreeMap::new();
+        scopes.insert("demo".to_string(), "Ship the thing behind a flag.".to_string());
+
+        let docs =
+            read_feature_docs(&root, "demo", &scopes, &[]).expect("a docs dir with any .md file must read Some");
+        assert_eq!(docs.docs, vec!["promote-proposals.md".to_string()]);
+        assert_eq!(docs.description, Some("Ship the thing behind a flag.".to_string()));
+        assert_ne!(docs.title, Some("demo".to_string()), "the fallback title must never be the bare slug");
+        assert_eq!(docs.title, Some("Demo".to_string()));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (hub-fallbacks) Every markdown file under a feature's docs dir is
+    /// listed, `CONTEXT.md` and `plan.md` pinned first in that order, the
+    /// rest alphabetical — never limited to just those two well-known
+    /// names.
+    #[test]
+    fn read_feature_docs_lists_every_markdown_file_sorted_context_and_plan_first() {
+        let root = fresh_root("feature-docs-full-listing");
+        write(&root, "docs/history/demo/walkthrough.md", "walkthrough body");
+        write(&root, "docs/history/demo/promote-proposals.md", "proposal body");
+        write(&root, "docs/history/demo/plan.md", "plan body");
+        write(&root, "docs/history/demo/CONTEXT.md", "# Demo — Context\n\nno boundary section\n");
+        write(&root, "docs/history/demo/notes.txt", "not markdown, must never be listed");
+
+        let (scopes, cells) = no_fallback_sources();
+        let docs = read_feature_docs(&root, "demo", &scopes, &cells).expect("CONTEXT.md present must read Some");
+        assert_eq!(
+            docs.docs,
+            vec![
+                "CONTEXT.md".to_string(),
+                "plan.md".to_string(),
+                "promote-proposals.md".to_string(),
+                "walkthrough.md".to_string(),
+            ]
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (hub-fallbacks) With no decision on record for a feature's own
+    /// `scope`, its first cell's own `title` is the description fallback.
+    #[test]
+    fn read_feature_docs_falls_back_to_first_cell_title_when_no_decision_exists() {
+        let root = fresh_root("feature-docs-cell-fallback");
+        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "demo", "open", None, None));
+        let scopes = std::collections::BTreeMap::new();
+        let cells =
+            vec![parse_cell(&root.join(".bee/cells/a.json"), &root).expect("fixture cell must parse")];
+
+        let docs = read_feature_docs(&root, "demo", &scopes, &cells).expect("a cell for this feature must read Some");
+        assert_eq!(docs.description, Some("Cell a".to_string()));
+        assert_eq!(docs.title, Some("Demo".to_string()));
+        assert!(docs.docs.is_empty(), "no docs dir exists for this fixture");
+
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -5918,7 +6197,15 @@ mod tests {
         let docs = snap.feature_docs.get("has-docs").expect("has-docs must have a feature_docs entry");
         assert_eq!(docs.title, Some("Has Docs".to_string()));
         assert_eq!(docs.description, Some("Boundary text for the fixture.".to_string()));
-        assert!(snap.feature_docs.get("no-docs").is_none(), "a feature with no CONTEXT.md must have no entry");
+
+        // hub-fallbacks: "no-docs" has no CONTEXT.md and no docs dir at all,
+        // but it does have a cell — its own first cell's title is now the
+        // description fallback, and its title is the prettified slug, never
+        // the bare slug or a missing entry.
+        let no_docs = snap.feature_docs.get("no-docs").expect("a feature with a cell must still get a real entry");
+        assert_eq!(no_docs.title, Some("No Docs".to_string()));
+        assert_eq!(no_docs.description, Some("Cell a".to_string()));
+        assert!(no_docs.docs.is_empty(), "no docs dir exists for this fixture's \"no-docs\" feature");
 
         std::fs::remove_dir_all(&root).ok();
     }
