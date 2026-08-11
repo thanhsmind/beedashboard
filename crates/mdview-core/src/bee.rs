@@ -1664,6 +1664,35 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
     })
 }
 
+/// Read every cell archived under `.bee/cells/archive/<feature>/` — moved
+/// there when the feature closes (D9) — into typed [`BeeCell`]s, reusing
+/// the same `parse_cell` parsing and path-scrubbing a live cell gets.
+/// Read-only, and deliberately a second, narrower read the two detail
+/// routes (feature, cell) call directly: [`read_snapshot`] above never
+/// descends into `archive/` (`archived_cells_contribute_to_no_count`), and
+/// this function does not change that — the main board's snapshot-wide
+/// buckets and KPIs stay archive-free.
+pub fn read_archived_cells(root: &Path, feature: &str) -> Vec<BeeCell> {
+    let dir = root.join(".bee").join("cells").join("archive").join(feature);
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let mut entries: Vec<PathBuf> = match fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    entries.sort();
+    entries
+        .into_iter()
+        .filter_map(|path| parse_cell(&path, root).ok())
+        .collect()
+}
+
 /// Read and summarize `.bee/backlog.jsonl` (D4, D9-adjacent — this file is
 /// live store, not archive). A missing file is a normal, expected shape
 /// (silent, matching `read_state`); a malformed line degrades to a
