@@ -68,16 +68,18 @@ From the quick scout only. Downstream agents read these before planning.
 - `crates/mdview-core/src/bee.rs:932` — `read_snapshot(root)` reads one project's
   `.bee/` and returns `BeeSnapshot`; returns `BeeSnapshot::absent()` when the
   directory is missing. The roll-up is N calls to this, one per qualifying project.
-- `crates/mdview/src/views.rs:1872` — `bee_feature_hub_section` builds the three
+- `crates/mdview/src/views.rs:1883` — `bee_feature_hub_section` builds the three
   column groups and the classification rules that decide which column a feature
-  lands in (doc comment at `views.rs:1765-1871`).
-- `crates/mdview/src/views.rs:2121` / `views.rs:2198` — `bee_hub_card` and
+  lands in (doc comment immediately above it).
+- `crates/mdview/src/views.rs:2132` / `views.rs:2209` — `bee_hub_card` and
   `bee_hub_finished_row`, the two item renderers that must gain the project label.
-- `crates/mdview/src/views.rs:2217` / `views.rs:2233` — `bee_hub_finished_rows`
+- `crates/mdview/src/views.rs:2228` / `views.rs:2244` — `bee_hub_finished_rows`
   and `bee_hub_finished_more` already implement D7's paging with nested
   `<details>` and no JavaScript.
-- `crates/mdview/src/views.rs:1751` — `bee_live_strip_section`, built from
+- `crates/mdview/src/views.rs:1694` — `bee_live_strip_section`, built from
   `snapshot.sessions` and `snapshot.worktrees`.
+- `crates/mdview/src/views.rs:1371` — `bee_board_page`, the per-project page
+  that composes all of the above.
 
 ### Established Patterns
 
@@ -113,14 +115,27 @@ here so planning does not re-measure them.
 
 - **Registry size.** 10 registered projects, 8 of them qualifying under D8 (the
   other two are stale worktree registrations with no `.bee/`). Their `.bee/`
-  stores hold 199 cells and ~308 `docs/history/<feature>/` directories between
-  them, the largest single project carrying 206 feature directories.
+  stores hold 194 live cells and ~306 `docs/history/<feature>/` directories
+  between them, the largest single project carrying 204 feature directories.
 - **Cost of the roll-up.** `read_snapshot` (`bee.rs:932`) is synchronous
   filesystem work — roughly ten fixed reads plus one read per cell plus one
   directory read per feature — and today both of its callers
   (`server.rs:1268`, `server.rs:3081`) invoke it directly on the async task with
   no cache. Eight of those on `/` is the shape planning must design against.
-- **Ship timestamps.** Answered and locked as D10.
+  `mdview-core` is deliberately framework-free and a test enforces it
+  (`crates/mdview-core/src/bee.rs:3604-3612` fails if `axum`, `tokio`, or
+  `hyper` appears in its manifest), so any off-thread or concurrent execution
+  belongs in `crates/mdview`, never in the core read.
+- **Ship timestamps.** Answered and locked as D10. The source is the archived
+  cells: `.bee/cells/archive/<feature>/*.json` each carry `trace.capped_at`, and
+  a finished feature's ship time is the latest of them. Measured across all
+  eight qualifying projects: 144 archived features, 346 archived cells, 140 of
+  the 144 features carrying a usable time on every cell — and a full scan of all
+  of it costs about 46 ms single-threaded in Python on a warm cache, so the
+  timed block of D10 covers substantially all of the Finished column rather than
+  a fraction of it. `snapshot.shipped` alone is not that source: it is computed
+  from `.bee/cells/*.json` only (`bee.rs:950-960`, `bee.rs:994`), which excludes
+  the archive where most finished features live.
 
 ## Deferred Ideas
 
