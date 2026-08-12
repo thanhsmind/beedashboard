@@ -5042,9 +5042,13 @@ mod bee_route_tests {
     /// bee-cockpit-6 / bbp-11 (happy, split from
     /// `panels_render_backlog_sessions_and_lanes_with_liveness`, which
     /// asserted across backlog, sessions and lanes in one body): the backlog
-    /// panel states PBI statuses and finding severity counts.
+    /// panel states PBI statuses. board-drop-findings-1 removed the panel's
+    /// findings block, so the severity counts this test also used to assert
+    /// are gone from the page — the fixture keeps its two finding rows to
+    /// prove they now render NOWHERE, while `mdview-core`'s own reader tests
+    /// keep proving the rows are still parsed and counted.
     #[tokio::test]
-    async fn backlog_panel_states_pbi_statuses_and_finding_severities() {
+    async fn backlog_panel_states_pbi_statuses() {
         let root = fresh_root("panels-happy-backlog");
         write(
             &root,
@@ -5063,40 +5067,19 @@ mod bee_route_tests {
 
         assert!(body.contains("in-flight: 1"), "{body}");
         assert!(body.contains("done: 1"), "{body}");
-        assert!(body.contains("P1: 1"), "{body}");
-        assert!(body.contains("P2: 1"), "{body}");
-        assert!(body.contains("P3: 0"), "{body}");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    /// bee-cockpit-6 (happy): 25 findings exceed `RECENT_DETAIL_CAP` (20), so
-    /// the findings panel must state its true total (25) alongside the
-    /// capped count actually shown, not just the visible subset.
-    #[tokio::test]
-    async fn capped_findings_subset_states_its_true_total() {
-        let root = fresh_root("panels-capped");
-        let mut jsonl = String::new();
-        for i in 0..25 {
-            jsonl.push_str(&format!(
-                "{{\"ts\":\"2026-08-05T04:{i:02}:00Z\",\"type\":\"finding\",\"title\":\"Finding {i}\",\"detail\":\"d\",\"severity\":\"P3\",\"layer\":\"x\",\"feature\":\"demo\"}}\n"
-            ));
-        }
-        write(&root, ".bee/backlog.jsonl", &jsonl);
-
-        let st = build_state();
-        let project = register(&st, &root, "panels-capped");
-        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
-        assert_eq!(resp.status(), StatusCode::OK);
-        let body = body_string(resp).await;
-
         assert!(
-            body.contains("Showing 20 of 25 findings."),
-            "capped subset must state its true total: {body}"
+            !body.contains("Findings by severity"),
+            "the findings block is gone from the board: {body}"
+        );
+        assert!(!body.contains("P1: 1") && !body.contains("P2: 1"), "no severity chips remain: {body}");
+        assert!(
+            !body.contains("Race in write path") && !body.contains("Slow query"),
+            "no finding row renders on the board: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
     }
+
 
     /// (bbp-14, edge; updated backlog-open-detail-1) 25 OPEN PBIs plus 5
     /// `done` ones exceed the backlog panel's own display cap (20), so the
@@ -5159,7 +5142,6 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(body.contains("No backlog items yet."), "{body}");
-        assert!(body.contains("No findings yet."), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
     }

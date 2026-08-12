@@ -2407,13 +2407,20 @@ fn bee_panels_section(snapshot: &BeeSnapshot) -> String {
 /// Backlog & review panel (bbp-14): PBI items grouped by current status —
 /// each item's own escaped title alongside the status counts, so a manager
 /// reads not just how many are proposed or in flight but WHAT they are —
-/// findings grouped by severity with the P1 count visually weighted
-/// (`bee-severity--p1`) since a P1 blocks, and the review queue by state
-/// (D7: independent review is presented as owner-invoked, never as pending
-/// automatic work — see [`bee_review_queue_body`]). `findings.recent` is a
-/// bounded slice of `findings.total` (`RECENT_DETAIL_CAP` in
-/// `mdview_core::bee`) — when it is showing fewer than the true total, the
-/// panel says so instead of looking smaller than the real backlog. The PBI
+/// and the review queue by state (D7: independent review is presented as
+/// owner-invoked, never as pending automatic work — see
+/// [`bee_review_queue_body`]).
+///
+/// board-drop-findings-1 removed the third block, findings by severity.
+/// `.bee/backlog.jsonl`'s finding rows are an append-only inbox: they never
+/// close, so the counts only ever climb, and the list showed the twenty
+/// NEWEST rather than the worst — a block that read like a work list while
+/// answering no question the owner had. The reader is untouched
+/// (`BeeBacklog::findings` still fills, exactly as board-trim (D1) left the
+/// readers it stopped rendering), so `bee backlog findings`, the feedback
+/// digest and `bee-grooming` keep their source. The sharp number survives
+/// where it belongs: the review body's own open-P1 callout, which counts
+/// review sessions rather than the whole log. The PBI
 /// card list beneath the status chips shows only OPEN work — every status
 /// except `done` and `declined` — since those two are already reflected in
 /// the chip counts and would otherwise bury the items still worth reading;
@@ -2426,8 +2433,8 @@ fn bee_panels_section(snapshot: &BeeSnapshot) -> String {
 /// chips exist to avoid; capping it, and stating its true total (of OPEN
 /// items) alongside the visible subset, is what keeps this a supporting
 /// panel rather than a second scroll of the whole backlog. An empty PBI
-/// list, a backlog with no open items, and an empty finding set each render
-/// their own honest empty state rather than a hidden section or a bare `0`.
+/// list and a backlog with no open items each render their own honest empty
+/// state rather than a hidden section or a bare `0`.
 /// How many PBI cards the backlog panel shows before it falls back to a
 /// "Showing X of Y" note (bbp-14) — the same cap discipline
 /// `mdview_core::bee`'s own `RECENT_DETAIL_CAP` already applies to findings,
@@ -2509,47 +2516,6 @@ fn bee_backlog_panel(backlog: &BeeBacklog, review: &BeeReview) -> String {
         )
     };
 
-    let findings = &backlog.findings;
-    let findings_body = if findings.total == 0 {
-        "<p class=\"fg-empty\">No findings yet.</p>".to_string()
-    } else {
-        let sev = &findings.by_severity;
-        let sev_chips = format!(
-            r#"<span class="fg-chip fg-chip--danger bee-severity--p1">P1: {p1}</span><span class="fg-chip fg-chip--neutral">P2: {p2}</span><span class="fg-chip fg-chip--neutral">P3: {p3}</span>"#,
-            p1 = sev.p1,
-            p2 = sev.p2,
-            p3 = sev.p3,
-        );
-        let recent_note = if findings.recent.len() < findings.total {
-            format!(
-                r#"<p class="bee-cell__meta">Showing {shown} of {total} findings.</p>"#,
-                shown = findings.recent.len(),
-                total = findings.total,
-            )
-        } else {
-            format!(
-                r#"<p class="bee-cell__meta">{total} finding{plural} total.</p>"#,
-                total = findings.total,
-                plural = if findings.total == 1 { "" } else { "s" },
-            )
-        };
-        let mut rows = String::new();
-        for f in &findings.recent {
-            rows.push_str(&format!(
-                r#"<div class="fg-card bee-cell"><div class="fg-card__title">{title}</div><div class="bee-cell__meta">{severity} · {feature}</div></div>"#,
-                title = esc(&f.title),
-                severity = esc(&f.severity),
-                feature = esc(&f.feature),
-            ));
-        }
-        format!(
-            r#"<div class="bee-panel__chips">{sev_chips}</div>{recent_note}<div class="bee-panel__list">{rows}</div>"#,
-            sev_chips = sev_chips,
-            recent_note = recent_note,
-            rows = rows,
-        )
-    };
-
     let review_body = bee_review_queue_body(review);
 
     format!(
@@ -2557,13 +2523,10 @@ fn bee_backlog_panel(backlog: &BeeBacklog, review: &BeeReview) -> String {
   <h3 class="bee-panel__head">Backlog &amp; Review</h3>
   <h4 class="bee-panel__subhead">PBIs by status</h4>
   {pbi_body}
-  <h4 class="bee-panel__subhead">Findings by severity</h4>
-  {findings_body}
   <h4 class="bee-panel__subhead">Review queue by state</h4>
   {review_body}
 </section>"#,
         pbi_body = pbi_body,
-        findings_body = findings_body,
         review_body = review_body,
     )
 }
