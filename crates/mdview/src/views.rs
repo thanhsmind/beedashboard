@@ -4280,6 +4280,14 @@ fn topbar(center: &str) -> String {
 /// e.g. the copy-page-as-Markdown button on file pages), and an optional
 /// `nav` slot for links that navigate away from this page.
 ///
+/// Three areas — left/center/right — so the bar's width lines up with the
+/// sidebar/content/rightbar columns below it on desktop (`.topbar__*` in
+/// app.css); on narrower viewports they stay a plain flex row. That structure
+/// comes from upstream; the brand text, the fourth `nav` slot and the menu
+/// below are this fork's and are kept across it — the name shown to a person
+/// on these pages is "Bee Artifact" by a locked decision (`bee-cockpit.md`),
+/// never the identifier the command line uses.
+///
 /// The nav slot and the Settings link share one menu. On a wide screen the
 /// stylesheet hides its control and lays the panel out inline, so the bar
 /// reads exactly as it did before this existed. On a narrow one the control
@@ -4297,19 +4305,25 @@ fn topbar(center: &str) -> String {
 fn topbar_full(lead: &str, center: &str, actions: &str, nav: &str) -> String {
     format!(
         r#"<header class="topbar">
-  {lead}
-  <a href="/" class="home">Bee Artifact</a>
-  {center}
-  {actions}
-  <div class="topbar-menu js-menu">
-    <input type="checkbox" id="topbar-menu-toggle" class="topbar-menu__toggle">
-    <label class="topbar-menu__button" for="topbar-menu-toggle" title="Menu"><span class="menu-label">Menu</span><span aria-hidden="true">☰</span></label>
-    <div class="topbar-menu__panel">
-      {nav}
-      <a class="nav-link" href="/settings">Settings</a>
-    </div>
+  <div class="topbar__left">
+    {lead}
+    <a href="/" class="home">Bee Artifact</a>
   </div>
-  {toggle}
+  <div class="topbar__center">
+    {center}
+  </div>
+  <div class="topbar__right">
+    {actions}
+    <div class="topbar-menu js-menu">
+      <input type="checkbox" id="topbar-menu-toggle" class="topbar-menu__toggle">
+      <label class="topbar-menu__button" for="topbar-menu-toggle" title="Menu"><span class="menu-label">Menu</span><span aria-hidden="true">☰</span></label>
+      <div class="topbar-menu__panel">
+        {nav}
+        <a class="nav-link" href="/settings">Settings</a>
+      </div>
+    </div>
+    {toggle}
+  </div>
 </header>"#,
         lead = lead,
         center = center,
