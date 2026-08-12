@@ -14411,6 +14411,60 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (responsive, detail-desc-wrap) the same overflow the hub card fix
+    /// closed was still open one page over: the detail header's
+    /// description kept `white-space: nowrap`, and the flex column holding
+    /// it never broke its own default `min-width: auto`, so a long
+    /// description grew that column and the detail page scrolled sideways.
+    #[tokio::test]
+    async fn feature_detail_description_wraps_instead_of_forcing_page_width() {
+        let root = fresh_root("responsive-detail-desc-clamp");
+        write(&root, ".bee/cells/a.json", &cell_json("r1", "capped", &[], "w1"));
+
+        let st = build_state();
+        let project = register(&st, &root, "responsive-detail-desc-clamp");
+        let resp = get(router(st), &format!("/p/{}/_bee/feature/demo", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let style = board_style_block(&body);
+
+        let head_start = style
+            .find(".bee-detail-head > div {")
+            .expect("the detail header's own column must break its default min-width");
+        let head_end = style[head_start..]
+            .find('}')
+            .map(|i| head_start + i)
+            .unwrap_or(style.len());
+        assert!(
+            style[head_start..head_end].contains("min-width: 0"),
+            "the detail header column must be allowed to shrink below its content: {rule}",
+            rule = &style[head_start..head_end]
+        );
+
+        let desc_start = style
+            .find(".bee-detail-desc {")
+            .expect("the detail page must declare .bee-detail-desc");
+        let desc_end = style[desc_start..]
+            .find('}')
+            .map(|i| desc_start + i)
+            .unwrap_or(style.len());
+        let desc_rule = &style[desc_start..desc_end];
+        assert!(
+            !desc_rule.contains("white-space: nowrap"),
+            "an unbroken nowrap line is exactly what forced the detail page wide: {desc_rule}"
+        );
+        assert!(
+            desc_rule.contains("-webkit-line-clamp"),
+            ".bee-detail-desc must clamp to a bounded number of lines: {desc_rule}"
+        );
+        assert!(
+            desc_rule.contains("overflow-wrap"),
+            ".bee-detail-desc must guard against one unbroken long word: {desc_rule}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (responsive, retired) feature-hub fh-1 retires the five-wide Kanban
     /// column row this test's own `.bee-agent-board__cols` selector named —
     /// the new grouped list is only ever three groups (`.bee-hub__groups`),

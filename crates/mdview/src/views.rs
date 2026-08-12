@@ -1434,7 +1434,7 @@ html[data-scheme="dark"] .bee-hub-theme {{
    feature's docs dir holds (hub-fallbacks; CONTEXT.md/plan.md lead when
    present) through the viewer's own document routes. */
 .bee-detail-slug {{ margin: var(--space-1) 0 0 0; font-size: var(--type-body-sm-size); color: var(--color-text-subtle); }}
-.bee-detail-desc {{ margin: var(--space-1) 0 0 0; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }}
+.bee-detail-desc {{ margin: var(--space-1) 0 0 0; color: var(--color-text-muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; max-width: 100%; }}
 .bee-detail-docs {{ display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-4) 0; }}
 .bee-detail-docs a {{ color: var(--color-link); font-size: var(--type-body-sm-size); }}
 .bee-done-summary {{ cursor: pointer; list-style: none; padding: var(--space-2) 0; font-weight: var(--weight-strong); color: var(--color-text); }}
@@ -1465,6 +1465,10 @@ html[data-scheme="dark"] .bee-hub-theme {{
    past what any `display` override here can undo; a plain input a browser
    already knows how to toggle needs none of that). */
 .bee-detail-head {{ display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-2); }}
+/* Same shrink chain the hub cards need: without `min-width: 0` this flex
+   column grows to its description's widest line instead of wrapping it,
+   and the whole detail page scrolls sideways on a phone. */
+.bee-detail-head > div {{ min-width: 0; flex: 1 1 16rem; }}
 .bee-detail-chips {{ display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-4); }}
 .bee-tabs {{ margin-top: var(--space-2); }}
 .bee-tabs__radio {{ position: absolute; opacity: 0; pointer-events: none; }}
