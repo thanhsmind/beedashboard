@@ -296,12 +296,20 @@ impl<'a> PaneScroller<'a> {
     /// [`ScrollStrategy::EscapeInjection`] result changes the pane's own
     /// escape-injection position, so only that case is worth recording as
     /// the gateway's new depth.
+    ///
+    /// Review fix (D): also returns the depth ACTUALLY reached -- not
+    /// necessarily `to_depth`. The hop loops below can break early (the
+    /// agent's own scrollback ran out), and the caller
+    /// (`server.rs`'s `scroll_aware_read`) records whatever this returns as
+    /// its new per-pane depth, never the depth it merely asked for; claiming
+    /// `to_depth` was reached when it was not is exactly the kind of silent
+    /// depth drift an independent review found.
     pub async fn read_to_depth(
         &self,
         pane_id: &str,
         from_depth: usize,
         to_depth: usize,
-    ) -> Result<(ScreenRead, ScrollStrategy)> {
+    ) -> Result<(ScreenRead, ScrollStrategy, usize)> {
         if from_depth == to_depth {
             // Nothing to move -- just hand back what's on screen right now.
             // `to_depth == 0` here still reports `NativeScrollback` (no
@@ -316,7 +324,7 @@ impl<'a> PaneScroller<'a> {
             } else {
                 ScrollStrategy::EscapeInjection
             };
-            return Ok((read, strategy));
+            return Ok((read, strategy, to_depth));
         }
 
         if to_depth == 0 {
@@ -335,7 +343,7 @@ impl<'a> PaneScroller<'a> {
             let restored = self
                 .wait_until_progressed_and_stable(pane_id, |r| r.text != before.text)
                 .await?;
-            return Ok((restored, ScrollStrategy::EscapeInjection));
+            return Ok((restored, ScrollStrategy::EscapeInjection, 0));
         }
 
         if from_depth == 0 {
@@ -352,9 +360,10 @@ impl<'a> PaneScroller<'a> {
                 .read_pane(pane_id, ReadSource::Recent, RECENT_LINES_CAP)
                 .await?;
             if is_richer(&recent, &visible) {
-                return Ok((recent, ScrollStrategy::NativeScrollback));
+                return Ok((recent, ScrollStrategy::NativeScrollback, 0));
             }
             let mut current = visible;
+            let mut reached = 0;
             for _ in 0..to_depth {
                 self.herdr.send_text(pane_id, PAGE_UP).await?;
                 let before = current.clone();
@@ -365,8 +374,9 @@ impl<'a> PaneScroller<'a> {
                     break; // agent's own scrollback limit reached -- later hops would be no-ops too
                 }
                 current = progressed;
+                reached += 1;
             }
-            return Ok((current, ScrollStrategy::EscapeInjection));
+            return Ok((current, ScrollStrategy::EscapeInjection, reached));
         }
 
         // Both from_depth and to_depth are non-zero and unequal: a pure
@@ -381,6 +391,7 @@ impl<'a> PaneScroller<'a> {
             .herdr
             .read_pane(pane_id, ReadSource::Visible, 0)
             .await?;
+        let mut reached = from_depth;
         for _ in 0..hops {
             self.herdr.send_text(pane_id, bytes).await?;
             let before = current.clone();
@@ -391,8 +402,36 @@ impl<'a> PaneScroller<'a> {
                 break;
             }
             current = progressed;
+            reached = if bytes == PAGE_UP {
+                reached + 1
+            } else {
+                reached - 1
+            };
         }
-        Ok((current, ScrollStrategy::EscapeInjection))
+        Ok((current, ScrollStrategy::EscapeInjection, reached))
+    }
+
+    /// Review fix (B): always sends [`RESTORE_BOTTOM`], regardless of what
+    /// the caller believes this pane's current escape-injection depth to
+    /// be -- the one entry point an EXPLICIT depth-0 request
+    /// (`server.rs`'s Live button / `?history=0`) must go through.
+    /// [`PaneScroller::read_to_depth`]'s own `from_depth == to_depth`
+    /// shortcut sends nothing at all when the caller (wrongly) assumes
+    /// `from_depth == 0`, which is exactly what left a Live press a no-op
+    /// after a daemon restart dropped the gateway's own per-pane record
+    /// even though the real pane might still genuinely be scrolled from
+    /// before the restart. Sending `RESTORE_BOTTOM` to a pane that is
+    /// already at live is the same accepted harmless no-op every other
+    /// unconditional restore in this module already relies on (see
+    /// `read_history_with_strategy`'s own doc comment).
+    pub async fn restore_to_live(&self, pane_id: &str) -> Result<ScreenRead> {
+        let before = self
+            .herdr
+            .read_pane(pane_id, ReadSource::Visible, 0)
+            .await?;
+        self.herdr.send_text(pane_id, RESTORE_BOTTOM).await?;
+        self.wait_until_progressed_and_stable(pane_id, |r| r.text != before.text)
+            .await
     }
 }
 
@@ -415,11 +454,12 @@ fn is_richer(recent: &ScreenRead, visible: &ScreenRead) -> bool {
     visible_len(&recent.text) > visible_len(&visible.text)
 }
 
-/// A read's length with ANSI CSI escape sequences stripped and each line's
-/// trailing whitespace trimmed -- both are rendering noise (color codes,
-/// padding to the terminal's column width) that a raw byte-length
-/// comparison would otherwise count as "more content" (see `is_richer`).
-fn visible_len(text: &str) -> usize {
+/// Strips ANSI CSI escape sequences from `text`, leaving every other
+/// character -- including newlines -- untouched. The shared first half of
+/// both `visible_len` (a length-only heuristic) and `normalized_lines` (a
+/// full line-by-line normalisation `server.rs`'s content-mismatch rail
+/// uses, review fix A).
+fn strip_ansi(text: &str) -> String {
     let mut stripped = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
@@ -439,7 +479,66 @@ fn visible_len(text: &str) -> usize {
             }
         }
     }
-    stripped.lines().map(|line| line.trim_end().len()).sum()
+    stripped
+}
+
+/// A read's length with ANSI CSI escape sequences stripped and each line's
+/// trailing whitespace trimmed -- both are rendering noise (color codes,
+/// padding to the terminal's column width) that a raw byte-length
+/// comparison would otherwise count as "more content" (see `is_richer`).
+fn visible_len(text: &str) -> usize {
+    strip_ansi(text)
+        .lines()
+        .map(|line| line.trim_end().len())
+        .sum()
+}
+
+/// `text` normalised the same way `visible_len` measures it -- ANSI CSI
+/// sequences stripped, each line's trailing whitespace trimmed -- but
+/// returned as the actual lines rather than a bare length, so a caller can
+/// compare WHAT changed, not just how much. Used by
+/// `normalized_content_diverges`.
+pub(crate) fn normalized_lines(text: &str) -> Vec<String> {
+    strip_ansi(text)
+        .lines()
+        .map(|line| line.trim_end().to_string())
+        .collect()
+}
+
+/// Review fix (A): whether `current` and `recorded` -- both run through
+/// `normalized_lines` first -- differ MATERIALLY, meaning anywhere other
+/// than their own last line. `server.rs`'s content-mismatch rail
+/// (`scroll_aware_read`) uses this, not a raw whole-text hash, to decide
+/// whether a remembered scroll depth can still be trusted for a delta move.
+///
+/// WHY the last line is exempt rather than compared: a live Claude Code
+/// pane's footer (elapsed-time / token-percentage counters -- see
+/// `is_richer`'s own doc comment) re-renders on every single read,
+/// including while the pane sits escape-injection-scrolled away from live,
+/// so even a fully ANSI/padding-normalised byte-for-byte comparison fired
+/// on nearly every "Older" click even though nothing else about the pane
+/// had moved -- collapsing the whole point of remembering a depth back
+/// into a full replay-and-restore on almost every request (the independent
+/// review's headline finding). The rail exists to catch a REAL change
+/// under the pane (a reply sent, another operator scrolling, the agent
+/// producing genuinely new output) -- every one of those changes more than
+/// just the trailing status line -- so tolerating drift confined to the
+/// last line is a deliberate, narrow exception, not a general fuzzy match:
+/// a different LINE COUNT (the screen reflowed) or any difference in an
+/// earlier line still counts as material and still trips the rail. A
+/// single-line pane has no separate footer line to exempt, so that case
+/// compares in full rather than silently accepting any change at all.
+pub(crate) fn normalized_content_diverges(current: &str, recorded: &str) -> bool {
+    let current_lines = normalized_lines(current);
+    let recorded_lines = normalized_lines(recorded);
+    if current_lines.len() != recorded_lines.len() {
+        return true;
+    }
+    if current_lines.len() <= 1 {
+        return current_lines != recorded_lines;
+    }
+    let last = current_lines.len() - 1;
+    current_lines[..last] != recorded_lines[..last]
 }
 
 #[cfg(test)]
@@ -756,26 +855,102 @@ mod tests {
         );
 
         let scroller = PaneScroller::new(&herdr);
-        let (first, strategy) = scroller.read_to_depth("w1:p1", 0, 1).await.unwrap();
+        let (first, strategy, reached) = scroller.read_to_depth("w1:p1", 0, 1).await.unwrap();
         assert_eq!(strategy, ScrollStrategy::EscapeInjection);
         assert!(first.text.contains("page1 further back"));
+        assert_eq!(reached, 1, "the depth actually reached is 1");
         assert_eq!(
             herdr.sent_text_log("w1:p1").await,
             vec![PAGE_UP.to_string()],
             "reaching depth 1 from a fresh pane sends exactly one PageUp"
         );
 
-        let (second, strategy) = scroller.read_to_depth("w1:p1", 1, 2).await.unwrap();
+        let (second, strategy, reached) = scroller.read_to_depth("w1:p1", 1, 2).await.unwrap();
         assert_eq!(strategy, ScrollStrategy::EscapeInjection);
         assert!(
             second.text.contains("page2 even further back"),
             "depth 1 -> 2 should land on page 2: {:?}",
             second.text
         );
+        assert_eq!(reached, 2, "the depth actually reached is 2");
         assert_eq!(
             herdr.sent_text_log("w1:p1").await,
             vec![PAGE_UP.to_string(), PAGE_UP.to_string()],
             "depth 1 -> 2 sends exactly one MORE PageUp, and no restore"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_to_depth_step_back_toward_live_sends_exactly_one_pagedown() {
+        // scroll-keep-position review fix (E): the delta branch's PAGE_DOWN
+        // side (moving toward live but not all the way, both depths
+        // non-zero) had no coverage at all before this test. From depth 2
+        // to depth 1 is a single hop: exactly one PageDown, never a
+        // restore and never a PageUp.
+        let herdr = FakeHerdr::new();
+        let live_bottom = "page0 (live)\n❯ ";
+        herdr.seed_scroll_pane(
+            "w1:p1",
+            live_bottom,
+            live_bottom,
+            Some("page1 further back\npage0 (live)\n❯ "),
+        );
+        herdr.push_escape_page(
+            "w1:p1",
+            "page2 even further back\npage1 further back\npage0 (live)\n❯ ",
+        );
+
+        let scroller = PaneScroller::new(&herdr);
+        scroller.read_to_depth("w1:p1", 0, 2).await.unwrap();
+        assert_eq!(
+            herdr.sent_text_log("w1:p1").await,
+            vec![PAGE_UP.to_string(), PAGE_UP.to_string()]
+        );
+
+        let (_read, strategy, reached) = scroller.read_to_depth("w1:p1", 2, 1).await.unwrap();
+        assert_eq!(strategy, ScrollStrategy::EscapeInjection);
+        assert_eq!(
+            herdr.sent_text_log("w1:p1").await,
+            vec![
+                PAGE_UP.to_string(),
+                PAGE_UP.to_string(),
+                PAGE_DOWN.to_string(),
+            ],
+            "depth 2 -> 1 sends exactly one PageDown, never a restore or a PageUp"
+        );
+        // The fake never modeled PAGE_DOWN moving the pane (this module's
+        // own doc comment on `PAGE_DOWN`: unlike PAGE_UP/RESTORE_BOTTOM,
+        // its effect was never independently live-verified) -- so the hop
+        // is a no-op and the loop breaks after the one attempt. The
+        // ACTUALLY reached depth must reflect that reality (still 2, the
+        // hop never really moved anything), not blindly report the
+        // requested depth 1 -- exactly the drift review fix (D) exists to
+        // prevent.
+        assert_eq!(
+            reached, 2,
+            "a no-op hop must not be reported as having reached the requested depth"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_to_depth_returns_the_depth_actually_reached_when_the_hop_loop_breaks_early() {
+        // scroll-keep-position review fix (D): only 1 page of scrollback
+        // exists; asking to go from depth 0 to depth 5 must not claim depth
+        // 5 was reached when the agent's own scrollback ran out after 1 hop
+        // -- the caller (`server.rs`) records whatever this returns.
+        let herdr = FakeHerdr::new();
+        let live_bottom = "page0 (live)\n❯ ";
+        let only_page = "page1 further back\npage0 (live)\n❯ ";
+        herdr.seed_scroll_pane("w1:p1", live_bottom, live_bottom, Some(only_page));
+
+        let scroller = PaneScroller::new(&herdr);
+        let (read, strategy, reached) = scroller.read_to_depth("w1:p1", 0, 5).await.unwrap();
+
+        assert_eq!(strategy, ScrollStrategy::EscapeInjection);
+        assert_eq!(read.text, only_page);
+        assert_eq!(
+            reached, 1,
+            "only 1 page exists -- the actual depth reached is 1, not the requested 5"
         );
     }
 
@@ -803,8 +978,9 @@ mod tests {
             vec![PAGE_UP.to_string(), PAGE_UP.to_string()]
         );
 
-        let (restored, strategy) = scroller.read_to_depth("w1:p1", 2, 0).await.unwrap();
+        let (restored, strategy, reached) = scroller.read_to_depth("w1:p1", 2, 0).await.unwrap();
         assert_eq!(strategy, ScrollStrategy::EscapeInjection);
+        assert_eq!(reached, 0, "depth 0 is always the depth actually reached");
         assert_eq!(
             restored.text, live_bottom,
             "depth 0 always lands back at live"
@@ -859,5 +1035,58 @@ mod tests {
         };
         assert!(is_richer(&a, &b));
         assert!(!is_richer(&b, &a));
+    }
+
+    #[test]
+    fn normalized_content_diverges_ignores_a_footer_only_change() {
+        // scroll-keep-position review fix (A): a live Claude Code pane's
+        // footer (elapsed-time / token-percentage counters) keeps
+        // re-rendering regardless of scroll position -- a fixture that
+        // changes ONLY that trailing line must not read as a material
+        // divergence, or `server.rs`'s content-mismatch rail fires on
+        // nearly every "Older" click even though nothing else moved.
+        let recorded = "page1 further back\npage0 (live)\nfooter 00:12 \u{b7} 45%";
+        let current = "page1 further back\npage0 (live)\nfooter 00:59 \u{b7} 47%";
+        assert!(
+            !normalized_content_diverges(current, recorded),
+            "a footer-only change must not be treated as a material divergence"
+        );
+    }
+
+    #[test]
+    fn normalized_content_diverges_still_flags_a_real_content_change() {
+        let recorded = "page1 further back\npage0 (live)\nfooter 00:12 \u{b7} 45%";
+        let current = "a completely different frame\npage0 (live)\nfooter 00:59 \u{b7} 47%";
+        assert!(
+            normalized_content_diverges(current, recorded),
+            "a change earlier than the last line must still count as material"
+        );
+    }
+
+    #[test]
+    fn normalized_content_diverges_flags_a_line_count_change() {
+        let recorded = "page1 further back\npage0 (live)\n\u{2771} ";
+        let current = "page1 further back\nan extra line appeared\npage0 (live)\n\u{2771} ";
+        assert!(
+            normalized_content_diverges(current, recorded),
+            "a different line count is a structural change, always material"
+        );
+    }
+
+    #[test]
+    fn normalized_content_diverges_ignores_ansi_and_padding_noise_that_carries_no_content_change() {
+        // Same content, wrapped in different ANSI colour codes and
+        // right-padding to the terminal's column width -- rendering noise
+        // that must never register as a divergence, single line or not
+        // (the same normalisation `is_richer` already relies on for its own
+        // length comparison, `is_richer_ignores_ansi_and_padding_noise...`
+        // above).
+        let recorded = "\x1b[38;2;80;80;80m\u{2771} \x1b[0m                    ";
+        let current = "\x1b[38;2;40;40;40m\u{2771} \x1b[0m";
+        assert!(
+            !normalized_content_diverges(current, recorded),
+            "ANSI colour codes and trailing padding differing must not register as content \
+             diverging when the actual text is identical"
+        );
     }
 }

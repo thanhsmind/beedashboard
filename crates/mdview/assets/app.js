@@ -819,6 +819,12 @@
     // pressed "Live" (or clicked "Load older" again). Cleared only by the
     // "Live" button's handler further down.
     var viewingHistory = {}; // pane id -> true while showing history, not live
+    // scroll-keep-position review fix (C): each pane's own last-requested
+    // absolute depth, kept at this outer scope (not just the per-pane
+    // closure local it used to be) so the best-effort pagehide/
+    // visibilitychange restore below can see every scrolled pane, not only
+    // the one whose button was clicked most recently.
+    var paneHistoryDepth = {}; // pane id -> 0 = live; last absolute depth requested
 
     function screenUrl(paneId, historyDepth) {
       var url = "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/screen";
@@ -1033,19 +1039,19 @@
       if (!screenEl) return;
       var olderBtn = group.querySelector('[data-scroll="older"]');
       var liveBtn = group.querySelector('[data-scroll="live"]');
-      var historyDepth = 0; // 0 = live; how many PageUp-hops back this pane's last press reached
+      paneHistoryDepth[paneId] = 0; // 0 = live; how many PageUp-hops back this pane's last press reached
 
       if (olderBtn) {
         olderBtn.addEventListener("click", function () {
           viewingHistory[paneId] = true; // pause the poller before the round trip, not after
-          var requestedDepth = historyDepth + 1;
+          var requestedDepth = paneHistoryDepth[paneId] + 1;
           fetch(screenUrl(paneId, requestedDepth), { credentials: "same-origin" })
             .then(function (res) {
               return res.ok ? res.json() : null;
             })
             .then(function (body) {
               if (!body) return;
-              historyDepth = requestedDepth;
+              paneHistoryDepth[paneId] = requestedDepth;
               lastRevision[paneId] = body.revision;
               screenEl.innerHTML = body.text;
               fitScreenFont(screenEl);
@@ -1059,7 +1065,7 @@
           // Keep the poller paused (viewingHistory stays true) until this
           // explicit depth-0 request actually lands -- reaching depth 0 is
           // this press's job alone, never left to race the next poll tick.
-          historyDepth = 0;
+          paneHistoryDepth[paneId] = 0;
           fetch(screenUrl(paneId, 0), { credentials: "same-origin" })
             .then(function (res) {
               return res.ok ? res.json() : null;
@@ -1080,6 +1086,35 @@
               screenEl.scrollTop = screenEl.scrollHeight;
             });
         });
+      }
+    });
+
+    // scroll-keep-position review fix (C): a best-effort last-gasp restore
+    // when the page is about to go away (tab closed, backgrounded on
+    // mobile, navigated away). `pagehide` fires reliably on both desktop
+    // and mobile browsers (unlike `beforeunload`, which mobile Safari/
+    // Chrome often skip entirely); `visibilitychange` going `"hidden"`
+    // additionally catches the "backgrounded, never actually unloaded"
+    // state a phone can leave a tab in indefinitely. `keepalive: true`
+    // lets the request survive the page's own teardown.
+    //
+    // BEST-EFFORT ONLY: no response is read, no retry, no confirmation the
+    // server ever received it -- the server-side idle-TTL sweep (review fix
+    // C, `server.rs`'s `scroll_aware_read`, run on every `/screen` request
+    // for ANY pane) is the real, load-bearing guarantee that an abandoned
+    // pane never stays parked forever; this is only a faster path for the
+    // common case where the browser gets to run it at all.
+    function restoreEveryScrolledPaneBestEffort() {
+      Object.keys(paneHistoryDepth).forEach(function (paneId) {
+        if (paneHistoryDepth[paneId] > 0) {
+          fetch(screenUrl(paneId, 0), { credentials: "same-origin", keepalive: true }).catch(function () {});
+        }
+      });
+    }
+    window.addEventListener("pagehide", restoreEveryScrolledPaneBestEffort);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "hidden") {
+        restoreEveryScrolledPaneBestEffort();
       }
     });
   })();
