@@ -12043,10 +12043,10 @@ mod bee_route_tests {
         );
 
         assert!(
-            body.contains(".term-scroll { position: sticky;")
+            body.contains(".term-scroll { position: absolute;")
                 && body.contains("display: flex; flex-direction: column;")
                 && body.contains("env(safe-area-inset-bottom)"),
-            "the group must be a vertical stack that respects the iOS safe-area inset: {body}"
+            "the group must be a vertical stack, anchored to the screen, that respects the iOS safe-area inset: {body}"
         );
         assert!(
             body.contains(".term-scroll button { width: 44px; height: 44px;")

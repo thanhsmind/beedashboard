@@ -514,17 +514,18 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .term-keys--move button { min-width: 44px; font-size: var(--type-body-size); }
 /* scroll-fab: the three screen-moving controls (Older, Newer, Live) belong
    to the screen, not to the keys that type into the pane, so they ride on
-   it as a small round-button column pinned to its lower-right corner rather
-   than straddling the edge. `sticky` keeps the stack reachable while a tall
-   screen is scrolled past — the trio a reader wants is the one for the
-   screen they are looking at, never buried under the reply composer that
-   sits below `.term-screen-wrap` in the flow. The negative pull is deeper
-   than the stack's own rendered height, which is what both lifts it clear
-   of the edge and gives back the flow row it would otherwise open above the
-   keys; `env(safe-area-inset-bottom)` layered onto that offset keeps the
-   stack clear of an iPhone's home-indicator strip too. */
+   it as a small round-button column in its lower-right corner. The stack is
+   anchored `absolute` against `.term-screen-wrap` — the element that IS the
+   screen — so the screen bounds it on every side: it can neither reach past
+   the frame's right edge nor hang below the frame onto the keys and the
+   reply composer that follow it in the flow. The earlier `sticky` placement
+   leaned on an auto side margin and a negative pull for the same corner,
+   and on a wide window it drifted out of both of those bounds. Out of flow,
+   the stack still opens no row of its own above the keys, and
+   `env(safe-area-inset-bottom)` layered onto the bottom offset keeps it
+   clear of an iPhone's home-indicator strip. */
 .term-screen-wrap { position: relative; display: flow-root; }
-.term-scroll { position: sticky; bottom: calc(var(--space-3) + env(safe-area-inset-bottom)); z-index: 2; display: flex; flex-direction: column; gap: var(--space-2); width: max-content; margin: calc(-1 * var(--space-7)) var(--space-3) 0 auto; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-surface-raised); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
+.term-scroll { position: absolute; right: var(--space-3); bottom: calc(var(--space-3) + env(safe-area-inset-bottom)); z-index: 2; display: flex; flex-direction: column; gap: var(--space-2); width: max-content; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-surface-raised); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
 /* Each button is a fixed-size circle — equal `width`/`height`, not a
    `min-width` — so `border-radius: 50%` draws a true circle rather than a
    pill. Fixed at 44px it keeps the same touch-target floor the named keys'
@@ -4262,6 +4263,41 @@ mod tests {
         assert!(
             !html.contains(".term-reply__send { min-width: 44px") && !html.contains(".term-reply__stage { min-width: 44px"),
             "the reply buttons must carry no such rule: {html}"
+        );
+    }
+
+    /// The Older/Newer/Live column is bounded by the screen it moves: it is
+    /// positioned against `.term-screen-wrap`, which is the only ancestor
+    /// that establishes a containing block, so both its right and its bottom
+    /// offset are measured from the screen's own edges. An auto side margin
+    /// would hand the placement back to the flow and let the stack leave the
+    /// frame on a wide window, which is what this pins against.
+    #[test]
+    fn the_scroll_stack_is_anchored_inside_the_screen_it_moves() {
+        let project = sample_project();
+        let html = terminal_page(&project, &[], None, &[]);
+        assert!(
+            html.contains(".term-screen-wrap { position: relative;"),
+            "the screen must establish the containing block the stack anchors to: {html}"
+        );
+        assert!(
+            html.contains(
+                ".term-scroll { position: absolute; right: var(--space-3); bottom: calc(var(--space-3) + env(safe-area-inset-bottom));"
+            ),
+            "the stack must be inset from the screen's own right and bottom edges: {html}"
+        );
+        assert!(
+            !html.contains(".term-scroll { position: sticky"),
+            "a sticky stack is placed by the flow, not by the screen: {html}"
+        );
+        let rule = html
+            .split(".term-scroll { ")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("the stylesheet must carry a .term-scroll rule");
+        assert!(
+            !rule.contains("margin"),
+            "no margin may push the stack out of the screen's bounds: {rule}"
         );
     }
 
