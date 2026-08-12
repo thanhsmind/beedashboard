@@ -437,7 +437,22 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .term-pane { border: none; background: transparent; box-shadow: none; padding: 0; gap: var(--space-2); }
 /* With no card edges left to separate them, panes need their own spacing. */
 .term-panes { display: flex; flex-direction: column; gap: var(--space-5); }
-.term-screen { margin-top: var(--space-2); padding: var(--space-2); background: #1c1f26; color: #d7dae0; border-radius: var(--radius-sm); white-space: pre; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.25; height: auto; min-width: 0; max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+/* terminal-scroll-perf-1: the pane itself never scrolls vertically (that is
+   the page's job, height: auto above) but it does scroll horizontally, and
+   on a phone the page scroll that shows/hides the URL bar must stay the
+   browser's own smooth-scrolling path rather than route through anything
+   this element could intercept. `touch-action` tells the browser this
+   element only ever pans, never pinch-zooms or long-presses, so it can
+   start that pan on the first touch frame instead of waiting to see if a
+   gesture handler intervenes; `-webkit-overflow-scrolling: touch` is the
+   older iOS momentum-scroll opt-in some Safari versions still consult;
+   `overscroll-behavior: contain` keeps a pane that hits the end of its own
+   horizontal scroll from bubbling the gesture into a page-level scroll
+   (or a pull-to-refresh) the operator didn't ask for; `contain: layout
+   paint` tells the browser this element's internal layout and paint can
+   never affect anything outside it, so a resize-triggered refit's writes
+   and reads stay scoped to the pane instead of invalidating the page. */
+.term-screen { margin-top: var(--space-2); padding: var(--space-2); background: #1c1f26; color: #d7dae0; border-radius: var(--radius-sm); white-space: pre; font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.25; height: auto; min-width: 0; max-width: 100%; overflow-x: auto; overflow-y: hidden; touch-action: pan-x pan-y; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; contain: layout paint; }
 /* Applied by `assets/app.js` only once the fit has bottomed out: at that
    width no readable type size can hold the grid, so the lines wrap instead
    of running off the side. */

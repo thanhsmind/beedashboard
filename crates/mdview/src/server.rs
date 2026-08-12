@@ -8221,6 +8221,55 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// terminal-scroll-perf-1: the unconditional `.term-screen` rule (not
+    /// the narrow-screen override) must carry the scroll hints that keep a
+    /// phone's own native scroll and momentum in charge of the pane rather
+    /// than anything a resize-driven refit does. Pinned here because these
+    /// live in a string constant (`views::PROJECT_TAB_STYLE`), not real CSS
+    /// a compiler or a stylesheet linter would ever check.
+    #[tokio::test]
+    async fn terminal_page_declares_term_screen_scroll_hints() {
+        let dir = fresh_root("terminal-scroll-hints-css");
+        let root = fresh_root("terminal-scroll-hints-css-project");
+        enable_terminal(&dir);
+
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "scroll-hints-css");
+        let resp = router(st).oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let style = board_style_block(&body);
+
+        let rule_start = style
+            .find(".term-screen {")
+            .unwrap_or_else(|| panic!("the terminal page must declare .term-screen: {style}"));
+        let rule_end = style[rule_start..]
+            .find('}')
+            .map(|i| rule_start + i)
+            .unwrap_or(style.len());
+        let rule = &style[rule_start..rule_end];
+
+        assert!(
+            rule.contains("touch-action: pan-x pan-y"),
+            "a pane must declare touch-action so a touch pan starts on the first frame, not after a gesture-handler wait: {rule}"
+        );
+        assert!(
+            rule.contains("-webkit-overflow-scrolling: touch"),
+            "a pane must opt into momentum scrolling for the Safari versions that still consult it: {rule}"
+        );
+        assert!(
+            rule.contains("overscroll-behavior: contain"),
+            "a pane at the end of its own horizontal scroll must not bubble the gesture into the page: {rule}"
+        );
+        assert!(
+            rule.contains("contain: layout paint"),
+            "a pane's own layout and paint must not be allowed to affect anything outside it: {rule}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// D6: a silent herdr socket renders the named remedy state, never a
     /// raw error and never an empty-panes rendering that would look
     /// identical to a project that genuinely has zero agents.
