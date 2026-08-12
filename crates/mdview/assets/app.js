@@ -819,10 +819,22 @@
     // pressed "Live" (or clicked "Load older" again). Cleared only by the
     // "Live" button's handler further down.
     var viewingHistory = {}; // pane id -> true while showing history, not live
+    // scroll-keep-position review fix (C): each pane's own last-requested
+    // absolute depth, kept at this outer scope (not just the per-pane
+    // closure local it used to be) so the best-effort pagehide/
+    // visibilitychange restore below can see every scrolled pane, not only
+    // the one whose button was clicked most recently.
+    var paneHistoryDepth = {}; // pane id -> 0 = live; last absolute depth requested
 
-    function screenUrl(paneId, historyPages) {
+    function screenUrl(paneId, historyDepth) {
       var url = "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/screen";
-      return historyPages ? url + "?history=" + historyPages : url;
+      // scroll-keep-position: `historyDepth` is now the pane's absolute
+      // requested depth, and 0 is a real, meaningful value (an explicit
+      // "restore to live" request) -- so this checks presence (`!= null`),
+      // not truthiness, or the Live button's own `screenUrl(paneId, 0)`
+      // call would silently drop the query string and hit the plain poll
+      // URL instead.
+      return historyDepth != null ? url + "?history=" + historyDepth : url;
     }
 
     // A pane's frame is a fixed grid: wrapping it destroys the box drawing, so
@@ -995,22 +1007,31 @@
     pollAll();
     setInterval(pollAll, POLL_MS);
 
-    // Scroll-history buttons (terminal-scroll-2, `herdr/pane_scroller.rs`):
-    // "Load older" raises this pane's own running depth by one — the server
-    // keeps no scroll depth between requests (every `?history=` call always
-    // restores to live before answering), so reaching further back than the
-    // last press means asking for one more hop than last time, which is what
-    // this per-pane counter tracks. The response is applied unconditionally,
-    // never gated behind `lastRevision`'s dedupe above: a history read's
-    // revision can coincide with whatever this pane last polled live, and
-    // that coincidence must never be read as "nothing changed, skip the
-    // repaint" the way a genuine live-poll tick would.
+    // Scroll-history buttons (terminal-scroll-2, `herdr/pane_scroller.rs`;
+    // made stateful by scroll-keep-position): "Load older" raises this
+    // pane's own running depth by one and sends that ABSOLUTE depth — the
+    // server now remembers where this pane last was
+    // (`AppState::scroll_tracker`) and moves only the delta, so reaching
+    // further back than the last press costs one hop server-side too, not
+    // a full replay from live. This per-pane counter is still what supplies
+    // that absolute depth on every call; the server no longer needs it to
+    // restore between requests, only to know how far this call should go.
+    // The response is applied unconditionally, never gated behind
+    // `lastRevision`'s dedupe above: a history read's revision can coincide
+    // with whatever this pane last polled live, and that coincidence must
+    // never be read as "nothing changed, skip the repaint" the way a
+    // genuine live-poll tick would.
     //
-    // "Live" is a pure client action, not a fetch: the server already
-    // restored the pane to its live view at the end of the previous history
-    // request, so there is nothing left to ask for. It only clears the
-    // depth and the pause flag above, and scrolls the box back to the
-    // bottom — the regular poller resumes on its own next tick.
+    // "Live" now sends its own explicit `?history=0` request rather than
+    // just resetting local state: the server no longer restores a scrolled
+    // pane on its own at the end of every history call, so without this
+    // fetch the pane would stay escape-injection-scrolled server-side until
+    // some later request happened to ask for depth 0 — visibly, the next
+    // live poll would still show the stale escalated view for one more
+    // tick. `viewingHistory[paneId]` stays true (the poller stays paused)
+    // until this restore round trip actually lands, so depth 0 is reached
+    // exactly once per "Live" press, never raced against the plain poller
+    // also waking the pane up.
     Array.prototype.slice.call(document.querySelectorAll(".term-scroll[data-pane-id]")).forEach(function (group) {
       var paneId = group.getAttribute("data-pane-id");
       var card = group.closest(".term-pane");
@@ -1018,19 +1039,19 @@
       if (!screenEl) return;
       var olderBtn = group.querySelector('[data-scroll="older"]');
       var liveBtn = group.querySelector('[data-scroll="live"]');
-      var historyDepth = 0; // 0 = live; how many PageUp-hops back this pane's last press reached
+      paneHistoryDepth[paneId] = 0; // 0 = live; how many PageUp-hops back this pane's last press reached
 
       if (olderBtn) {
         olderBtn.addEventListener("click", function () {
           viewingHistory[paneId] = true; // pause the poller before the round trip, not after
-          var requestedDepth = historyDepth + 1;
+          var requestedDepth = paneHistoryDepth[paneId] + 1;
           fetch(screenUrl(paneId, requestedDepth), { credentials: "same-origin" })
             .then(function (res) {
               return res.ok ? res.json() : null;
             })
             .then(function (body) {
               if (!body) return;
-              historyDepth = requestedDepth;
+              paneHistoryDepth[paneId] = requestedDepth;
               lastRevision[paneId] = body.revision;
               screenEl.innerHTML = body.text;
               fitScreenFont(screenEl);
@@ -1041,10 +1062,59 @@
 
       if (liveBtn) {
         liveBtn.addEventListener("click", function () {
-          viewingHistory[paneId] = false;
-          historyDepth = 0;
-          screenEl.scrollTop = screenEl.scrollHeight;
+          // Keep the poller paused (viewingHistory stays true) until this
+          // explicit depth-0 request actually lands -- reaching depth 0 is
+          // this press's job alone, never left to race the next poll tick.
+          paneHistoryDepth[paneId] = 0;
+          fetch(screenUrl(paneId, 0), { credentials: "same-origin" })
+            .then(function (res) {
+              return res.ok ? res.json() : null;
+            })
+            .then(function (body) {
+              if (body) {
+                lastRevision[paneId] = body.revision;
+                screenEl.innerHTML = body.text;
+                fitScreenFont(screenEl);
+              }
+              viewingHistory[paneId] = false;
+              screenEl.scrollTop = screenEl.scrollHeight;
+            })
+            .catch(function () {
+              // Never strand the pane paused if the restore request itself
+              // failed -- the regular poller resuming is the fallback.
+              viewingHistory[paneId] = false;
+              screenEl.scrollTop = screenEl.scrollHeight;
+            });
         });
+      }
+    });
+
+    // scroll-keep-position review fix (C): a best-effort last-gasp restore
+    // when the page is about to go away (tab closed, backgrounded on
+    // mobile, navigated away). `pagehide` fires reliably on both desktop
+    // and mobile browsers (unlike `beforeunload`, which mobile Safari/
+    // Chrome often skip entirely); `visibilitychange` going `"hidden"`
+    // additionally catches the "backgrounded, never actually unloaded"
+    // state a phone can leave a tab in indefinitely. `keepalive: true`
+    // lets the request survive the page's own teardown.
+    //
+    // BEST-EFFORT ONLY: no response is read, no retry, no confirmation the
+    // server ever received it -- the server-side idle-TTL sweep (review fix
+    // C, `server.rs`'s `scroll_aware_read`, run on every `/screen` request
+    // for ANY pane) is the real, load-bearing guarantee that an abandoned
+    // pane never stays parked forever; this is only a faster path for the
+    // common case where the browser gets to run it at all.
+    function restoreEveryScrolledPaneBestEffort() {
+      Object.keys(paneHistoryDepth).forEach(function (paneId) {
+        if (paneHistoryDepth[paneId] > 0) {
+          fetch(screenUrl(paneId, 0), { credentials: "same-origin", keepalive: true }).catch(function () {});
+        }
+      });
+    }
+    window.addEventListener("pagehide", restoreEveryScrolledPaneBestEffort);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "hidden") {
+        restoreEveryScrolledPaneBestEffort();
       }
     });
   })();
