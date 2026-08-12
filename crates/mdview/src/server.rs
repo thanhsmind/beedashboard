@@ -12201,11 +12201,20 @@ mod bee_route_tests {
         let group_start = body
             .find(&format!("class=\"term-scroll\" data-pane-id=\"{}\"", started.pane_id))
             .unwrap_or_else(|| panic!("no scroll group for the pane: {body}"));
+        // scroll-fab-follow: the buttons ride in the sticky column nested in
+        // the rail, so the group ends at the rail's own close — the second
+        // `</div>` after the opening tag, not the first one, which closes the
+        // column.
         let group_end = body[group_start..]
-            .find("</div>")
-            .map(|i| group_start + i)
+            .match_indices("</div>")
+            .nth(1)
+            .map(|(i, _)| group_start + i)
             .unwrap_or_else(|| panic!("the scroll group must close: {body}"));
         let group = &body[group_start..group_end];
+        assert!(
+            group.contains(r#"<div class="term-scroll__stack">"#),
+            "the buttons must ride in the rail's sticky column, not on the rail itself: {group}"
+        );
 
         let older = group
             .find(r#"data-scroll="older" aria-label="Older""#)

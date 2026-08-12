@@ -514,18 +514,30 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .term-keys--move button { min-width: 44px; font-size: var(--type-body-size); }
 /* scroll-fab: the three screen-moving controls (Older, Newer, Live) belong
    to the screen, not to the keys that type into the pane, so they ride on
-   it as a small round-button column in its lower-right corner. The stack is
-   anchored `absolute` against `.term-screen-wrap` — the element that IS the
-   screen — so the screen bounds it on every side: it can neither reach past
-   the frame's right edge nor hang below the frame onto the keys and the
-   reply composer that follow it in the flow. The earlier `sticky` placement
-   leaned on an auto side margin and a negative pull for the same corner,
-   and on a wide window it drifted out of both of those bounds. Out of flow,
-   the stack still opens no row of its own above the keys, and
-   `env(safe-area-inset-bottom)` layered onto the bottom offset keeps it
+   it as a small round-button column in its lower-right corner. Two elements
+   carry that: `.term-scroll` is a rail running the screen's full height
+   down its right edge, anchored `absolute` against `.term-screen-wrap` —
+   the element that IS the screen — and `.term-scroll__stack` is the visible
+   button column inside it. The rail is what the screen bounds: the column
+   can neither reach past the frame's right edge nor hang below the frame
+   onto the keys and the reply composer that follow it in the flow. The
+   earlier free `sticky` placement leaned on an auto side margin and a
+   negative pull for the same corner, and on a wide window it drifted out of
+   both of those bounds; sticky INSIDE the rail cannot, because the rail is
+   its containing block.
+   scroll-fab-follow: a screen taller than the phone's viewport used to park
+   the column at the screen's bottom edge, off-screen for the whole scroll up
+   through the history — the one place the buttons are wanted. Sticky within
+   the rail keeps the column at the viewport's lower edge while any part of
+   the screen is in view, and clamps it back to the screen's own bottom the
+   moment the screen ends. The rail takes no pointer events so the screen
+   under it stays draggable; the stack takes them back. Out of flow, the
+   column still opens no row of its own above the keys, and
+   `env(safe-area-inset-bottom)` layered onto the sticky offset keeps it
    clear of an iPhone's home-indicator strip. */
 .term-screen-wrap { position: relative; display: flow-root; }
-.term-scroll { position: absolute; right: var(--space-3); bottom: calc(var(--space-3) + env(safe-area-inset-bottom)); z-index: 2; display: flex; flex-direction: column; gap: var(--space-2); width: max-content; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-surface-raised); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
+.term-scroll { position: absolute; right: var(--space-3); top: var(--space-3); bottom: var(--space-3); z-index: 2; width: max-content; pointer-events: none; }
+.term-scroll__stack { position: sticky; bottom: calc(var(--space-3) + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: var(--space-2); width: max-content; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-surface-raised); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); pointer-events: auto; }
 /* Each button is a fixed-size circle — equal `width`/`height`, not a
    `min-width` — so `border-radius: 50%` draws a true circle rather than a
    pill. Fixed at 44px it keeps the same touch-target floor the named keys'
@@ -796,9 +808,11 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str, attach: bool) -> Stri
   <div class="term-screen-wrap">
     <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
     <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
-      <button type="button" data-scroll="older" aria-label="Older">↑</button>
-      <button type="button" data-scroll="newer" aria-label="Newer" disabled>↓</button>
-      <button type="button" data-scroll="live" aria-label="Live">Live</button>
+      <div class="term-scroll__stack">
+        <button type="button" data-scroll="older" aria-label="Older">↑</button>
+        <button type="button" data-scroll="newer" aria-label="Newer" disabled>↓</button>
+        <button type="button" data-scroll="live" aria-label="Live">Live</button>
+      </div>
     </div>
   </div>
   <div class="term-controls">
@@ -4360,39 +4374,52 @@ mod tests {
         );
     }
 
-    /// The Older/Newer/Live column is bounded by the screen it moves: it is
-    /// positioned against `.term-screen-wrap`, which is the only ancestor
-    /// that establishes a containing block, so both its right and its bottom
-    /// offset are measured from the screen's own edges. An auto side margin
-    /// would hand the placement back to the flow and let the stack leave the
-    /// frame on a wide window, which is what this pins against.
+    /// The Older/Newer/Live column is bounded by the screen it moves: the
+    /// rail it lives in is positioned against `.term-screen-wrap`, which is
+    /// the only ancestor that establishes a containing block, so every one of
+    /// its offsets is measured from the screen's own edges. An auto side
+    /// margin would hand the placement back to the flow and let the rail
+    /// leave the frame on a wide window, which is what this pins against.
+    /// scroll-fab-follow: the visible column is `sticky` INSIDE that rail —
+    /// it follows the viewport up a screen taller than the phone instead of
+    /// parking off-screen at the screen's bottom edge — and sticky inside an
+    /// absolute rail still cannot escape the screen, which the free sticky
+    /// placement this replaced could.
     #[test]
     fn the_scroll_stack_is_anchored_inside_the_screen_it_moves() {
         let project = sample_project();
         let html = terminal_page(&project, &[], None, &[]);
         assert!(
             html.contains(".term-screen-wrap { position: relative;"),
-            "the screen must establish the containing block the stack anchors to: {html}"
+            "the screen must establish the containing block the rail anchors to: {html}"
         );
         assert!(
             html.contains(
-                ".term-scroll { position: absolute; right: var(--space-3); bottom: calc(var(--space-3) + env(safe-area-inset-bottom));"
+                ".term-scroll { position: absolute; right: var(--space-3); top: var(--space-3); bottom: var(--space-3);"
             ),
-            "the stack must be inset from the screen's own right and bottom edges: {html}"
+            "the rail must be inset from the screen's own right, top and bottom edges: {html}"
         );
         assert!(
             !html.contains(".term-scroll { position: sticky"),
-            "a sticky stack is placed by the flow, not by the screen: {html}"
+            "the rail itself is placed by the screen, never by the flow: {html}"
         );
-        let rule = html
-            .split(".term-scroll { ")
-            .nth(1)
-            .and_then(|rest| rest.split('}').next())
-            .expect("the stylesheet must carry a .term-scroll rule");
         assert!(
-            !rule.contains("margin"),
-            "no margin may push the stack out of the screen's bounds: {rule}"
+            html.contains(
+                ".term-scroll__stack { position: sticky; bottom: calc(var(--space-3) + env(safe-area-inset-bottom));"
+            ),
+            "the button column must stick to the viewport's lower edge inside the rail: {html}"
         );
+        for selector in [".term-scroll { ", ".term-scroll__stack { "] {
+            let rule = html
+                .split(selector)
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .unwrap_or_else(|| panic!("the stylesheet must carry a {selector}rule"));
+            assert!(
+                !rule.contains("margin"),
+                "no margin may push the column out of the screen's bounds: {rule}"
+            );
+        }
     }
 
     /// toa-4 (D9): the settings page offers the Unassigned group's own
