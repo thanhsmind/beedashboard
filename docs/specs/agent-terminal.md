@@ -167,7 +167,10 @@ implementation. Code entry points are listed in `reading-map.md`.
   a listed agent's pane, while the terminal switch is on.
 - **What it does:** typed text can be staged into the agent's pane without
   being sent — submitting it (pressing Enter) is a separate act the operator
-  chooses explicitly; a named key is sent immediately. Every one of these
+  chooses explicitly; a named key is sent immediately. The keys offered are
+  the four arrows, then Enter, Escape, Tab and an interrupt (Ctrl+C) — the
+  last of these stops whatever the agent is running and, like every other
+  named key, acts on the first press with no confirmation step. Every one of these
   actions — reading the screen, sending text, sending a key, reading the
   transcript — is refused unless the target agent already belongs to this
   project, exactly like viewing the terminal itself.
