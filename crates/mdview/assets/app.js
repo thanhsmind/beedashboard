@@ -840,6 +840,34 @@
     var FONT_MIN_PX = 10;
     var FONT_MAX_PX = 13;
 
+    // Pane element -> the available width its last fit was computed against
+    // (terminal-scroll-perf-1). A resize that leaves every pane's available
+    // width unchanged — which happens constantly on a phone, where the URL
+    // bar showing/hiding during page scroll fires `resize` on every frame —
+    // has nothing to refit, so this cache lets the resize handler skip the
+    // fit entirely instead of repeating it for no reason.
+    var lastFitWidth = new WeakMap();
+
+    // The box's own width is not a safe ceiling on its own: if anything
+    // above it has already been pushed wider than the window, the box
+    // inherits that width, the frame looks like it fits, and the sideways
+    // scroll shows up on the page instead. The window is the one width
+    // nothing can be wider than, so it caps the measurement. This alone is
+    // one layout read (getComputedStyle + clientWidth) and is cheap enough
+    // to also use as the resize handler's "did anything actually change"
+    // check, separate from the more expensive scrollWidth measurement below.
+    function availableWidth(el) {
+      var style = window.getComputedStyle(el);
+      var padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+      var parent = el.parentElement;
+      var ceiling = Math.min(
+        el.clientWidth,
+        parent ? parent.clientWidth : el.clientWidth,
+        document.documentElement.clientWidth
+      );
+      return { available: ceiling - padding, padding: padding };
+    }
+
     function fitScreenFont(el) {
       // Measure the frame's real width rather than counting its characters:
       // an emoji or a box-drawing glyph occupies two terminal cells while
@@ -849,50 +877,63 @@
       // browser actually laid out, and it is never wrong about it.
       el.classList.remove("term-screen--wrapped"); // measure unwrapped, always
       el.style.fontSize = FONT_MAX_PX + "px";
-      var style = window.getComputedStyle(el);
-      var padding = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
-      // The box's own width is not a safe ceiling on its own: if anything
-      // above it has already been pushed wider than the window, the box
-      // inherits that width, the frame looks like it fits, and the sideways
-      // scroll shows up on the page instead. The window is the one width
-      // nothing can be wider than, so it caps the measurement.
-      var parent = el.parentElement;
-      var ceiling = Math.min(
-        el.clientWidth,
-        parent ? parent.clientWidth : el.clientWidth,
-        document.documentElement.clientWidth
-      );
-      var available = ceiling - padding;
+      var dims = availableWidth(el);
+      var padding = dims.padding;
+      var available = dims.available;
       if (available <= 0) return;
+      lastFitWidth.set(el, available);
+
       var size = FONT_MAX_PX;
-      // Shrink toward the fit, remeasuring: one pass lands close, and a
-      // couple more settle the rounding that sub-pixel glyph advances leave
-      // behind. Bail the moment it fits — the common wide-screen case never
-      // gets past the first check.
-      for (var pass = 0; pass < 4; pass++) {
-        var needed = el.scrollWidth - padding;
-        if (needed <= available) break;
-        size = size * (available / needed);
-        if (size < FONT_MIN_PX) {
+      // At most two forced-layout reads of scrollWidth per fit, not a
+      // remeasure-every-pass loop: scrollWidth scales close to linearly with
+      // font-size for a monospace grid, so one ratio lands within a
+      // sub-pixel of the true fit. The common wide-screen case never even
+      // reaches the second read.
+      var needed = el.scrollWidth - padding; // read #1: width at FONT_MAX_PX
+      if (needed > available) {
+        size = Math.max(FONT_MIN_PX, FONT_MAX_PX * (available / needed));
+        el.style.fontSize = size + "px";
+        // Sub-pixel glyph advances can leave that ratio's guess a hair over
+        // or under; this second read confirms it and, if it still
+        // overflows, clamps the rest of the way to the floor arithmetically
+        // (an estimate, not a third measurement — close enough for a
+        // monospace grid) rather than looping to remeasure again.
+        var confirmedNeeded = el.scrollWidth - padding; // read #2: confirm/clamp
+        if (confirmedNeeded > available && size > FONT_MIN_PX) {
+          var neededAtFloor = confirmedNeeded * (FONT_MIN_PX / size);
           size = FONT_MIN_PX;
           el.style.fontSize = size + "px";
-          break;
+          confirmedNeeded = neededAtFloor;
         }
-        el.style.fontSize = size + "px";
-      }
-      // At the floor the frame no longer fits at any readable size, so the
-      // grid is already lost whatever we do. Wrapping is the cheapest way to
-      // lose it: every character stays on screen and legible, at the cost of
-      // the column alignment that narrow a screen could not have shown
-      // anyway. Above the floor the grid is intact and stays untouched.
-      if (size <= FONT_MIN_PX && el.scrollWidth - padding > available) {
-        el.classList.add("term-screen--wrapped");
+        // At the floor the frame no longer fits at any readable size, so the
+        // grid is already lost whatever we do. Wrapping is the cheapest way
+        // to lose it: every character stays on screen and legible, at the
+        // cost of the column alignment that narrow a screen could not have
+        // shown anyway. Above the floor the grid is intact and stays
+        // untouched.
+        if (size <= FONT_MIN_PX && confirmedNeeded > available) {
+          el.classList.add("term-screen--wrapped");
+        }
       }
     }
 
-    // One resize can change every pane's fit at once.
+    // One resize can change every pane's fit at once, but on a phone the
+    // URL bar showing or hiding while the page scrolls fires `resize` on
+    // nearly every frame — so a burst is coalesced into a single refit on
+    // the next animation frame, and within that frame a pane whose
+    // available width didn't actually move is skipped rather than refit for
+    // nothing (terminal-scroll-perf-1).
+    var resizeScheduled = false;
     window.addEventListener("resize", function () {
-      screens.forEach(fitScreenFont);
+      if (resizeScheduled) return;
+      resizeScheduled = true;
+      requestAnimationFrame(function () {
+        resizeScheduled = false;
+        screens.forEach(function (el) {
+          if (availableWidth(el).available === lastFitWidth.get(el)) return;
+          fitScreenFont(el);
+        });
+      });
     });
 
     function pollOne(el) {
