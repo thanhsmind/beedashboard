@@ -12,6 +12,20 @@
 //! herdr 0.7.3/0.7.4 + Claude Code pane, 2026-07-28: two idle alt-screen
 //! panes with no native scrollback each revealed previously-unseen lines --
 //! 17 and 14 -- in response to a raw PageUp).
+//!
+//! scroll-keep-position: this module now offers two entry points, not one --
+//! [`PaneScroller::read_to_depth`] is the primary, *stateful* one, moving
+//! only the delta between a caller-supplied `from_depth` and `to_depth`
+//! (one `PAGE_UP`/`PAGE_DOWN` per page, never a full replay), so the
+//! gateway's own per-pane depth record (`server.rs`'s `PaneScrollTracker`)
+//! can make "one more page back" cost one hop instead of re-walking every
+//! page from live each time. [`PaneScroller::read_history`] stays exactly
+//! as it always was -- self-contained, always ends restored to live, no
+//! memory of a previous call -- and is now used only as the gateway's
+//! content-mismatch recovery path (`server.rs`'s `scroll_aware_read`): when
+//! the caller's remembered depth can no longer be trusted, replaying the
+//! whole journey from a known-good start is safer than trying to delta from
+//! a position that might not be real anymore.
 
 use std::time::Duration;
 
@@ -20,6 +34,17 @@ use super::{Herdr, ReadSource, Result, ScreenRead};
 /// Raw PageUp — the VT escape sequence a live Claude Code pane was verified
 /// to interpret as "scroll its own transcript up".
 pub(crate) const PAGE_UP: &str = "\x1b[5~";
+/// Raw PageDown — the mirror of [`PAGE_UP`], used by
+/// [`PaneScroller::read_to_depth`] to move a page back *toward* live without
+/// going all the way (a full [`RESTORE_BOTTOM`] would overshoot a caller
+/// asking for depth 1 when the pane is currently at depth 3). Not
+/// independently live-verified the way `PAGE_UP`/`RESTORE_BOTTOM` were
+/// (2026-07-28's live pane testing only exercised scrolling up and
+/// restoring to bottom) -- accepted on the same VT100/xterm pager-keybinding
+/// symmetry `PAGE_UP` itself relies on, same low-cost-if-wrong reasoning as
+/// `read_history_with_strategy`'s own harmless-no-op acceptance for a short
+/// primary-screen pane.
+pub(crate) const PAGE_DOWN: &str = "\x1b[6~";
 /// Raw Ctrl+End — verified to restore the live bottom view afterward.
 pub(crate) const RESTORE_BOTTOM: &str = "\x1b[1;5F";
 
@@ -68,12 +93,22 @@ impl<'a> PaneScroller<'a> {
     /// bottom (clamped to at least 1). Every call is a fresh, self-contained
     /// round trip that always ends restored to live, never a continuation of
     /// a previous call's state -- there is no durable per-pane scroll state
-    /// kept between requests. A caller wanting to go further back than its
-    /// last request simply asks for one more page next time; the whole
-    /// `pages`-hop journey happens inside this one call before restoring.
-    /// Always returns the existing [`ScreenRead`] wire type (`text` +
-    /// `revision`, never a bare `Vec<String>`/`String`), and always carries
-    /// the read's own `revision` through unchanged, never fabricated.
+    /// kept *by this type* between requests (the gateway keeps its own now,
+    /// see below). The whole `pages`-hop journey happens inside this one
+    /// call before restoring. Always returns the existing [`ScreenRead`]
+    /// wire type (`text` + `revision`, never a bare `Vec<String>`/`String`),
+    /// and always carries the read's own `revision` through unchanged, never
+    /// fabricated.
+    ///
+    /// scroll-keep-position: no longer the gateway's default path for a
+    /// `?history=` request -- [`PaneScroller::read_to_depth`] is, moving
+    /// only the delta from the caller's own remembered depth. This method
+    /// remains exactly as self-contained as it always was, which is now
+    /// exactly what makes it the right *recovery* path: when the gateway's
+    /// remembered depth can no longer be trusted (`server.rs`'s
+    /// content-mismatch rail), replaying the full journey from scratch and
+    /// always landing back at live is safer than deltaing from a position
+    /// that might not be real.
     pub async fn read_history(&self, pane_id: &str, pages: usize) -> Result<ScreenRead> {
         self.read_history_with_strategy(pane_id, pages)
             .await
@@ -232,6 +267,132 @@ impl<'a> PaneScroller<'a> {
             last = next;
         }
         Ok(last)
+    }
+
+    /// scroll-keep-position: the stateful entry point -- moves `pane_id`
+    /// from `from_depth` (the gateway's own remembered depth, `0` meaning
+    /// live) to `to_depth`, sending only the difference: one [`PAGE_UP`] per
+    /// extra page going deeper, one [`PAGE_DOWN`] per page coming back
+    /// toward live, and [`RESTORE_BOTTOM`] only when `to_depth` is `0`. The
+    /// caller (`server.rs`'s `scroll_aware_read`) owns `from_depth` --  this
+    /// method trusts it completely and never re-derives it, which is why
+    /// the gateway's own safety rails (idle-TTL, content-mismatch) run
+    /// *before* calling this, not inside it.
+    ///
+    /// `from_depth == 0` is the one case that also gets the free
+    /// native-scrollback shortcut (see `read_history_with_strategy`'s own
+    /// WHY-comment for why that check only ever compares the two live
+    /// reads): a fresh request restarting from live may still be answerable
+    /// without escape injection at all. Once a pane is already escape-
+    /// injection-scrolled (`from_depth > 0`), every further move is a pure
+    /// delta -- the native-scrollback comparison is deliberately not
+    /// repeated there, since it answers a different question (does herdr's
+    /// own scrollback beat the live screen) than the one an already-
+    /// escalated pane is asking (move N pages from here).
+    ///
+    /// Returns the strategy that served the request alongside the read, the
+    /// same shape `read_history_with_strategy` returns, so a caller can
+    /// decide whether the move is worth remembering: only an
+    /// [`ScrollStrategy::EscapeInjection`] result changes the pane's own
+    /// escape-injection position, so only that case is worth recording as
+    /// the gateway's new depth.
+    pub async fn read_to_depth(
+        &self,
+        pane_id: &str,
+        from_depth: usize,
+        to_depth: usize,
+    ) -> Result<(ScreenRead, ScrollStrategy)> {
+        if from_depth == to_depth {
+            // Nothing to move -- just hand back what's on screen right now.
+            // `to_depth == 0` here still reports `NativeScrollback` (no
+            // escape-injection position to speak of), matching what a
+            // brand-new pane's first depth-0 request would report.
+            let read = self
+                .herdr
+                .read_pane(pane_id, ReadSource::Visible, 0)
+                .await?;
+            let strategy = if to_depth == 0 {
+                ScrollStrategy::NativeScrollback
+            } else {
+                ScrollStrategy::EscapeInjection
+            };
+            return Ok((read, strategy));
+        }
+
+        if to_depth == 0 {
+            // Always ends at live regardless of how far back `from_depth`
+            // was -- one Ctrl+End is exactly as cheap as one PageDown here,
+            // and it is the one move this module already verified live
+            // (2026-07-28) actually lands the agent's TUI back at its own
+            // bottom, so it stays the depth-0 exit for every from_depth,
+            // never a chain of PAGE_DOWNs that would only be trusted on the
+            // same unverified symmetry PAGE_DOWN itself relies on.
+            let before = self
+                .herdr
+                .read_pane(pane_id, ReadSource::Visible, 0)
+                .await?;
+            self.herdr.send_text(pane_id, RESTORE_BOTTOM).await?;
+            let restored = self
+                .wait_until_progressed_and_stable(pane_id, |r| r.text != before.text)
+                .await?;
+            return Ok((restored, ScrollStrategy::EscapeInjection));
+        }
+
+        if from_depth == 0 {
+            // Fresh request restarting from live: the free native-
+            // scrollback shortcut applies here and only here (see this
+            // method's own doc comment for why it is not repeated once
+            // already escalated).
+            let visible = self
+                .herdr
+                .read_pane(pane_id, ReadSource::Visible, 0)
+                .await?;
+            let recent = self
+                .herdr
+                .read_pane(pane_id, ReadSource::Recent, RECENT_LINES_CAP)
+                .await?;
+            if is_richer(&recent, &visible) {
+                return Ok((recent, ScrollStrategy::NativeScrollback));
+            }
+            let mut current = visible;
+            for _ in 0..to_depth {
+                self.herdr.send_text(pane_id, PAGE_UP).await?;
+                let before = current.clone();
+                let progressed = self
+                    .wait_until_progressed_and_stable(pane_id, |r| r.text != before.text)
+                    .await?;
+                if progressed.text == before.text {
+                    break; // agent's own scrollback limit reached -- later hops would be no-ops too
+                }
+                current = progressed;
+            }
+            return Ok((current, ScrollStrategy::EscapeInjection));
+        }
+
+        // Both from_depth and to_depth are non-zero and unequal: a pure
+        // delta move, no restore either way -- the whole reason this method
+        // exists instead of always replaying through `read_history`.
+        let (bytes, hops) = if to_depth > from_depth {
+            (PAGE_UP, to_depth - from_depth)
+        } else {
+            (PAGE_DOWN, from_depth - to_depth)
+        };
+        let mut current = self
+            .herdr
+            .read_pane(pane_id, ReadSource::Visible, 0)
+            .await?;
+        for _ in 0..hops {
+            self.herdr.send_text(pane_id, bytes).await?;
+            let before = current.clone();
+            let progressed = self
+                .wait_until_progressed_and_stable(pane_id, |r| r.text != before.text)
+                .await?;
+            if progressed.text == before.text {
+                break;
+            }
+            current = progressed;
+        }
+        Ok((current, ScrollStrategy::EscapeInjection))
     }
 }
 
@@ -573,6 +734,90 @@ mod tests {
 
         assert_eq!(strategy, ScrollStrategy::EscapeInjection);
         assert_eq!(read.text, only_page);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_to_depth_from_1_to_2_sends_exactly_one_pageup_and_no_restore() {
+        // scroll-keep-position: the whole point of `read_to_depth` over
+        // `read_history` -- a caller already at depth 1 asking for depth 2
+        // must send only the ONE additional PageUp the delta actually
+        // needs, never a restore, and never a replay of the first hop.
+        let herdr = FakeHerdr::new();
+        let live_bottom = "page0 (live)\n❯ ";
+        herdr.seed_scroll_pane(
+            "w1:p1",
+            live_bottom,
+            live_bottom,
+            Some("page1 further back\npage0 (live)\n❯ "),
+        );
+        herdr.push_escape_page(
+            "w1:p1",
+            "page2 even further back\npage1 further back\npage0 (live)\n❯ ",
+        );
+
+        let scroller = PaneScroller::new(&herdr);
+        let (first, strategy) = scroller.read_to_depth("w1:p1", 0, 1).await.unwrap();
+        assert_eq!(strategy, ScrollStrategy::EscapeInjection);
+        assert!(first.text.contains("page1 further back"));
+        assert_eq!(
+            herdr.sent_text_log("w1:p1").await,
+            vec![PAGE_UP.to_string()],
+            "reaching depth 1 from a fresh pane sends exactly one PageUp"
+        );
+
+        let (second, strategy) = scroller.read_to_depth("w1:p1", 1, 2).await.unwrap();
+        assert_eq!(strategy, ScrollStrategy::EscapeInjection);
+        assert!(
+            second.text.contains("page2 even further back"),
+            "depth 1 -> 2 should land on page 2: {:?}",
+            second.text
+        );
+        assert_eq!(
+            herdr.sent_text_log("w1:p1").await,
+            vec![PAGE_UP.to_string(), PAGE_UP.to_string()],
+            "depth 1 -> 2 sends exactly one MORE PageUp, and no restore"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn read_to_depth_from_2_to_0_restores() {
+        // Asking for depth 0 from anywhere non-zero always restores to the
+        // live bottom, regardless of how many pages back the caller was.
+        let herdr = FakeHerdr::new();
+        let live_bottom = "page0 (live)\n❯ ";
+        herdr.seed_scroll_pane(
+            "w1:p1",
+            live_bottom,
+            live_bottom,
+            Some("page1 further back\npage0 (live)\n❯ "),
+        );
+        herdr.push_escape_page(
+            "w1:p1",
+            "page2 even further back\npage1 further back\npage0 (live)\n❯ ",
+        );
+
+        let scroller = PaneScroller::new(&herdr);
+        scroller.read_to_depth("w1:p1", 0, 2).await.unwrap();
+        assert_eq!(
+            herdr.sent_text_log("w1:p1").await,
+            vec![PAGE_UP.to_string(), PAGE_UP.to_string()]
+        );
+
+        let (restored, strategy) = scroller.read_to_depth("w1:p1", 2, 0).await.unwrap();
+        assert_eq!(strategy, ScrollStrategy::EscapeInjection);
+        assert_eq!(
+            restored.text, live_bottom,
+            "depth 0 always lands back at live"
+        );
+        assert_eq!(
+            herdr.sent_text_log("w1:p1").await,
+            vec![
+                PAGE_UP.to_string(),
+                PAGE_UP.to_string(),
+                RESTORE_BOTTOM.to_string(),
+            ],
+            "depth 2 -> 0 sends exactly one restore, no PageDowns"
+        );
     }
 
     #[test]

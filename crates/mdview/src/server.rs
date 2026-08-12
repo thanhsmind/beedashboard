@@ -69,6 +69,89 @@ pub struct AppState {
     /// `terminal_background` on every reconcile rather than reopened per
     /// toggle.
     pub notify_store: Arc<mdview_core::notify_store::NotifyStore>,
+    /// scroll-keep-position: the `/screen` routes' own per-pane remembered
+    /// scroll depth (`herdr::pane_scroller::PaneScroller`'s stateless
+    /// escape-injection mechanism given a durable home) — guarded the same
+    /// way `terminal_background` guards its own interior state, one shared
+    /// instance per `AppState`, cloned cheaply into every clone.
+    pub scroll_tracker: Arc<PaneScrollTracker>,
+}
+
+/// scroll-keep-position: one pane's remembered position in the
+/// escape-injection scrollback mechanism (`herdr::pane_scroller`) — the
+/// `/screen` routes' stateful successor to the old "every `?history=` call
+/// is self-contained and always restores to live" contract. A `Mutex`
+/// behind an `Arc`, the same interior-mutability shape `TerminalBackground`
+/// already uses for its own per-daemon state — never touched off the
+/// request path: no background task, no timer. The idle-TTL rail
+/// (`SCROLL_IDLE_TTL`) is checked lazily, only when a later request for the
+/// same pane actually arrives, never by a sweep.
+#[derive(Default)]
+pub struct PaneScrollTracker {
+    records: std::sync::Mutex<std::collections::HashMap<String, ScrollRecord>>,
+}
+
+/// One pane's remembered depth, the moment it was last recorded — `depth`
+/// mirrors `?history=`'s own absolute-depth meaning (`0` is live);
+/// `last_touched` backs the idle-TTL rail; `last_text_revision` is
+/// `mdview_core::ansi::revision_of` of the pane's own text at the moment
+/// `depth` was recorded, so a later request can tell whether anything else
+/// (a reply sent, a redraw, another operator) moved the pane out from under
+/// this record before trusting it for a delta move. `last_touched` is a
+/// `tokio::time::Instant`, not `std::time::Instant`: the idle-TTL rail's own
+/// test pauses and fast-forwards the runtime clock (`start_paused = true` +
+/// `tokio::time::advance`) rather than actually sleeping `SCROLL_IDLE_TTL`
+/// real seconds, and only `tokio::time::Instant::elapsed` observes that
+/// advance.
+#[derive(Clone, Copy)]
+struct ScrollRecord {
+    depth: usize,
+    last_touched: tokio::time::Instant,
+    last_text_revision: u64,
+}
+
+impl PaneScrollTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `pane_id`'s current record, if any — `None` for a pane never
+    /// scrolled via `?history=`, or one already restored/cleared.
+    fn get(&self, pane_id: &str) -> Option<ScrollRecord> {
+        self.records
+            .lock()
+            .expect("scroll tracker mutex poisoned")
+            .get(pane_id)
+            .copied()
+    }
+
+    /// Records `pane_id` at `depth`, with `text` as the content that depth
+    /// showed — `last_text_revision` is derived from it, never passed in
+    /// separately, so a caller can never record a depth against the wrong
+    /// text's revision by accident.
+    fn record(&self, pane_id: &str, depth: usize, text: &str) {
+        self.records
+            .lock()
+            .expect("scroll tracker mutex poisoned")
+            .insert(
+                pane_id.to_string(),
+                ScrollRecord {
+                    depth,
+                    last_touched: tokio::time::Instant::now(),
+                    last_text_revision: mdview_core::ansi::revision_of(text),
+                },
+            );
+    }
+
+    /// Drops `pane_id`'s record entirely — used once a pane is known to be
+    /// back at live (depth 0 needs no record at all: there is nothing left
+    /// for the idle-TTL or content-mismatch rails to protect).
+    fn clear(&self, pane_id: &str) {
+        self.records
+            .lock()
+            .expect("scroll tracker mutex poisoned")
+            .remove(pane_id);
+    }
 }
 
 /// D7/D9 outbox (agent-terminal-22): the only code path that ever reads or
@@ -126,6 +209,7 @@ pub async fn serve() -> Result<()> {
         attach_root: None,
         terminal_background: Arc::new(crate::TerminalBackground::new()),
         notify_store,
+        scroll_tracker: Arc::new(PaneScrollTracker::new()),
     };
 
     // D7: reconcile the live background against whatever the config already
@@ -1268,29 +1352,143 @@ fn telegram_credentials(
 const HERDR_DOWN_REMEDY: &str = "herdr is not running";
 
 /// Shared by `terminal_screen` and `unassigned_terminal_screen` — mirrors
-/// herdr-go's own `ScreenQuery` (`herdr-go/src/web/screen.rs`). Presence
-/// requests older pane content via `PaneScroller::read_history`
-/// (`herdr/pane_scroller.rs`) instead of the routes' existing default
-/// live-view read; absent leaves today's behavior byte-for-byte unchanged.
-/// The value doubles as the cumulative depth (PageUp-hops back from the live
-/// bottom) this one call goes before always restoring to live — the gateway
-/// keeps no scroll depth of its own between requests, so the client sends
-/// one more than its last request to go further back than last time
-/// (`assets/app.js`'s own running per-pane counter). A present-but-non-
-/// numeric value falls back to one hop rather than erroring, matching
-/// herdr-go's own fallback for callers that only ever checked presence.
+/// herdr-go's own `ScreenQuery` (`herdr-go/src/web/screen.rs`), but the
+/// protocol shape is the only thing herdr-go's version and this one still
+/// share (scroll-keep-position). Presence requests older pane content
+/// through `scroll_aware_read` (below) instead of the routes' plain default
+/// live-view read; absent leaves the default live-view read untouched, same
+/// as always. The value is now the pane's *absolute* requested depth (`0`
+/// meaning live), not a hop count added to an implicit "always restores
+/// after" baseline — the gateway keeps its own per-pane depth
+/// (`AppState::scroll_tracker`) between requests now, so `scroll_aware_read`
+/// moves only the delta from wherever that pane's own record says it is,
+/// and `assets/app.js`'s per-pane counter is what supplies the absolute
+/// depth on every call (one more than last time for "Load older", exactly
+/// `0` for "Live"). A present-but-non-numeric value falls back to depth 1
+/// rather than erroring, matching herdr-go's own fallback for callers that
+/// only ever checked presence.
 #[derive(serde::Deserialize, Default)]
 struct ScreenQuery {
     #[serde(default)]
     history: Option<String>,
 }
 
-/// Parses `ScreenQuery::history` into a PageUp-hop count for
-/// `PaneScroller::read_history` — non-numeric falls back to 1, and the
-/// result is always clamped to at least 1 (mirrors herdr-go's own
-/// `.parse::<usize>().unwrap_or(1).max(1)`).
-fn history_pages(history: &str) -> usize {
-    history.parse::<usize>().unwrap_or(1).max(1)
+/// Parses `ScreenQuery::history` into the pane's requested absolute scroll
+/// depth for `scroll_aware_read` — non-numeric falls back to 1. Unlike the
+/// old hop-count parsing this deliberately does NOT clamp a genuine `0` up
+/// to 1 anymore: depth 0 is now a meaningful value in its own right, an
+/// explicit "reach live" request (`assets/app.js`'s Live button sends
+/// `?history=0`), not merely "absent".
+fn requested_depth(history: &str) -> usize {
+    history.parse::<usize>().unwrap_or(1)
+}
+
+/// scroll-keep-position: how long a pane's remembered scroll depth is
+/// trusted before being treated as abandoned. An operator who scrolled up
+/// with "Load older" and then simply walked away (never pressing "Live")
+/// must not leave that pane escape-injection-scrolled forever — the next
+/// request touching this pane, of any kind, finds the record stale and
+/// silently restores to live before doing anything else. 90s: long enough
+/// that a person actually reading a loaded-older page for a few seconds is
+/// never reset out from under them, short enough that an abandoned pane's
+/// own footer (elapsed-time/token counters, still re-rendering under the
+/// escalated view — see `pane_scroller.rs`'s own `is_richer` doc comment)
+/// is never mistaken for "still being used" for long.
+const SCROLL_IDLE_TTL: Duration = Duration::from_secs(90);
+
+/// scroll-keep-position: serves one `/screen` request against `pane_id`,
+/// wrapping `PaneScroller` with the gateway's own per-pane depth record and
+/// its three safety rails — shared by `terminal_screen` and
+/// `unassigned_terminal_screen`, the same way `SCREEN_READ_LINES` and
+/// `herdr_down_response` already are. `history` is `ScreenQuery::history`
+/// unchanged (`None` for the plain live poll).
+///
+/// Rail order matters: idle-TTL is checked first (an abandoned record must
+/// never survive to be delta'd from, nor to gate a live read); then, if this
+/// is a live request (`history` absent, or present with `requested_depth`
+/// `0`), any surviving non-zero record is restored and dropped; otherwise
+/// (a genuine "load older") a surviving record's own text revision is
+/// checked against the pane's current text before trusting it for a delta —
+/// a mismatch falls back once to `PaneScroller::read_history`'s
+/// self-contained replay-and-restore, and the record is dropped rather than
+/// re-recorded against a position this call never actually confirmed.
+async fn scroll_aware_read(
+    st: &AppState,
+    pane_id: &str,
+    history: Option<&str>,
+) -> herdr::Result<herdr::ScreenRead> {
+    let scroller = herdr::pane_scroller::PaneScroller::new(st.herdr.as_ref());
+
+    // Rail: an idle record is abandoned — restore to live and drop it
+    // before this request does anything else with it.
+    if let Some(record) = st.scroll_tracker.get(pane_id) {
+        if record.last_touched.elapsed() > SCROLL_IDLE_TTL {
+            if record.depth != 0 {
+                scroller.read_to_depth(pane_id, record.depth, 0).await?;
+            }
+            st.scroll_tracker.clear(pane_id);
+        }
+    }
+
+    let requested = history.map(requested_depth).unwrap_or(0);
+
+    if history.is_none() || requested == 0 {
+        // Rail: a live read for a pane still recorded as scrolled restores
+        // it first — the plain poll, a page reload, and the Live button's
+        // own explicit `?history=0` all share this one path, and none of
+        // them may ever see a stale escalated view.
+        if let Some(record) = st.scroll_tracker.get(pane_id) {
+            if record.depth != 0 {
+                scroller.read_to_depth(pane_id, record.depth, 0).await?;
+            }
+            st.scroll_tracker.clear(pane_id);
+        }
+        return st
+            .herdr
+            .read_pane(pane_id, herdr::ReadSource::Recent, SCREEN_READ_LINES)
+            .await;
+    }
+
+    // A genuine "load older" request: requested > 0.
+    match st.scroll_tracker.get(pane_id) {
+        None => {
+            let (read, strategy) = scroller.read_to_depth(pane_id, 0, requested).await?;
+            if strategy == herdr::pane_scroller::ScrollStrategy::EscapeInjection {
+                st.scroll_tracker.record(pane_id, requested, &read.text);
+            }
+            Ok(read)
+        }
+        Some(record) => {
+            let current = st
+                .herdr
+                .read_pane(pane_id, herdr::ReadSource::Visible, 0)
+                .await?;
+            if mdview_core::ansi::revision_of(&current.text) != record.last_text_revision {
+                // Rail: something else moved this pane since the record was
+                // made (another operator, a reply sent, the agent's own
+                // redraw) — the remembered depth can no longer be trusted
+                // for a delta move. Fall back once to the old self-contained
+                // replay, which always ends restored to live regardless of
+                // where this call started; the record is dropped rather
+                // than re-recorded, since this call never actually confirms
+                // a *new* escape-injection position worth remembering (see
+                // `pane_scroller.rs`'s own `read_history` doc comment).
+                let read = scroller.read_history(pane_id, requested).await?;
+                st.scroll_tracker.clear(pane_id);
+                Ok(read)
+            } else {
+                let (read, strategy) = scroller
+                    .read_to_depth(pane_id, record.depth, requested)
+                    .await?;
+                if strategy == herdr::pane_scroller::ScrollStrategy::EscapeInjection {
+                    st.scroll_tracker.record(pane_id, requested, &read.text);
+                } else {
+                    st.scroll_tracker.clear(pane_id);
+                }
+                Ok(read)
+            }
+        }
+    }
 }
 
 /// `GET /p/:id/_terminal/:pane_id/screen` (D2/D3/D4/D6) — one pane's current
@@ -1340,21 +1538,7 @@ async fn terminal_screen(
     if !in_project {
         return not_found("pane not found");
     }
-    let read = if let Some(history) = &query.history {
-        // TEMPORARY (remove once the button is confirmed working end to end):
-        // proves whether the browser's press reaches this route at all.
-        // Carries only the pane id and the hop count — never any typed text
-        // or key press.
-        tracing::info!("screen history read pane={pane_id} pages={}", history_pages(history));
-        let scroller = herdr::pane_scroller::PaneScroller::new(st.herdr.as_ref());
-        scroller.read_history(&pane_id, history_pages(history)).await
-    } else {
-        // Unchanged default behavior: today's existing read, named
-        // explicitly.
-        st.herdr
-            .read_pane(&pane_id, herdr::ReadSource::Recent, SCREEN_READ_LINES)
-            .await
-    };
+    let read = scroll_aware_read(&st, &pane_id, query.history.as_deref()).await;
     match read {
         Ok(read) => {
             let revision = mdview_core::ansi::revision_of(&read.text);
@@ -2498,21 +2682,7 @@ async fn unassigned_terminal_screen(
     if let Err(refusal) = verify_pane_is_unassigned(&st, &pane_id).await {
         return refusal;
     }
-    let read = if let Some(history) = &query.history {
-        // TEMPORARY (remove once the button is confirmed working end to end):
-        // proves whether the browser's press reaches this route at all.
-        // Carries only the pane id and the hop count — never any typed text
-        // or key press.
-        tracing::info!("screen history read pane={pane_id} pages={}", history_pages(history));
-        let scroller = herdr::pane_scroller::PaneScroller::new(st.herdr.as_ref());
-        scroller.read_history(&pane_id, history_pages(history)).await
-    } else {
-        // Unchanged default behavior: today's existing read, named
-        // explicitly.
-        st.herdr
-            .read_pane(&pane_id, herdr::ReadSource::Recent, SCREEN_READ_LINES)
-            .await
-    };
+    let read = scroll_aware_read(&st, &pane_id, query.history.as_deref()).await;
     match read {
         Ok(read) => {
             let revision = mdview_core::ansi::revision_of(&read.text);
@@ -3457,6 +3627,9 @@ mod bee_route_tests {
             notify_store: Arc::new(
                 mdview_core::notify_store::NotifyStore::open_in_memory().unwrap(),
             ),
+            // A fresh tracker per state — no route test shares a remembered
+            // scroll depth across states.
+            scroll_tracker: Arc::new(PaneScrollTracker::new()),
         }
     }
 
@@ -9144,17 +9317,20 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// terminal-scroll-2: `?history=2` must route through
-    /// `PaneScroller::read_history` with 2 pages — proven both by the
-    /// content returned (the 2nd escape page, not the 1st or live) and by
-    /// the fake's `sent_text_log` recording exactly two `PAGE_UP` hops then
-    /// one `RESTORE_BOTTOM`, mirroring `pane_scroller.rs`'s own
-    /// `pages_gt_1_hops_back_further_than_a_single_pageup` unit test at the
-    /// HTTP layer.
+    /// terminal-scroll-2/scroll-keep-position: `?history=2` against a pane
+    /// with no remembered depth yet must route through
+    /// `scroll_aware_read`/`PaneScroller::read_to_depth` from a fresh
+    /// (depth 0) start — proven both by the content returned (the 2nd
+    /// escape page, not the 1st or live) and by the fake's `sent_text_log`
+    /// recording exactly two `PAGE_UP` hops. Unlike the old self-contained
+    /// contract this does NOT end with a `RESTORE_BOTTOM` anymore: the
+    /// gateway now remembers this pane is at depth 2 and only moves the
+    /// delta on a later request, so a mid-journey "load older" no longer
+    /// pays to walk all the way back to live before the next one.
     #[tokio::test]
-    async fn terminal_screen_history_param_sends_two_pageups_then_restores() {
+    async fn terminal_screen_history_param_sends_two_pageups_no_restore() {
         use crate::herdr::fake::FakeHerdr;
-        use crate::herdr::pane_scroller::{PAGE_UP, RESTORE_BOTTOM};
+        use crate::herdr::pane_scroller::PAGE_UP;
 
         let dir = fresh_root("terminal-screen-history-2");
         enable_terminal(&dir);
@@ -9199,12 +9375,189 @@ mod bee_route_tests {
         );
         assert_eq!(
             fake.sent_text_log(&started.pane_id).await,
-            vec![PAGE_UP.to_string(), PAGE_UP.to_string(), RESTORE_BOTTOM.to_string()],
-            "two PageUp hops then one restore-to-bottom, in that order"
+            vec![PAGE_UP.to_string(), PAGE_UP.to_string()],
+            "two PageUp hops and no restore -- the gateway now remembers depth 2"
         );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// scroll-keep-position, route test: a live read (`?history` absent)
+    /// for a pane the gateway still remembers as scrolled must restore it
+    /// to the bottom first -- proven by the fake's `sent_text_log` showing
+    /// `RESTORE_BOTTOM` land on this SECOND, history-less request, even
+    /// though that request never asked for any history itself.
+    #[tokio::test]
+    async fn terminal_screen_live_read_after_history_read_restores_the_pane() {
+        use crate::herdr::fake::FakeHerdr;
+        use crate::herdr::pane_scroller::{PAGE_UP, RESTORE_BOTTOM};
+
+        let dir = fresh_root("terminal-screen-live-after-history");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-live-after-history-project");
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let live_bottom = "page0 (live)\n❯ ";
+        fake.seed_scroll_pane(
+            &started.pane_id,
+            live_bottom,
+            live_bottom,
+            Some("page1 further back\npage0 (live)\n❯ "),
+        );
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let project = register(&st, &root, "screen-live-after-history");
+        let app = router(st);
+
+        // First: a history request records this pane at depth 1.
+        let history_resp = app
+            .clone()
+            .oneshot(Request::builder()
+                .uri(format!("/p/{}/_terminal/{}/screen?history=1", project.id, started.pane_id))
+                .method("GET")
+                .body(Body::empty())
+                .unwrap())
+            .await
+            .unwrap();
+        assert_eq!(history_resp.status(), StatusCode::OK);
+        assert_eq!(
+            fake.sent_text_log(&started.pane_id).await,
+            vec![PAGE_UP.to_string()],
+            "one PageUp and no restore -- depth 1 is now remembered"
+        );
+
+        // Second: a plain live read for the SAME pane, no history param at
+        // all, must restore it first rather than serving whatever the
+        // escalated view still shows.
+        let live_resp = app
+            .clone()
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(live_resp.status(), StatusCode::OK);
+        let body = body_string(live_resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            json["text"],
+            serde_json::json!(mdview_core::ansi::to_html(live_bottom)),
+            "{body}"
+        );
+        assert_eq!(
+            fake.sent_text_log(&started.pane_id).await,
+            vec![PAGE_UP.to_string(), RESTORE_BOTTOM.to_string()],
+            "the live read restored the pane before serving, unprompted"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// scroll-keep-position: a record older than `SCROLL_IDLE_TTL` is
+    /// treated as abandoned -- the next request touching this pane, even one
+    /// asking for the exact same depth as before, restores to live and
+    /// drops the record before serving fresh, rather than trusting a depth
+    /// that might no longer reflect reality. Uses a paused runtime clock
+    /// (`tokio::time::advance`) instead of a real 90s sleep.
+    #[tokio::test(start_paused = true)]
+    async fn scroll_aware_read_stale_record_restores_before_serving() {
+        use crate::herdr::fake::FakeHerdr;
+        use crate::herdr::pane_scroller::{PAGE_UP, RESTORE_BOTTOM};
+
+        let dir = fresh_root("scroll-aware-stale");
+        let mut st = build_state_with_dir(&dir);
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let live_bottom = "page0 (live)\n❯ ";
+        fake.seed_scroll_pane(
+            "w1:p1",
+            live_bottom,
+            live_bottom,
+            Some("page1 further back\npage0 (live)\n❯ "),
+        );
+        st.herdr = fake.clone();
+
+        let first = scroll_aware_read(&st, "w1:p1", Some("1")).await.unwrap();
+        assert!(first.text.contains("page1 further back"));
+        assert_eq!(fake.sent_text_log("w1:p1").await, vec![PAGE_UP.to_string()]);
+
+        // Idle past the TTL -- nobody presses "Live", nobody asks again for
+        // a while.
+        tokio::time::advance(SCROLL_IDLE_TTL + Duration::from_secs(1)).await;
+
+        // The next request, for that very same depth, must not trust the
+        // old record: it restores first, then serves fresh from depth 0.
+        let second = scroll_aware_read(&st, "w1:p1", Some("1")).await.unwrap();
+        assert!(second.text.contains("page1 further back"));
+        assert_eq!(
+            fake.sent_text_log("w1:p1").await,
+            vec![
+                PAGE_UP.to_string(),
+                RESTORE_BOTTOM.to_string(),
+                PAGE_UP.to_string(),
+            ],
+            "a stale record restores to live before serving the fresh request"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// scroll-keep-position: when the pane's current text no longer matches
+    /// the recorded depth's own `last_text_revision` (someone else moved the
+    /// pane, or the agent redrew it on its own), the remembered depth can no
+    /// longer be trusted for a delta move -- this falls back ONCE to
+    /// `PaneScroller::read_history`'s self-contained replay-and-restore
+    /// (serving the requested depth against the CURRENT content) and drops
+    /// the record rather than re-recording a position this call never
+    /// actually confirmed.
+    #[tokio::test(start_paused = true)]
+    async fn scroll_aware_read_content_mismatch_falls_back_to_replay() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("scroll-aware-mismatch");
+        let mut st = build_state_with_dir(&dir);
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let live_bottom = "page0 (live)\n❯ ";
+        fake.seed_scroll_pane(
+            "w1:p1",
+            live_bottom,
+            live_bottom,
+            Some("page1 further back\npage0 (live)\n❯ "),
+        );
+        st.herdr = fake.clone();
+
+        let first = scroll_aware_read(&st, "w1:p1", Some("1")).await.unwrap();
+        assert!(first.text.contains("page1 further back"));
+        assert!(
+            st.scroll_tracker.get("w1:p1").is_some(),
+            "depth 1 recorded after the first request"
+        );
+
+        // Someone else moves this pane between requests -- re-seeded to a
+        // completely different screen, simulating a reply sent (or the
+        // agent's own redraw) that the tracker's record never saw.
+        fake.seed_scroll_pane(
+            "w1:p1",
+            "a different live frame\n❯ ",
+            "a different live frame\n❯ ",
+            Some("a different older frame\n❯ "),
+        );
+
+        let second = scroll_aware_read(&st, "w1:p1", Some("1")).await.unwrap();
+        assert!(
+            second.text.contains("a different older frame"),
+            "the fallback replay serves the requested depth against the NEW content: {}",
+            second.text
+        );
+        assert!(
+            st.scroll_tracker.get("w1:p1").is_none(),
+            "a mismatch falls back once and drops the record rather than re-recording an unconfirmed depth"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// agent-terminal-6, truth: "herdr going silent between polls surfaces
@@ -13098,13 +13451,14 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// terminal-scroll-2: `?history=2` against the Unassigned group's screen
-    /// route must route through `PaneScroller::read_history` with 2 pages —
-    /// same proof shape as `terminal_screen_history_param_sends_two_pageups_then_restores`.
+    /// terminal-scroll-2/scroll-keep-position: `?history=2` against the
+    /// Unassigned group's screen route, for a pane with no remembered depth
+    /// yet, must route through `scroll_aware_read` from a fresh start — same
+    /// proof shape as `terminal_screen_history_param_sends_two_pageups_no_restore`.
     #[tokio::test]
-    async fn unassigned_terminal_screen_history_param_sends_two_pageups_then_restores() {
+    async fn unassigned_terminal_screen_history_param_sends_two_pageups_no_restore() {
         use crate::herdr::fake::FakeHerdr;
-        use crate::herdr::pane_scroller::{PAGE_UP, RESTORE_BOTTOM};
+        use crate::herdr::pane_scroller::PAGE_UP;
 
         let dir = fresh_root("unassigned-screen-history-2");
         enable_terminal(&dir);
@@ -13152,8 +13506,8 @@ mod bee_route_tests {
         );
         assert_eq!(
             fake.sent_text_log(&stray.pane_id).await,
-            vec![PAGE_UP.to_string(), PAGE_UP.to_string(), RESTORE_BOTTOM.to_string()],
-            "two PageUp hops then one restore-to-bottom, in that order"
+            vec![PAGE_UP.to_string(), PAGE_UP.to_string()],
+            "two PageUp hops and no restore -- the gateway now remembers depth 2"
         );
 
         std::fs::remove_dir_all(&dir).ok();
