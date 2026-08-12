@@ -1475,6 +1475,17 @@ const SCROLL_IDLE_TTL: Duration = Duration::from_secs(90);
 /// falls back once to `PaneScroller::read_history`'s self-contained
 /// replay-and-restore, and the record is dropped rather than re-recorded
 /// against a position this call never actually confirmed.
+///
+/// Independent re-review fixes, on top of the above: (1) the explicit-zero
+/// rail below now serves the SAME shape the plain-poll rail serves (Recent,
+/// `SCREEN_READ_LINES`), not `PaneScroller::restore_to_live`'s own bare
+/// Visible read, so a Live press does not repaint the pane once with just
+/// the current screen and then again 1.5s later with the full window. (2)
+/// both the explicit-zero rail and (3) the stale-sweep loop now clear a
+/// pane's record only once its restore is confirmed to have succeeded —
+/// clearing unconditionally left a failed restore's pane scrolled with no
+/// record at all, and nothing keys off a pane that has none, so it would
+/// never be retried.
 async fn scroll_aware_read(
     st: &AppState,
     pane_id: &str,
@@ -1501,10 +1512,23 @@ async fn scroll_aware_read(
         };
         if let Some(record) = st.scroll_tracker.get(&other) {
             if record.last_touched.elapsed() > SCROLL_IDLE_TTL {
-                if record.depth != 0 {
-                    let _ = scroller.read_to_depth(&other, record.depth, 0).await;
+                if record.depth == 0 {
+                    st.scroll_tracker.clear(&other);
+                } else if scroller
+                    .read_to_depth(&other, record.depth, 0)
+                    .await
+                    .is_ok()
+                {
+                    // Independent re-review fix (3): only drop the record
+                    // once the restore is CONFIRMED — a failed restore
+                    // keeps it, so a later sweep (any later request, for
+                    // any pane) retries this same pane instead of parking
+                    // it scrolled forever with nothing left that would ever
+                    // touch it again. Still best-effort in every other
+                    // respect: no background task or timer, still
+                    // `try_lock` and skip on contention above.
+                    st.scroll_tracker.clear(&other);
                 }
-                st.scroll_tracker.clear(&other);
             }
         }
     }
@@ -1535,8 +1559,26 @@ async fn scroll_aware_read(
         // `from_depth == to_depth` shortcut, which is exactly what left a
         // Live press a no-op after a daemon restart dropped the record
         // while the real pane was still genuinely scrolled.
+        //
+        // Independent re-review fix (2): restore FIRST, clear the record
+        // only once that is confirmed to have succeeded — the plain-poll
+        // rail below already does it in this order. Clearing first left a
+        // failed restore's pane scrolled with no record at all, and the
+        // sweep above only ever revisits panes that HAVE one.
+        scroller.restore_to_live(pane_id).await?;
         st.scroll_tracker.clear(pane_id);
-        return scroller.restore_to_live(pane_id).await;
+        // Independent re-review fix (1): serve the SAME shape the plain
+        // poll below serves (Recent, `SCREEN_READ_LINES`), not
+        // `restore_to_live`'s own bare Visible read — Visible is only the
+        // current screen, much smaller than the ordinary poll's
+        // Recent(`SCREEN_READ_LINES`) window, so an explicit Live press
+        // repainted the pane with just that and the very next poll 1.5s
+        // later repainted it again with the full window: a visible
+        // flicker.
+        return st
+            .herdr
+            .read_pane(pane_id, herdr::ReadSource::Recent, SCREEN_READ_LINES)
+            .await;
     }
 
     if history.is_none() {
@@ -9953,6 +9995,113 @@ mod bee_route_tests {
             fake.sent_text_log("w1:p2").await,
             vec![PAGE_UP.to_string(), RESTORE_BOTTOM.to_string()],
             "the swept pane was restored too, even though it was never the one requested"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// scroll-keep-position, independent re-review fix (3): a stale pane
+    /// whose OWN restore fails during the sweep must keep its record, not
+    /// lose it -- clearing it regardless would park that pane
+    /// escape-injection-scrolled forever, since nothing else ever revisits
+    /// a pane the tracker has no record for. Models the failure with a
+    /// record for a pane herdr itself no longer knows about (the real-world
+    /// shape: the pane closed, or survived a daemon restart that dropped
+    /// it) -- its restore errors with `NoSuchPane`, never with a fabricated
+    /// failure toggle.
+    #[tokio::test(start_paused = true)]
+    async fn sweep_keeps_a_stale_panes_record_when_its_own_restore_fails() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("scroll-sweep-restore-fails");
+        let mut st = build_state_with_dir(&dir);
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let live_bottom = "page0 (live)\n❯ ";
+        fake.seed_scroll_pane("w1:p1", live_bottom, live_bottom, None);
+        st.herdr = fake.clone();
+
+        // A stale record for a pane that no longer exists in herdr -- the
+        // sweep's own restore attempt for it must fail.
+        st.scroll_tracker
+            .record("w1:ghost", 1, "some scrolled text");
+        tokio::time::advance(SCROLL_IDLE_TTL + Duration::from_secs(1)).await;
+
+        // A plain poll for an unrelated, healthy pane still triggers the
+        // sweep for every OTHER stale pane, "w1:ghost" included.
+        scroll_aware_read(&st, "w1:p1", None).await.unwrap();
+
+        assert!(
+            st.scroll_tracker.get("w1:ghost").is_some(),
+            "a stale pane whose restore fails during the sweep must keep its record so a later \
+             sweep retries it, not park it scrolled forever"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// scroll-keep-position, independent re-review fix (2): an EXPLICIT
+    /// `?history=0` request whose restore fails must leave the record
+    /// intact -- clearing it first (the defect) left the pane genuinely
+    /// scrolled with no record at all, and nothing else would ever revisit
+    /// it.
+    #[tokio::test]
+    async fn scroll_aware_read_explicit_zero_keeps_the_record_when_the_restore_fails() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("scroll-explicit-zero-restore-fails");
+        let mut st = build_state_with_dir(&dir);
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        st.herdr = fake.clone();
+
+        // A record for a pane herdr itself does not know about -- its own
+        // restore errors with `NoSuchPane`.
+        st.scroll_tracker
+            .record("w1:ghost", 1, "some scrolled text");
+
+        let result = scroll_aware_read(&st, "w1:ghost", Some("0")).await;
+        assert!(
+            result.is_err(),
+            "a failed restore must surface as an error, not be swallowed"
+        );
+        assert!(
+            st.scroll_tracker.get("w1:ghost").is_some(),
+            "the record must survive a failed explicit-zero restore so a later request retries it"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// scroll-keep-position, independent re-review fix (1): an explicit
+    /// `?history=0` restore must serve the SAME shape the plain poll
+    /// serves (`Recent`, `SCREEN_READ_LINES`), not `PaneScroller::
+    /// restore_to_live`'s own bare `Visible` read -- otherwise a Live press
+    /// repaints the pane with just the current screen and the very next
+    /// poll 1.5s later repaints it again with the full recent window, a
+    /// visible flicker. The fixture makes `recent` strictly richer than
+    /// `visible` so the two shapes are observably different.
+    #[tokio::test]
+    async fn scroll_aware_read_explicit_zero_serves_the_same_shape_as_the_plain_poll() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("scroll-explicit-zero-shape");
+        let mut st = build_state_with_dir(&dir);
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let visible = "page0 (live)\n❯ ";
+        let recent = "page-2 (older)\npage-1 (older)\npage0 (live)\n❯ ";
+        fake.seed_scroll_pane("w1:p1", visible, recent, None);
+        st.herdr = fake.clone();
+
+        let explicit_zero = scroll_aware_read(&st, "w1:p1", Some("0")).await.unwrap();
+        let plain_poll = scroll_aware_read(&st, "w1:p1", None).await.unwrap();
+
+        assert_eq!(
+            explicit_zero.text, recent,
+            "an explicit depth-0 response must carry the same recent-lines payload the plain \
+             poll serves, not the bare Visible read"
+        );
+        assert_eq!(
+            explicit_zero.text, plain_poll.text,
+            "explicit ?history=0 and the ordinary poll must serve the identical shape"
         );
 
         std::fs::remove_dir_all(&dir).ok();

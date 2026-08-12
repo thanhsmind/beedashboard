@@ -424,14 +424,70 @@ impl<'a> PaneScroller<'a> {
     /// already at live is the same accepted harmless no-op every other
     /// unconditional restore in this module already relies on (see
     /// `read_history_with_strategy`'s own doc comment).
+    ///
+    /// Independent re-review fix (4): waits via [`Self::wait_until_settled`],
+    /// not [`Self::wait_until_progressed_and_stable`] -- see that method's
+    /// own doc comment for why a pane that is ALREADY live (the majority of
+    /// both Live presses and idle-sweep restores) needs a different settle
+    /// rule than a hop that must confirm real movement.
     pub async fn restore_to_live(&self, pane_id: &str) -> Result<ScreenRead> {
-        let before = self
+        self.herdr.send_text(pane_id, RESTORE_BOTTOM).await?;
+        self.wait_until_settled(pane_id).await
+    }
+
+    /// Re-reads `Visible` until two consecutive reads land on the same
+    /// value -- the pane has genuinely stopped changing -- or the shared
+    /// attempt budget (`STABILITY_READ_ATTEMPTS`) runs out, whichever comes
+    /// first. [`Self::restore_to_live`] is the one caller.
+    ///
+    /// Independent re-review fix (4): unlike
+    /// [`Self::wait_until_progressed_and_stable`], this does NOT first
+    /// require a difference from some pre-send baseline.
+    /// [`Self::restore_to_live`] unconditionally sends [`RESTORE_BOTTOM`]
+    /// even to a pane that is already live -- the accepted harmless no-op
+    /// every unconditional restore in this module already relies on (see
+    /// `read_history_with_strategy`'s own doc comment) -- and for that
+    /// overwhelmingly common call shape (every idle-sweep restore, every
+    /// Live press on a pane that never actually scrolled) a baseline-diff
+    /// gate can NEVER fire, so it burned the full
+    /// `STABILITY_READ_ATTEMPTS x STABILITY_READ_INTERVAL` budget (~450ms)
+    /// every single time, waiting for a change that structurally cannot
+    /// come. "Two reads in a row came back the same" is the only question
+    /// `restore_to_live` actually needs answered -- has the pane stopped
+    /// moving -- and it is trivially true on the very first pair of reads
+    /// for an already-live pane, cutting that case down to one
+    /// `STABILITY_READ_INTERVAL` (~50ms). A pane that IS genuinely
+    /// transitioning still gets its real end state here: successive reads
+    /// keep differing from each other while the transition is under way, so
+    /// two-in-a-row still can't fire until the redraw has actually stopped
+    /// -- the rule is symmetric, not merely "give up early".
+    ///
+    /// Traded off, not eliminated: a transition whose own async-redraw lag
+    /// happens to echo the exact same stale frame across two reads in a row
+    /// before it starts moving would settle one read early here -- the same
+    /// low-cost-if-wrong acceptance this module already relies on elsewhere
+    /// (see `read_history_with_strategy`'s own doc comment), traded for
+    /// cutting the overwhelmingly common already-live case from ~450ms to
+    /// ~50ms.
+    async fn wait_until_settled(&self, pane_id: &str) -> Result<ScreenRead> {
+        let mut last = self
             .herdr
             .read_pane(pane_id, ReadSource::Visible, 0)
             .await?;
-        self.herdr.send_text(pane_id, RESTORE_BOTTOM).await?;
-        self.wait_until_progressed_and_stable(pane_id, |r| r.text != before.text)
-            .await
+        let mut attempts_left = STABILITY_READ_ATTEMPTS;
+        while attempts_left > 1 {
+            tokio::time::sleep(STABILITY_READ_INTERVAL).await;
+            let next = self
+                .herdr
+                .read_pane(pane_id, ReadSource::Visible, 0)
+                .await?;
+            attempts_left -= 1;
+            if next.text == last.text {
+                return Ok(next);
+            }
+            last = next;
+        }
+        Ok(last)
     }
 }
 
@@ -767,6 +823,60 @@ mod tests {
         assert_eq!(
             read.text, revealed,
             "the escalated read itself is unaffected by the restore-side wait"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restore_to_live_settles_immediately_on_an_already_live_pane() {
+        // Independent re-review fix (4): a pane that never scrolled makes
+        // RESTORE_BOTTOM a structural no-op -- `wait_until_settled` must not
+        // burn the full stability budget (~450ms) waiting for a change that
+        // can never come. It should settle on the very first pair of
+        // identical reads (one `STABILITY_READ_INTERVAL`, ~50ms).
+        let herdr = FakeHerdr::new();
+        herdr.seed_scroll_pane("w1:p1", "❯ ", "❯ ", None);
+
+        let scroller = PaneScroller::new(&herdr);
+        let start = tokio::time::Instant::now();
+        let read = scroller.restore_to_live("w1:p1").await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(read.text, "❯ ");
+        assert!(
+            elapsed <= STABILITY_READ_INTERVAL,
+            "an already-live restore must settle within one stability interval, not the full \
+             budget -- took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restore_to_live_still_waits_out_a_genuine_transition() {
+        // Independent re-review fix (4): the short-circuit above must not
+        // cut a REAL transition off early. The pane is genuinely scrolled,
+        // and its exit lands one read late (mirrors
+        // `restore_wait_lets_a_delayed_exit_from_scroll_view_land_before_
+        // returning`'s own asynchronous-redraw-lag fixture) -- the first
+        // post-send read still echoes the scrolled frame, and only the read
+        // after that shows the real live content twice in a row.
+        // `wait_until_settled` must keep polling through the stale echo and
+        // land on the real settled value, not the stale one.
+        let herdr = FakeHerdr::new();
+        let live_bottom = "Jump to bottom (ctrl+End)\n❯ ";
+        let revealed = "...earlier transcript...\nJump to bottom (ctrl+End)\n❯ ";
+        herdr.seed_scroll_pane("w1:p1", live_bottom, live_bottom, Some(revealed));
+        herdr.set_restore_delay("w1:p1", 1); // still looks scrolled for 1 read after Ctrl+End
+
+        let scroller = PaneScroller::new(&herdr);
+        // Genuinely scroll the pane first -- the state restore_to_live is
+        // meant to exit.
+        herdr.send_text("w1:p1", PAGE_UP).await.unwrap();
+
+        let read = scroller.restore_to_live("w1:p1").await.unwrap();
+
+        assert_eq!(
+            read.text, live_bottom,
+            "restore_to_live must land on the real live content, not the stale frame the \
+             redraw lag echoed first"
         );
     }
 
