@@ -650,16 +650,88 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
             // configured"), so it must track both switches, not the family
             // switch alone.
             let unassigned_visible = badges_enabled && unassigned_group_enabled(&st);
-            Html(views::project_list_page(
+            // cross-board D1/D8/D9: a registered project qualifies for the
+            // home page's cross-project sections only when its root also
+            // holds `.bee/` (`is_bee_project`, the same D3 rule
+            // `bee_board`/`project_home_page` already apply) — every
+            // registered project still appears in the list below either
+            // way, so this filter only decides what feeds the two new
+            // sections. Cloned out of `with_counts` rather than filtered
+            // from `projects` directly: `projects` was already consumed
+            // building `with_counts` above.
+            let bee_projects: Vec<mdview_core::domain::Project> = with_counts
+                .iter()
+                .map(|(p, _, _)| p.clone())
+                .filter(is_bee_project)
+                .collect();
+            let (cross_live_html, cross_features_html) = if bee_projects.is_empty() {
+                // D9: nothing qualifies, so neither section is built at all —
+                // no roll-up read, no `spawn_blocking` task, and
+                // `views::home_page` below reads this pair of empties as
+                // "render exactly `project_list_page`'s own output".
+                (String::new(), String::new())
+            } else {
+                let rollups = cross_project_rollup(bee_projects).await;
+                let pairs: Vec<(&mdview_core::domain::Project, &mdview_core::bee::BeeProjectRollup)> =
+                    rollups.iter().map(|(p, r)| (p, r)).collect();
+                (
+                    views::bee_cross_project_live_section(&pairs),
+                    views::bee_cross_project_features_section(&pairs),
+                )
+            };
+            Html(views::home_page(
                 &with_counts,
                 unassigned_visible,
                 &suggestions,
                 flag.register_error.as_deref(),
+                &cross_live_html,
+                &cross_features_html,
             ))
             .into_response()
         }
         Err(e) => internal_error(&e.to_string()),
     }
+}
+
+/// cross-board-3: `mdview_core::bee::read_rollup` is strictly synchronous
+/// filesystem work — `mdview-core` deliberately forbids tokio/axum/hyper
+/// (`bee.rs:3604`), so running it directly on `index_page`'s async task the
+/// way `bee_board` still does today for one project (`read_snapshot` at
+/// `server.rs:1268`) would put every qualifying project's `.bee/` walk on
+/// the request thread that serves `/`. Instead each qualifying project gets
+/// its own `spawn_blocking` task — the same precedent already in this file
+/// (`server.rs:294`, `1027`, `1085`) — and every task is spawned before any
+/// of them is awaited: a `spawn_blocking` task starts running the moment it
+/// is spawned, not when its handle is awaited, so spawning the whole batch
+/// first is what makes the roll-up run concurrently across projects rather
+/// than one project's walk waiting on the previous one's. A task that
+/// panics, or that the blocking pool refuses, drops that one project from
+/// the page rather than failing the whole request — the same fail-open
+/// shape `BeeSnapshot::read_errors` already gives one project's own broken
+/// `.bee/` read (a corrupt cell inside a project that DID read still
+/// reaches the page via `read_errors`; only a wholesale panic/refusal of the
+/// task itself is dropped here).
+async fn cross_project_rollup(
+    projects: Vec<mdview_core::domain::Project>,
+) -> Vec<(mdview_core::domain::Project, mdview_core::bee::BeeProjectRollup)> {
+    let handles: Vec<_> = projects
+        .into_iter()
+        .map(|project| {
+            let root = project.root_path.clone();
+            let handle = tokio::task::spawn_blocking(move || {
+                mdview_core::bee::read_rollup(&[root]).into_iter().next()
+            });
+            (project, handle)
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity(handles.len());
+    for (project, handle) in handles {
+        if let Ok(Some(rollup)) = handle.await {
+            out.push((project, rollup));
+        }
+    }
+    out
 }
 
 async fn health() -> impl IntoResponse {
@@ -14367,6 +14439,205 @@ mod bee_route_tests {
                 "{what}'s selector {selector} matches nothing the page emits: {body}"
             );
         }
+    }
+
+    // --- cross-board-3: the home page's cross-project sections ---
+
+    /// Writes the same live-session/lane fixture shape
+    /// `views.rs`'s own cross-board-2 tests use, so a qualifying project
+    /// contributes one In Progress feature card and one Live strip row —
+    /// enough to prove both new sections render from real `.bee/` data, not
+    /// just that they're wired to an empty roll-up.
+    fn write_bee_project_fixture(root: &Path, feature: &str) {
+        write(
+            root,
+            &format!(".bee/lanes/{feature}.json"),
+            &format!(
+                r#"{{
+                    "feature": "{feature}",
+                    "phase": "swarming",
+                    "mode": "standard",
+                    "next_action": "keep going",
+                    "approved_gates": {{"context": true, "shape": true, "execution": true, "review": true}}
+                }}"#
+            ),
+        );
+        write(
+            root,
+            ".bee/sessions/live.json",
+            &format!(
+                r#"{{"id": "live", "last_heartbeat": "{hb}", "lane": "{feature}"}}"#,
+                hb = rfc3339_minutes_ago(0)
+            ),
+        );
+    }
+
+    /// (cross-board D1/D8) Several qualifying projects, each with its own
+    /// live session and in-progress feature: the home page renders Live and
+    /// Features above the project list, and both sections carry entries
+    /// from more than one project — the whole point of D4's flat merge
+    /// rather than one block per project.
+    #[tokio::test]
+    async fn home_page_renders_cross_project_live_and_features_above_the_project_list_from_several_projects() {
+        let dir = fresh_root("home-cross-several");
+        let st = build_state_with_dir(&dir);
+        let root_a = dir.join("proj-a");
+        let root_b = dir.join("proj-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        write_bee_project_fixture(&root_a, "feat-a");
+        write_bee_project_fixture(&root_b, "feat-b");
+        register(&st, &root_a, "Project A");
+        register(&st, &root_b, "Project B");
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        let live_at = body
+            .find(r#"data-feature-hub="cross-project-live""#)
+            .expect(&format!("the cross-project Live strip must render: {body}"));
+        let features_at = body
+            .find(r#"data-feature-hub="cross-project""#)
+            .filter(|&i| i != live_at)
+            .expect(&format!("the cross-project Features section must render: {body}"));
+        let list_at = body
+            .find("<ul class=\"proj-list\">")
+            .expect(&format!("the project list must still render: {body}"));
+
+        assert!(live_at < features_at, "Live must render above Features (D1): {body}");
+        assert!(features_at < list_at, "Features must render above the project list (D1): {body}");
+        assert!(body.contains("feat-a") && body.contains("feat-b"), "both projects' features must appear: {body}");
+        assert!(
+            body.contains("Project A") && body.contains("Project B"),
+            "both projects' own names must label their entries: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// (cross-board D9) No registered project has a `.bee/` directory: the
+    /// home page must carry neither new section and must match the page's
+    /// own pre-feature markup.
+    #[tokio::test]
+    async fn home_page_omits_cross_project_sections_when_no_project_qualifies() {
+        let dir = fresh_root("home-cross-none");
+        let st = build_state_with_dir(&dir);
+        let root = dir.join("no-bee-project");
+        std::fs::create_dir_all(&root).unwrap();
+        register(&st, &root, "no-bee-project");
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            !body.contains("data-feature-hub=\"cross-project-live\"") && !body.contains("data-feature-hub=\"cross-project\""),
+            "neither cross-project section may render when nothing qualifies: {body}"
+        );
+        assert!(body.contains("<ul class=\"proj-list\">"), "the ordinary project list must still render: {body}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// (cross-board D8, plan.md edge case) A registered root whose directory
+    /// no longer exists on disk must be treated as non-qualifying, not as an
+    /// error: `is_bee_project`'s own `.is_dir()` check already answers
+    /// `false` for a missing path, so this proves that holds all the way
+    /// through the home page rather than panicking or 500ing.
+    #[tokio::test]
+    async fn home_page_treats_a_registered_root_missing_from_disk_as_non_qualifying() {
+        let dir = fresh_root("home-cross-vanished");
+        let st = build_state_with_dir(&dir);
+        let root = dir.join("vanished");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "vanished-feat");
+        register(&st, &root, "vanished");
+        // The registry still names this root; the directory itself is gone.
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("data-feature-hub=\"cross-project-live\"") && !body.contains("data-feature-hub=\"cross-project\""),
+            "a root missing from disk must not qualify for the cross-project sections: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// (cross-board, error path) One qualifying project's `.bee/` holds a
+    /// corrupt cell; a second qualifying project is entirely healthy. The
+    /// corrupt project must not take the page down, and the healthy
+    /// project's own entries must still reach it.
+    #[tokio::test]
+    async fn home_page_survives_a_corrupt_cell_in_one_project_and_keeps_the_others_entries() {
+        let dir = fresh_root("home-cross-corrupt");
+        let st = build_state_with_dir(&dir);
+        let root_ok = dir.join("healthy");
+        let root_bad = dir.join("corrupt");
+        std::fs::create_dir_all(&root_ok).unwrap();
+        std::fs::create_dir_all(&root_bad).unwrap();
+        write_bee_project_fixture(&root_ok, "healthy-feat");
+        // A corrupt cell: not valid JSON at all.
+        write(&root_bad, ".bee/cells/broken.json", "{ not json");
+        write(&root_bad, ".bee/state.json", r#"{"phase": "swarming"}"#);
+        register(&st, &root_ok, "healthy");
+        register(&st, &root_bad, "corrupt");
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("healthy-feat"),
+            "the healthy project's own entry must still reach the page: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// (cross-board, proof shape) A timeout around `spawn_blocking` would
+    /// abandon the blocking thread rather than stop the filesystem read
+    /// (plan.md's own reasoning for why this is proven structurally, not by
+    /// racing a clock), so this reads `cross_project_rollup`'s own source
+    /// and proves `read_rollup` is called from inside a `spawn_blocking`
+    /// closure, mirroring `mdview_core::bee`'s
+    /// `no_web_framework_dependency_declared` self-inspection test.
+    #[test]
+    fn cross_project_rollup_calls_read_rollup_inside_spawn_blocking() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/server.rs")).unwrap();
+        let sig = "async fn cross_project_rollup(";
+        let start = src.find(sig).expect("cross_project_rollup must exist in server.rs");
+        let rest = &src[start..];
+        let open = rest.find('{').expect("cross_project_rollup must have a body");
+        let mut depth = 0i32;
+        let mut end = open;
+        for (i, ch) in rest[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &rest[..end];
+
+        let spawn_blocking_at = body
+            .find("spawn_blocking")
+            .expect("cross_project_rollup must run its work inside spawn_blocking");
+        let read_rollup_at = body
+            .find("read_rollup")
+            .expect("cross_project_rollup must call read_rollup");
+        assert!(
+            spawn_blocking_at < read_rollup_at,
+            "read_rollup must be called from inside the spawn_blocking closure, not before it: {body}"
+        );
     }
 
     /// D5/D4's core resolution, on the home page itself: an unauthenticated

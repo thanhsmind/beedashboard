@@ -108,6 +108,68 @@ pub fn project_list_page(
     suggestions: &[ProjectSuggestion],
     register_error: Option<&str>,
 ) -> String {
+    let body = format!(
+        r#"{topbar}
+{main}"#,
+        topbar = topbar(""),
+        main = project_list_main(projects, unassigned_visible, suggestions, register_error),
+    );
+    layout("Projects", "", &body)
+}
+
+/// cross-board (D1): the home page `/` is ordered Live (cross-project), then
+/// Features (cross-project), then this exact project list, unmoved and
+/// unreordered inside itself — nothing in [`project_list_main`] changes for
+/// this feature. `cross_live_html` ([`bee_cross_project_live_section`]) and
+/// `cross_features_html` ([`bee_cross_project_features_section`]) are the
+/// caller's own decision of what to show (`server.rs::index_page` applies
+/// D8's qualification and D9's empty rule before calling this); both empty
+/// is treated as "nothing qualified" and this function returns exactly
+/// [`project_list_page`]'s own output, not a byte different -- D9's "the page
+/// is what it is today" is met by construction, not by matching markup by
+/// hand. Otherwise the two sections render inside their own themed `<main>`
+/// (the same `.bee-hub-theme` scoping [`bee_board_page`] uses, reusing its
+/// [`bee_hub_style`] rather than declaring new tokens), directly above the
+/// unthemed project list `<main>` [`project_list_main`] already renders.
+pub fn home_page(
+    projects: &[(Project, usize, Vec<TerminalPaneView>)],
+    unassigned_visible: bool,
+    suggestions: &[ProjectSuggestion],
+    register_error: Option<&str>,
+    cross_live_html: &str,
+    cross_features_html: &str,
+) -> String {
+    if cross_live_html.is_empty() && cross_features_html.is_empty() {
+        return project_list_page(projects, unassigned_visible, suggestions, register_error);
+    }
+    let body = format!(
+        r#"{topbar}
+{style}
+<main class="fg-page bee-hub-theme">
+  {live}
+  {features}
+</main>
+{list_main}"#,
+        topbar = topbar(""),
+        style = bee_hub_style(),
+        live = cross_live_html,
+        features = cross_features_html,
+        list_main = project_list_main(projects, unassigned_visible, suggestions, register_error),
+    );
+    layout("Projects", "", &body)
+}
+
+/// The project list itself — everything [`project_list_page`] used to build
+/// inline, factored out so [`home_page`] can render it unchanged beneath the
+/// cross-project sections (cross-board D1) without duplicating a single line
+/// of this logic. Returns just the `<main>` element; topbar and `layout`
+/// wrapping stay each caller's own job.
+fn project_list_main(
+    projects: &[(Project, usize, Vec<TerminalPaneView>)],
+    unassigned_visible: bool,
+    suggestions: &[ProjectSuggestion],
+    register_error: Option<&str>,
+) -> String {
     let listing = if projects.is_empty() {
         "<p class=\"fg-empty\">Chưa có project nào trong Bee Artifact. Đăng ký: <code>mdview register &lt;dir&gt;</code> hoặc gọi MCP <code>mdview_view_file</code>.</p>".to_string()
     } else {
@@ -245,17 +307,14 @@ pub fn project_list_page(
         ),
         None => String::new(),
     };
-    let body = format!(
-        r#"{topbar}
-<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{register_banner}{add_form}{listing}{suggestions_block}{unassigned_card}</main>"#,
-        topbar = topbar(""),
+    format!(
+        r#"<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{register_banner}{add_form}{listing}{suggestions_block}{unassigned_card}</main>"#,
         register_banner = register_banner,
         add_form = project_add_form(),
         listing = listing,
         suggestions_block = suggestions_block,
         unassigned_card = unassigned_card,
-    );
-    layout("Projects", "", &body)
+    )
 }
 
 /// D7's add-project form — one absolute-path field; the project name is
@@ -1774,6 +1833,108 @@ fn bee_live_strip_section(snapshot: &BeeSnapshot) -> String {
 
     format!(
         r#"<section class="fg-card bee-strip" data-live-rows="{row_count}"><h3 class="bee-panel__head">Live</h3><div class="bee-strip__rows">{rows}</div></section>"#,
+        row_count = row_count,
+        rows = rows,
+    )
+}
+
+/// The cross-project board's Live strip
+/// (`docs/history/cross-board/CONTEXT.md` D1): [`bee_live_strip_section`]'s
+/// own per-row shape — one row per live session, one row per granted
+/// worktree, an unresolved grant naming its own reason, board-liveness-3's
+/// "never disappears" rule — merged across every rolled-up project instead
+/// of read from one, with each row carrying the project it belongs to
+/// (a `fg-chip fg-chip--neutral` label, the same chip idiom
+/// [`bee_hub_card`]'s own D5 project chip already uses, rather than a new
+/// component). Row order is per-project first, in `rollups`' own order,
+/// sessions before worktrees within each project — exactly the within-
+/// project order [`bee_live_strip_section`] itself uses; this function
+/// invents no cross-project sort of its own (nothing in D1 asks for one, and
+/// D10's ship-time ordering is Finished-column-specific). An empty
+/// `rollups`, or a set of rollups with nothing live in any of them, both
+/// render the same single honest empty line [`bee_live_strip_section`]
+/// itself shows for one project with nothing running — whether to call this
+/// at all when nothing qualifies (D9) is the caller's decision, exactly like
+/// [`bee_cross_project_features_section`]'s own doc comment.
+pub fn bee_cross_project_live_section(rollups: &[(&Project, &BeeProjectRollup)]) -> String {
+    let mut rows = String::new();
+    let mut row_count = 0usize;
+
+    for (project, rollup) in rollups {
+        let snapshot = &rollup.snapshot;
+        let active_feature = snapshot.state.as_ref().and_then(|s| s.feature.as_deref());
+        let mut live_sessions: Vec<&BeeSession> = snapshot.sessions.iter().filter(|s| s.live).collect();
+        live_sessions.sort_by(|a, b| a.id.cmp(&b.id));
+        let project_chip = format!(r#"<span class="fg-chip fg-chip--neutral">{}</span>"#, esc(&project.name));
+
+        for s in &live_sessions {
+            let label = s.lane.as_deref().or(active_feature).unwrap_or("no active lane");
+            let phase = snapshot
+                .phase_board
+                .iter()
+                .find(|f| f.feature == label)
+                .and_then(|f| f.phase.as_deref())
+                .unwrap_or("phase unknown");
+            let heartbeat = bee_relative_minutes(s.heartbeat_age_minutes);
+            let workspace = s.workspace_id.as_ref().and_then(|id| {
+                let named = snapshot
+                    .workspaces
+                    .iter()
+                    .find(|w| &w.id == id)
+                    .map(|w| w.root.trim())
+                    .filter(|root| !root.is_empty())
+                    .unwrap_or(id.as_str());
+                (!named.is_empty()).then(|| named.to_string())
+            });
+            let workspace_html = match &workspace {
+                Some(name) => format!(" · {}", esc(name)),
+                None => String::new(),
+            };
+            rows.push_str(&format!(
+                r#"<div class="bee-strip__row" data-live-kind="session">{project_chip}<span class="bee-strip__label">{label}</span><span class="bee-strip__meta">{phase} · beat {heartbeat}{workspace_html}</span></div>"#,
+                project_chip = project_chip,
+                label = esc(label),
+                phase = esc(phase),
+                heartbeat = esc(&heartbeat),
+                workspace_html = workspace_html,
+            ));
+            row_count += 1;
+        }
+
+        for w in &snapshot.worktrees {
+            if !w.resolved {
+                let reason = w.unresolved_reason.as_deref().unwrap_or("unknown reason");
+                rows.push_str(&format!(
+                    r#"<div class="bee-strip__row bee-strip__row--unresolved" data-live-kind="worktree-unresolved">{project_chip}<span class="bee-strip__label">Worktree {id}</span><span class="bee-strip__meta">could not be read: {reason}</span></div>"#,
+                    project_chip = project_chip,
+                    id = esc(&w.id),
+                    reason = esc(reason),
+                ));
+                row_count += 1;
+                continue;
+            }
+            let branch = w.branch.as_deref().unwrap_or("unknown branch");
+            let feature = w.feature.as_deref().unwrap_or("no active feature");
+            rows.push_str(&format!(
+                r#"<div class="bee-strip__row" data-live-kind="worktree">{project_chip}<span class="bee-strip__label">{branch}</span><span class="bee-strip__meta">{feature}</span></div>"#,
+                project_chip = project_chip,
+                branch = esc(branch),
+                feature = esc(feature),
+            ));
+            row_count += 1;
+        }
+    }
+
+    if row_count == 0 {
+        return r#"<section class="fg-card bee-strip" data-live-rows="0" data-feature-hub="cross-project-live">
+  <h3 class="bee-panel__head">Live</h3>
+  <p class="fg-empty">Nothing is running right now.</p>
+</section>"#
+            .to_string();
+    }
+
+    format!(
+        r#"<section class="fg-card bee-strip" data-live-rows="{row_count}" data-feature-hub="cross-project-live"><h3 class="bee-panel__head">Live</h3><div class="bee-strip__rows">{rows}</div></section>"#,
         row_count = row_count,
         rows = rows,
     )
@@ -6073,6 +6234,92 @@ mod tests {
             html_with, html_without,
             "a project contributing no features must change nothing in the merged section"
         );
+
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+    }
+
+    // --- cross-board-3: bee_cross_project_live_section ---
+
+    /// (cross-board D1) Two projects, each with one live session: the merged
+    /// strip carries a row from each, and each row names its own project —
+    /// the same per-row shape `bee_live_strip_section` proves for one
+    /// project at a time, just merged.
+    #[test]
+    fn cross_project_live_strip_merges_sessions_from_more_than_one_project_and_labels_them() {
+        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-live-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-live-b-{}", std::process::id()));
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+        let write = |root: &std::path::Path, rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        let hb = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            &root_a,
+            ".bee/sessions/live.json",
+            &format!(r#"{{"id": "live", "last_heartbeat": "{hb}", "lane": "feat-a"}}"#),
+        );
+        write(
+            &root_b,
+            ".bee/sessions/live.json",
+            &format!(r#"{{"id": "live", "last_heartbeat": "{hb}", "lane": "feat-b"}}"#),
+        );
+
+        let mut project_a = sample_project();
+        project_a.id = "proj-a".into();
+        project_a.name = "Project A".into();
+        project_a.root_path = root_a.clone();
+        let mut project_b = sample_project();
+        project_b.id = "proj-b".into();
+        project_b.name = "Project B".into();
+        project_b.root_path = root_b.clone();
+
+        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
+        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+        let html = bee_cross_project_live_section(&pairs);
+
+        assert!(html.contains("feat-a") && html.contains("Project A"), "{html}");
+        assert!(html.contains("feat-b") && html.contains("Project B"), "{html}");
+        assert!(html.contains(r#"data-live-rows="2""#), "the row count must sum across projects: {html}");
+
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+    }
+
+    /// (cross-board D9/honest-empty) Two rolled-up projects, neither with a
+    /// live session or a worktree grant: the merged strip still renders
+    /// [`bee_live_strip_section`]'s own honest empty line rather than
+    /// disappearing, since at least one project qualified.
+    #[test]
+    fn cross_project_live_strip_renders_the_honest_empty_line_when_nothing_is_live_anywhere() {
+        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-live-empty-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-live-empty-b-{}", std::process::id()));
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+            std::fs::create_dir_all(r.join(".bee")).unwrap();
+        }
+
+        let mut project_a = sample_project();
+        project_a.id = "proj-a".into();
+        project_a.root_path = root_a.clone();
+        let mut project_b = sample_project();
+        project_b.id = "proj-b".into();
+        project_b.root_path = root_b.clone();
+
+        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
+        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+        let html = bee_cross_project_live_section(&pairs);
+
+        assert!(html.contains("Nothing is running right now."), "{html}");
+        assert!(html.contains(r#"data-live-rows="0""#), "{html}");
 
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
