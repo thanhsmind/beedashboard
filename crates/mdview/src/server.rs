@@ -3903,8 +3903,13 @@ mod bee_route_tests {
     /// `.bee/runtime/workspaces/<id>.json` record naming its own
     /// `wt/finished-feat` branch (feature-hub-3 F5: real evidence a grant
     /// once existed for it, even though `bee worktree merge`'s own cleanup
-    /// already dropped the grant itself) renders under Finished with a
-    /// "Merged" worktree chip. Replaces
+    /// already dropped the grant itself) renders under Finished. Its own
+    /// "1/1 cell done" count and "Merged" worktree chip no longer render at
+    /// all (hub-finished-compact: a Finished row is a dense name-only
+    /// line) — both rules are now proven directly by `views.rs`'s own
+    /// `bee_hub_archived_counts_excludes_dropped_from_both_counts` and
+    /// `bee_hub_worktree_chip_reads_merged_only_when_finished_and_a_grant_history_exists`
+    /// unit tests. Replaces
     /// `agent_board_happy_path_places_cells_in_columns_with_badges`, which
     /// asserted the now-retired Kanban markup.
     #[tokio::test]
@@ -3984,19 +3989,15 @@ mod bee_route_tests {
             2,
             "both the waiting and in-progress cards must show one open cell not yet done: {body}"
         );
-        assert!(
-            body.contains("1/1 cell done"),
-            "the finished card must count its own archived capped cell: {body}"
-        );
 
-        assert!(
-            body.contains("fg-chip--success\">Merged</span>"),
-            "a finished feature with no open worktree grant but a leftover workspace record naming its own branch must read Merged: {body}"
-        );
         assert_eq!(
             body.matches("fg-chip--neutral\">Main</span>").count(),
             2,
             "the waiting and in-progress cards must both read Main (no open worktree grant): {body}"
+        );
+        assert!(
+            !body.contains("Merged"),
+            "hub-finished-compact: a Finished row carries no worktree chip at all: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -4144,13 +4145,17 @@ mod bee_route_tests {
     /// `.bee/cells/archive/<feature>/` directory — no lane record, never
     /// the active feature, and no `.bee/runtime/workspaces/` record naming
     /// its own `wt/<feature>` branch either — still renders under Finished
-    /// (`list_archived_feature_dirs`), with its own done/total counted from
-    /// `read_archived_cells` (D7 parity: the archive's own dropped cell
-    /// counts toward neither `done` nor `total`). Independent review found
-    /// the old code inferred "Merged" here from `finished` alone, with no
-    /// evidence a worktree grant ever existed for this feature; this store
-    /// records none, so the corrected chip reads "Main" — a feature with no
-    /// grant history was never worked in its own worktree at all.
+    /// (`list_archived_feature_dirs`). Its own done/total-counted "1/1 cell
+    /// done" (D7 parity: the archive's own dropped cell counts toward
+    /// neither `done` nor `total`) and its "Main" worktree chip are no
+    /// longer rendered at all (hub-finished-compact: a Finished row is a
+    /// dense name-only line) — those two rules are now proven directly by
+    /// `views.rs`'s own `bee_hub_archived_counts_excludes_dropped_from_both_counts`
+    /// and `bee_hub_worktree_chip_reads_main_with_no_grant_history` unit
+    /// tests. Independent review originally found the old code inferred
+    /// "Merged" here from `finished` alone, with no evidence a worktree
+    /// grant ever existed for this feature; that corrected resolution is
+    /// what those unit tests now pin.
     #[tokio::test]
     async fn feature_hub_archive_only_feature_with_no_grant_history_renders_under_finished() {
         let root = fresh_root("hub-archive-only");
@@ -4178,15 +4183,6 @@ mod bee_route_tests {
             body.contains(&format!("href=\"/p/{}/_bee/feature/orphan-feat\"", project.id)),
             "the archive-only feature must still link to its own detail page: {body}"
         );
-        assert!(
-            body.contains("1/1 cell done"),
-            "the dropped cell must count toward neither done nor total: {body}"
-        );
-        assert!(
-            body.contains("fg-chip--neutral\">Main</span>"),
-            "a finished feature with no grant history at all must read Main, never a fabricated Merged: {body}"
-        );
-        assert!(!body.contains("Merged"), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4238,9 +4234,15 @@ mod bee_route_tests {
     }
 
     /// (edge, feature-hub fh-1, D1) A currently granted worktree naming a
-    /// Finished feature wins over the group's own "Merged" fallback — the
-    /// chip reads what `.bee/runtime/worktree-grants.json` actually
-    /// records, never a guess drawn from the feature's own group.
+    /// Finished feature still places it under Finished. The chip that used
+    /// to read "Open · wt/wt-feat" here (winning over the group's own
+    /// "Merged" fallback — what `.bee/runtime/worktree-grants.json`
+    /// actually records, never a guess drawn from the feature's own group)
+    /// no longer renders at all (hub-finished-compact: a Finished row is a
+    /// dense name-only line); that resolution is now proven directly by
+    /// `views.rs`'s own
+    /// `bee_hub_worktree_chip_reads_open_with_branch_when_a_grant_is_live`
+    /// unit test.
     #[tokio::test]
     async fn feature_hub_open_worktree_grant_wins_over_finished_fallback() {
         let root = fresh_root("hub-wt-finished");
@@ -4265,11 +4267,6 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""), "{body}");
-        assert!(
-            body.contains("fg-chip--info\">Open · wt/wt-feat</span>"),
-            "a still-granted worktree must win over the Finished group's Merged fallback: {body}"
-        );
-        assert!(!body.contains("Merged"), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&sibling).ok();
@@ -6345,6 +6342,10 @@ mod bee_route_tests {
     /// denominator). board-declutter retired the Working-on-now card whose
     /// own progress bar this test used to exercise; the same D8 guarantee
     /// now lives in [`bee_hub_card`]'s progress bar instead, reused here.
+    /// hub-finished-compact drops the old "No cells recorded." filler
+    /// paragraph entirely for a `total == 0` card — the empty block is now
+    /// absent rather than present, and this test's own no-"0/0" guarantee
+    /// still holds regardless.
     #[tokio::test]
     async fn board_feature_with_all_dropped_cells_renders_honest_progress_no_division_artifact() {
         let root = fresh_root("top-all-dropped");
@@ -6363,8 +6364,8 @@ mod bee_route_tests {
 
         assert!(body.contains("all-dropped-feature"), "{body}");
         assert!(
-            body.contains("No cells recorded."),
-            "expected the hub card's own honest progress state: {body}"
+            !body.contains("No cells recorded."),
+            "hub-finished-compact: an empty hub card must render no empty-state paragraph at all: {body}"
         );
         assert!(!body.contains("0/0"), "a division artifact leaked in: {body}");
 

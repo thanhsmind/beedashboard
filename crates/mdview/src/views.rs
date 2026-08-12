@@ -3,10 +3,9 @@
 //! `/highlight.css` (syntect class-based), so themes switch without re-render.
 
 use mdview_core::bee::{
-    feature_cell_span, list_archived_feature_dirs, read_archived_cells, BeeApprovedGates,
-    BeeBacklog, BeeBuckets, BeeCell, BeeDecisionSummary, BeeFeaturePhase, BeePbi, BeeReview,
-    BeeReviewStatus, BeeShippedFeature, BeeSnapshot, BeeState, BeeWorkspace,
-    BeeWorktree,
+    feature_cell_span, list_archived_feature_dirs, BeeApprovedGates, BeeBacklog, BeeBuckets,
+    BeeCell, BeeDecisionSummary, BeeFeaturePhase, BeePbi, BeeReview, BeeReviewStatus,
+    BeeShippedFeature, BeeSnapshot, BeeState, BeeWorkspace, BeeWorktree,
 };
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
@@ -1441,6 +1440,17 @@ html[data-scheme="dark"] .bee-hub-theme {{
 .bee-hub__chips {{ display: flex; flex-wrap: wrap; gap: var(--space-1); }}
 .bee-hub__progress-label {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
 .bee-hub__reason {{ font-style: italic; }}
+/* hub-finished-compact: the Finished group's own dense row — name only,
+   linking straight to the detail page — mirroring `.bee-done-line`'s
+   one-line idiom rather than the full `.bee-hub__card` shape the other
+   two groups keep; plus the nested-details toggle
+   ([`bee_hub_finished_rows`]) that pages it ten rows at a time. */
+.bee-hub__row {{ display: block; color: var(--color-text); font-size: var(--type-body-sm-size); text-decoration: none; padding: var(--space-1) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); overflow-wrap: anywhere; }}
+.bee-hub__row:hover {{ color: var(--color-action); }}
+.bee-hub__more {{ margin-top: var(--space-1); }}
+.bee-hub__more-summary {{ cursor: pointer; list-style: none; color: var(--color-text-subtle); font-size: var(--type-caption-size); padding: var(--space-1) var(--space-2); }}
+.bee-hub__more-summary::-webkit-details-marker {{ display: none; }}
+.bee-hub__more-summary:hover {{ color: var(--color-action); }}
 /* feature-titles: the card's own slug subtitle (shown only alongside a
    human title read from CONTEXT.md — a title-less card already shows the
    slug as its own title) and its boundary-description line, clamped so no
@@ -1639,14 +1649,19 @@ fn bee_board_asof() -> String {
 /// directory (an orchestrator-run cleanup, out of this cell's scope), and
 /// nowhere until then — never a ghost.
 ///
-/// Every card names its feature, links to its own detail page, its own
-/// done/total cell progress, its own last-activity age
-/// ([`bee_fmt_trace_time`]), a worktree-state chip
+/// Every Waiting or In Progress card ([`bee_hub_card`]) names its feature,
+/// links to its own detail page, its own done/total cell progress, its own
+/// last-activity age ([`bee_fmt_trace_time`]), a worktree-state chip
 /// ([`bee_hub_worktree_chip`]) and a status chip naming its own group.
-/// Every path-shaped value a `BeeCell`/`BeeFeaturePhase` carries already
-/// arrives relativized by `mdview_core::bee::read_snapshot` (D9), so
-/// nothing further is redacted here — this view only escapes for HTML
-/// safety.
+/// hub-finished-compact strips all of that from the Finished group: a
+/// closed feature owes no decision and no progress reading, so each of its
+/// entries is one dense row carrying only its name
+/// ([`bee_hub_finished_row`]), and the column itself pages ten rows at a
+/// time behind nested `<details>` ([`bee_hub_finished_rows`]) rather than
+/// growing without bound as more features close. Every path-shaped value a
+/// `BeeCell`/`BeeFeaturePhase` carries already arrives relativized by
+/// `mdview_core::bee::read_snapshot` (D9), so nothing further is redacted
+/// here — this view only escapes for HTML safety.
 fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String {
     let active_feature = snapshot.state.as_ref().and_then(|s| s.feature.as_deref());
     let handoff_is_pause = snapshot
@@ -1657,7 +1672,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
 
     let mut waiting_cards = String::new();
     let mut in_progress_cards = String::new();
-    let mut finished_cards = String::new();
+    let mut finished_rows: Vec<String> = Vec::new();
     let mut waiting_count = 0usize;
     let mut in_progress_count = 0usize;
     let mut finished_count = 0usize;
@@ -1725,22 +1740,8 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
             ));
         } else if is_finished {
             finished_count += 1;
-            let archived = read_archived_cells(&project.root_path, &f.feature);
-            let (done, total) = bee_hub_archived_counts(&archived);
-            let last_activity = bee_hub_latest_activity(archived.iter());
-            let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, true);
             let docs = snapshot.feature_docs.get(f.feature.as_str());
-            finished_cards.push_str(&bee_hub_card(
-                &project.id,
-                &f.feature,
-                "finished",
-                done,
-                total,
-                last_activity.as_deref(),
-                &worktree,
-                None,
-                docs,
-            ));
+            finished_rows.push(bee_hub_finished_row(&project.id, &f.feature, docs));
         }
         // else: no live work, no gate/handoff pull, and neither
         // `compounding-complete` nor archived — a pre-build lane (still
@@ -1755,23 +1756,10 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
     archive_only.sort();
     for feature in archive_only {
         finished_count += 1;
-        let archived = read_archived_cells(&project.root_path, &feature);
-        let (done, total) = bee_hub_archived_counts(&archived);
-        let last_activity = bee_hub_latest_activity(archived.iter());
-        let worktree = bee_hub_worktree_chip(&feature, &snapshot.worktrees, &snapshot.workspaces, true);
         let docs = snapshot.feature_docs.get(feature.as_str());
-        finished_cards.push_str(&bee_hub_card(
-            &project.id,
-            &feature,
-            "finished",
-            done,
-            total,
-            last_activity.as_deref(),
-            &worktree,
-            None,
-            docs,
-        ));
+        finished_rows.push(bee_hub_finished_row(&project.id, &feature, docs));
     }
+    let finished_cards = bee_hub_finished_rows(&finished_rows);
 
     format!(
         r#"<section class="fg-card bee-hub" data-feature-hub="1">
@@ -1881,13 +1869,18 @@ fn bee_hub_group_label(key: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// One feature card (D1): name + link to its own detail page, its own
-/// done/total cell progress (a `bee-progress` bar), its own last-activity age
-/// ([`bee_fmt_trace_time`]), its own worktree-state chip
+/// One Waiting or In Progress feature card (D1) — hub-finished-compact
+/// retires the Finished group's own use of this helper in favor of
+/// [`bee_hub_finished_row`]'s dense line, so `group_key` in practice now
+/// only ever arrives as `"waiting"` or `"in-progress"`. Name + link to its
+/// own detail page, its own done/total cell progress (a `bee-progress`
+/// bar, or no markup at all when `total == 0` — hub-finished-compact drops
+/// the old "No cells recorded." filler paragraph), its own last-activity
+/// age ([`bee_fmt_trace_time`]), its own worktree-state chip
 /// ([`bee_hub_worktree_chip`]) and its own group status chip
 /// ([`bee_hub_group_label`]). `reason` carries the Waiting group's own
 /// "why" line (its current-stop gate, or a paused handoff) — `None` for
-/// every other group, which has no such single reason to name. `docs`
+/// In Progress, which has no such single reason to name. `docs`
 /// (feature-titles) carries this feature's own `CONTEXT.md` reader result:
 /// present with a title, the card's name becomes that human title with the
 /// slug demoted to a small muted subtitle beneath it, plus the boundary
@@ -1919,7 +1912,10 @@ fn bee_hub_card(
         None => String::new(),
     };
     let progress_html = if total == 0 {
-        r#"<p class="fg-empty">No cells recorded.</p>"#.to_string()
+        // hub-finished-compact: an empty card renders no markup at all here
+        // — no fabricated "No cells recorded." paragraph — since a card
+        // with genuinely nothing to report needs no line saying so.
+        String::new()
     } else {
         let percent = (done * 100) / total;
         format!(
@@ -1956,6 +1952,59 @@ fn bee_hub_card(
         progress_html = progress_html,
         reason_html = reason_html,
         activity_html = activity_html,
+    )
+}
+
+/// One Finished row (hub-finished-compact): just the feature's own name —
+/// its CONTEXT title when [`docs`] carries one, else its slug — linking to
+/// its own detail page exactly like [`bee_hub_card`], and still carrying
+/// `data-hub-group="finished"` so the group's own filtering/testing hooks
+/// keep working. Deliberately none of `bee_hub_card`'s description,
+/// progress bar, worktree chip, group chip or last-activity line: a closed
+/// feature owes no decision and no progress reading, so the board only
+/// needs to name it — its detail page is one click away.
+fn bee_hub_finished_row(project_id: &str, feature: &str, docs: Option<&mdview_core::bee::BeeFeatureDocs>) -> String {
+    let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
+    let name = title.unwrap_or(feature);
+    format!(
+        r#"<a class="bee-hub__row" data-hub-group="finished" href="/p/{pid}/_bee/feature/{feature_href}">{name}</a>"#,
+        pid = esc(project_id),
+        feature_href = esc(feature),
+        name = esc(name),
+    )
+}
+
+/// Pages the Finished column's dense rows ([`bee_hub_finished_row`]) ten at
+/// a time: the first ten render directly, in the open flow; every further
+/// run of up to ten rows nests inside its own collapsed `<details>`, and
+/// each further `<details>` nests inside the previous one rather than
+/// sitting beside it as a sibling — so opening one reveals both its own
+/// rows and the next page's own toggle in the same click. No JavaScript:
+/// `assets/app.js` belongs to another live session and is off-limits to
+/// this cell, and a `<details>` element needs none to collapse.
+fn bee_hub_finished_rows(rows: &[String]) -> String {
+    let split_at = rows.len().min(10);
+    let (open, rest) = rows.split_at(split_at);
+    let mut out = open.concat();
+    if !rest.is_empty() {
+        out.push_str(&bee_hub_finished_more(rest));
+    }
+    out
+}
+
+/// One nested paging level for [`bee_hub_finished_rows`] — never called
+/// with an empty slice, so its own chunk always holds at least one row.
+fn bee_hub_finished_more(rows: &[String]) -> String {
+    let split_at = rows.len().min(10);
+    let (chunk, rest) = rows.split_at(split_at);
+    let mut inner = chunk.concat();
+    if !rest.is_empty() {
+        inner.push_str(&bee_hub_finished_more(rest));
+    }
+    format!(
+        r#"<details class="bee-hub__more"><summary class="bee-hub__more-summary">Show {n} more</summary>{inner}</details>"#,
+        n = chunk.len(),
+        inner = inner,
     )
 }
 
@@ -2028,6 +2077,10 @@ fn bee_hub_latest_activity<'a>(cells: impl Iterator<Item = &'a BeeCell>) -> Opti
 /// apply: `dropped` and any unrecognized status count toward neither
 /// `done` nor `total`, so a fully-dropped archive reports an honest
 /// `(0, 0)` rather than a fabricated complete or a division by zero.
+/// hub-finished-compact drops this count from the Finished group's own
+/// render (a dense row shows no progress reading at all), so this rule is
+/// proven directly by this module's own unit tests rather than through a
+/// full render.
 fn bee_hub_archived_counts(cells: &[BeeCell]) -> (usize, usize) {
     let mut done = 0usize;
     let mut total = 0usize;
@@ -4102,15 +4155,19 @@ mod tests {
         );
     }
 
-    /// (regression, board-finished-wins-1) A feature that has already
-    /// closed — every cell archived, `phase` at bee's own terminal
-    /// `"compounding-complete"` — kept rendering under Waiting on you,
-    /// because `state.json` still names it active and `.bee/HANDOFF.json`
-    /// still reads as a pause, and that pull was evaluated before the
-    /// Finished branch. The card then showed "No cells recorded.", since
-    /// the Waiting branch counts live cells only and a closed feature has
-    /// none. Finished now wins whenever no live cell is left: the card
-    /// lands under Finished with its archived done/total.
+    /// (regression, board-finished-wins-1; progress assertion trimmed by
+    /// hub-finished-compact, whose own dropped-cell rule is now proven
+    /// directly by `bee_hub_archived_counts_excludes_dropped_from_both_counts`)
+    /// A feature that has already closed — every cell archived, `phase` at
+    /// bee's own terminal `"compounding-complete"` — kept rendering under
+    /// Waiting on you, because `state.json` still names it active and
+    /// `.bee/HANDOFF.json` still reads as a pause, and that pull was
+    /// evaluated before the Finished branch. The card then showed
+    /// "No cells recorded.", since the Waiting branch counts live cells
+    /// only and a closed feature has none. Finished now wins whenever no
+    /// live cell is left: the card lands under Finished — as a dense row,
+    /// carrying no done/total count of its own at all
+    /// (hub-finished-compact).
     #[test]
     fn hub_sends_a_closed_feature_to_finished_even_while_a_pause_handoff_names_it() {
         let root = std::env::temp_dir().join(format!("mdview-views-hub-closed-{}", std::process::id()));
@@ -4177,13 +4234,267 @@ mod tests {
             "the closed feature belongs under Finished: {html}"
         );
         assert!(
-            html.contains("2/2 cells done"),
-            "its card must count its archived cells, not the empty live set: {html}"
+            !html.contains("cells done") && !html.contains("No cells recorded."),
+            "hub-finished-compact: a Finished row carries no progress count of its own, done or empty: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn sample_archived_cell(id: &str, feature: &str, status: &str) -> BeeCell {
+        BeeCell {
+            id: id.to_string(),
+            feature: feature.to_string(),
+            title: "a cell".to_string(),
+            lane: "tiny".to_string(),
+            status: status.to_string(),
+            tier: None,
+            files: vec![],
+            worker: None,
+            claimed_at: None,
+            capped_at: None,
+            behavior_change: false,
+            outcome: None,
+            tests: None,
+        }
+    }
+
+    /// (hub-finished-compact) Proves directly what the server.rs
+    /// `feature_hub_archive_only_feature_with_no_grant_history_renders_under_finished`
+    /// test's own now-trimmed "1/1 cell done" assertion used to prove
+    /// through a full render: a `dropped` cell counts toward neither
+    /// `done` nor `total` (the same D7 bucket rule every other cell count
+    /// on this board already follows), while a `capped` cell counts toward
+    /// both.
+    #[test]
+    fn bee_hub_archived_counts_excludes_dropped_from_both_counts() {
+        let cells = vec![
+            sample_archived_cell("c-1", "feat", "capped"),
+            sample_archived_cell("c-2", "feat", "dropped"),
+        ];
+        assert_eq!(bee_hub_archived_counts(&cells), (1, 1));
+    }
+
+    /// (hub-finished-compact) The other three `bee_hub_archived_counts`
+    /// buckets — `claimed`, `open` and `blocked` — count toward `total` but
+    /// never `done`, matching the live D7 buckets this helper mirrors for
+    /// archived cells.
+    #[test]
+    fn bee_hub_archived_counts_counts_live_statuses_toward_total_only() {
+        let cells = vec![
+            sample_archived_cell("c-1", "feat", "claimed"),
+            sample_archived_cell("c-2", "feat", "open"),
+            sample_archived_cell("c-3", "feat", "blocked"),
+        ];
+        assert_eq!(bee_hub_archived_counts(&cells), (0, 3));
+    }
+
+    fn sample_workspace(branch: &str) -> BeeWorkspace {
+        BeeWorkspace {
+            id: "w-1".to_string(),
+            kind: "worktree".to_string(),
+            root: "sibling".to_string(),
+            branch: Some(branch.to_string()),
+            attached_sessions: 0,
+            created_at: None,
+        }
+    }
+
+    /// (hub-finished-compact) Proves directly what the server.rs
+    /// `feature_hub_archive_only_feature_with_no_grant_history_renders_under_finished`
+    /// test's own now-trimmed "Main" chip assertion used to prove through a
+    /// full render: with no currently granted worktree AND no surviving
+    /// workspace record naming this feature's own `wt/<feature>` branch,
+    /// the chip reads "Main" regardless of `finished` — a feature never
+    /// worked in its own worktree has no grant history to report.
+    #[test]
+    fn bee_hub_worktree_chip_reads_main_with_no_grant_history() {
+        let (label, tone) = bee_hub_worktree_chip("solo-feat", &[], &[], true);
+        assert_eq!((label.as_str(), tone), ("Main", "neutral"));
+        let (label, tone) = bee_hub_worktree_chip("solo-feat", &[], &[], false);
+        assert_eq!((label.as_str(), tone), ("Main", "neutral"));
+    }
+
+    /// (hub-finished-compact) Proves directly what the server.rs
+    /// `feature_hub_open_worktree_grant_wins_over_finished_fallback` test's
+    /// own now-trimmed "Open · wt/wt-feat" chip assertion used to prove
+    /// through a full render: a currently granted worktree naming this
+    /// feature wins over every fallback, `finished` or not.
+    #[test]
+    fn bee_hub_worktree_chip_reads_open_with_branch_when_a_grant_is_live() {
+        let grant = BeeWorktree {
+            id: "g-1".to_string(),
+            resolved: true,
+            unresolved_reason: None,
+            feature: Some("wt-feat".to_string()),
+            phase: Some("swarming".to_string()),
+            mode: Some("standard".to_string()),
+            branch: Some("wt/wt-feat".to_string()),
+            created_at: None,
+            live: false,
+            heartbeat_age_minutes: None,
+        };
+        let (label, tone) = bee_hub_worktree_chip("wt-feat", std::slice::from_ref(&grant), &[], true);
+        assert_eq!((label.as_str(), tone), ("Open · wt/wt-feat", "info"));
+    }
+
+    /// (hub-finished-compact) The third resolution `bee_hub_worktree_chip`
+    /// carries: no currently granted worktree, but a surviving workspace
+    /// record whose own `branch` matches this feature's `wt/<feature>`
+    /// convention — a grant genuinely existed and is now gone. `finished`
+    /// reads that as "Merged"; the same evidence for a feature still live
+    /// reads "Main" (never a fabricated "Merged" for work still open).
+    #[test]
+    fn bee_hub_worktree_chip_reads_merged_only_when_finished_and_a_grant_history_exists() {
+        let workspace = sample_workspace("wt/shipped-feat");
+        let (label, tone) = bee_hub_worktree_chip("shipped-feat", &[], std::slice::from_ref(&workspace), true);
+        assert_eq!((label.as_str(), tone), ("Merged", "success"));
+
+        let (label, tone) = bee_hub_worktree_chip("shipped-feat", &[], std::slice::from_ref(&workspace), false);
+        assert_eq!(
+            (label.as_str(), tone),
+            ("Main", "neutral"),
+            "grant history alone must never read Merged for work that has not finished: got {label}"
+        );
+    }
+
+    /// (hub-finished-compact) A Finished row is exactly a name and a link —
+    /// none of `bee_hub_card`'s chip, progress bar or activity markup.
+    #[test]
+    fn bee_hub_finished_row_renders_only_a_name_and_link() {
+        let row = bee_hub_finished_row("proj-1", "shipped-feat", None);
+        assert_eq!(
+            row,
+            r#"<a class="bee-hub__row" data-hub-group="finished" href="/p/proj-1/_bee/feature/shipped-feat">shipped-feat</a>"#
         );
         assert!(
-            !html.contains("No cells recorded."),
-            "\"No cells recorded.\" was the live-count leak this fixes: {html}"
+            !row.contains("bee-hub__chips") && !row.contains("fg-chip") && !row.contains("bee-progress") && !row.contains("Last activity"),
+            "a Finished row must carry none of the full card's chip/progress/activity markup: {row}"
         );
+    }
+
+    /// (hub-finished-compact, feature-titles parity) A Finished row prefers
+    /// the feature's own CONTEXT title over its slug, exactly as
+    /// `bee_hub_card` already does for the other two groups — and drops the
+    /// slug entirely rather than demoting it to a subtitle, since a dense
+    /// row has no room for both.
+    #[test]
+    fn bee_hub_finished_row_prefers_the_context_title_over_the_slug() {
+        let docs = mdview_core::bee::BeeFeatureDocs {
+            title: Some("Human Title".to_string()),
+            description: None,
+            docs: vec![],
+        };
+        let row = bee_hub_finished_row("proj-1", "slug-feat", Some(&docs));
+        assert!(row.contains(">Human Title</a>"), "{row}");
+        assert!(!row.contains(">slug-feat<"), "the slug must not also render once a title exists: {row}");
+    }
+
+    /// (hub-finished-compact) Ten or fewer rows render entirely in the open
+    /// flow — no `<details>` at all.
+    #[test]
+    fn bee_hub_finished_rows_with_ten_or_fewer_renders_no_details() {
+        let rows: Vec<String> = (0..10).map(|i| format!("<a>{i}</a>")).collect();
+        let html = bee_hub_finished_rows(&rows);
+        assert!(!html.contains("<details"), "{html}");
+        for i in 0..10 {
+            assert!(html.contains(&format!("<a>{i}</a>")), "{html}");
+        }
+    }
+
+    /// (hub-finished-compact) 25 rows page into the first 10 open, then a
+    /// `<details>` holding the next 10, with a further `<details>` NESTED
+    /// inside that one (never a sibling) holding the final 5 — each
+    /// summary naming exactly how many rows it reveals.
+    #[test]
+    fn bee_hub_finished_rows_pages_twenty_five_into_ten_open_and_two_nested_details() {
+        let rows: Vec<String> = (0..25).map(|i| format!("<a>{i}</a>")).collect();
+        let html = bee_hub_finished_rows(&rows);
+
+        let first_details = html.find("<details").expect("expected a details block for the overflow");
+        for i in 0..10 {
+            let marker = format!("<a>{i}</a>");
+            let pos = html.find(&marker).unwrap_or_else(|| panic!("missing {marker}: {html}"));
+            assert!(pos < first_details, "row {i} must render open, ahead of the first <details>: {html}");
+        }
+        for i in 10..25 {
+            assert!(html.contains(&format!("<a>{i}</a>")), "{html}");
+        }
+        assert_eq!(
+            html.matches("<details").count(),
+            2,
+            "25 rows must page into exactly two nested <details>: {html}"
+        );
+        assert!(html.contains("Show 10 more"), "{html}");
+        assert!(html.contains("Show 5 more"), "{html}");
+
+        let outer_open = html.find("<details").unwrap();
+        let outer_close = html.rfind("</details>").unwrap();
+        let inner_open = html.rfind("<details").unwrap();
+        assert!(
+            inner_open > outer_open && inner_open < outer_close,
+            "the second <details> must nest inside the first, not sit beside it: {html}"
+        );
+    }
+
+    /// (hub-finished-compact, integration) The paging arithmetic itself is
+    /// proven at the unit level above; this proves `bee_feature_hub_section`
+    /// really wires the Finished group's rows through
+    /// `bee_hub_finished_rows` end to end, rather than dumping every
+    /// archived feature into the open flow.
+    #[test]
+    fn hub_finished_group_pages_more_than_ten_archived_features_behind_a_details() {
+        let root = std::env::temp_dir().join(format!("mdview-views-hub-finished-paged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for n in 0..12 {
+            let feature = format!("finished-feat-{n:02}");
+            let path = root.join(format!(".bee/cells/archive/{feature}/a.json"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{
+                        "id": "c-{n}",
+                        "feature": "{feature}",
+                        "lane": "tiny",
+                        "title": "Cell",
+                        "action": "do the thing",
+                        "verify": "cargo test",
+                        "files": [],
+                        "read_first": [],
+                        "deps": [],
+                        "decisions": [],
+                        "must_haves": {{}},
+                        "behavior_change": false,
+                        "change_class": "behavior",
+                        "pbi": null,
+                        "status": "capped",
+                        "tier": "generation",
+                        "trace": {{"worker": "w1", "claimed_at": "2026-08-10T08:00:00Z", "capped_at": "2026-08-10T08:30:00Z"}}
+                    }}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(html.contains(r#"data-hub-group="finished" data-hub-count="12""#), "{html}");
+        assert_eq!(
+            html.matches("<details").count(),
+            1,
+            "12 finished features must page into exactly one <details>: {html}"
+        );
+        assert!(html.contains("Show 2 more"), "{html}");
+        for n in 0..12 {
+            assert!(
+                html.contains(&format!("/_bee/feature/finished-feat-{n:02}")),
+                "every finished feature must still render somewhere on the page: {html}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }
