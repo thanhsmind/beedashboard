@@ -8119,6 +8119,68 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// term-frame-blocks: the terminal page's own inline stylesheet
+    /// (`views::PROJECT_TAB_STYLE`) must declare both halves of the split —
+    /// `.term-frame`'s always-on `pre`/`overflow-x: auto` (so a table or TUI
+    /// frame keeps its grid and scrolls itself on a phone) alongside the
+    /// narrow-screen `.term-screen` rule that still wraps everything else.
+    /// Losing either half regresses one side of the fix without a compiler
+    /// ever noticing, since both live in a string constant, not real CSS.
+    #[tokio::test]
+    async fn terminal_page_declares_the_term_frame_nowrap_rule_alongside_the_mobile_wrap_rule() {
+        let dir = fresh_root("terminal-frame-css");
+        let root = fresh_root("terminal-frame-css-project");
+        enable_terminal(&dir);
+
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "frame-css");
+        let resp = router(st).oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let style = board_style_block(&body);
+
+        let frame_start = style
+            .find(".term-frame {")
+            .unwrap_or_else(|| panic!("the terminal page must declare .term-frame: {style}"));
+        let frame_end = style[frame_start..]
+            .find('}')
+            .map(|i| frame_start + i)
+            .unwrap_or(style.len());
+        let frame_rule = &style[frame_start..frame_end];
+        assert!(
+            frame_rule.contains("white-space: pre") && !frame_rule.contains("white-space: pre-wrap"),
+            "a frame block must never wrap its own grid, on any screen size: {frame_rule}"
+        );
+        assert!(
+            frame_rule.contains("overflow-x: auto"),
+            "a frame block scrolls itself sideways instead of wrapping: {frame_rule}"
+        );
+
+        let media_start = style
+            .find("@media (max-width: 720px)")
+            .unwrap_or_else(|| panic!("the terminal page must still carry its narrow-screen rule: {style}"));
+        // The frame rule is declared unconditionally, ahead of the
+        // narrow-screen block — never nested inside it, or it would only win
+        // there and lose the cascade battle with `.term-screen` everywhere
+        // else the mobile rule does not reach.
+        assert!(
+            frame_start < media_start,
+            ".term-frame must be declared outside (and before) the narrow-screen @media block: {style}"
+        );
+        let media_end = style[media_start..]
+            .find("}\n}")
+            .map(|i| media_start + i + 2)
+            .unwrap_or(style.len());
+        let media_block = &style[media_start..media_end];
+        assert!(
+            media_block.contains(".term-screen { white-space: pre-wrap"),
+            "the rest of a pane's screen must still wrap on a phone: {media_block}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// D6: a silent herdr socket renders the named remedy state, never a
     /// raw error and never an empty-panes rendering that would look
     /// identical to a project that genuinely has zero agents.
