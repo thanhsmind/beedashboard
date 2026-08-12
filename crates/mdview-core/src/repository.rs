@@ -330,7 +330,12 @@ impl SqliteStore {
 /// that crate would only wrap this list, so the dependency is not earned yet;
 /// the shape here is deliberately the one it expects, so adopting it later is a
 /// mechanical swap rather than a redesign.
-const MIGRATIONS: &[(i64, fn(&Connection) -> Result<()>)] = &[(1, migration_1_path_hash)];
+type MigrationStep = (i64, fn(&Connection) -> Result<()>);
+// Upstream's step 2 backfills a content hash for its scoped live-reload, which
+// this fork deliberately did not take (its own reload rules differ) — so the
+// list stops at step 1 here. The alias comes across because it is what keeps
+// this line readable as more steps land.
+const MIGRATIONS: &[MigrationStep] = &[(1, migration_1_path_hash)];
 
 /// Schema version this build expects — the last entry in [`MIGRATIONS`].
 pub const SCHEMA_VERSION: i64 = 1;

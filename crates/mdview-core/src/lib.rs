@@ -6,6 +6,7 @@
 
 pub mod ansi;
 pub mod bee;
+pub mod code_source;
 pub mod config;
 pub mod daemon;
 pub mod doc_links;
