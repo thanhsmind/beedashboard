@@ -78,6 +78,9 @@ implementation. Code entry points are listed in `reading-map.md`.
   second copy only pushes the content down a handset's viewport. Sessions
   with no agent are named as shells and are listed like any other. A session
   belonging to a different project, or to none, never appears here.
+- **Starting another session:** the control that starts one shares the strip's
+  own row, at that row's right end, so the list of sessions and the way to add
+  one read as a single band rather than two stacked controls.
 - **Which one is shown:** the entry the address names. Opening the tab
   without naming one shows the session the operator is currently focused on
   when it belongs to this project, and otherwise the first in the strip, so
