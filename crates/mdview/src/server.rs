@@ -275,6 +275,30 @@ pub async fn serve() -> Result<()> {
     // Filesystem watcher (kept alive for the process lifetime).
     let _watch = crate::watch::spawn_watchers(engine.clone(), reload_tx.clone())?;
 
+    // stale-index-refresh-1: reconcile every registered project against disk
+    // before the listener starts serving. The watcher above only catches
+    // changes from this instant forward -- a file committed or edited while
+    // the daemon was down never fires a watch event, and the lookup behind
+    // `/p/<id>/<path>` is a plain rel_path row match in sqlite
+    // (`SqliteStore::get_file`), not a filesystem probe, so that file stayed
+    // invisible until someone remembered to hit refresh by hand. Filesystem
+    // and sqlite work throughout, so this runs off the async runtime the
+    // same way `register_project` already does (`spawn_blocking`, this
+    // file's own `validate_register_path` call) -- but unlike that handler
+    // this call is never `.await`ed. It is fired here and left to finish on
+    // its own blocking thread so a large project registry never delays the
+    // bind just below; the first request can land while the sweep is still
+    // running.
+    {
+        let engine = engine.clone();
+        tokio::task::spawn_blocking(move || {
+            let (reconciled, files_touched) = reconcile_registered_projects(&engine);
+            tracing::info!(
+                "startup reconcile: {reconciled} project(s) reconciled, {files_touched} file(s) touched"
+            );
+        });
+    }
+
     // Bind with port auto-increment (PRD §10 / mdserve pattern).
     let cfg = &engine.config.server;
     let (listener, addr) = bind_with_retry(&cfg.host, cfg.port).await?;
@@ -319,6 +343,64 @@ pub async fn serve() -> Result<()> {
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+/// stale-index-refresh-1: reconcile every registered project's index against
+/// its filesystem, through the SAME door `mdview refresh` uses
+/// (`Engine::refresh`, which chains `IndexService::index_project` and
+/// `reindex_links`) -- so this startup sweep and that explicit command can
+/// never drift onto two different reconcile paths. Returns
+/// `(projects reconciled, files touched)` so `serve()` can log one line
+/// naming both.
+///
+/// Kept as its own synchronous, non-async function -- rather than inlined in
+/// `serve()`'s `spawn_blocking` closure -- so a test can call it directly on
+/// a plain `Engine`, off the tokio runtime, without also standing up
+/// `serve()`'s network bind and process-wide lock file.
+///
+/// A project whose root has gone missing since the daemon last ran (deleted,
+/// unmounted, renamed outside mdview) is logged by id and root path and
+/// skipped -- `Engine::refresh` would just silently scan zero files for it
+/// (`scan_markdown_files`'s walker drops an unreadable root rather than
+/// erroring), but checking first makes that skip an explicit, logged fact
+/// rather than an indistinguishable zero-file reconcile. Likewise a project
+/// whose refresh call itself fails (e.g. deleted from the registry between
+/// the list and the refresh) is logged and skipped, never allowed to abort
+/// the rest of the sweep.
+fn reconcile_registered_projects(engine: &Engine) -> (usize, usize) {
+    let projects = match engine.list_projects() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("startup reconcile: could not list projects ({e})");
+            return (0, 0);
+        }
+    };
+
+    let mut reconciled = 0usize;
+    let mut files_touched = 0usize;
+    for project in &projects {
+        if !project.root_path.exists() {
+            tracing::warn!(
+                "startup reconcile: project {} root {} no longer exists; skipping",
+                project.id,
+                project.root_path.display()
+            );
+            continue;
+        }
+        match engine.refresh(&project.id) {
+            Ok(n) => {
+                reconciled += 1;
+                files_touched += n;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "startup reconcile: project {} failed to refresh ({e}); skipping",
+                    project.id
+                );
+            }
+        }
+    }
+    (reconciled, files_touched)
 }
 
 fn router(state: AppState) -> Router {
