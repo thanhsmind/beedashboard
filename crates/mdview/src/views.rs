@@ -2006,7 +2006,12 @@ fn bee_hub_finished_rows(rows: &[String]) -> String {
 
 /// One nested paging level for [`bee_hub_finished_rows`] — never called
 /// with an empty slice, so its own chunk always holds at least one row.
+/// The summary names both how many rows this level opens directly (`n`)
+/// and how many rows sit below this level in total (`remaining`: this
+/// chunk plus every row still nested beneath it), so the pager never
+/// leaves the reader guessing how much of the list is still hidden.
 fn bee_hub_finished_more(rows: &[String]) -> String {
+    let remaining = rows.len();
     let split_at = rows.len().min(10);
     let (chunk, rest) = rows.split_at(split_at);
     let mut inner = chunk.concat();
@@ -2014,8 +2019,9 @@ fn bee_hub_finished_more(rows: &[String]) -> String {
         inner.push_str(&bee_hub_finished_more(rest));
     }
     format!(
-        r#"<details class="bee-hub__more"><summary class="bee-hub__more-summary">Show {n} more</summary>{inner}</details>"#,
+        r#"<details class="bee-hub__more"><summary class="bee-hub__more-summary">Show {n} more · {remaining} left</summary>{inner}</details>"#,
         n = chunk.len(),
+        remaining = remaining,
         inner = inner,
     )
 }
@@ -2081,32 +2087,6 @@ fn bee_hub_latest_activity<'a>(cells: impl Iterator<Item = &'a BeeCell>) -> Opti
         }
     }
     latest.map(|(_, s)| s)
-}
-
-/// D7-style done/total over one feature's archived cells
-/// (`read_archived_cells`) — the same bucket rule `read_snapshot`'s own D7
-/// buckets and `compute_feature_cell_counts` (`mdview_core::bee`) already
-/// apply: `dropped` and any unrecognized status count toward neither
-/// `done` nor `total`, so a fully-dropped archive reports an honest
-/// `(0, 0)` rather than a fabricated complete or a division by zero.
-/// hub-finished-compact drops this count from the Finished group's own
-/// render (a dense row shows no progress reading at all), so this rule is
-/// proven directly by this module's own unit tests rather than through a
-/// full render.
-fn bee_hub_archived_counts(cells: &[BeeCell]) -> (usize, usize) {
-    let mut done = 0usize;
-    let mut total = 0usize;
-    for c in cells {
-        match c.status.as_str() {
-            "capped" => {
-                done += 1;
-                total += 1;
-            }
-            "claimed" | "open" | "blocked" => total += 1,
-            _ => {}
-        }
-    }
-    (done, total)
 }
 
 /// The board's Finished list (D5/D10), rendered as a native
@@ -4168,8 +4148,9 @@ mod tests {
     }
 
     /// (regression, board-finished-wins-1; progress assertion trimmed by
-    /// hub-finished-compact, whose own dropped-cell rule is now proven
-    /// directly by `bee_hub_archived_counts_excludes_dropped_from_both_counts`)
+    /// hub-finished-compact, whose own dropped-cell rule no longer applies
+    /// anywhere in the product now that the Finished column shows no
+    /// counts at all)
     /// A feature that has already closed — every cell archived, `phase` at
     /// bee's own terminal `"compounding-complete"` — kept rendering under
     /// Waiting on you, because `state.json` still names it active and
@@ -4251,54 +4232,6 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    fn sample_archived_cell(id: &str, feature: &str, status: &str) -> BeeCell {
-        BeeCell {
-            id: id.to_string(),
-            feature: feature.to_string(),
-            title: "a cell".to_string(),
-            lane: "tiny".to_string(),
-            status: status.to_string(),
-            tier: None,
-            files: vec![],
-            worker: None,
-            claimed_at: None,
-            capped_at: None,
-            behavior_change: false,
-            outcome: None,
-            tests: None,
-        }
-    }
-
-    /// (hub-finished-compact) Proves directly what the server.rs
-    /// `feature_hub_archive_only_feature_with_no_grant_history_renders_under_finished`
-    /// test's own now-trimmed "1/1 cell done" assertion used to prove
-    /// through a full render: a `dropped` cell counts toward neither
-    /// `done` nor `total` (the same D7 bucket rule every other cell count
-    /// on this board already follows), while a `capped` cell counts toward
-    /// both.
-    #[test]
-    fn bee_hub_archived_counts_excludes_dropped_from_both_counts() {
-        let cells = vec![
-            sample_archived_cell("c-1", "feat", "capped"),
-            sample_archived_cell("c-2", "feat", "dropped"),
-        ];
-        assert_eq!(bee_hub_archived_counts(&cells), (1, 1));
-    }
-
-    /// (hub-finished-compact) The other three `bee_hub_archived_counts`
-    /// buckets — `claimed`, `open` and `blocked` — count toward `total` but
-    /// never `done`, matching the live D7 buckets this helper mirrors for
-    /// archived cells.
-    #[test]
-    fn bee_hub_archived_counts_counts_live_statuses_toward_total_only() {
-        let cells = vec![
-            sample_archived_cell("c-1", "feat", "claimed"),
-            sample_archived_cell("c-2", "feat", "open"),
-            sample_archived_cell("c-3", "feat", "blocked"),
-        ];
-        assert_eq!(bee_hub_archived_counts(&cells), (0, 3));
     }
 
     fn sample_workspace(branch: &str) -> BeeWorkspace {
@@ -4417,7 +4350,8 @@ mod tests {
     /// (hub-finished-compact) 25 rows page into the first 10 open, then a
     /// `<details>` holding the next 10, with a further `<details>` NESTED
     /// inside that one (never a sibling) holding the final 5 — each
-    /// summary naming exactly how many rows it reveals.
+    /// summary naming exactly how many rows it reveals and how many rows
+    /// remain below it (this chunk plus everything nested beneath it).
     #[test]
     fn bee_hub_finished_rows_pages_twenty_five_into_ten_open_and_two_nested_details() {
         let rows: Vec<String> = (0..25).map(|i| format!("<a>{i}</a>")).collect();
@@ -4437,8 +4371,8 @@ mod tests {
             2,
             "25 rows must page into exactly two nested <details>: {html}"
         );
-        assert!(html.contains("Show 10 more"), "{html}");
-        assert!(html.contains("Show 5 more"), "{html}");
+        assert!(html.contains("Show 10 more · 15 left"), "{html}");
+        assert!(html.contains("Show 5 more · 5 left"), "{html}");
 
         let outer_open = html.find("<details").unwrap();
         let outer_close = html.rfind("</details>").unwrap();
@@ -4500,7 +4434,7 @@ mod tests {
             1,
             "12 finished features must page into exactly one <details>: {html}"
         );
-        assert!(html.contains("Show 2 more"), "{html}");
+        assert!(html.contains("Show 2 more · 2 left"), "{html}");
         for n in 0..12 {
             assert!(
                 html.contains(&format!("/_bee/feature/finished-feat-{n:02}")),
