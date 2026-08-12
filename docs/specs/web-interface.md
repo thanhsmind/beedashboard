@@ -173,8 +173,9 @@ content itself.
   and the theme toggle — on every page without exception (per R1). On a
   project's own pages the bar also carries that project's section switcher
   (element 12).
-- **On a narrow screen:** everything in the bar that navigates *away* from the
-  current page — the section switcher and the Settings link — collapses behind
+- **On a narrow screen (a viewport under 720 pixels wide — the one threshold
+  every narrow-screen rule in this area shares):** everything in the bar that
+  navigates *away* from the current page — the section switcher and the Settings link — collapses behind
   one menu control at the bar's right edge, opening as a panel that spans the
   full width directly under the bar, one comfortably-sized row per
   destination, the current section marked. The brand, the page label and the

@@ -93,7 +93,8 @@ implementation. Code entry points are listed in `reading-map.md`.
   ruined; a single non-box line inside such a run is absorbed into it
   rather than splitting it, and output containing no box-drawing at all
   renders exactly as it always did.
-- **On a narrow screen:** the page collapses to two rows: the project's own
+- **On a narrow screen (a viewport under 720 pixels wide, the same threshold
+  the rest of the browser chrome uses):** the page collapses to two rows: the project's own
   navigation moves into the top bar beside the brand, and the strip below it
   carries the sessions plus the "new session" control at its own row's right
   end. The reading spacing above the screen is tightened so the screen

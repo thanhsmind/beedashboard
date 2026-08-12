@@ -238,3 +238,18 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   sends no credentials — otherwise a session guard refuses first and the
   method test proves nothing. (2026-08-06, `agent-terminal` cells 7 and 11,
   `docs/knowledge/work/agent-terminal/delivery.md`)
+- **A watcher is a delta mechanism: something else must establish its base at
+  startup.** `serve()` spawned the filesystem watcher and served, so every
+  change from that instant forward reached the index — and everything that
+  happened while the daemon was down did not. Because a file is served from
+  the sqlite index (`SqliteStore::get_file`, a `rel_path` row match) and never
+  from a fresh look at the folder, a file written with the daemon stopped
+  answered 404 forever, until a human ran `mdview refresh`. Any future cache,
+  index, mirror or subscription in this repo needs the same pair: a
+  reconcile against the source of truth at startup (walk the existing door —
+  here `Engine::refresh`, the call the CLI already makes — rather than writing
+  a second indexing path), fired without `.await` so it never delays the bind;
+  and a way for the reader who still hits a stale answer to force it from the
+  surface the failure appeared on, since "the user can run the command" is
+  only true where the user has a shell. (2026-08-12, `stale-index-refresh`
+  cells 1 and 2, `docs/history/learnings/20260812-a-serve-loop-that-only-watches-forward.md`)
