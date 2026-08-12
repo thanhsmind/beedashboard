@@ -826,6 +826,7 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str, attach: bool) -> Stri
       <button type="button" data-key="enter">Enter</button>
       <button type="button" data-key="escape">Esc</button>
       <button type="button" data-key="tab">Tab</button>
+      <button type="button" data-key="ctrl+c">Ctrl+C</button>
     </div>
   </div>
   <form class="term-reply" data-pane-id="{pane_id}">

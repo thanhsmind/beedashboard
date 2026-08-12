@@ -12164,6 +12164,108 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// ctrl-c-key-1: the named-key row ends with Ctrl+C, the one key an
+    /// operator watching a runaway command reaches for. It carries the wire
+    /// name herdr's key channel accepts for an interrupt — `ctrl+c`, never
+    /// tmux's `C-c` — and it sits in the SAME group as Enter/Esc/Tab, after
+    /// Tab: the arrow group above it is styled for glyph keys, and a key that
+    /// stops the agent belongs beside the keys that answer it. No separate
+    /// wiring is asserted because none exists: `assets/app.js` binds every
+    /// `button[data-key]` in a key group, so the markup IS the feature.
+    #[tokio::test]
+    async fn the_key_row_ends_with_an_interrupt() {
+        let dir = fresh_root("terminal-ctrl-c-key");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-ctrl-c-key-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        fake.agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "ctrl-c-key");
+        let app = router(st);
+
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        let interrupt = body
+            .find("<button type=\"button\" data-key=\"ctrl+c\">Ctrl+C</button>")
+            .unwrap_or_else(|| panic!("no interrupt key in the row: {body}"));
+        assert!(
+            !body.contains("data-key=\"C-c\"") && !body.contains("data-key=\"ctrl-c\""),
+            "the wire name is ctrl+c; tmux spelling would be sent verbatim and ignored: {body}"
+        );
+        // Same group as the other named keys, last in it: the named-key group
+        // opens after the arrow group, and the interrupt falls between Tab and
+        // that group's close.
+        let arrows = body
+            .find("class=\"term-keys term-keys--move\"")
+            .unwrap_or_else(|| panic!("no arrow group: {body}"));
+        let named = body[arrows + 1..]
+            .find("class=\"term-keys\"")
+            .unwrap_or_else(|| panic!("no named-key group: {body}"))
+            + arrows
+            + 1;
+        let tab = body
+            .find("data-key=\"tab\"")
+            .unwrap_or_else(|| panic!("no Tab key: {body}"));
+        let group_end = body[named..]
+            .find("</div>")
+            .map(|i| named + i)
+            .unwrap_or_else(|| panic!("the named-key group must close: {body}"));
+        assert!(
+            named < tab && tab < interrupt && interrupt < group_end,
+            "the interrupt must be the last key in the named-key group (group {named}, tab {tab}, interrupt {interrupt}, end {group_end}): {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// ctrl-c-key-1: the key the button names travels the same route every
+    /// other named key does, and reaches the pane unchanged — a button that
+    /// rendered but whose name the key channel dropped would look identical
+    /// on screen.
+    #[tokio::test]
+    async fn an_interrupt_key_reaches_the_pane() {
+        let dir = fresh_root("terminal-ctrl-c-send");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-ctrl-c-send-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let project = register(&st, &root, "ctrl-c-send");
+        let app = router(st);
+
+        let resp = app
+            .oneshot(terminal_keys_req(
+                &project.id,
+                &started.pane_id,
+                &["ctrl+c"],
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let screen = fake.read_pane(&started.pane_id, crate::herdr::ReadSource::Visible, 200).await.unwrap();
+        assert!(
+            screen.text.contains("<ctrl+c>"),
+            "the interrupt must reach the pane under its own name: {}",
+            screen.text
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// scroll-fab: the pane's scroll group renders as a three-button
     /// vertical stack — Older, Newer, Live, top to bottom, each carrying its
     /// own explicit English `aria-label` distinct from the controls strip's
