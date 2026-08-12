@@ -4,7 +4,7 @@
 
 use mdview_core::bee::{
     feature_cell_span, list_archived_feature_dirs, BeeApprovedGates, BeeBacklog, BeeBuckets,
-    BeeCell, BeeDecisionSummary, BeeFeaturePhase, BeePbi, BeeReview, BeeReviewStatus,
+    BeeCell, BeeDecisionSummary, BeeFeaturePhase, BeePbi, BeeReview, BeeReviewStatus, BeeSession,
     BeeShippedFeature, BeeSnapshot, BeeState, BeeWorkspace, BeeWorktree,
 };
 use mdview_core::config::Config;
@@ -1335,12 +1335,19 @@ pub fn terminal_down_page(project: &Project) -> String {
 /// untouched — the feature detail page and other consumers still read them
 /// from `BeeSnapshot`; this page just stops rendering them. `{panels}` now
 /// carries only the Backlog & review card (`bee_backlog_panel`).
+///
+/// board-liveness-3 puts one thing back between `{top}` and `{board}`:
+/// `{live}` ([`bee_live_strip_section`]), a single dense presence strip —
+/// nowhere close to a revival of the D1 Sessions panel it sits where that
+/// panel used to live; see that function's own doc comment for exactly how
+/// little it carries.
 pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
     let body = format!(
         r#"{topbar}
 {style}
 <main class="fg-page bee-hub-theme">
   {top}
+  {live}
   {board}
   {finished}
   {panels}
@@ -1351,6 +1358,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         )),
         style = bee_hub_style(),
         top = bee_board_top(project),
+        live = bee_live_strip_section(snapshot),
         board = bee_feature_hub_section(project, snapshot),
         finished = bee_finished_section(&project.id, &snapshot.shipped),
         panels = bee_panels_section(snapshot),
@@ -1437,6 +1445,17 @@ html[data-scheme="dark"] .bee-hub-theme {{
   --color-surface-hover: #342C24;
 }}
 .bee-hub {{ margin-bottom: var(--space-4); }}
+/* board-liveness-3: the live strip's own dense-row idiom, one row per live
+   session or granted worktree — deliberately never `.bee-hub__row`'s
+   feature-link styling, since a strip row never links anywhere of its
+   own. */
+.bee-strip {{ margin-bottom: var(--space-4); }}
+.bee-strip__rows {{ display: flex; flex-direction: column; gap: var(--space-1); }}
+.bee-strip__row {{ display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); padding: var(--space-1) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); font-size: var(--type-body-sm-size); }}
+.bee-strip__row:last-child {{ border-bottom: none; }}
+.bee-strip__label {{ font-weight: var(--weight-strong); color: var(--color-text); }}
+.bee-strip__meta {{ color: var(--color-text-muted); }}
+.bee-strip__row--unresolved .bee-strip__meta {{ color: var(--color-danger); }}
 .bee-hub__groups {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); }}
 /* hub-fallbacks: a grid/flex item's own default `min-width: auto` sizes it
    to its content's min-content width — normally harmless, but a clamped
@@ -1605,6 +1624,116 @@ fn bee_board_asof() -> String {
         day = now.day(),
         hour = now.hour(),
         minute = now.minute(),
+    )
+}
+
+/// board-liveness-3's "something is running right now" strip, rendered by
+/// [`bee_board_page`] directly above [`bee_feature_hub_section`] (see that
+/// function's own doc comment for the exact position). **This is not a
+/// revival of the retired `bee_sessions_panel`** (board-trim D1 dropped
+/// that panel's three cards — sessions, worktrees, workspaces — on
+/// purpose, along with the Working-on-now card's own Running now
+/// subsection board-declutter dropped before it). Nothing here restores
+/// any of that: this is a single dense strip, one plain row per live
+/// session and per granted worktree, carrying no card, no
+/// worktree/workspace detail block, and no process-health reading of its
+/// own — its only job is presence, something this board previously had no
+/// way to say at all once those panels were gone.
+///
+/// One row per live session (`BeeSession.live`, `SESSION_LIVE_MINUTES`):
+/// its own `lane` when the session record carries one, else the globally
+/// active feature (`state.feature`) when it does not, else the plain
+/// fallback "no active lane" — that label's own phase, read from
+/// `snapshot.phase_board` (the same lanes-∪-active-feature union
+/// [`bee_feature_hub_section`] already reads, so a lane-less session bound
+/// to the active feature still gets a real phase whenever `state.json`
+/// carries one), its heartbeat age via [`bee_relative_minutes`], and its
+/// workspace: the matching `snapshot.workspaces` entry's own `root` when
+/// `workspace_id` resolves to one, else the raw `workspace_id` verbatim,
+/// else "no workspace recorded".
+///
+/// One row per granted worktree in `snapshot.worktrees`
+/// ([`BeeWorktree`]): its own `branch` and the feature its own
+/// `state.json` names active, when `resolved`. An unresolved grant — a
+/// dangling directory, a missing or malformed `state.json` — renders its
+/// own row naming `unresolved_reason` rather than being silently dropped,
+/// exactly `BeeWorktree`'s own contract for that case.
+///
+/// Nothing live at all (no live session, no worktree grant) renders one
+/// plain `<p class="fg-empty">` line rather than disappearing — the
+/// section itself is always present, so "nothing is running" is always a
+/// stated fact on this page, never an absent element a reader could
+/// mistake for a rendering bug.
+fn bee_live_strip_section(snapshot: &BeeSnapshot) -> String {
+    let active_feature = snapshot.state.as_ref().and_then(|s| s.feature.as_deref());
+
+    let mut live_sessions: Vec<&BeeSession> = snapshot.sessions.iter().filter(|s| s.live).collect();
+    live_sessions.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut rows = String::new();
+    let mut row_count = 0usize;
+
+    for s in &live_sessions {
+        let label = s.lane.as_deref().or(active_feature).unwrap_or("no active lane");
+        let phase = snapshot
+            .phase_board
+            .iter()
+            .find(|f| f.feature == label)
+            .and_then(|f| f.phase.as_deref())
+            .unwrap_or("phase unknown");
+        let heartbeat = bee_relative_minutes(s.heartbeat_age_minutes);
+        let workspace = match &s.workspace_id {
+            Some(id) => snapshot
+                .workspaces
+                .iter()
+                .find(|w| &w.id == id)
+                .map(|w| w.root.clone())
+                .unwrap_or_else(|| id.clone()),
+            None => "no workspace recorded".to_string(),
+        };
+        rows.push_str(&format!(
+            r#"<div class="bee-strip__row" data-live-kind="session"><span class="bee-strip__label">{label}</span><span class="bee-strip__meta">{phase} · beat {heartbeat} · {workspace}</span></div>"#,
+            label = esc(label),
+            phase = esc(phase),
+            heartbeat = esc(&heartbeat),
+            workspace = esc(&workspace),
+        ));
+        row_count += 1;
+    }
+
+    for w in &snapshot.worktrees {
+        if !w.resolved {
+            let reason = w.unresolved_reason.as_deref().unwrap_or("unknown reason");
+            rows.push_str(&format!(
+                r#"<div class="bee-strip__row bee-strip__row--unresolved" data-live-kind="worktree-unresolved"><span class="bee-strip__label">Worktree {id}</span><span class="bee-strip__meta">could not be read: {reason}</span></div>"#,
+                id = esc(&w.id),
+                reason = esc(reason),
+            ));
+            row_count += 1;
+            continue;
+        }
+        let branch = w.branch.as_deref().unwrap_or("unknown branch");
+        let feature = w.feature.as_deref().unwrap_or("no active feature");
+        rows.push_str(&format!(
+            r#"<div class="bee-strip__row" data-live-kind="worktree"><span class="bee-strip__label">{branch}</span><span class="bee-strip__meta">{feature}</span></div>"#,
+            branch = esc(branch),
+            feature = esc(feature),
+        ));
+        row_count += 1;
+    }
+
+    if row_count == 0 {
+        return r#"<section class="fg-card bee-strip" data-live-rows="0">
+  <h3 class="bee-panel__head">Live</h3>
+  <p class="fg-empty">Nothing is running right now.</p>
+</section>"#
+            .to_string();
+    }
+
+    format!(
+        r#"<section class="fg-card bee-strip" data-live-rows="{row_count}"><h3 class="bee-panel__head">Live</h3><div class="bee-strip__rows">{rows}</div></section>"#,
+        row_count = row_count,
+        rows = rows,
     )
 }
 
@@ -4352,6 +4481,138 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&sibling);
+    }
+
+    /// (board-liveness-3) Existing coverage before this test: the hub tests
+    /// above already prove `session_bound`/`worktree_bound` liveness
+    /// signals feed feature placement; none of them render or assert
+    /// anything about a strip row's own content (lane, phase, heartbeat,
+    /// workspace) — that is the gap this test and its three siblings below
+    /// close. A live session with a lane bound to a lane record names that
+    /// lane, that lane's own phase, its heartbeat age
+    /// (`bee_relative_minutes`), and its workspace's own `root`.
+    #[test]
+    fn live_strip_names_a_live_sessions_lane_phase_and_heartbeat_age() {
+        let root = std::env::temp_dir().join(format!("mdview-views-strip-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/strip-feat.json",
+            r#"{
+                "feature": "strip-feat",
+                "phase": "executing",
+                "mode": "standard"
+            }"#,
+        );
+        let hb = (time::OffsetDateTime::now_utc() - time::Duration::minutes(4))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            ".bee/sessions/live.json",
+            &format!(r#"{{"id": "live", "last_heartbeat": "{hb}", "lane": "strip-feat", "workspace_id": "ws-1"}}"#),
+        );
+        write(
+            ".bee/runtime/workspaces/ws-1.json",
+            r#"{"id": "ws-1", "type": "worktree", "root": "sibling-dir", "branch": "wt/strip-feat", "attached_sessions": []}"#,
+        );
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let html = bee_live_strip_section(&snapshot);
+
+        assert!(html.contains("strip-feat"), "the row must name the session's own lane: {html}");
+        assert!(html.contains("executing"), "the row must name that lane's phase: {html}");
+        assert!(html.contains("4 minutes ago"), "the row must state the heartbeat age: {html}");
+        assert!(html.contains("sibling-dir"), "the row must name the session's own workspace: {html}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (board-liveness-3) A resolved granted worktree — its own sibling
+    /// `state.json` names an active feature, this project's own workspace
+    /// record names its branch — renders its own row naming both, with no
+    /// live session in the fixture at all.
+    #[test]
+    fn live_strip_names_a_resolved_worktrees_branch_and_active_feature() {
+        let root = std::env::temp_dir().join(format!("mdview-views-strip-wt-{}", std::process::id()));
+        let sibling = std::env::temp_dir().join(format!("mdview-views-strip-wt-sibling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&sibling);
+        let write = |dir: &std::path::Path, rel: &str, body: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        std::fs::create_dir_all(&sibling).unwrap();
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"wt-strip-feat","mode":"standard"}"#);
+        let grant_id = sibling.file_name().unwrap().to_string_lossy().to_string();
+        write(
+            &root,
+            &format!(".bee/runtime/workspaces/{grant_id}.json"),
+            &format!(r#"{{"id": "{grant_id}", "type": "worktree", "root": "wt-root", "branch": "wt/wt-strip-feat", "attached_sessions": []}}"#),
+        );
+        write(&root, ".bee/runtime/worktree-grants.json", &format!(r#"{{"{grant_id}": true}}"#));
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let html = bee_live_strip_section(&snapshot);
+
+        assert!(html.contains("wt/wt-strip-feat"), "the row must name the worktree's own branch: {html}");
+        assert!(html.contains("wt-strip-feat"), "the row must name the worktree's own active feature: {html}");
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&sibling);
+    }
+
+    /// (board-liveness-3) A granted worktree whose sibling directory does
+    /// not exist at all is dangling — `resolve_worktree` reports it
+    /// unresolved with a reason, never dropped — and the strip must say so
+    /// in its own row rather than rendering nothing for that grant.
+    #[test]
+    fn live_strip_names_an_unresolved_worktree_grants_reason_rather_than_dropping_it() {
+        let root = std::env::temp_dir().join(format!("mdview-views-strip-wt-unresolved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dangling_id = format!("mdview-views-strip-wt-ghost-{}", std::process::id());
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(&dangling_id));
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(".bee/runtime/worktree-grants.json", &format!(r#"{{"{dangling_id}": true}}"#));
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let html = bee_live_strip_section(&snapshot);
+
+        assert!(
+            html.contains("could not be read"),
+            "an unresolved grant's own row must say it could not be read, never disappear silently: {html}"
+        );
+        assert!(html.contains(&dangling_id), "the unresolved row must still name the dangling grant: {html}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (board-liveness-3) No live session and no worktree grant at all: the
+    /// strip renders one honest empty line rather than an absent section.
+    #[test]
+    fn live_strip_renders_one_honest_line_when_nothing_is_live() {
+        let root = std::env::temp_dir().join(format!("mdview-views-strip-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".bee")).unwrap();
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let html = bee_live_strip_section(&snapshot);
+
+        assert!(
+            html.contains("Nothing is running right now."),
+            "with nothing live, the strip must still render an honest empty line: {html}"
+        );
+        assert!(html.contains("data-live-rows=\"0\""), "{html}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// (board-liveness-2) A lane parked at `swarming` with no live cells, no

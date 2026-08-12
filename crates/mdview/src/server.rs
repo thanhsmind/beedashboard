@@ -6173,6 +6173,85 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&sibling).ok();
     }
 
+    /// (board-liveness-3) Existing coverage before this test: `views.rs`'s
+    /// own `bee_live_strip_section` unit tests already prove each row
+    /// kind's content in isolation (a session row's lane/phase/heartbeat/
+    /// workspace, a resolved worktree row's branch/feature, an unresolved
+    /// grant's own reason, the honest empty line). What none of them
+    /// prove is that the real `/p/<id>/_bee` route actually wires that
+    /// function into the page it serves, and where its output lands
+    /// relative to the Feature Hub — that seam is this test's only job, so
+    /// it exercises a live session, a resolved worktree grant and an
+    /// unresolved one together on one real board response.
+    #[tokio::test]
+    async fn board_live_strip_renders_above_the_feature_hub_with_every_row_kind() {
+        let root = fresh_root("live-strip");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature": "strip-active-feat", "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}}"#,
+        );
+        write(
+            &root,
+            ".bee/sessions/strip-session.json",
+            &session_json("strip-session", &rfc3339_minutes_ago(2), "/home/x/t.jsonl", "main", "startup"),
+        );
+        let sibling = make_worktree_sibling("live-strip-wt");
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"strip-wt-feat","mode":"standard"}"#);
+        write(
+            &root,
+            ".bee/runtime/workspaces/live-strip-wt.json",
+            &workspace_json("live-strip-wt", "/tmp/nonexistent-live-strip-wt", "wt/strip-wt-feat", &[]),
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["live-strip-wt", "live-strip-ghost-wt"]),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "live-strip");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        let main_start = body.find("<main class=\"fg-page bee-hub-theme\">").expect("main tag");
+        let after_main = &body[main_start..];
+        let strip_at = after_main.find(r#"<section class="fg-card bee-strip""#).expect("live strip section");
+        let hub_at = after_main.find(r#"<section class="fg-card bee-hub" data-feature-hub="1">"#).expect("hub section");
+        assert!(
+            strip_at < hub_at,
+            "the live strip must render above the Feature Hub section: {body}"
+        );
+
+        assert!(
+            body.contains("strip-active-feat"),
+            "the live session's own row must name the active feature it falls back to (no lane of its own): {body}"
+        );
+        assert!(body.contains("2 minutes ago"), "the live session's row must state its heartbeat age: {body}");
+
+        assert!(
+            body.contains("wt/strip-wt-feat"),
+            "the resolved worktree's own row must name its branch: {body}"
+        );
+        assert!(
+            body.contains("strip-wt-feat"),
+            "the resolved worktree's own row must name its active feature: {body}"
+        );
+
+        assert!(
+            body.contains("could not be read"),
+            "the unresolved grant's own row must say it could not be read: {body}"
+        );
+        assert!(
+            body.contains("live-strip-ghost-wt"),
+            "the unresolved row must still name the dangling grant: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
     /// (happy) The board's Finished section groups finished features — one
     /// compact line per feature, not one card per cell — and states the
     /// true total number of finished cells, matching `data-finished-cells`.
