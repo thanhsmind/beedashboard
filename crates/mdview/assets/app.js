@@ -1038,8 +1038,20 @@
       var screenEl = card ? card.querySelector(".term-screen[data-pane-id]") : null;
       if (!screenEl) return;
       var olderBtn = group.querySelector('[data-scroll="older"]');
+      var newerBtn = group.querySelector('[data-scroll="newer"]');
       var liveBtn = group.querySelector('[data-scroll="live"]');
       paneHistoryDepth[paneId] = 0; // 0 = live; how many PageUp-hops back this pane's last press reached
+
+      // scroll-fab: Newer's disabled state is a plain function of the depth
+      // — disabled exactly at depth 0 (already live, nothing to request),
+      // enabled the moment a press takes it above 0. Called at init and
+      // again everywhere the depth changes (Older's, Newer's and Live's own
+      // handlers below) rather than left implicit in each handler's own
+      // logic, so this one line is the single place that rule lives.
+      function updateNewerDisabled() {
+        if (newerBtn) newerBtn.disabled = paneHistoryDepth[paneId] === 0;
+      }
+      updateNewerDisabled();
 
       if (olderBtn) {
         olderBtn.addEventListener("click", function () {
@@ -1055,6 +1067,39 @@
               lastRevision[paneId] = body.revision;
               screenEl.innerHTML = body.text;
               fitScreenFont(screenEl);
+              updateNewerDisabled();
+            })
+            .catch(function () {});
+        });
+      }
+
+      if (newerBtn) {
+        newerBtn.addEventListener("click", function () {
+          // scroll-fab: Newer walks one page back toward live through the
+          // same request path Older uses (`screenUrl`, `paneHistoryDepth`,
+          // `viewingHistory`) — never below depth 0, which is live itself
+          // and is already what Newer's own disabled state guards against
+          // requesting.
+          viewingHistory[paneId] = true; // pause the poller before the round trip, not after
+          var requestedDepth = Math.max(paneHistoryDepth[paneId] - 1, 0);
+          fetch(screenUrl(paneId, requestedDepth), { credentials: "same-origin" })
+            .then(function (res) {
+              return res.ok ? res.json() : null;
+            })
+            .then(function (body) {
+              if (!body) return;
+              paneHistoryDepth[paneId] = requestedDepth;
+              lastRevision[paneId] = body.revision;
+              screenEl.innerHTML = body.text;
+              fitScreenFont(screenEl);
+              updateNewerDisabled();
+              if (requestedDepth === 0) {
+                // Reaching depth 0 through Newer is the same live end-state
+                // the Live button's own handler reaches below — resume the
+                // poller exactly as its success path does.
+                viewingHistory[paneId] = false;
+                screenEl.scrollTop = screenEl.scrollHeight;
+              }
             })
             .catch(function () {});
         });
@@ -1066,6 +1111,7 @@
           // explicit depth-0 request actually lands -- reaching depth 0 is
           // this press's job alone, never left to race the next poll tick.
           paneHistoryDepth[paneId] = 0;
+          updateNewerDisabled(); // Live always lands at depth 0, so Newer disables immediately
           fetch(screenUrl(paneId, 0), { credentials: "same-origin" })
             .then(function (res) {
               return res.ok ? res.json() : null;

@@ -10808,6 +10808,65 @@ mod bee_route_tests {
         );
     }
 
+    /// scroll-fab: Newer walks one page toward live through the same
+    /// request path Older uses (`screenUrl`, `paneHistoryDepth`,
+    /// `viewingHistory`) — never below depth 0 — and its own disabled state
+    /// is driven directly by the depth reaching 0, exactly the end state
+    /// Live's own handler reaches too. Grep-based over `views::APP_JS`, the
+    /// same shape
+    /// `transcript_poller_clears_the_in_flight_flag_only_once_the_request_has_settled`
+    /// above uses, since there is no JS test runner in this workspace.
+    #[test]
+    fn scroll_newer_button_requests_depth_minus_one_and_disables_at_depth_zero() {
+        let js = views::APP_JS;
+
+        // The disabled state is a function of the depth alone, recomputed at
+        // every point the depth changes -- pinned to its own line so a
+        // future edit cannot silently stop calling it from one of the spots
+        // (init, Older's success path, Newer's success path, Live's
+        // synchronous reset) without this test catching it.
+        assert!(
+            js.contains("newerBtn.disabled = paneHistoryDepth[paneId] === 0;"),
+            "Newer's disabled state must be driven directly by the depth reaching 0"
+        );
+        let update_calls = js.matches("updateNewerDisabled();").count();
+        assert!(
+            update_calls >= 4,
+            "updateNewerDisabled must run at init and after every depth-changing press \
+             (Older, Newer, Live): found {update_calls} calls"
+        );
+
+        let newer_start = js.find("if (newerBtn) {").expect("the Newer button handler must exist");
+        let newer_end = js[newer_start..]
+            .find("if (liveBtn) {")
+            .map(|i| newer_start + i)
+            .expect("the Live button handler must follow Newer's");
+        let newer_block = &js[newer_start..newer_end];
+
+        assert!(
+            newer_block.contains("var requestedDepth = Math.max(paneHistoryDepth[paneId] - 1, 0);"),
+            "Newer must request one page toward live, never below depth 0: {newer_block}"
+        );
+        assert!(
+            newer_block.contains("screenUrl(paneId, requestedDepth)"),
+            "Newer must request through the same screenUrl path Older uses: {newer_block}"
+        );
+        assert!(
+            newer_block.contains("viewingHistory[paneId] = true;"),
+            "Newer must pause the poller before its round trip, exactly like Older: {newer_block}"
+        );
+        assert!(
+            newer_block.contains("paneHistoryDepth[paneId] = requestedDepth;"),
+            "Newer must advance the shared depth state on a successful response: {newer_block}"
+        );
+        assert!(
+            newer_block.contains("if (requestedDepth === 0) {")
+                && newer_block.contains("viewingHistory[paneId] = false;")
+                && newer_block.contains("screenEl.scrollTop = screenEl.scrollHeight;"),
+            "reaching depth 0 through Newer must resume the poller exactly like Live's own end state: {newer_block}"
+        );
+    }
+
     /// agent-terminal-20/22, truth: "Swapping the session-expired and
     /// transient-error states makes a test fail" — same grep-based-over-
     /// `views::APP_JS` proof shape as the in-flight test above, but pinned to
@@ -11770,6 +11829,92 @@ mod bee_route_tests {
         assert!(
             named < reply,
             "the named keys must sit in the control block, above the reply box: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// scroll-fab: the pane's scroll group renders as a three-button
+    /// vertical stack — Older, Newer, Live, top to bottom, each carrying its
+    /// own explicit English `aria-label` distinct from the controls strip's
+    /// arrow-glyph keys (`data-key="up"`/`"down"`) that send real keystrokes
+    /// to the TUI, so the two must not read alike to a screen reader. Newer
+    /// starts disabled (the pane is live on first render). The stylesheet
+    /// pins the column to a `flex-direction: column` stack of fixed 44px
+    /// circles (`width`/`height`, not `min-width`) — the same 44px
+    /// touch-target floor `terminal_key_rows_share_one_height_and_arrows_keep_the_wider_box`
+    /// (`views.rs`) pins absent as a literal `min-width: 44px` rule on this
+    /// selector, reached here by the circle's own fixed size instead.
+    #[tokio::test]
+    async fn terminal_page_renders_the_older_newer_live_round_button_column() {
+        let dir = fresh_root("terminal-scroll-fab-render");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-scroll-fab-render-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "scroll-fab-render");
+        let app = router(st);
+
+        let resp = app
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        let group_start = body
+            .find(&format!("class=\"term-scroll\" data-pane-id=\"{}\"", started.pane_id))
+            .unwrap_or_else(|| panic!("no scroll group for the pane: {body}"));
+        let group_end = body[group_start..]
+            .find("</div>")
+            .map(|i| group_start + i)
+            .unwrap_or_else(|| panic!("the scroll group must close: {body}"));
+        let group = &body[group_start..group_end];
+
+        let older = group
+            .find(r#"data-scroll="older" aria-label="Older""#)
+            .unwrap_or_else(|| panic!("no Older button with its own aria-label: {group}"));
+        let newer = group
+            .find(r#"data-scroll="newer" aria-label="Newer" disabled"#)
+            .unwrap_or_else(|| panic!("no disabled Newer button with its own aria-label: {group}"));
+        let live = group
+            .find(r#"data-scroll="live" aria-label="Live""#)
+            .unwrap_or_else(|| panic!("no Live button with its own aria-label: {group}"));
+        assert!(
+            older < newer && newer < live,
+            "the stack must read Older, Newer, Live top to bottom (older {older}, newer {newer}, live {live}): {group}"
+        );
+        assert!(
+            group.contains(r#"aria-label="Live">Live<"#),
+            "Live keeps its short visible label alongside its own aria-label: {group}"
+        );
+
+        assert!(
+            body.contains(".term-scroll { position: sticky;")
+                && body.contains("display: flex; flex-direction: column;")
+                && body.contains("env(safe-area-inset-bottom)"),
+            "the group must be a vertical stack that respects the iOS safe-area inset: {body}"
+        );
+        assert!(
+            body.contains(".term-scroll button { width: 44px; height: 44px;")
+                && body.contains("border-radius: 50%"),
+            "each button must be a fixed 44px circle: {body}"
+        );
+        assert!(
+            body.contains(".term-scroll button:disabled { opacity:"),
+            "the disabled Newer button must render visibly dimmed: {body}"
+        );
+        assert!(
+            !body.contains(".term-scroll button { min-width: 44px") && !body.contains(".term-scroll { min-width: 44px"),
+            "the 44px floor must come from the circle's own fixed size, not a reintroduced \
+             min-width rule the terminal_key_rows test in views.rs pins absent: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();

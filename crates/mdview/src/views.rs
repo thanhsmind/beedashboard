@@ -482,7 +482,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    the edge. */
 @media (max-width: 720px) {
   .term-screen { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
-  .term-keys button, .term-scroll button, .term-reply__send, .term-reply__stage { padding: var(--space-2) var(--space-3); }
+  .term-keys button, .term-reply__send, .term-reply__stage { padding: var(--space-2) var(--space-3); }
   .term-reply__actions { justify-content: stretch; }
   .term-reply__actions button { flex: 1; }
 }
@@ -512,20 +512,31 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    once both groups share one row, "the direct child of `.term-controls`"
    reaches the named keys too. */
 .term-keys--move button { min-width: 44px; font-size: var(--type-body-size); }
-/* The two screen-moving controls belong to the screen, not to the keys that
-   type into the pane, so they ride on it: centred, wholly inside its lower
-   edge rather than straddling it. `sticky` keeps them reachable while a tall
-   screen is scrolled past — the pair a reader wants is the one for the
-   screen they are looking at. The negative pull is deeper than the pair's
-   own rendered height, which is what both lifts it clear of the edge and
-   gives back the flow row it would otherwise open above the keys. */
+/* scroll-fab: the three screen-moving controls (Older, Newer, Live) belong
+   to the screen, not to the keys that type into the pane, so they ride on
+   it as a small round-button column pinned to its lower-right corner rather
+   than straddling the edge. `sticky` keeps the stack reachable while a tall
+   screen is scrolled past — the trio a reader wants is the one for the
+   screen they are looking at, never buried under the reply composer that
+   sits below `.term-screen-wrap` in the flow. The negative pull is deeper
+   than the stack's own rendered height, which is what both lifts it clear
+   of the edge and gives back the flow row it would otherwise open above the
+   keys; `env(safe-area-inset-bottom)` layered onto that offset keeps the
+   stack clear of an iPhone's home-indicator strip too. */
 .term-screen-wrap { position: relative; display: flow-root; }
-.term-scroll { position: sticky; bottom: var(--space-3); z-index: 2; display: flex; flex-wrap: wrap; gap: var(--space-2); width: max-content; margin: calc(-1 * var(--space-7)) var(--space-3) 0 auto; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-surface-raised); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
-/* Bigger than the named keys beside the arrows: these are read at a glance
-   and pressed mid-scroll. Width comes from padding, never a `min-width` —
-   that 44px target is the arrows' own, and the pair keeps the smaller box
-   the touch-target rule reserves for everything else. */
-.term-scroll button { padding: var(--space-2) var(--space-4); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; font-size: var(--type-body-sm-size); }
+.term-scroll { position: sticky; bottom: calc(var(--space-3) + env(safe-area-inset-bottom)); z-index: 2; display: flex; flex-direction: column; gap: var(--space-2); width: max-content; margin: calc(-1 * var(--space-7)) var(--space-3) 0 auto; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-surface-raised); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); }
+/* Each button is a fixed-size circle — equal `width`/`height`, not a
+   `min-width` — so `border-radius: 50%` draws a true circle rather than a
+   pill. Fixed at 44px it keeps the same touch-target floor the named keys'
+   own `min-width: 44px` rule reaches for by a different route
+   (`terminal_key_rows_share_one_height_and_arrows_keep_the_wider_box` pins
+   that this selector still carries no literal `min-width: 44px` rule — the
+   width/height pair here is that different route, not a reintroduction of
+   the rule it pins absent). Newer's disabled state only dims the circle
+   (`:disabled`); it never changes size, so the column's shape holds steady
+   as depth changes. */
+.term-scroll button { width: 44px; height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; border: var(--border-width-hairline) solid var(--color-border); border-radius: 50%; background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; font-size: var(--type-caption-size); line-height: 1; }
+.term-scroll button:disabled { opacity: 0.4; cursor: not-allowed; }
 .term-transcript { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
 .term-transcript__line { white-space: pre-wrap; word-break: break-word; }
 /* agent-switch-drawer-2: a fixed edge tab reaches the cross-project agent
@@ -784,8 +795,9 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str, attach: bool) -> Stri
   <div class="term-screen-wrap">
     <pre class="term-screen" data-pane-id="{pane_id}" aria-live="polite">Loading screen…</pre>
     <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
-      <button type="button" data-scroll="older">Older</button>
-      <button type="button" data-scroll="live">Live</button>
+      <button type="button" data-scroll="older" aria-label="Older">↑</button>
+      <button type="button" data-scroll="newer" aria-label="Newer" disabled>↓</button>
+      <button type="button" data-scroll="live" aria-label="Live">Live</button>
     </div>
   </div>
   <div class="term-controls">
