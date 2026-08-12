@@ -27,7 +27,8 @@ a silent edit.
 | D3 | The Features section keeps the same three columns, in the same order and with the same names: Waiting on you, In Progress, Finished. | The user asked for the per-project presentation, applied across projects. |
 | D4 | Features are listed flat inside each column — never grouped into per-project blocks and never one row per project. | A flat list answers "what is waiting on me" first; the project is a detail on the item, not the organising axis. |
 | D5 | Every feature card and every Finished row carries a label naming the project it belongs to. | Without it a flat cross-project list is unreadable. |
-| D6 | The Finished column is one shared ship timeline across all projects — most recently finished first — not per-project sequences interleaved by any other key. | — |
+| D6 | ~~The Finished column is one shared ship timeline across all projects — most recently finished first.~~ **Superseded by D10.** | Locked on the premise that a reliable ship timestamp exists; it does not. |
+| D10 | The Finished column orders in two blocks. First, every feature that has a `cycle_time.ended_at`, most recently finished first, each row showing that time. Behind them, every feature without one, ordered alphabetically by feature name across all projects. The 10-row cap and "Show 10 more" of D7 apply to the combined sequence. | `cycle_time.ended_at` is `Option` and only exists when every live cell of the feature carries both `claimed_at` and `capped_at` (`bee.rs:342-344`; `compute_velocity` at `bee.rs:2346` already filters the missing case as routine). A pure timeline would bury most features in an unexplained tail; the per-project board's own order is alphabetical (`views.rs:1901`). |
 | D7 | The Finished column shows 10 rows, with the rest behind a "Show 10 more · N left" control that matches the per-project board's existing behaviour. | One project alone already has 105 finished features; the page must stay light, and the user already knows this control. |
 | D8 | A project appears in the cross-project sections only when it is registered AND its root has a `.bee/` directory. Registered projects without `.bee/` still appear in the project list below, unchanged. | This is the same qualification rule the per-project bee surface already states in `docs/specs/bee-cockpit.md`. |
 | D9 | When no registered project qualifies, the Live and Features sections are absent from the page entirely and `/` reads exactly as it does today. | A person with no bee projects must not be shown two empty shells. |
@@ -107,12 +108,19 @@ From the quick scout only. Downstream agents read these before planning.
 
 ### Deferred To Planning
 
-- [ ] How many registered projects a real installation has, and whether N
-      sequential `read_snapshot` calls keep `/` fast enough or need concurrency
-      or caching — measure against the current registry before choosing.
-- [ ] Whether `BeeShippedFeature` carries a finish timestamp precise enough to
-      order D6's shared timeline across projects, and what the fallback ordering
-      is for a finished feature that carries no usable timestamp.
+Both questions this section opened are now answered; the answers are recorded
+here so planning does not re-measure them.
+
+- **Registry size.** 10 registered projects, 8 of them qualifying under D8 (the
+  other two are stale worktree registrations with no `.bee/`). Their `.bee/`
+  stores hold 199 cells and ~308 `docs/history/<feature>/` directories between
+  them, the largest single project carrying 206 feature directories.
+- **Cost of the roll-up.** `read_snapshot` (`bee.rs:932`) is synchronous
+  filesystem work — roughly ten fixed reads plus one read per cell plus one
+  directory read per feature — and today both of its callers
+  (`server.rs:1268`, `server.rs:3081`) invoke it directly on the async task with
+  no cache. Eight of those on `/` is the shape planning must design against.
+- **Ship timestamps.** Answered and locked as D10.
 
 ## Deferred Ideas
 
