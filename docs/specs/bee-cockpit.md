@@ -1,7 +1,7 @@
 ---
 area: bee-cockpit
-updated: 2026-08-12
-sources: [feature-close, agent-board, bee-artifact-rename, archive-visibility, feature-hub, board-declutter, board-trim, feature-titles, hub-fallbacks, detail-desc-wrap]
+updated: 2026-08-13
+sources: [feature-close, agent-board, bee-artifact-rename, archive-visibility, feature-hub, board-declutter, board-trim, feature-titles, hub-fallbacks, detail-desc-wrap, cross-board]
 decisions: []
 coverage: partial
 ---
@@ -43,6 +43,40 @@ page for it returns not-found rather than an empty bee page. The absence of a st
 never rendered as an empty dashboard.
 
 A qualifying project gains an entry point on its home page leading to its board.
+
+## The cross-project board
+
+The same surface also exists once for everything at once. The viewer's own front
+page — the page a person lands on before choosing a project — leads with two
+sections rolled up across **every** qualifying project, and only then shows the
+list of registered projects that page has always shown:
+
+1. **Live**, across all projects.
+2. **Features**, across all projects.
+3. The project list, unchanged — same rows, same order, same everything below it.
+
+Qualification is the same rule stated above, and it decides only what feeds those
+two sections: a registered project without a `.bee/` store still appears in the
+list below, exactly as before. When no project qualifies at all, neither section is
+built and the front page is precisely the page it was — a person with no bee
+projects is never shown two empty frames.
+
+The two rolled-up sections read the same way their per-project counterparts do,
+with three differences that follow from having more than one project in view:
+
+- Every entry names the project it belongs to. Without that, a merged list is
+  unreadable.
+- The lists stay **flat**. Features are never grouped into per-project blocks and
+  a project never gets a row of its own. The question this page answers first is
+  "what is waiting on me", and the project is a detail of the answer, not the axis
+  it is organised by.
+- Ordering, counting, and truncating all happen **after** the merge, over the
+  combined sequence — never per project and then stitched together.
+
+Reading every project's store is more work than reading one, so it is done off to
+the side and for all projects at once, never one after another while the page
+waits. The per-project board is untouched by any of this: it keeps its own address
+and renders exactly what it rendered before.
 
 ## The reading order — and why it is the feature
 
@@ -109,6 +143,25 @@ text, then the most recent decision scoped to the feature, then the title of its
 cell. A long description wraps and is visually clamped — on the card, and on the
 feature's own detail page too — rather than overflowing or forcing either page to
 scroll sideways. A card links onward to the feature's own detail page.
+
+### How each group is ordered, and how Finished is cut short
+
+Within the Waiting on you and In Progress groups, features are listed by name.
+
+Finished is different, because it is the group that grows without bound — a
+long-running project accumulates hundreds of finished features while the other two
+groups stay small. Two rules keep it readable:
+
+- **Order.** Finished features that carry a ship time come first, most recently
+  finished at the top, each showing that time. Every remaining finished feature
+  follows, listed by name. A feature has a ship time only when the whole of its
+  finished work is timed; a feature whose record is partly timed counts as untimed
+  rather than being placed on a half-known date. On the cross-project board this
+  is one shared sequence across every project, not one sequence per project.
+- **Length.** The group shows ten entries and puts the rest behind a control that
+  names how many are hidden and reveals the next ten at a time. Nothing is ever
+  dropped — only folded. On the cross-project board the ten and the hidden count
+  are both taken from the merged total.
 
 ## Finished (shipped) list
 

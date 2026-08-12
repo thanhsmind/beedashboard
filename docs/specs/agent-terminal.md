@@ -1,7 +1,7 @@
 ---
 area: agent-terminal
-updated: 2026-08-12
-sources: [agent-terminal, terminal-open-access]
+updated: 2026-08-13
+sources: [agent-terminal, terminal-open-access, scroll-fab-follow]
 decisions: [D1, D2, D3, D4, D5, D6, D7, D8, D9, D10]
 coverage: partial
 ---
@@ -134,10 +134,14 @@ implementation. Code entry points are listed in `reading-map.md`.
   are separate, individually labelled controls, so an assistive reader
   never confuses them with the pane's own arrow keys, and each meets the
   same 44px touch-target minimum as the pane's other controls. They sit
-  stacked together at the screen's bottom-right corner, positioned so they
-  stay reachable and stay inside the screen's own frame regardless of the
-  pane's height or the window's width, never covering the reply controls
-  beneath the screen, and clear of a phone's own safe-area inset. While an
+  stacked together against the screen's right edge, and they follow the
+  reader: while any part of the pane's screen is in view the stack stays at
+  the lower edge of the viewport, so a long screen never leaves the controls
+  scrolled off below. Once the screen's own bottom comes into view the stack
+  stops there rather than travelling past it — it never leaves the screen's
+  frame, never covers the reply controls beneath the screen, and stays clear
+  of a phone's own safe-area inset, regardless of the pane's height or the
+  window's width. While an
   operator has stepped back this way, the pane's normal live refresh stops
   updating that view, so it is never overwritten out from under them.
 - **How stepping stays cheap:** the surface remembers how far back each pane
