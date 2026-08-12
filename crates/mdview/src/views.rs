@@ -442,6 +442,17 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    width no readable type size can hold the grid, so the lines wrap instead
    of running off the side. */
 .term-screen--wrapped { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
+/* term-frame-blocks: a table or TUI frame `mdview_core::ansi::to_html` wraps
+   in its own `<div class="term-frame">` keeps its grid on every screen size,
+   never the phone-only `pre-wrap` the rest of `.term-screen` takes below —
+   a `<div>` inside a `<pre>` still inherits `white-space` from its ancestor
+   (it is an inherited CSS property), so this rule has to restate `pre` and
+   `overflow-x: auto` on the frame itself rather than rely on nesting alone.
+   Declared once, unconditionally (not inside the narrow-screen `@media`
+   block below), it wins over the inherited value at every width — the
+   surrounding prose lines are untouched and keep wrapping under that rule
+   exactly as before. */
+.term-frame { white-space: pre; overflow-x: auto; }
 /* A document path an agent printed, now clickable. It keeps whatever colour
    the surrounding ANSI run gave it — recolouring would lose information the
    agent meant to convey — and says it is a link by underlining. */

@@ -89,8 +89,27 @@ use std::str::Chars;
 /// becomes a `<span class="…">` wrapping its escaped text; a run with no
 /// active style renders as plain escaped text, with no wrapper. Every other
 /// escape sequence is dropped without emitting anything.
+///
+/// term-frame-blocks: a table or a TUI reply frame is a *grid*, not prose —
+/// wrapping it the way a phone wraps a paragraph shatters its box-drawing
+/// mid-glyph. [`scan_runs`] does the same SGR-run scan this function always
+/// did (unchanged: same escape handling, same run boundaries); the frame/
+/// prose split happens one layer up, in [`render_runs`], entirely from the
+/// runs' own raw text and line positions — never by re-parsing already-
+/// escaped HTML, which would have no reliable way back to "was this
+/// character part of a table".
 pub fn to_html(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
+    render_runs(&scan_runs(raw))
+}
+
+/// Scans `raw` into the ordered sequence of (style, raw-text) runs a `\u{1b}[…m`
+/// (SGR) escape ever splits it into — every other escape sequence dropped in
+/// full per [`consume_escape`]'s contract, exactly as before this module
+/// carried a frame/prose split. This is the same partition [`to_html`] always
+/// computed inline; pulling it out lets [`render_runs`] see run *and* line
+/// boundaries at once without ever touching already-escaped HTML.
+fn scan_runs(raw: &str) -> Vec<(Style, String)> {
+    let mut runs = Vec::new();
     let mut style = Style::default();
     let mut run = String::new();
     let mut chars = raw.chars().peekable();
@@ -99,8 +118,7 @@ pub fn to_html(raw: &str) -> String {
         if c == '\u{1b}' {
             match consume_escape(&mut chars) {
                 EscapeOutcome::Sgr(params) => {
-                    flush_run(&mut out, &run, &style);
-                    run.clear();
+                    runs.push((style, std::mem::take(&mut run)));
                     apply_sgr(&mut style, &params);
                 }
                 EscapeOutcome::Dropped => {}
@@ -113,7 +131,125 @@ pub fn to_html(raw: &str) -> String {
         }
         run.push(c);
     }
-    flush_run(&mut out, &run, &style);
+    runs.push((style, run));
+    runs
+}
+
+/// A box-drawing character (U+2500–U+257F): the light/heavy/double line and
+/// corner glyphs, and — since they fall in the same block — the rounded
+/// corners (U+256D–U+2570) a TUI's own frame often uses instead of square
+/// ones. One codepoint in this range anywhere on a line is enough to call
+/// that whole line frame-shaped; prose essentially never contains one.
+fn is_box_drawing_char(c: char) -> bool {
+    ('\u{2500}'..='\u{257F}').contains(&c)
+}
+
+/// Which lines of `line_texts` belong to a frame run, per line. A line is
+/// frame-shaped on its own merits ([`is_box_drawing_char`]); a single
+/// non-frame line sandwiched between two frame-shaped lines is pulled in too
+/// — a TUI panel's own content row often carries no border glyph of its own
+/// (top/bottom rule, plain text between), and treating that row as a prose
+/// island would split one frame into two with a wrapping gap in the middle.
+/// The absorption is bounded to a single line of gap on purpose: it is the
+/// shape an interior content row actually takes, while a wider gap reads as
+/// two separate visual blocks rather than one, and an unbounded look-ahead
+/// would risk pulling unrelated prose paragraphs together across a page.
+fn frame_line_runs(line_texts: &[&str]) -> Vec<bool> {
+    let is_frame: Vec<bool> = line_texts
+        .iter()
+        .map(|line| line.chars().any(is_box_drawing_char))
+        .collect();
+    let mut in_run = is_frame.clone();
+    if in_run.len() >= 3 {
+        for i in 1..in_run.len() - 1 {
+            if !in_run[i] && in_run[i - 1] && is_frame[i + 1] {
+                in_run[i] = true;
+            }
+        }
+    }
+    in_run
+}
+
+/// Opens or closes the `<div class="term-frame">` wrapper so it matches
+/// `want` — a no-op when it already does. Called immediately before every
+/// [`flush_run`] in [`render_runs`], which is what "closed/reopened across
+/// the block boundary" means in practice: a styled run that starts in prose
+/// and is still active when a frame line begins never renders as one `<span>`
+/// straddling the `<div>` boundary (invalid nesting — a `<div>` inside a
+/// `<span>` is not something a browser parses back the way it was written);
+/// it renders as two complete spans, one on each side, each with the same
+/// class/style, because each call to `flush_run` is already a fully
+/// self-contained `<span>…</span>`.
+fn set_frame(out: &mut String, in_div: &mut bool, want: bool) {
+    if want && !*in_div {
+        out.push_str("<div class=\"term-frame\">");
+        *in_div = true;
+    } else if !want && *in_div {
+        out.push_str("</div>");
+        *in_div = false;
+    }
+}
+
+/// Renders `runs` (as produced by [`scan_runs`]) to HTML, wrapping every
+/// frame-shaped line run ([`frame_line_runs`]) in its own `<div
+/// class="term-frame">` and leaving prose lines in the surrounding flow.
+///
+/// A block boundary only ever falls on a line break: `line_idx` walks the
+/// same line count `plain_text.split('\n')` would produce, advancing once
+/// per `\n` byte consumed across every run in order, so a run's text is only
+/// ever split where a `\n` it contains crosses into a line whose frame
+/// membership differs from the one before it. When no line anywhere is
+/// frame-shaped (no box-drawing character in the whole screen), that
+/// condition is never true, no run is ever split, and every call this
+/// function makes reduces to exactly [`flush_run`] once per run in order —
+/// the same output `to_html` always produced. That is the byte-for-byte
+/// guarantee this rewrite has to keep, and there is no other code path.
+fn render_runs(runs: &[(Style, String)]) -> String {
+    let plain_text: String = runs.iter().map(|(_, text)| text.as_str()).collect();
+    let line_texts: Vec<&str> = plain_text.split('\n').collect();
+    let in_run = frame_line_runs(&line_texts);
+
+    let mut out = String::with_capacity(plain_text.len());
+    let mut in_div = false;
+    let mut line_idx = 0usize;
+
+    for (style, text) in runs {
+        let bytes = text.as_str();
+        let mut piece_start = 0usize;
+        let mut cursor = 0usize;
+        loop {
+            match bytes[cursor..].find('\n') {
+                None => {
+                    let piece = &bytes[piece_start..];
+                    if !piece.is_empty() {
+                        set_frame(&mut out, &mut in_div, in_run[line_idx]);
+                        flush_run(&mut out, piece, style);
+                    }
+                    break;
+                }
+                Some(rel) => {
+                    let abs = cursor + rel;
+                    let piece_end = abs + 1; // include the '\n' itself
+                    let next_line_idx = line_idx + 1;
+                    let boundary =
+                        next_line_idx >= in_run.len() || in_run[next_line_idx] != in_run[line_idx];
+                    if boundary {
+                        let piece = &bytes[piece_start..piece_end];
+                        if !piece.is_empty() {
+                            set_frame(&mut out, &mut in_div, in_run[line_idx]);
+                            flush_run(&mut out, piece, style);
+                        }
+                        piece_start = piece_end;
+                    }
+                    line_idx = next_line_idx;
+                    cursor = piece_end;
+                }
+            }
+        }
+    }
+    if in_div {
+        out.push_str("</div>");
+    }
     out
 }
 
@@ -822,6 +958,109 @@ mod tests {
     #[test]
     fn empty_input_produces_empty_output() {
         assert_eq!(to_html(""), "");
+    }
+
+    // --- term-frame-blocks: box-drawing lines wrap in their own block ---
+
+    #[test]
+    fn box_drawing_table_lines_land_in_one_term_frame_block_and_prose_stays_outside() {
+        let raw = "before the table\n┌───┬───┐\n│ a │ b │\n└───┴───┘\nafter the table";
+        let html = to_html(raw);
+        assert_eq!(
+            html.matches("<div class=\"term-frame\">").count(),
+            1,
+            "exactly one frame block for the one table: {html}"
+        );
+        assert_eq!(html.matches("</div>").count(), 1, "{html}");
+        let open = html.find("<div class=\"term-frame\">").unwrap();
+        let close = html.find("</div>").unwrap();
+        assert!(html[..open].contains("before the table"), "{html}");
+        assert!(html[close..].contains("after the table"), "{html}");
+        // The three table lines are inside the block; the prose lines are not.
+        let inside = &html[open..close];
+        assert!(inside.contains('┌') && inside.contains('└'), "{inside}");
+        assert!(!html[..open].contains('┌'), "{html}");
+        assert!(!html[close..].contains('└'), "{html}");
+    }
+
+    #[test]
+    fn a_borderless_content_line_between_two_frame_lines_is_absorbed_into_the_same_run() {
+        // A common TUI shape: a top/bottom rule made of box-drawing glyphs
+        // with a plain-text content line between them carrying none — the
+        // whole three-line panel must still render as one frame block.
+        let raw = "── status ──\n  cpu: 12%\n─────────────";
+        let html = to_html(raw);
+        assert_eq!(
+            html.matches("<div class=\"term-frame\">").count(),
+            1,
+            "the borderless content row must not split the panel into two blocks: {html}"
+        );
+        let open = html.find("<div class=\"term-frame\">").unwrap();
+        let close = html.find("</div>").unwrap();
+        assert!(html[open..close].contains("cpu: 12%"), "{html}");
+    }
+
+    #[test]
+    fn a_two_line_prose_gap_between_frame_lines_is_not_absorbed() {
+        // The absorption rule only pulls in a single line of gap; two lines
+        // of ordinary prose between two frame-shaped lines read as two
+        // separate visual blocks, not one that swallows a paragraph.
+        let raw = "─────\nfirst prose line\nsecond prose line\n─────";
+        let html = to_html(raw);
+        assert_eq!(
+            html.matches("<div class=\"term-frame\">").count(),
+            2,
+            "a two-line gap must not merge into one frame block: {html}"
+        );
+        // The prose in between must sit outside both blocks, not inside either.
+        let first_close = html.find("</div>").unwrap();
+        let second_open = html.rfind("<div class=\"term-frame\">").unwrap();
+        assert!(first_close < second_open, "{html}");
+        let between = &html[first_close..second_open];
+        assert!(between.contains("first prose line") && between.contains("second prose line"), "{between}");
+    }
+
+    #[test]
+    fn sgr_color_spanning_a_frame_boundary_renders_as_two_complete_spans() {
+        // A colour turned on before the table and never reset must still
+        // render on both sides of the `<div>` boundary — as two independent,
+        // fully-closed spans, never one `<span>` wrapping the `<div>` itself
+        // (which is not valid nesting and would not survive round-tripping
+        // through a browser's parser the way it was written).
+        let raw = "\u{1b}[31mred prose\n┌─┐\n│x│\n└─┘\nstill red\u{1b}[0m";
+        let html = to_html(raw);
+        // Three complete spans: the prose before the block, the frame's own
+        // content (still coloured, since the SGR was never reset), and the
+        // prose after it — never one span wrapping the `<div>` itself.
+        assert_eq!(
+            html.matches("<span class=\"ansi-fg-red\">").count(),
+            3,
+            "the red span must close before the frame block and reopen inside and after it: {html}"
+        );
+        assert_eq!(html.matches("</span>").count(), 3, "{html}");
+        let div_open = html.find("<div class=\"term-frame\">").unwrap();
+        let div_close = html.find("</div>").unwrap();
+        // No span may straddle the div boundary in either direction.
+        let before = &html[..div_open];
+        let after = &html[div_close..];
+        assert_eq!(before.matches("<span").count(), before.matches("</span>").count(), "{before}");
+        assert_eq!(after.matches("<span").count(), after.matches("</span>").count(), "{after}");
+    }
+
+    #[test]
+    fn output_with_no_box_drawing_characters_is_unchanged_from_plain_flush_run_output() {
+        // A multi-line, multi-style screen with no box-drawing glyph anywhere
+        // must carry no `.term-frame` wrapper at all — the frame/prose split
+        // adds structure, never removes or reflows text that was never
+        // frame-shaped to begin with.
+        let raw = "\u{1b}[1;31mline one\u{1b}[0m\nplain line two\n\u{1b}[4mline three\u{1b}[0m\nlast line, no trailing newline";
+        let html = to_html(raw);
+        assert!(!html.contains("term-frame"), "{html}");
+        assert_eq!(
+            html,
+            "<span class=\"ansi-bold ansi-fg-red\">line one</span>\nplain line two\n\
+             <span class=\"ansi-underline\">line three</span>\nlast line, no trailing newline"
+        );
     }
 
     // --- revision_of: screen-revision fix ---
