@@ -3792,6 +3792,46 @@ pub fn error_page(status: u16, msg: &str) -> String {
     layout(&status.to_string(), "", &body)
 }
 
+/// stale-index-refresh-2: `error_page`'s sibling for the one 404 that names a
+/// known project — `server.rs::project_path`'s own not-found branch, reached
+/// when the project itself resolves but the requested path matches neither
+/// an indexed markdown file nor an on-disk asset. A file committed or edited
+/// while the daemon was down (or between the startup reconcile sweep and
+/// now — `stale-index-refresh-1`) stays invisible until something reindexes
+/// it, and a reader who followed a link straight to this page has no
+/// terminal handy to run `mdview refresh` in. This renders `error_page`'s
+/// same status/message body, then — under the message, not replacing it — a
+/// plain HTML `<form>` posting to `server.rs::refresh_project`
+/// (`/api/projects/<id>/refresh`) with a hidden `redirect` field carrying the
+/// path the reader actually asked for, so submitting it reindexes the
+/// project and lands them back where they started. Deliberately no
+/// JavaScript: a form post works even with the pane's own scripts idle, and
+/// every other `not_found` caller (bad project id first among them) never
+/// reaches this function at all — `error_page` above still renders their
+/// plain, button-less message.
+pub fn error_page_with_refresh(
+    status: u16,
+    msg: &str,
+    project_id: &str,
+    requested_path: &str,
+) -> String {
+    let body = format!(
+        r#"{topbar}
+<main class="fg-page"><h2 class="fg-pagehead__title">{status}</h2><p class="fg-empty">{msg}</p>
+<form class="fg-refresh-index" method="post" action="/api/projects/{project_id}/refresh">
+  <input type="hidden" name="redirect" value="{redirect}">
+  <button type="submit" class="fg-btn fg-btn--primary">Refresh index</button>
+</form>
+</main>"#,
+        topbar = topbar(""),
+        status = status,
+        msg = esc(msg),
+        project_id = esc(project_id),
+        redirect = esc(requested_path),
+    );
+    layout(&status.to_string(), "", &body)
+}
+
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")

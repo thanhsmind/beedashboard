@@ -426,6 +426,9 @@ fn router(state: AppState) -> Router {
         // entirely (D1) — nothing was ever gated on them but themselves.
         .route("/api/terminal-config", post(update_terminal_config))
         .route("/api/projects/:id/unregister", post(unregister_project))
+        // stale-index-refresh-2: the 404 page's own "Refresh index" button
+        // target — see `refresh_project`'s doc comment.
+        .route("/api/projects/:id/refresh", post(refresh_project))
         // D7/D8: the add-project form's target. Mounted with its one true
         // method (toa-1), so an unauthenticated GET here answers axum's
         // ordinary 405 rather than reaching the handler.
@@ -983,6 +986,72 @@ async fn update_config(State(st): State<AppState>, Form(form): Form<SettingsForm
 async fn unregister_project(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     let _ = st.engine.unregister(&id);
     Redirect::to("/").into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct RefreshProjectForm {
+    #[serde(default)]
+    redirect: Option<String>,
+}
+
+/// stale-index-refresh-2: the 404 page's own "Refresh index" button target
+/// (`views::error_page_with_refresh`'s form). A reader who hit that 404 for a
+/// file that exists on disk but predates the last reconcile — the daemon was
+/// down when it landed, or it landed after the startup sweep
+/// (`stale-index-refresh-1`'s `reconcile_registered_projects`) already ran —
+/// has no terminal handy to run `mdview refresh` in; this route is that
+/// command, reachable from the page that told them something was missing.
+/// Runs the same door `mdview refresh` and the startup sweep both use
+/// (`Engine::refresh`), off the async thread via `spawn_blocking` since it
+/// walks the filesystem and writes sqlite — unlike the startup sweep this one
+/// IS awaited, since the redirect that follows depends on it having run.
+///
+/// Like every route in this file it is unauthenticated (D1), which is why
+/// the `redirect` form field cannot be trusted as-is: `safe_redirect_path`
+/// refuses anything that is not a same-site absolute path before it ever
+/// reaches a `Location` header, falling back to the project's own home
+/// (`/p/<id>/`) — the same fallback used when the field is absent entirely.
+async fn refresh_project(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<RefreshProjectForm>,
+) -> Response {
+    let fallback = format!("/p/{id}/");
+    let target = match form.redirect.as_deref() {
+        Some(raw) => safe_redirect_path(raw, &fallback),
+        None => fallback,
+    };
+
+    let engine = st.engine.clone();
+    let project_id = id.clone();
+    let _ = tokio::task::spawn_blocking(move || engine.refresh(&project_id)).await;
+
+    Redirect::to(&target).into_response()
+}
+
+/// stale-index-refresh-2: guard `refresh_project`'s `redirect` form field
+/// against becoming an open redirect. That field is attacker-suppliable on
+/// an unauthenticated route (D1), so only a same-site absolute path is ever
+/// honoured — `raw` must start with exactly one `/`: never zero (a bare
+/// `evil.com` would be relative to the current path, not a redirect target,
+/// so this rule never has to consider it), and never two or more, since
+/// `//evil.com` is scheme-relative — a browser resolves it against the
+/// current `location.protocol` and lands off-site. A leading `\` right after
+/// that first `/` is refused for the same reason spelled a different way:
+/// some browsers normalize backslashes to forward slashes while parsing a
+/// URL, so `/\evil.com` becomes the same `//evil.com` attack once parsed,
+/// despite passing a naive "does not start with `//`" check. Anything that
+/// fails either check falls back to `fallback` (the project's own home)
+/// rather than refusing the request outright — a bad redirect value is never
+/// worth failing the refresh itself over.
+fn safe_redirect_path(raw: &str, fallback: &str) -> String {
+    let bytes = raw.as_bytes();
+    let is_same_site = bytes.first() == Some(&b'/') && !matches!(bytes.get(1), Some(b'/' | b'\\'));
+    if is_same_site {
+        raw.to_string()
+    } else {
+        fallback.to_string()
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -3374,35 +3443,45 @@ async fn project_path(
     State(st): State<AppState>,
     Path((id, path)): Path<(String, String)>,
 ) -> Response {
+    // Unknown project id: no refresh button to offer, since there is nothing
+    // to refresh and nowhere same-site to send the reader back to — falls
+    // straight through to the plain, button-less `not_found` every other
+    // caller in this file renders (stale-index-refresh-2's must-have: "A 404
+    // for an unknown project id renders no button").
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("file not found");
+    };
     // Markdown file in the index → render it.
-    if let Ok(Some(project)) = st.engine.get_project(&id) {
-        if st
-            .engine
-            .store
-            .get_file(&id, &path)
-            .ok()
-            .flatten()
-            .is_some()
-        {
-            return match st.engine.render_file(&id, &path) {
-                Ok(page) => {
-                    let file = st.engine.store.get_file(&id, &path).unwrap().unwrap();
-                    let files = st.engine.list_files(&id).unwrap_or_default();
-                    let backlinks = st.engine.backlinks(&id, &path).unwrap_or_default();
-                    Html(views::file_page(&project, &file, &page, &files, &backlinks))
-                        .into_response()
-                }
-                Err(e) => internal_error(&e.to_string()),
-            };
-        }
-        // Otherwise serve as a static asset (image, etc.) with traversal guard.
-        if let Ok(abs) = st.engine.asset_path(&id, &path) {
-            if let Ok(bytes) = std::fs::read(&abs) {
-                return asset_response(&abs, bytes);
+    if st
+        .engine
+        .store
+        .get_file(&id, &path)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        return match st.engine.render_file(&id, &path) {
+            Ok(page) => {
+                let file = st.engine.store.get_file(&id, &path).unwrap().unwrap();
+                let files = st.engine.list_files(&id).unwrap_or_default();
+                let backlinks = st.engine.backlinks(&id, &path).unwrap_or_default();
+                Html(views::file_page(&project, &file, &page, &files, &backlinks)).into_response()
             }
+            Err(e) => internal_error(&e.to_string()),
+        };
+    }
+    // Otherwise serve as a static asset (image, etc.) with traversal guard.
+    if let Ok(abs) = st.engine.asset_path(&id, &path) {
+        if let Ok(bytes) = std::fs::read(&abs) {
+            return asset_response(&abs, bytes);
         }
     }
-    not_found("file not found")
+    // stale-index-refresh-2: the project IS known, but the path matches
+    // neither an indexed markdown file nor an on-disk asset — exactly the
+    // "reindex might fix this" 404 the refresh button exists for. Offer it,
+    // carrying the full requested URL back through so a successful refresh
+    // redirects the reader straight to the page they asked for.
+    not_found_with_refresh(&id, &format!("/p/{id}/{path}"), "file not found")
 }
 
 #[derive(serde::Deserialize)]
@@ -3605,6 +3684,26 @@ fn is_loopback_host(host: &str) -> bool {
 fn not_found(msg: &str) -> Response {
     (StatusCode::NOT_FOUND, Html(views::error_page(404, msg))).into_response()
 }
+
+/// stale-index-refresh-2: `not_found`'s sibling for `project_path`'s own
+/// not-found branch — the one 404 that already has a known project id and a
+/// requested path worth handing back. Renders `views::error_page_with_refresh`
+/// (see its own doc comment for the form this adds) rather than
+/// `views::error_page`, so this and only this 404 offers the Refresh index
+/// button.
+fn not_found_with_refresh(project_id: &str, requested_path: &str, msg: &str) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Html(views::error_page_with_refresh(
+            404,
+            msg,
+            project_id,
+            requested_path,
+        )),
+    )
+        .into_response()
+}
+
 fn internal_error(msg: &str) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -17754,5 +17853,174 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&outer).ok();
+    }
+
+    // ── stale-index-refresh-2: the 404 page's Refresh index button ─────────
+
+    /// A markdown file written straight to disk after registration (the
+    /// daemon-was-down case `stale-index-refresh-1`'s own fixture uses) is
+    /// invisible to the index until something reconciles it — `project_path`
+    /// 404s exactly like a genuinely missing file. Since the project itself
+    /// IS known, that 404 must carry the refresh form: an action posting to
+    /// this project's own refresh endpoint, and a hidden `redirect` field
+    /// carrying the exact path the reader asked for.
+    #[tokio::test]
+    async fn stale_on_disk_file_404s_with_a_refresh_form_carrying_the_requested_path() {
+        let dir = fresh_root("refresh-404-stale-data");
+        let root = fresh_root("refresh-404-stale-root");
+        write(&root, "README.md", "# Root");
+
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "refresh-stale");
+        // Written directly to disk — never indexed, mirroring a file that
+        // landed while the daemon was down.
+        write(&root, "new-page.md", "# New Page\n");
+        let app = router(st);
+
+        let resp = get(app, &format!("/p/{}/new-page.md", project.id)).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "an unindexed on-disk file must still 404 until refreshed"
+        );
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!(
+                "action=\"/api/projects/{}/refresh\"",
+                project.id
+            )),
+            "the 404 for a known project must offer the refresh form: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "name=\"redirect\" value=\"/p/{}/new-page.md\"",
+                project.id
+            )),
+            "the refresh form must carry the exact path the reader asked for: {body}"
+        );
+        assert!(
+            body.contains("Refresh index"),
+            "the submit button must read \"Refresh index\": {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Posting the refresh form's own endpoint reindexes the project through
+    /// `Engine::refresh` — the same door `mdview refresh` and the startup
+    /// sweep both use — and redirects the reader straight back to the path
+    /// they asked for, which now renders 200 since the reindex just found it.
+    #[tokio::test]
+    async fn posting_refresh_reindexes_and_redirects_back_to_the_requested_path() {
+        let dir = fresh_root("refresh-post-data");
+        let root = fresh_root("refresh-post-root");
+        write(&root, "README.md", "# Root");
+
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "refresh-post");
+        write(&root, "new-page.md", "# New Page\n");
+        let app = router(st);
+
+        let redirect_path = format!("/p/{}/new-page.md", project.id);
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/projects/{}/refresh", project.id))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "redirect={}",
+                urlencoding_lite(&redirect_path)
+            )))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::SEE_OTHER,
+            "a refresh POST must redirect back to the requested page"
+        );
+        assert_eq!(
+            resp.headers().get(header::LOCATION).unwrap(),
+            redirect_path.as_str(),
+            "the redirect must land on the exact path the form carried"
+        );
+
+        let follow_up = get(app, &redirect_path).await;
+        assert_eq!(
+            follow_up.status(),
+            StatusCode::OK,
+            "the reindexed file must now render instead of 404ing"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A `redirect` value that is off-site (`http://evil.com`) or
+    /// scheme-relative (`//evil.com`, or `/\evil.com` — the backslash
+    /// bypass some browsers normalize into the same `//` attack) is refused
+    /// in favour of the project's own home, `/p/<id>/` — the button can
+    /// never be turned into an open redirect.
+    #[tokio::test]
+    async fn refresh_refuses_an_off_site_redirect_target() {
+        let dir = fresh_root("refresh-open-redirect-data");
+        let root = fresh_root("refresh-open-redirect-root");
+        write(&root, "README.md", "# Root");
+
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "refresh-guard");
+        let app = router(st);
+
+        let fallback = format!("/p/{}/", project.id);
+        for unsafe_target in [
+            "http://evil.com/",
+            "//evil.com/",
+            "/\\evil.com/",
+            "evil.com/",
+        ] {
+            let req = Request::builder()
+                .method("POST")
+                .uri(format!("/api/projects/{}/refresh", project.id))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "redirect={}",
+                    urlencoding_lite(unsafe_target)
+                )))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::SEE_OTHER,
+                "an unsafe redirect value must still redirect, just to the fallback: {unsafe_target}"
+            );
+            assert_eq!(
+                resp.headers().get(header::LOCATION).unwrap(),
+                fallback.as_str(),
+                "an unsafe redirect value ({unsafe_target}) must fall back to the project home"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A 404 for an unknown project id (bad id, or any other `not_found`
+    /// caller in this file) keeps today's plain message — there is no
+    /// project to refresh and nowhere same-site to send the reader back to.
+    #[tokio::test]
+    async fn not_found_for_an_unknown_project_id_offers_no_refresh_button() {
+        let st = build_state();
+        let app = router(st);
+
+        let resp = get(app, "/p/no-such-project/whatever.md").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("Refresh index"),
+            "an unknown project must never offer a refresh button: {body}"
+        );
+        assert!(
+            !body.contains("action=\"/api/projects/"),
+            "an unknown project's 404 must carry no refresh form at all: {body}"
+        );
     }
 }
