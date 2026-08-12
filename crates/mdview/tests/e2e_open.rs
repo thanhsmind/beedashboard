@@ -310,3 +310,85 @@ fn code_section_lists_dirs_highlights_files_and_denies_sensitive_paths() {
         "Docs page missing the section switch: {body}"
     );
 }
+
+/// tsk-5yf: the Code sidebar splits into distinct Folders/Files groups (like
+/// Docs' own chapter sidebar), and a code file's breadcrumb right half
+/// carries its language and size.
+#[test]
+fn code_view_sidebar_splits_folders_files_and_breadcrumb_shows_type_and_size() {
+    let bin = env!("CARGO_BIN_EXE_mdview");
+    let home = scratch_home("code-sidebar");
+    let root = home.join("proj");
+
+    write_file(&root.join("README.md"), b"# Hello\n");
+    write_file(&root.join("src/lib.rs"), b"pub fn hello() {}\n");
+    write_file(&root.join("docs/notes.md"), b"notes\n");
+
+    let child = Command::new(bin)
+        .args(["serve", "--port", "0", "--host", "127.0.0.1"])
+        .env("HOME", &home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn mdview serve");
+    let _guard = DaemonGuard(child);
+
+    let info = wait_for_lock(&home, Duration::from_secs(10));
+    assert!(
+        wait_for_health(&info.host, info.port, Duration::from_secs(10)),
+        "daemon never answered /health"
+    );
+
+    let project_id = open_project(bin, &home, &root.join("README.md"));
+    // Upstream reaches these pages through its own login helper; this fork did
+    // not take upstream's authentication, so the daemon answers unauthenticated
+    // and `http_get` here carries no cookie argument.
+
+    // 1. Root directory listing: sidebar carries separate Folders/Files
+    //    section headers, folders listed before files.
+    let (status, body) = http_get(
+        &info.host,
+        info.port,
+        &format!("/p/{project_id}/_code/"),
+    );
+    assert_eq!(status, 200);
+    let folders_at = body
+        .find("chap-sec\">Folders")
+        .expect("Folders section header missing");
+    let files_at = body
+        .find("chap-sec\">Files")
+        .expect("Files section header missing");
+    assert!(
+        folders_at < files_at,
+        "Folders section must render before Files: {body}"
+    );
+
+    // 2. A source file's breadcrumb right half carries its language and size.
+    let (status, body) = http_get(
+        &info.host,
+        info.port,
+        &format!("/p/{project_id}/_code/src/lib.rs"),
+    );
+    assert_eq!(status, 200);
+    let right_start = body
+        .find("breadcrumb__right")
+        .expect("breadcrumb right half missing");
+    let right_slice = &body[right_start..right_start + 300];
+    assert!(
+        right_slice.contains("breadcrumb__meta-lang"),
+        "breadcrumb right half missing file type: {right_slice}"
+    );
+    assert!(
+        right_slice.contains("breadcrumb__meta-size"),
+        "breadcrumb right half missing file size: {right_slice}"
+    );
+}
+
+// Upstream's `first_start_generates_and_prints_a_login_token_exactly_once`
+// lived here. It asserts that a first start generates a `web_secret` into
+// `config.toml` and prints the login token once — behaviour that belongs to
+// upstream's authentication, which this fork deliberately did not take (the
+// daemon answers unauthenticated; the agent terminal is gated by its own
+// switch alone). The test is removed rather than ignored: an ignored test
+// reads as "we mean to fix this", and there is nothing here to fix.
