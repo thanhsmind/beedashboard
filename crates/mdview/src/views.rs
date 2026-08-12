@@ -4,8 +4,9 @@
 
 use mdview_core::bee::{
     feature_cell_span, list_archived_feature_dirs, BeeApprovedGates, BeeBacklog, BeeBuckets,
-    BeeCell, BeeDecisionSummary, BeeFeaturePhase, BeePbi, BeeReview, BeeReviewStatus, BeeSession,
-    BeeShippedFeature, BeeSnapshot, BeeState, BeeWorkspace, BeeWorktree,
+    BeeCell, BeeDecisionSummary, BeeFeaturePhase, BeePbi, BeeProjectRollup, BeeReview,
+    BeeReviewStatus, BeeSession, BeeShippedFeature, BeeSnapshot, BeeState, BeeWorkspace,
+    BeeWorktree,
 };
 use mdview_core::config::Config;
 use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
@@ -1505,6 +1506,11 @@ html[data-scheme="dark"] .bee-hub-theme {{
    ([`bee_hub_finished_rows`]) that pages it ten rows at a time. */
 .bee-hub__row {{ display: block; color: var(--color-text); font-size: var(--type-body-sm-size); text-decoration: none; padding: var(--space-1) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); overflow-wrap: anywhere; }}
 .bee-hub__row:hover {{ color: var(--color-action); }}
+/* cross-board D5/D10: the cross-project board's own project label and ship
+   time on a Finished row — absent on every per-project board row, which
+   passes neither and renders unchanged. */
+.bee-hub__row-project {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); }}
+.bee-hub__row-time {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); float: right; }}
 .bee-hub__more {{ margin-top: var(--space-1); }}
 .bee-hub__more-summary {{ cursor: pointer; list-style: none; color: var(--color-text-subtle); font-size: var(--type-caption-size); padding: var(--space-1) var(--space-2); }}
 .bee-hub__more-summary::-webkit-details-marker {{ display: none; }}
@@ -1879,8 +1885,68 @@ const WORKING_MINUTES: f64 = 5.0;
 /// growing without bound as more features close. Every path-shaped value a
 /// `BeeCell`/`BeeFeaturePhase` carries already arrives relativized by
 /// `mdview_core::bee::read_snapshot` (D9), so nothing further is redacted
-/// here — this view only escapes for HTML safety.
+/// here -- this view only escapes for HTML safety.
+///
+/// cross-board-2 splits what used to be one function into two seams: this
+/// one reads `project`'s own archive off disk (D2 keeps that read exactly
+/// where it always lived) and hands the result to [`bee_classify_features`],
+/// which decides -- as plain data, no HTML -- which of the three columns
+/// each feature belongs in; [`bee_render_hub_section`] then turns that data
+/// back into this exact section, unchanged. The cross-project board
+/// (`bee_cross_project_features_section`) reuses only the classification
+/// step: it is handed archived-feature names from cross-board-1's
+/// `read_rollup` instead of reading the archive itself, so a feature still
+/// lands in the same column its own project's board would put it in,
+/// merged with every other project's instead of rendered alone.
 fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String {
+    let archived_features: std::collections::HashSet<String> =
+        list_archived_feature_dirs(&project.root_path).into_iter().collect();
+    let placements = bee_classify_features(snapshot, &archived_features);
+    bee_render_hub_section(project, &placements)
+}
+
+/// One feature already sorted into one of the feature hub's three columns
+/// by [`bee_classify_features`] -- the render inputs [`bee_hub_card`] or
+/// [`bee_hub_finished_row`] need, captured once so the merge step
+/// (`bee_cross_project_features_section`) never re-touches `BeeSnapshot`.
+enum BeeHubPlacement {
+    Waiting(BeeHubCardData),
+    InProgress(BeeHubCardData),
+    Finished(BeeHubFinishedData),
+}
+
+/// [`bee_hub_card`]'s render inputs for one Waiting or In Progress card.
+struct BeeHubCardData {
+    feature: String,
+    done: usize,
+    total: usize,
+    last_activity: Option<String>,
+    worktree: (String, &'static str),
+    reason: Option<String>,
+    docs: Option<mdview_core::bee::BeeFeatureDocs>,
+}
+
+/// [`bee_hub_finished_row`]'s render inputs for one Finished row.
+struct BeeHubFinishedData {
+    feature: String,
+    docs: Option<mdview_core::bee::BeeFeatureDocs>,
+}
+
+/// The feature hub's own column rules (this function's former home, see
+/// [`bee_feature_hub_section`]'s doc comment), factored out to plain data
+/// instead of HTML so `bee_cross_project_features_section` can run them
+/// once per project and merge the results into flat, multi-project columns
+/// (D4) rather than re-deriving the rules. `archived_features` is this one
+/// project's set of archived feature names -- the per-project caller
+/// ([`bee_feature_hub_section`]) reads it off disk; the cross-project
+/// caller takes it from cross-board-1's `read_rollup` instead, performing
+/// no filesystem read of its own. Iteration order matches the section this
+/// used to render directly: `snapshot.phase_board` sorted by feature name,
+/// then every archived feature not already placed, sorted by name.
+fn bee_classify_features(
+    snapshot: &BeeSnapshot,
+    archived_features: &std::collections::HashSet<String>,
+) -> Vec<BeeHubPlacement> {
     let active_feature = snapshot.state.as_ref().and_then(|s| s.feature.as_deref());
     let handoff_is_pause = snapshot
         .handoff
@@ -1888,15 +1954,8 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
         .map(|h| !matches!(h.kind.as_deref(), Some("planned-next")))
         .unwrap_or(false);
 
-    let mut waiting_cards = String::new();
-    let mut in_progress_cards = String::new();
-    let mut finished_rows: Vec<String> = Vec::new();
-    let mut waiting_count = 0usize;
-    let mut in_progress_count = 0usize;
-    let mut finished_count = 0usize;
+    let mut placements: Vec<BeeHubPlacement> = Vec::new();
     let mut placed: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let archived_features: std::collections::HashSet<String> =
-        list_archived_feature_dirs(&project.root_path).into_iter().collect();
 
     let mut features: Vec<&BeeFeaturePhase> = snapshot.phase_board.iter().collect();
     features.sort_by(|a, b| a.feature.cmp(&b.feature));
@@ -1946,45 +2005,38 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
         let finished_and_idle = is_finished && live == 0;
 
         if !finished_and_idle && !working_now && ((has_live_work && gate_stop.is_some()) || waiting_via_handoff) {
-            waiting_count += 1;
             let reason = match gate_stop {
                 Some((_, label)) => format!("{label} gate awaiting your decision"),
                 None => "Work is parked, waiting on your decision".to_string(),
             };
             let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
             let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
-            let docs = snapshot.feature_docs.get(f.feature.as_str());
-            waiting_cards.push_str(&bee_hub_card(
-                &project.id,
-                &f.feature,
-                "waiting",
-                f.cell_counts.done,
-                f.cell_counts.total,
-                last_activity.as_deref(),
-                &worktree,
-                Some(&reason),
+            let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
+            placements.push(BeeHubPlacement::Waiting(BeeHubCardData {
+                feature: f.feature.clone(),
+                done: f.cell_counts.done,
+                total: f.cell_counts.total,
+                last_activity,
+                worktree,
+                reason: Some(reason),
                 docs,
-            ));
+            }));
         } else if !finished_and_idle && has_live_work {
-            in_progress_count += 1;
             let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
             let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
-            let docs = snapshot.feature_docs.get(f.feature.as_str());
-            in_progress_cards.push_str(&bee_hub_card(
-                &project.id,
-                &f.feature,
-                "in-progress",
-                f.cell_counts.done,
-                f.cell_counts.total,
-                last_activity.as_deref(),
-                &worktree,
-                None,
+            let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
+            placements.push(BeeHubPlacement::InProgress(BeeHubCardData {
+                feature: f.feature.clone(),
+                done: f.cell_counts.done,
+                total: f.cell_counts.total,
+                last_activity,
+                worktree,
+                reason: None,
                 docs,
-            ));
+            }));
         } else if is_finished {
-            finished_count += 1;
-            let docs = snapshot.feature_docs.get(f.feature.as_str());
-            finished_rows.push(bee_hub_finished_row(&project.id, &f.feature, docs));
+            let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
+            placements.push(BeeHubPlacement::Finished(BeeHubFinishedData { feature: f.feature.clone(), docs }));
         }
         // else: no live work, no gate/handoff pull, and neither
         // `compounding-complete` nor archived — a pre-build lane (still
@@ -1992,20 +2044,207 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
         // pre-redesign board's own cell-only precedent.
     }
 
-    let mut archive_only: Vec<String> = archived_features
-        .into_iter()
-        .filter(|name| !placed.contains(name.as_str()))
-        .collect();
+    let mut archive_only: Vec<&String> =
+        archived_features.iter().filter(|name| !placed.contains(name.as_str())).collect();
     archive_only.sort();
     for feature in archive_only {
-        finished_count += 1;
-        let docs = snapshot.feature_docs.get(feature.as_str());
-        finished_rows.push(bee_hub_finished_row(&project.id, &feature, docs));
+        let docs = snapshot.feature_docs.get(feature.as_str()).cloned();
+        placements.push(BeeHubPlacement::Finished(BeeHubFinishedData { feature: feature.clone(), docs }));
+    }
+
+    placements
+}
+
+/// Turns [`bee_classify_features`]'s per-project placements back into
+/// exactly the section [`bee_feature_hub_section`] rendered before
+/// cross-board-2 (D2) -- every card and row carries no project label
+/// (`bee_hub_card`/`bee_hub_finished_row`'s `project_label: None`),
+/// matching this project's page having only ever shown itself.
+fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> String {
+    let mut waiting_cards = String::new();
+    let mut in_progress_cards = String::new();
+    let mut finished_rows: Vec<String> = Vec::new();
+    let mut waiting_count = 0usize;
+    let mut in_progress_count = 0usize;
+    let mut finished_count = 0usize;
+
+    for placement in placements {
+        match placement {
+            BeeHubPlacement::Waiting(data) => {
+                waiting_count += 1;
+                waiting_cards.push_str(&bee_hub_card(
+                    &project.id,
+                    &data.feature,
+                    "waiting",
+                    data.done,
+                    data.total,
+                    data.last_activity.as_deref(),
+                    &data.worktree,
+                    data.reason.as_deref(),
+                    data.docs.as_ref(),
+                    None,
+                ));
+            }
+            BeeHubPlacement::InProgress(data) => {
+                in_progress_count += 1;
+                in_progress_cards.push_str(&bee_hub_card(
+                    &project.id,
+                    &data.feature,
+                    "in-progress",
+                    data.done,
+                    data.total,
+                    data.last_activity.as_deref(),
+                    &data.worktree,
+                    data.reason.as_deref(),
+                    data.docs.as_ref(),
+                    None,
+                ));
+            }
+            BeeHubPlacement::Finished(data) => {
+                finished_count += 1;
+                finished_rows.push(bee_hub_finished_row(&project.id, &data.feature, data.docs.as_ref(), None, None));
+            }
+        }
     }
     let finished_cards = bee_hub_finished_rows(&finished_rows);
 
     format!(
         r#"<section class="fg-card bee-hub" data-feature-hub="1">
+  <h3 class="bee-panel__head">Features</h3>
+  <div class="bee-hub__groups">
+    {waiting_group}
+    {in_progress_group}
+    {finished_group}
+  </div>
+</section>"#,
+        waiting_group = bee_hub_group(
+            "Waiting on you",
+            "waiting",
+            waiting_count,
+            &waiting_cards,
+            "Nothing waiting on you."
+        ),
+        in_progress_group = bee_hub_group(
+            "In Progress",
+            "in-progress",
+            in_progress_count,
+            &in_progress_cards,
+            "Nothing in progress."
+        ),
+        finished_group = bee_hub_group(
+            "Finished",
+            "finished",
+            finished_count,
+            &finished_cards,
+            "Nothing finished yet."
+        ),
+    )
+}
+
+/// The cross-project board's Features section
+/// (`docs/history/cross-board/CONTEXT.md` D1/D3/D4/D5/D7/D10): runs
+/// [`bee_classify_features`] once per `(project, rollup)` pair -- the exact
+/// column rules the per-project board applies to itself -- then merges the
+/// results into three flat, multi-project columns instead of one block per
+/// project (D4), labels every card and Finished row with its own project's
+/// name (D5), and orders and caps the merged Finished sequence per D10/D7:
+/// every feature with a ship time first, most recently shipped first, each
+/// row showing that time; then every feature without one, alphabetically by
+/// feature name across all projects -- concatenating each project's
+/// already-sorted list would not be globally sorted, so the merge sorts
+/// again. The column counts beside each heading are the sum across
+/// projects. Archived-feature names and D10 ship times come from
+/// `rollup.archived_features` (cross-board-1's `read_rollup`) -- this
+/// function performs no filesystem read of its own. An empty `rollups`
+/// still renders the same three empty columns [`bee_hub_group`] always
+/// shows for a column with nothing in it; whether to call this at all when
+/// nothing qualifies (D9) is the caller's decision.
+pub fn bee_cross_project_features_section(rollups: &[(&Project, &BeeProjectRollup)]) -> String {
+    let mut waiting_cards = String::new();
+    let mut in_progress_cards = String::new();
+    let mut waiting_count = 0usize;
+    let mut in_progress_count = 0usize;
+
+    struct FinishedEntry {
+        shipped_at: Option<time::OffsetDateTime>,
+        feature: String,
+        html: String,
+    }
+    let mut finished: Vec<FinishedEntry> = Vec::new();
+    let rfc3339 = time::format_description::well_known::Rfc3339;
+
+    for (project, rollup) in rollups {
+        let archived_names: std::collections::HashSet<String> =
+            rollup.archived_features.iter().map(|a| a.feature.clone()).collect();
+        let shipped_by_feature: std::collections::HashMap<&str, Option<&str>> = rollup
+            .archived_features
+            .iter()
+            .map(|a| (a.feature.as_str(), a.shipped_at.as_deref()))
+            .collect();
+
+        let placements = bee_classify_features(&rollup.snapshot, &archived_names);
+        for placement in placements {
+            match placement {
+                BeeHubPlacement::Waiting(data) => {
+                    waiting_count += 1;
+                    waiting_cards.push_str(&bee_hub_card(
+                        &project.id,
+                        &data.feature,
+                        "waiting",
+                        data.done,
+                        data.total,
+                        data.last_activity.as_deref(),
+                        &data.worktree,
+                        data.reason.as_deref(),
+                        data.docs.as_ref(),
+                        Some(&project.name),
+                    ));
+                }
+                BeeHubPlacement::InProgress(data) => {
+                    in_progress_count += 1;
+                    in_progress_cards.push_str(&bee_hub_card(
+                        &project.id,
+                        &data.feature,
+                        "in-progress",
+                        data.done,
+                        data.total,
+                        data.last_activity.as_deref(),
+                        &data.worktree,
+                        data.reason.as_deref(),
+                        data.docs.as_ref(),
+                        Some(&project.name),
+                    ));
+                }
+                BeeHubPlacement::Finished(data) => {
+                    let shipped_at_str = shipped_by_feature.get(data.feature.as_str()).copied().flatten();
+                    let parsed = shipped_at_str.and_then(|s| time::OffsetDateTime::parse(s, &rfc3339).ok());
+                    let html = bee_hub_finished_row(
+                        &project.id,
+                        &data.feature,
+                        data.docs.as_ref(),
+                        Some(&project.name),
+                        parsed.and(shipped_at_str),
+                    );
+                    finished.push(FinishedEntry { shipped_at: parsed, feature: data.feature.clone(), html });
+                }
+            }
+        }
+    }
+
+    // D10: timed entries first, most recent first; untimed entries after,
+    // alphabetically by feature name across every project.
+    finished.sort_by(|a, b| match (&a.shipped_at, &b.shipped_at) {
+        (Some(x), Some(y)) => y.cmp(x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.feature.cmp(&b.feature),
+    });
+    let finished_count = finished.len();
+    let finished_rows: Vec<String> = finished.into_iter().map(|e| e.html).collect();
+    let finished_cards = bee_hub_finished_rows(&finished_rows);
+
+    format!(
+        r#"<section class="fg-card bee-hub" data-feature-hub="cross-project">
   <h3 class="bee-panel__head">Features</h3>
   <div class="bee-hub__groups">
     {waiting_group}
@@ -2128,7 +2367,10 @@ fn bee_hub_group_label(key: &str) -> (&'static str, &'static str) {
 /// present with a title, the card's name becomes that human title with the
 /// slug demoted to a small muted subtitle beneath it, plus the boundary
 /// description as one clamped line; `None`, or a title-less record, falls
-/// back to the slug alone, exactly as before this feature.
+/// back to the slug alone, exactly as before this feature. `project_label`
+/// is cross-board D5's project name, rendered as one more chip in the
+/// existing chip row when `Some`; `None` (every per-project board call)
+/// renders no such chip, byte-identical to before cross-board-2.
 fn bee_hub_card(
     project_id: &str,
     feature: &str,
@@ -2139,6 +2381,7 @@ fn bee_hub_card(
     worktree: &(String, &'static str),
     reason: Option<&str>,
     docs: Option<&mdview_core::bee::BeeFeatureDocs>,
+    project_label: Option<&str>,
 ) -> String {
     let (group_label, group_tone) = bee_hub_group_label(group_key);
     let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
@@ -2181,12 +2424,17 @@ fn bee_hub_card(
         _ => String::new(),
     };
     let (wt_label, wt_tone) = worktree;
+    let project_chip_html = match project_label {
+        Some(label) => format!(r#"<span class="fg-chip fg-chip--neutral">{}</span>"#, esc(label)),
+        None => String::new(),
+    };
     format!(
-        r#"<a class="fg-card bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}<div class="bee-hub__chips"><span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{desc_html}{progress_html}{reason_html}{activity_html}</a>"#,
+        r#"<a class="fg-card bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}<div class="bee-hub__chips">{project_chip_html}<span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{desc_html}{progress_html}{reason_html}{activity_html}</a>"#,
         group_key = group_key,
         pid = esc(project_id),
         feature_href = esc(feature),
         name_html = name_html,
+        project_chip_html = project_chip_html,
         group_tone = group_tone,
         group_label = group_label,
         wt_tone = wt_tone,
@@ -2205,15 +2453,35 @@ fn bee_hub_card(
 /// keep working. Deliberately none of `bee_hub_card`'s description,
 /// progress bar, worktree chip, group chip or last-activity line: a closed
 /// feature owes no decision and no progress reading, so the board only
-/// needs to name it — its detail page is one click away.
-fn bee_hub_finished_row(project_id: &str, feature: &str, docs: Option<&mdview_core::bee::BeeFeatureDocs>) -> String {
+/// needs to name it — its detail page is one click away. `project_label`
+/// (cross-board D5) and `shipped_at` (cross-board D10, already relative-
+/// formatted through [`bee_fmt_trace_time`]) both default to `None` for
+/// every per-project board call, which renders byte-identical to before
+/// cross-board-2; the cross-project board passes both.
+fn bee_hub_finished_row(
+    project_id: &str,
+    feature: &str,
+    docs: Option<&mdview_core::bee::BeeFeatureDocs>,
+    project_label: Option<&str>,
+    shipped_at: Option<&str>,
+) -> String {
     let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
     let name = title.unwrap_or(feature);
+    let project_html = match project_label {
+        Some(label) => format!(r#"<span class="bee-hub__row-project">{}</span> "#, esc(label)),
+        None => String::new(),
+    };
+    let time_html = match shipped_at {
+        Some(iso) => format!(r#" <span class="bee-hub__row-time">{}</span>"#, esc(&bee_fmt_trace_time(iso))),
+        None => String::new(),
+    };
     format!(
-        r#"<a class="bee-hub__row" data-hub-group="finished" href="/p/{pid}/_bee/feature/{feature_href}">{name}</a>"#,
+        r#"<a class="bee-hub__row" data-hub-group="finished" href="/p/{pid}/_bee/feature/{feature_href}">{project_html}{name}{time_html}</a>"#,
         pid = esc(project_id),
         feature_href = esc(feature),
+        project_html = project_html,
         name = esc(name),
+        time_html = time_html,
     )
 }
 
@@ -5340,7 +5608,7 @@ mod tests {
     /// none of `bee_hub_card`'s chip, progress bar or activity markup.
     #[test]
     fn bee_hub_finished_row_renders_only_a_name_and_link() {
-        let row = bee_hub_finished_row("proj-1", "shipped-feat", None);
+        let row = bee_hub_finished_row("proj-1", "shipped-feat", None, None, None);
         assert_eq!(
             row,
             r#"<a class="bee-hub__row" data-hub-group="finished" href="/p/proj-1/_bee/feature/shipped-feat">shipped-feat</a>"#
@@ -5363,7 +5631,7 @@ mod tests {
             description: None,
             docs: vec![],
         };
-        let row = bee_hub_finished_row("proj-1", "slug-feat", Some(&docs));
+        let row = bee_hub_finished_row("proj-1", "slug-feat", Some(&docs), None, None);
         assert!(row.contains(">Human Title</a>"), "{row}");
         assert!(!row.contains(">slug-feat<"), "the slug must not also render once a title exists: {row}");
     }
@@ -5414,6 +5682,401 @@ mod tests {
             inner_open > outer_open && inner_open < outer_close,
             "the second <details> must nest inside the first, not sit beside it: {html}"
         );
+    }
+
+    // --- cross-board-2: bee_cross_project_features_section ---
+
+    /// One archived cell fixture for `bee_cross_project_features_section`'s
+    /// own tests, mirroring `mdview_core::bee`'s own `feature_cell_json`
+    /// test helper (not reusable across crates) so an archived feature can
+    /// carry, or deliberately lack, a D10 ship time.
+    fn cross_board_archived_cell_json(id: &str, feature: &str, capped_at: Option<&str>) -> String {
+        let capped_json = capped_at.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".to_string());
+        format!(
+            r#"{{
+                "id": "{id}",
+                "feature": "{feature}",
+                "lane": "tiny",
+                "title": "Cell {id}",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {{}},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "capped",
+                "tier": "generation",
+                "trace": {{"worker": "w1", "claimed_at": "2026-08-01T00:00:00.000Z", "capped_at": {capped_json}}}
+            }}"#
+        )
+    }
+
+    /// (cross-board D3/D4/D5) Three projects, each contributing one feature
+    /// in a different one of the three states: the same shape
+    /// `hub_sends_a_gate_stopped_feature_to_waiting_once_its_session_goes_stale_enough`
+    /// and its siblings already prove one project at a time. Each feature
+    /// must land in the same column its own project's board would place it
+    /// in, and must carry that project's own name.
+    #[test]
+    fn cross_project_places_each_feature_in_the_column_its_own_project_would_and_labels_it() {
+        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-b-{}", std::process::id()));
+        let root_c = std::env::temp_dir().join(format!("mdview-views-cross-c-{}", std::process::id()));
+        for r in [&root_a, &root_b, &root_c] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+        let write = |root: &std::path::Path, rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+
+        // Project A: a gate-stopped feature, its session stale past
+        // WORKING_MINUTES but still live -> Waiting on you.
+        write(
+            &root_a,
+            ".bee/lanes/waiting-feat.json",
+            r#"{
+                "feature": "waiting-feat",
+                "phase": "executing",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        let stale_hb = (time::OffsetDateTime::now_utc() - time::Duration::minutes(20))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            &root_a,
+            ".bee/sessions/live.json",
+            &format!(r#"{{"id": "live", "last_heartbeat": "{stale_hb}", "lane": "waiting-feat"}}"#),
+        );
+
+        // Project B: every gate approved, a fresh live session bound to its
+        // lane -> In Progress.
+        write(
+            &root_b,
+            ".bee/lanes/progress-feat.json",
+            r#"{
+                "feature": "progress-feat",
+                "phase": "swarming",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
+            }"#,
+        );
+        let fresh_hb = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            &root_b,
+            ".bee/sessions/live.json",
+            &format!(r#"{{"id": "live", "last_heartbeat": "{fresh_hb}", "lane": "progress-feat"}}"#),
+        );
+
+        // Project C: one archived feature, no lane and no session -> Finished.
+        write(
+            &root_c,
+            ".bee/cells/archive/finished-feat/c-1.json",
+            &cross_board_archived_cell_json("c-1", "finished-feat", Some("2026-08-01T05:00:00.000Z")),
+        );
+
+        let mut project_a = sample_project();
+        project_a.id = "proj-a".into();
+        project_a.name = "Project A".into();
+        project_a.root_path = root_a.clone();
+        let mut project_b = sample_project();
+        project_b.id = "proj-b".into();
+        project_b.name = "Project B".into();
+        project_b.root_path = root_b.clone();
+        let mut project_c = sample_project();
+        project_c.id = "proj-c".into();
+        project_c.name = "Project C".into();
+        project_c.root_path = root_c.clone();
+
+        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone(), root_c.clone()]);
+        let pairs: Vec<(&Project, &BeeProjectRollup)> =
+            vec![(&project_a, &rollups[0]), (&project_b, &rollups[1]), (&project_c, &rollups[2])];
+        let html = bee_cross_project_features_section(&pairs);
+
+        assert!(
+            html.contains(r#"data-hub-group="waiting" href="/p/proj-a/_bee/feature/waiting-feat""#),
+            "waiting-feat must land under Waiting, same as its own project's board would: {html}"
+        );
+        assert!(html.contains("Project A"), "the waiting card must carry its own project's name: {html}");
+        assert!(
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-b/_bee/feature/progress-feat""#),
+            "progress-feat must land under In Progress: {html}"
+        );
+        assert!(html.contains("Project B"), "the in-progress card must carry its own project's name: {html}");
+        assert!(
+            html.contains(r#"data-hub-group="finished" href="/p/proj-c/_bee/feature/finished-feat""#),
+            "finished-feat must land under Finished: {html}"
+        );
+        assert!(html.contains("Project C"), "the finished row must carry its own project's name: {html}");
+        assert!(
+            html.contains(r#"data-hub-group="waiting" data-hub-count="1""#),
+            "the Waiting count must be the sum across projects: {html}"
+        );
+        assert!(
+            html.contains(r#"data-hub-group="in-progress" data-hub-count="1""#),
+            "the In Progress count must be the sum across projects: {html}"
+        );
+        assert!(
+            html.contains(r#"data-hub-group="finished" data-hub-count="1""#),
+            "the Finished count must be the sum across projects: {html}"
+        );
+
+        for r in [&root_a, &root_b, &root_c] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+    }
+
+    /// (cross-board D10) Two projects: some Finished features carry a
+    /// usable D10 ship time (every archived cell's `capped_at` parses),
+    /// some do not (one cell missing it). Timed entries must render newest
+    /// first, each showing its time; untimed entries follow, alphabetically
+    /// by feature name across both projects, not grouped by project.
+    #[test]
+    fn cross_project_finished_orders_timed_newest_first_then_untimed_alphabetically() {
+        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-d10-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-d10-b-{}", std::process::id()));
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+        let write = |root: &std::path::Path, rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+
+        // Timed, older.
+        write(
+            &root_a,
+            ".bee/cells/archive/older-feat/c-1.json",
+            &cross_board_archived_cell_json("c-1", "older-feat", Some("2026-08-01T00:00:00.000Z")),
+        );
+        // Timed, newer -- in the other project, so the merge must still put
+        // it first.
+        write(
+            &root_b,
+            ".bee/cells/archive/newer-feat/c-1.json",
+            &cross_board_archived_cell_json("c-1", "newer-feat", Some("2026-08-05T00:00:00.000Z")),
+        );
+        // Untimed: one cell missing capped_at (mixed capped_at makes the
+        // whole feature untimed, per cross-board-1's own rule).
+        write(&root_a, ".bee/cells/archive/zeta-feat/c-1.json", &cross_board_archived_cell_json("c-1", "zeta-feat", None));
+        write(
+            &root_b,
+            ".bee/cells/archive/alpha-feat/c-1.json",
+            &cross_board_archived_cell_json("c-1", "alpha-feat", None),
+        );
+
+        let mut project_a = sample_project();
+        project_a.id = "proj-a".into();
+        project_a.name = "Project A".into();
+        project_a.root_path = root_a.clone();
+        let mut project_b = sample_project();
+        project_b.id = "proj-b".into();
+        project_b.name = "Project B".into();
+        project_b.root_path = root_b.clone();
+
+        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
+        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+        let html = bee_cross_project_features_section(&pairs);
+
+        let pos_newer = html.find("newer-feat").expect("newer-feat must render");
+        let pos_older = html.find("older-feat").expect("older-feat must render");
+        let pos_alpha = html.find("alpha-feat").expect("alpha-feat must render");
+        let pos_zeta = html.find("zeta-feat").expect("zeta-feat must render");
+
+        assert!(pos_newer < pos_older, "the most recently shipped feature must render first: {html}");
+        assert!(pos_older < pos_alpha, "every timed feature must render ahead of every untimed one: {html}");
+        assert!(
+            pos_alpha < pos_zeta,
+            "untimed features must follow, alphabetically by feature name across projects: {html}"
+        );
+        assert!(
+            html.contains(r#"<span class="bee-hub__row-time">"#) && html.contains("ago</span>"),
+            "a timed row must show its ship time: {html}"
+        );
+
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+    }
+
+    /// (cross-board D7) More than ten Finished entries combined across
+    /// projects must still page ten open, the rest behind "Show 10 more",
+    /// with the remaining count taken from the merged total -- never
+    /// computed, and never paged, per project.
+    #[test]
+    fn cross_project_finished_pages_more_than_ten_combined_entries_behind_show_10_more() {
+        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-cap-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-cap-b-{}", std::process::id()));
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+        let write = |root: &std::path::Path, rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        // 6 untimed features in project A, 7 in project B -- 13 combined,
+        // neither project alone crosses the per-project cap of 10.
+        for n in 0..6 {
+            let feature = format!("a-feat-{n:02}");
+            write(
+                &root_a,
+                &format!(".bee/cells/archive/{feature}/c-1.json"),
+                &cross_board_archived_cell_json("c-1", &feature, None),
+            );
+        }
+        for n in 0..7 {
+            let feature = format!("b-feat-{n:02}");
+            write(
+                &root_b,
+                &format!(".bee/cells/archive/{feature}/c-1.json"),
+                &cross_board_archived_cell_json("c-1", &feature, None),
+            );
+        }
+
+        let mut project_a = sample_project();
+        project_a.id = "proj-a".into();
+        project_a.root_path = root_a.clone();
+        let mut project_b = sample_project();
+        project_b.id = "proj-b".into();
+        project_b.root_path = root_b.clone();
+
+        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
+        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+        let html = bee_cross_project_features_section(&pairs);
+
+        assert!(
+            html.contains(r#"data-hub-group="finished" data-hub-count="13""#),
+            "the Finished count must be the merged total across both projects: {html}"
+        );
+        assert!(
+            html.contains("Show 3 more · 3 left"),
+            "13 combined entries must page 10 open and 3 behind the control, from the merged total: {html}"
+        );
+
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+    }
+
+    /// (cross-board D4/D5) The same feature slug owned by two different
+    /// projects must render as two distinct rows -- different project
+    /// labels, different links -- never merged or deduplicated into one.
+    #[test]
+    fn cross_project_same_feature_slug_in_two_projects_renders_two_distinct_rows() {
+        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-dup-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-dup-b-{}", std::process::id()));
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+        let write = |root: &std::path::Path, rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            &root_a,
+            ".bee/cells/archive/auth/c-1.json",
+            &cross_board_archived_cell_json("c-1", "auth", None),
+        );
+        write(
+            &root_b,
+            ".bee/cells/archive/auth/c-1.json",
+            &cross_board_archived_cell_json("c-1", "auth", None),
+        );
+
+        let mut project_a = sample_project();
+        project_a.id = "proj-a".into();
+        project_a.name = "Project A".into();
+        project_a.root_path = root_a.clone();
+        let mut project_b = sample_project();
+        project_b.id = "proj-b".into();
+        project_b.name = "Project B".into();
+        project_b.root_path = root_b.clone();
+
+        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
+        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+        let html = bee_cross_project_features_section(&pairs);
+
+        assert!(
+            html.contains(r#"href="/p/proj-a/_bee/feature/auth""#),
+            "project A's own auth feature must render its own link: {html}"
+        );
+        assert!(
+            html.contains(r#"href="/p/proj-b/_bee/feature/auth""#),
+            "project B's own auth feature must render its own, distinct link: {html}"
+        );
+        assert_eq!(
+            html.matches("data-hub-group=\"finished\" href=").count(),
+            2,
+            "the same feature slug in two projects must render as two rows, never merged into one: {html}"
+        );
+        assert!(html.contains("Project A") && html.contains("Project B"), "each row must carry its own project's name: {html}");
+
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+    }
+
+    /// (cross-board, edge case) A qualifying project with `.bee/` but no
+    /// features at all must contribute nothing and break nothing -- the
+    /// merged section reads exactly as if that project were absent.
+    #[test]
+    fn cross_project_a_project_contributing_no_features_changes_nothing() {
+        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-empty-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-empty-b-{}", std::process::id()));
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+        let write = |root: &std::path::Path, rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        // Project A has a `.bee/` directory but no lanes, no sessions, no
+        // archive -- nothing to contribute.
+        write(&root_a, ".bee/state.json", r#"{"phase": "exploring"}"#);
+        write(
+            &root_b,
+            ".bee/cells/archive/only-feat/c-1.json",
+            &cross_board_archived_cell_json("c-1", "only-feat", None),
+        );
+
+        let mut project_a = sample_project();
+        project_a.id = "proj-a".into();
+        project_a.root_path = root_a.clone();
+        let mut project_b = sample_project();
+        project_b.id = "proj-b".into();
+        project_b.root_path = root_b.clone();
+
+        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
+        let with_empty: Vec<(&Project, &BeeProjectRollup)> =
+            vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+        let without_empty: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_b, &rollups[1])];
+
+        let html_with = bee_cross_project_features_section(&with_empty);
+        let html_without = bee_cross_project_features_section(&without_empty);
+
+        assert_eq!(
+            html_with, html_without,
+            "a project contributing no features must change nothing in the merged section"
+        );
+
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
     }
 
     /// (hub-finished-compact, integration) The paging arithmetic itself is
