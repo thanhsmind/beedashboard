@@ -1608,7 +1608,10 @@ fn bee_board_asof() -> String {
 ///   a genuine pause (never a `"planned-next"` clean stop) — the note
 ///   carries no feature name of its own (`compute_attention_items`'s own
 ///   doc comment says so), so it is folded onto whichever feature
-///   `state.json` currently names active.
+///   `state.json` currently names active. Either pull yields to Finished
+///   when the feature has no live cells left: a closed feature owes no
+///   decision, and `state.feature` keeps naming it long after its last
+///   cell was archived.
 /// - **In Progress**: everything left with `doing`/`waiting`/`stuck`
 ///   cells — live work not already claimed by Waiting.
 /// - **Finished**: everything left with no live cells AND either a lane
@@ -1674,8 +1677,17 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
         let gate_stop =
             bee_gate_current_stop(f.approved_gates.as_ref()).filter(|(key, _)| *key != "review");
         let waiting_via_handoff = is_active && handoff_is_pause;
+        // A feature whose work already finished is never waiting on
+        // anyone. Its gates stopped mattering when its cells reached the
+        // archive, and the pause handoff — folded onto `state.feature`,
+        // which keeps naming a feature long after it closed — records
+        // where a session stopped, not a decision still owed. Only a live
+        // cell pulls a finished feature back out of Finished.
+        let is_finished = f.phase.as_deref() == Some("compounding-complete")
+            || archived_features.contains(f.feature.as_str());
+        let finished_and_idle = is_finished && live == 0;
 
-        if (has_live_work && gate_stop.is_some()) || waiting_via_handoff {
+        if !finished_and_idle && ((has_live_work && gate_stop.is_some()) || waiting_via_handoff) {
             waiting_count += 1;
             let reason = match gate_stop {
                 Some((_, label)) => format!("{label} gate awaiting your decision"),
@@ -1711,8 +1723,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
                 None,
                 docs,
             ));
-        } else if f.phase.as_deref() == Some("compounding-complete") || archived_features.contains(f.feature.as_str())
-        {
+        } else if is_finished {
             finished_count += 1;
             let archived = read_archived_cells(&project.root_path, &f.feature);
             let (done, total) = bee_hub_archived_counts(&archived);
@@ -4089,5 +4100,91 @@ mod tests {
             html_on.contains(r#"name="unassigned_enabled" checked"#),
             "the switch must render checked once the stored config is on: {html_on}"
         );
+    }
+
+    /// (regression, board-finished-wins-1) A feature that has already
+    /// closed — every cell archived, `phase` at bee's own terminal
+    /// `"compounding-complete"` — kept rendering under Waiting on you,
+    /// because `state.json` still names it active and `.bee/HANDOFF.json`
+    /// still reads as a pause, and that pull was evaluated before the
+    /// Finished branch. The card then showed "No cells recorded.", since
+    /// the Waiting branch counts live cells only and a closed feature has
+    /// none. Finished now wins whenever no live cell is left: the card
+    /// lands under Finished with its archived done/total.
+    #[test]
+    fn hub_sends_a_closed_feature_to_finished_even_while_a_pause_handoff_names_it() {
+        let root = std::env::temp_dir().join(format!("mdview-views-hub-closed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/state.json",
+            r#"{
+                "feature": "closed-feat",
+                "phase": "compounding-complete",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": false}
+            }"#,
+        );
+        write(
+            ".bee/HANDOFF.json",
+            r#"{"written_at": "2026-08-10T09:00:00Z", "next_action": "Nothing pending from me.", "kind": "pause"}"#,
+        );
+        for id in ["cf-1", "cf-2"] {
+            write(
+                &format!(".bee/cells/archive/closed-feat/{id}.json"),
+                &format!(
+                    r#"{{
+                        "id": "{id}",
+                        "feature": "closed-feat",
+                        "lane": "tiny",
+                        "title": "Cell {id}",
+                        "action": "do the thing",
+                        "verify": "cargo test",
+                        "files": [],
+                        "read_first": [],
+                        "deps": [],
+                        "decisions": [],
+                        "must_haves": {{}},
+                        "behavior_change": false,
+                        "change_class": "behavior",
+                        "pbi": null,
+                        "status": "capped",
+                        "tier": "generation",
+                        "trace": {{"worker": "w1", "claimed_at": "2026-08-10T08:00:00Z", "capped_at": "2026-08-10T08:30:00Z"}}
+                    }}"#
+                ),
+            );
+        }
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="waiting" data-hub-count="0""#),
+            "a closed feature owes no decision, so Waiting on you must be empty: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/closed-feat""#),
+            "the closed feature must render no Waiting card at all: {html}"
+        );
+        assert!(
+            html.contains(r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/closed-feat""#),
+            "the closed feature belongs under Finished: {html}"
+        );
+        assert!(
+            html.contains("2/2 cells done"),
+            "its card must count its archived cells, not the empty live set: {html}"
+        );
+        assert!(
+            !html.contains("No cells recorded."),
+            "\"No cells recorded.\" was the live-count leak this fixes: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
