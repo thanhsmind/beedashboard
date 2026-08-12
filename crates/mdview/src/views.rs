@@ -1780,10 +1780,20 @@ fn bee_live_strip_section(snapshot: &BeeSnapshot) -> String {
 ///   a genuine pause (never a `"planned-next"` clean stop) — the note
 ///   carries no feature name of its own (`compute_attention_items`'s own
 ///   doc comment says so), so it is folded onto whichever feature
-///   `state.json` currently names active. Either pull yields to Finished
-///   when the feature has no live cells left: a closed feature owes no
-///   decision, and `state.feature`/a bound session/a granted worktree can
-///   all keep naming it long after its last cell was archived.
+///   `state.json` currently names active. Either pull is gated on
+///   `working_now` (`waiting-means-stopped-1`): a live session
+///   (`BeeSession.live`, `SESSION_LIVE_MINUTES`) bound to this feature's
+///   lane whose own `heartbeat_age_minutes` is inside [`WORKING_MINUTES`]
+///   — tighter than `SESSION_LIVE_MINUTES` on purpose (see that constant's
+///   own doc). An agent still actively on the feature right now — mid
+///   interview, gate not yet asked for — is In Progress, never Waiting; a
+///   granted worktree never counts toward `working_now` on its own, since
+///   a grant is not a heartbeat and a parked worktree with a gate owed is
+///   exactly the case Waiting exists for. Either pull also yields to
+///   Finished when the feature has no live cells left: a closed feature
+///   owes no decision, and `state.feature`/a bound session/a granted
+///   worktree can all keep naming it long after its last cell was
+///   archived.
 /// - **In Progress**: everything left with live work not already claimed
 ///   by Waiting, and not yielding to Finished.
 /// - **Finished**: everything left with no live *cells* left (a bound
@@ -1813,6 +1823,24 @@ fn bee_live_strip_section(snapshot: &BeeSnapshot) -> String {
 /// directory (an orchestrator-run cleanup, out of this cell's scope), and
 /// nowhere until then — never a ghost.
 ///
+/// How fresh a bound session's heartbeat must be for its feature to count
+/// as **working now** (`waiting-means-stopped-1`) — deliberately far
+/// tighter than `mdview-core`'s own [`SESSION_LIVE_MINUTES`] (30.0), which
+/// stays exactly as it is and keeps driving `BeeSession.live` and the Live
+/// strip: a terminal left open for twenty minutes still earns its strip
+/// row. The two windows answer different questions. `SESSION_LIVE_MINUTES`
+/// asks "is this session's heartbeat still worth showing at all" — a
+/// generous window, since a stale strip row is merely clutter.
+/// `WORKING_MINUTES` asks "is an agent actively at the keyboard on THIS
+/// feature right now" — the answer that decides whether an unapproved gate
+/// or a pause handoff still owes the owner a decision, or whether the
+/// agent already picked it back up. Five minutes is long enough to survive
+/// a single tool call or a thinking pause, short enough that a session
+/// that truly went idle — mid-interview one minute ago, parked twenty
+/// minutes later — falls back out of "working" well before its heartbeat
+/// goes fully stale at thirty.
+const WORKING_MINUTES: f64 = 5.0;
+
 /// Every Waiting or In Progress card ([`bee_hub_card`]) names its feature,
 /// links to its own detail page, its own done/total cell progress, its own
 /// last-activity age ([`bee_fmt_trace_time`]), a worktree-state chip
@@ -1860,6 +1888,13 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
             .iter()
             .any(|w| w.feature.as_deref() == Some(f.feature.as_str()));
         let has_live_work = live > 0 || is_active || session_bound || worktree_bound;
+        // (waiting-means-stopped-1) A grant is not a heartbeat: only a
+        // session's own recency counts toward "working right now", never a
+        // granted worktree on its own.
+        let working_now = snapshot
+            .sessions
+            .iter()
+            .any(|s| s.lane.as_deref() == Some(f.feature.as_str()) && s.heartbeat_age_minutes <= WORKING_MINUTES);
 
         let gate_stop =
             bee_gate_current_stop(f.approved_gates.as_ref()).filter(|(key, _)| *key != "review");
@@ -1874,7 +1909,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
             || archived_features.contains(f.feature.as_str());
         let finished_and_idle = is_finished && live == 0;
 
-        if !finished_and_idle && ((has_live_work && gate_stop.is_some()) || waiting_via_handoff) {
+        if !finished_and_idle && !working_now && ((has_live_work && gate_stop.is_some()) || waiting_via_handoff) {
             waiting_count += 1;
             let reason = match gate_stop {
                 Some((_, label)) => format!("{label} gate awaiting your decision"),
@@ -4562,6 +4597,210 @@ mod tests {
         assert!(
             html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/wt-bound-feat""#),
             "a zero-cell feature named by a granted worktree's own active feature must render under In Progress: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&sibling);
+    }
+
+    /// (waiting-means-stopped-1) The bug this cell fixes: an unapproved
+    /// gate used to outrank every liveness signal, so a feature an agent
+    /// was actively working — its own session's heartbeat a minute old —
+    /// still landed under Waiting on you. A session bound to the lane
+    /// whose heartbeat is inside `WORKING_MINUTES` now counts as "working
+    /// right now" and keeps the card in In Progress instead.
+    #[test]
+    fn hub_keeps_a_gate_stopped_feature_working_right_now_under_in_progress() {
+        let root = std::env::temp_dir().join(format!("mdview-views-hub-working-now-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/working-feat.json",
+            r#"{
+                "feature": "working-feat",
+                "phase": "executing",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        let hb = (time::OffsetDateTime::now_utc() - time::Duration::minutes(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            ".bee/sessions/live.json",
+            &format!(r#"{{"id": "live", "last_heartbeat": "{hb}", "lane": "working-feat"}}"#),
+        );
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/working-feat""#),
+            "a feature whose session beat a minute ago must render under In Progress even with a gate unapproved: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/working-feat""#),
+            "an agent actively working the feature must never see it under Waiting on you: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (waiting-means-stopped-1) The same gate-stopped lane, but the bound
+    /// session's heartbeat has gone stale enough (20 minutes, past
+    /// `WORKING_MINUTES` but still inside `SESSION_LIVE_MINUTES`) that
+    /// nobody is working it right now: the card falls back to Waiting on
+    /// you, while the session itself — still live per the 30-minute
+    /// window — keeps its own row on the Live strip.
+    #[test]
+    fn hub_sends_a_gate_stopped_feature_to_waiting_once_its_session_goes_stale_enough() {
+        let root = std::env::temp_dir().join(format!("mdview-views-hub-working-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/stale-working-feat.json",
+            r#"{
+                "feature": "stale-working-feat",
+                "phase": "executing",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        let hb = (time::OffsetDateTime::now_utc() - time::Duration::minutes(20))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            ".bee/sessions/live.json",
+            &format!(r#"{{"id": "live", "last_heartbeat": "{hb}", "lane": "stale-working-feat"}}"#),
+        );
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+        let strip_html = bee_live_strip_section(&snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/stale-working-feat""#),
+            "a session gone stale past WORKING_MINUTES must let the gate pull the card back to Waiting: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/stale-working-feat""#),
+            "a stale-past-WORKING_MINUTES session must not keep the card in In Progress: {html}"
+        );
+        assert!(
+            strip_html.contains("stale-working-feat"),
+            "the session is still live per SESSION_LIVE_MINUTES (30), so its row must stay on the Live strip: {strip_html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (waiting-means-stopped-1) A pause handoff naming the active feature,
+    /// with nobody's session bound to its lane at all, must still pull the
+    /// card into Waiting on you — the `working_now` gate only ever
+    /// suppresses the pull when an agent really is on it.
+    #[test]
+    fn hub_sends_a_pause_handoff_feature_to_waiting_when_nobody_is_working_it() {
+        let root = std::env::temp_dir().join(format!("mdview-views-hub-handoff-idle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/state.json",
+            r#"{
+                "feature": "handoff-idle-feat",
+                "phase": "executing",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
+            }"#,
+        );
+        write(
+            ".bee/lanes/handoff-idle-feat.json",
+            r#"{
+                "feature": "handoff-idle-feat",
+                "phase": "executing",
+                "mode": "standard",
+                "next_action": "none yet",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
+            }"#,
+        );
+        write(
+            ".bee/HANDOFF.json",
+            r#"{"written_at": "2026-08-10T09:00:00Z", "next_action": "Nothing pending from me.", "kind": "pause"}"#,
+        );
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/handoff-idle-feat""#),
+            "a genuine pause handoff naming a feature nobody is working must still render under Waiting on you: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (waiting-means-stopped-1) A granted worktree alone — no session, no
+    /// heartbeat — must never suppress the waiting pull: a grant is not a
+    /// heartbeat, and a parked worktree with a gate owed is exactly the
+    /// case Waiting exists for.
+    #[test]
+    fn hub_worktree_grant_alone_does_not_suppress_the_waiting_pull() {
+        let root = std::env::temp_dir().join(format!("mdview-views-hub-wt-no-working-{}", std::process::id()));
+        let sibling =
+            std::env::temp_dir().join(format!("mdview-views-hub-wt-no-working-sibling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&sibling);
+        let write = |dir: &std::path::Path, rel: &str, body: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            &root,
+            ".bee/lanes/wt-gate-owed-feat.json",
+            r#"{
+                "feature": "wt-gate-owed-feat",
+                "phase": "executing",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        std::fs::create_dir_all(&sibling).unwrap();
+        write(&sibling, ".bee/state.json", r#"{"phase":"executing","feature":"wt-gate-owed-feat","mode":"standard"}"#);
+        let grant_id = sibling.file_name().unwrap().to_string_lossy().to_string();
+        write(&root, ".bee/runtime/worktree-grants.json", &format!(r#"{{"{grant_id}": true}}"#));
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#),
+            "a granted worktree with no session bound must not suppress the waiting pull: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#),
+            "the worktree grant alone must not count as working now: {html}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
