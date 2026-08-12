@@ -1089,6 +1089,97 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     }
 }
 
+/// One feature archived under a project's `.bee/cells/archive/`, paired with
+/// the ship time the cross-project board's Finished column orders by
+/// (cross-board D10): the latest `trace.capped_at` across every one of that
+/// feature's archived cells, or `None` when any of those cells is missing
+/// one, or carries one that fails to parse as RFC 3339 — a partially-timed
+/// feature counts as untimed, never as partially timed. `shipped_at` is
+/// unrelated to [`BeeShippedFeature`] above: that struct is D10 of
+/// `bee-cockpit` (a *live*-cell shipped feature); this one is cross-board's
+/// D10, read straight from the archive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeArchivedFeature {
+    pub feature: String,
+    pub shipped_at: Option<String>,
+}
+
+/// One project's rolled-up bee read for the cross-project board
+/// (`docs/history/cross-board/CONTEXT.md`): a synchronous [`read_snapshot`]
+/// plus every feature archived under that root, ship time included, so the
+/// view layer built from [`read_rollup`] never has to touch the filesystem
+/// itself for either — see [`read_rollup`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeProjectRollup {
+    pub snapshot: BeeSnapshot,
+    pub archived_features: Vec<BeeArchivedFeature>,
+}
+
+/// Read [`read_snapshot`] for every root in `roots`, in the order given,
+/// each paired with that root's archived features and their ship times
+/// (cross-board D10). Strictly synchronous — no async, no
+/// threads-with-a-runtime anywhere in this function or what it calls; this
+/// module is deliberately framework-free
+/// (`no_web_framework_dependency_declared` fails if `axum`, `tokio`, or
+/// `hyper` ever appears in this crate's manifest), so scheduling multiple
+/// roots concurrently is the caller's job (`crates/mdview`, cross-board-3),
+/// never this one's.
+///
+/// D8's `.bee/`-qualification rule (a project must be registered AND have a
+/// `.bee/` root) is deliberately not applied here: the caller passes roots
+/// it has already qualified through `is_bee_project`
+/// (`crates/mdview/src/server.rs`), and duplicating that rule in two crates
+/// is exactly what this function must avoid. A root with no `.bee/` at all
+/// simply reads as [`BeeSnapshot::absent`] with no archived features, same
+/// as calling [`read_snapshot`] on it directly.
+pub fn read_rollup(roots: &[PathBuf]) -> Vec<BeeProjectRollup> {
+    roots
+        .iter()
+        .map(|root| BeeProjectRollup {
+            snapshot: read_snapshot(root),
+            archived_features: read_archived_features(root),
+        })
+        .collect()
+}
+
+/// Every feature archived under `root`'s `.bee/cells/archive/`
+/// ([`list_archived_feature_dirs`]), each paired with its ship time
+/// ([`archived_ship_time`]). A root with no archive directory at all yields
+/// an empty list — matching `list_archived_feature_dirs`'s own
+/// empty-list-on-absence precedent — never an error and never a fabricated
+/// time.
+fn read_archived_features(root: &Path) -> Vec<BeeArchivedFeature> {
+    list_archived_feature_dirs(root)
+        .into_iter()
+        .map(|feature| {
+            let cells = read_archived_cells(root, &feature);
+            let shipped_at = archived_ship_time(&cells);
+            BeeArchivedFeature { feature, shipped_at }
+        })
+        .collect()
+}
+
+/// The latest `trace.capped_at` across `cells`, taken as a feature's ship
+/// time (cross-board D10). `None` when `cells` is empty, or when any single
+/// cell in it lacks a `capped_at`, or carries one that does not parse as
+/// RFC 3339 — a partially-timed feature is reported as untimed, never as
+/// partially timed, and this function never guesses a time from whatever
+/// subset did parse.
+fn archived_ship_time(cells: &[BeeCell]) -> Option<String> {
+    if cells.is_empty() {
+        return None;
+    }
+    let mut latest: Option<(&str, time::OffsetDateTime)> = None;
+    for cell in cells {
+        let capped = cell.capped_at.as_deref()?;
+        let parsed = parse_rfc3339(capped)?;
+        if latest.is_none_or(|(_, t)| parsed > t) {
+            latest = Some((capped, parsed));
+        }
+    }
+    latest.map(|(s, _)| s.to_string())
+}
+
 /// Join `state.json`'s raw `workers[]` against the live cells and sessions
 /// this snapshot already read (D4 — read-only, no additional I/O). Never
 /// mutates or is used to compute `buckets`: D7's buckets stay a pure
@@ -6905,6 +6996,128 @@ mod tests {
             "an empty cell store must report nothing rather than zeros: {:?}",
             snap.tier_mix
         );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // --- cross-board-1: synchronous multi-project roll-up (D8, D10) ---
+
+    fn write_archived_cell(root: &Path, feature: &str, id: &str, capped_at: Option<&str>) {
+        write(
+            root,
+            &format!(".bee/cells/archive/{feature}/{id}.json"),
+            &feature_cell_json(id, feature, "capped", Some("2026-08-01T00:00:00.000Z"), capped_at),
+        );
+    }
+
+    #[test]
+    fn rollup_returns_one_snapshot_per_root_in_order() {
+        let root_a = fresh_root("rollup-order-a");
+        let root_b = fresh_root("rollup-order-b");
+        write(&root_a, ".bee/cells/a1.json", &cell_json("a1", "open"));
+        write(&root_b, ".bee/cells/b1.json", &cell_json("b1", "capped"));
+        write(&root_b, ".bee/cells/b2.json", &cell_json("b2", "open"));
+
+        let rollups = read_rollup(&[root_a.clone(), root_b.clone()]);
+        assert_eq!(rollups.len(), 2, "expected one roll-up entry per root: {rollups:?}");
+
+        let standalone_a = read_snapshot(&root_a);
+        let standalone_b = read_snapshot(&root_b);
+        assert_eq!(
+            serde_json::to_value(&rollups[0].snapshot).unwrap(),
+            serde_json::to_value(&standalone_a).unwrap(),
+            "the first root's snapshot must match read_snapshot called on it alone"
+        );
+        assert_eq!(
+            serde_json::to_value(&rollups[1].snapshot).unwrap(),
+            serde_json::to_value(&standalone_b).unwrap(),
+            "the second root's snapshot must match read_snapshot called on it alone"
+        );
+
+        std::fs::remove_dir_all(&root_a).ok();
+        std::fs::remove_dir_all(&root_b).ok();
+    }
+
+    #[test]
+    fn rollup_feature_with_all_capped_at_reports_latest_as_ship_time() {
+        let root = fresh_root("rollup-all-capped");
+        write_archived_cell(&root, "feat-a", "f-1", Some("2026-08-01T02:00:00.000Z"));
+        write_archived_cell(&root, "feat-a", "f-2", Some("2026-08-01T05:00:00.000Z"));
+
+        let rollups = read_rollup(&[root.clone()]);
+        assert_eq!(rollups.len(), 1);
+        let features = &rollups[0].archived_features;
+        assert_eq!(features.len(), 1, "expected exactly one archived feature: {features:?}");
+        assert_eq!(features[0].feature, "feat-a");
+        assert_eq!(
+            features[0].shipped_at.as_deref(),
+            Some("2026-08-01T05:00:00.000Z"),
+            "ship time must be the latest capped_at across the feature's archived cells"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn rollup_feature_with_mixed_capped_at_reports_no_ship_time() {
+        let root = fresh_root("rollup-mixed-capped");
+        write_archived_cell(&root, "feat-b", "f-1", Some("2026-08-01T02:00:00.000Z"));
+        write_archived_cell(&root, "feat-b", "f-2", None);
+
+        let rollups = read_rollup(&[root.clone()]);
+        let features = &rollups[0].archived_features;
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0].feature, "feat-b");
+        assert!(
+            features[0].shipped_at.is_none(),
+            "one archived cell missing capped_at must make the whole feature untimed, never partially timed: {:?}",
+            features[0].shipped_at
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn rollup_root_with_no_archive_yields_empty_archived_features() {
+        let root = fresh_root("rollup-no-archive");
+        write(&root, ".bee/state.json", r#"{"phase":"exploring"}"#);
+        write(&root, ".bee/cells/c1.json", &cell_json("c1", "open"));
+        // No .bee/cells/archive/ at all.
+
+        let rollups = read_rollup(&[root.clone()]);
+        assert_eq!(rollups.len(), 1);
+        assert!(
+            rollups[0].archived_features.is_empty(),
+            "a root with no archive directory must yield an empty archived-feature set, not an error: {:?}",
+            rollups[0].archived_features
+        );
+        assert!(rollups[0].snapshot.present, "the snapshot itself must still read normally");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn rollup_unparseable_archived_cell_does_not_lose_the_root_s_other_features() {
+        let root = fresh_root("rollup-unparseable-cell");
+        // A feature whose only archived cell is not valid JSON.
+        write(&root, ".bee/cells/archive/broken/z.json", "{ not valid json");
+        // A sibling feature under the same root, fully readable.
+        write_archived_cell(&root, "good", "g-1", Some("2026-08-01T03:00:00.000Z"));
+
+        let rollups = read_rollup(&[root.clone()]);
+        let features = &rollups[0].archived_features;
+        let names: Vec<&str> = features.iter().map(|f| f.feature.as_str()).collect();
+        assert!(
+            names.contains(&"good"),
+            "the readable feature must still surface despite a corrupt sibling: {names:?}"
+        );
+        let good = features.iter().find(|f| f.feature == "good").unwrap();
+        assert_eq!(good.shipped_at.as_deref(), Some("2026-08-01T03:00:00.000Z"));
+        // The broken feature's directory still exists, so it is still named;
+        // it just has no parseable cells to derive a ship time from.
+        if let Some(broken) = features.iter().find(|f| f.feature == "broken") {
+            assert!(broken.shipped_at.is_none(), "a feature with no parseable archived cells must be untimed");
+        }
 
         std::fs::remove_dir_all(&root).ok();
     }
