@@ -3319,6 +3319,46 @@ mod asset_response_tests {
         assert!(!is_loopback_host("192.168.1.10"));
         assert!(!is_loopback_host("::"));
     }
+
+    #[test]
+    fn served_stylesheet_bundles_jetbrains_mono_and_leads_font_mono_token() {
+        // A device monospace font often lacks box-drawing glyphs, so a
+        // browser substitutes a fallback of a different advance width and
+        // the terminal grid misaligns even when nothing wraps. The face must
+        // be bundled offline — no external font URL — exactly like Manrope.
+        let css = views::APP_CSS;
+        assert!(
+            css.contains("font-family: 'JetBrains Mono';"),
+            "served stylesheet must declare a JetBrains Mono @font-face"
+        );
+        assert!(
+            css.contains("src: url(data:font/woff2;base64,"),
+            "the face must ship as an embedded woff2 data URI"
+        );
+        assert!(
+            !css.contains("url(http"),
+            "no @font-face may reach out to an external font host"
+        );
+
+        // --font-mono must name the bundled face FIRST, ahead of the system
+        // stack, in every declaration — the terminal's
+        // font-family: var(--font-mono) only resolves to it if it leads.
+        let font_mono_decls: Vec<&str> = css
+            .lines()
+            .filter(|l| l.trim_start().starts_with("--font-mono:"))
+            .collect();
+        assert!(
+            font_mono_decls.len() >= 2,
+            "expected multiple --font-mono declarations (atelier.css and contract.css), found {}",
+            font_mono_decls.len()
+        );
+        for decl in &font_mono_decls {
+            assert!(
+                decl.contains("'JetBrains Mono', ui-monospace"),
+                "--font-mono must lead with the bundled face before the system stack: {decl}"
+            );
+        }
+    }
 }
 
 /// Route-level tests for `GET /p/:id/_bee` and the D3 project-home gate
