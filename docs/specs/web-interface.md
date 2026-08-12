@@ -1,6 +1,6 @@
 ---
 area: web-interface
-updated: 2026-08-07
+updated: 2026-08-12
 sources: [file-nav-ux, ui-polish-settings-sidebar, agent-terminal, terminal-open-access]
 decisions: [12d62831, 99e8df73, 184c77b0]
 coverage: partial
@@ -115,6 +115,24 @@ content itself.
   matching is case-insensitive. So a project with a README lands on it.
 - **Afterwards:** the operator picks a project by name without seeing where
   it lives on disk, or removes one it no longer wants listed.
+
+### A file the project does not have
+
+- **Triggers:** asking for a path that the project's index does not hold —
+  most often a file that exists on disk but was written while the viewer was
+  not watching, or one whose address was typed or shared wrongly.
+- **What it shows:** a not-found page naming what happened, and — when the
+  project itself is known — a single "Refresh index" control. There is no
+  such control when the project is unknown, because there would be nothing
+  to reconcile.
+- **Refreshing:** activating it reconciles that one project against disk and
+  returns the reader to the exact address they asked for. A file that was on
+  disk all along renders on arrival; a genuinely missing file returns the
+  same not-found page, now truthfully. The control needs nothing but the
+  page itself — no terminal, no command, and no scripting in the browser
+  (per R10).
+- **Afterwards:** a reader who was told "not found" about a file they can see
+  in their editor fixes it from the page they are already on.
 
 ### Reading breadcrumb (file pages)
 
@@ -302,6 +320,14 @@ consumes it.
   of whether that project's folder still exists; and a location reported by a
   path that walks up through a parent is never suggested at all, since
   registering such a path would be refused anyway.
+- **R10.** The refresh control on a not-found page returns the reader only to
+  an address within this viewer. The address to return to travels with the
+  request and is therefore whatever the sender put there, so anything that
+  would leave this site — another host, or an address that borrows the
+  current one's protocol — is discarded in favour of the project's own home
+  page. Reconciling a project is open to whoever can reach the page, exactly
+  as registering and unregistering are (R7's reasoning): it costs a re-scan
+  and changes no file on disk.
 
 
 ## Edge Cases Settled
@@ -314,6 +340,11 @@ consumes it.
   then files.
 - Without client scripting, the file page still shows the current folder's files
   by title (a reduced, non-zoomable fallback), so navigation is never blank.
+- A not-found page for an unknown project → the plain message, with no refresh
+  control: there is no project to reconcile.
+- Refreshing from a not-found page whose file really is absent → the reader
+  lands back on the same not-found page, which now reflects a checked answer
+  rather than a stale one.
 
 ## Open Gaps
 

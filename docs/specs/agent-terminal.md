@@ -1,6 +1,6 @@
 ---
 area: agent-terminal
-updated: 2026-08-07
+updated: 2026-08-12
 sources: [agent-terminal, terminal-open-access]
 decisions: [D1, D2, D3, D4, D5, D6, D7, D8, D9, D10]
 coverage: partial
@@ -42,15 +42,19 @@ implementation. Code entry points are listed in `reading-map.md`.
   switch, and the two background duties are turned on, alongside every
   other, unrelated mdview setting — see Actors & Access for what this
   surface's safety now rests on.
+- A fixed tab on the Terminal or Transcript page's edge → a slide-in drawer
+  listing every agent across every registered project, for switching
+  directly to any of them without first navigating to that project's own
+  page.
 
 ## Data Dictionary
 
 | # | Element | Meaning | Values |
 |---|---|---|---|
-| 1 | Agent | One coding agent herdr is running, addressed by its own id | id, folder (via its pane), status, current screen |
+| 1 | Agent | One coding agent herdr is running, addressed by its own id | id, folder (via its pane), status, the program it runs, current screen |
 | 2 | Pane | The addressable session, listed whether or not an agent runs inside it: every agent has exactly one, and a session opened with no agent started in it is listed too, as a shell | id, workspace and tab it sits in, launch folder, live folder, status, an agent when one is attached |
 | 2a | Status | What a listed session is doing, shown as a named dot on its entry | working, blocked, done, idle, unknown, or shell for a session with no agent; the first three each read as their own colour, the rest as the quiet one |
-| 3 | Screen | The agent's recent terminal contents, rendered with colour | a snapshot redrawn on each poll, not a live feed; a bounded tail of the pane's own scrollback rather than only the rows currently on screen, so a plain shell shows work that has already scrolled past, while an agent that redraws a full-screen interface has no scrollback to give and shows exactly its current frame; shown at the full height of one pane frame with its lines unwrapped, the box scrolling in both directions rather than re-flowing the frame |
+| 3 | Screen | The agent's recent terminal contents, rendered with colour | a snapshot redrawn on each poll, not a live feed; a bounded tail of up to 200 lines of the pane's own scrollback rather than only the rows currently on screen, so a plain shell shows work that has already scrolled past, while an agent that redraws a full-screen interface has no scrollback to give and shows exactly its current frame; shown at the full height of one pane frame with its lines unwrapped, the box scrolling in both directions rather than re-flowing the frame; rendered in full 24-bit colour rather than a limited palette, since agents' own output overwhelmingly uses colour beyond the basic 16 or 256-colour sets |
 | 4 | Transcript | The agent's own activity log, read directly rather than through herdr | a gap-free running record of the agent's activity, independent of the screen poll; a fresh agent with nothing written yet reports that plainly rather than showing an empty log; if the record is found truncated or rewritten under the reader, the next read shows a visible divider rather than jumping silently; a single poll returns only a bounded number of lines, and when a poll has more than that bound, its oldest lines are marked as lost rather than silently dropped |
 | 5 | Terminal switch | The one switch standing between anyone who can reach the daemon and the terminal, transcript, and agent-creation family — there is no credential behind it | on / off, off by default |
 | 6 | Unassigned agents | Agents whose working directory is outside every registered project's root | listed on their own page, reachable only while both the terminal switch and this group's own switch (below) are on |
@@ -66,40 +70,91 @@ implementation. Code entry points are listed in `reading-map.md`.
 - **Triggers:** opening a registered project's Terminal tab while the
   terminal switch is on.
 - **What it shows:** a strip naming every session in this project's folder —
-  each entry carrying the workspace and tab it sits in and its status dot —
-  and beneath it exactly one of them: its screen rendered as coloured text
-  and a control to reply. Sessions with no agent are named as shells and are
-  listed like any other. A session belonging to a different project, or to
-  none, never appears here.
+  each entry carrying, in order, the workspace and tab it sits in, its
+  status dot, and the program it runs — and beneath it exactly one of them:
+  its screen rendered as coloured text and a control to reply. That identity
+  is printed once, on the strip entry itself; the screen and transcript
+  views beneath it carry no heading of their own repeating it, since a
+  second copy only pushes the content down a handset's viewport. Sessions
+  with no agent are named as shells and are listed like any other. A session
+  belonging to a different project, or to none, never appears here.
 - **Which one is shown:** the entry the address names. Opening the tab
   without naming one shows the session the operator is currently focused on
   when it belongs to this project, and otherwise the first in the strip, so
   the tab always opens on something.
-- **On a narrow screen:** the strip costs one line instead of several. The
-  entry for the session being viewed stays on the line; every other entry,
-  together with the controls that start a new session, moves behind one menu
-  control beside it. Opening that menu lists them all — the viewed session
-  included, in its place among the others — so nothing is reachable only on a
-  wide screen. With no session to switch between there is no menu at all, and
-  the creation controls stand on their own. The menu opens and closes without
+- **How the screen renders:** a path to one of the project's own markdown
+  docs, wherever it appears in the screen or the transcript, is shown as a
+  clickable link to that doc. The monospaced type used for the screen ships
+  with mdview itself, so opening the tab never depends on reaching an
+  outside font service, and it covers the box-drawing characters, Vietnamese
+  text, and other characters an agent's screen may use. A run of box-drawing
+  lines an agent draws — a table or a frame — always keeps its original
+  layout and scrolls sideways on its own rather than being wrapped and
+  ruined; a single non-box line inside such a run is absorbed into it
+  rather than splitting it, and output containing no box-drawing at all
+  renders exactly as it always did.
+- **On a narrow screen:** the page collapses to two rows: the project's own
+  navigation moves into the top bar beside the brand, and the strip below it
+  carries the sessions plus the "new session" control at its own row's right
+  end. The reading spacing above the screen is tightened so the screen
+  itself starts within the first view on a phone rather than below the
+  fold. The strip itself costs one line instead of several: the entry for
+  the session being viewed stays on the line; every other entry, together
+  with the controls that start a new session, moves behind one menu control
+  beside it. Opening that menu lists them all — the viewed session included,
+  in its place among the others — so nothing is reachable only on a wide
+  screen. With no session to switch between there is no menu at all, and the
+  creation controls stand on their own. The menu opens and closes without
   scripting, the same way the top bar's does (see the Web interface spec).
+  The screen's own prose text wraps to fit the narrower width here instead
+  of requiring the two-way scrolling described above, at a type size
+  measured to stay readable and refitted automatically whenever the pane's
+  width changes; a run of box-drawing lines still keeps its unwrapped,
+  sideways-scrolling layout even on a narrow screen. Below the screen, the
+  named reply keys and the pane's own arrow keys share a single row rather
+  than stacking across two, keeping as much vertical space as possible for
+  the screen itself. Touch scrolling inside the screen stays contained to
+  it — it does not also trigger the browser's own pull-to-refresh or
+  page-navigation gesture.
 - **Afterwards:** the operator sees exactly the sessions that belong to this
   project, and has an address for each one on its own.
 
 ### Reaching a pane's older output
 
-- **Triggers:** pressing a listed agent's "load older" control while the
-  terminal switch is on.
-- **What it does:** each press reaches one step further back than the
-  previous press reached — there is nothing an operator needs to remember or
-  repeat between presses, the surface itself tracks how far back this pane
-  has gone and asks for one more step each time. While an operator is
-  looking at older output this way, the pane's normal live refresh stops
+- **Triggers:** pressing a listed agent's Older, Newer, or Live control
+  while the terminal switch is on.
+- **What it does:** Older steps one step further back than the previous
+  press reached; Newer steps one step forward toward the live view and is
+  unavailable once already there; Live jumps straight back to the current
+  live view in one press regardless of how many steps were taken. The three
+  are separate, individually labelled controls, so an assistive reader
+  never confuses them with the pane's own arrow keys, and each meets the
+  same 44px touch-target minimum as the pane's other controls. They sit
+  stacked together at the screen's bottom-right corner, positioned so they
+  stay reachable and stay inside the screen's own frame regardless of the
+  pane's height or the window's width, never covering the reply controls
+  beneath the screen, and clear of a phone's own safe-area inset. While an
+  operator has stepped back this way, the pane's normal live refresh stops
   updating that view, so it is never overwritten out from under them.
-- **Afterwards:** pressing the paired "back to live" control returns the
-  pane to its current live view and lets the normal refresh resume; nothing
-  about the pane's connection, or the operator's ability to reply, is
-  affected by having stepped back first.
+- **How stepping stays cheap:** the surface remembers how far back each pane
+  has already gone and moves only the extra step a press asks for, rather
+  than replaying every step from scratch each time. Landing on Live always
+  works, even for a pane nothing was remembered for. A pane left stepped
+  back with no further request for more than 90 seconds is swept back to
+  live automatically the next time any pane's screen is polled. Opening a
+  session's live view always restores a previously stepped-back pane to
+  live first. If the screen has materially changed underneath while stepped
+  back (a change confined to the status footer does not count), the next
+  step falls back once to a full restore-and-replay instead of an
+  incomplete jump, and what was remembered for that pane is cleared. Each
+  pane's stepping is handled one request at a time, so overlapping requests
+  for the same pane can never race each other.
+- **Afterwards:** pressing Live returns the pane to its current live view
+  and lets the normal refresh resume; nothing about the pane's connection,
+  or the operator's ability to reply, is affected by having stepped back
+  first. Leaving the page (navigating away, or the tab going into the
+  background) sends a best-effort request to restore the pane to live, so
+  it is not left stepped back for the next visit.
 
 ### Replying to an agent
 
@@ -181,6 +236,28 @@ implementation. Code entry points are listed in `reading-map.md`.
   would lose. The screen and the transcript answer different questions and
   are kept as separate tabs rather than merged into one.
 
+### Switching between agents
+
+- **Triggers:** opening the fixed edge tab on a Terminal or Transcript page
+  while the terminal switch is on.
+- **What it shows:** a slide-in drawer listing every agent pane across every
+  registered project — not only the ones belonging to the project currently
+  open — plus the Unassigned group's own agents when the Unassigned group's
+  own switch is also on (see The terminal switch); with that switch off, the
+  drawer lists every registered project's agents and simply leaves that
+  group out, the same as everywhere else it is gated. Plain shells are left
+  out; this list is agents only. A pane claimed by more than one project
+  (see Business Rules, Project scoping) is listed once, under the first
+  project that claims it, never twice. Panes are grouped under a heading for
+  each status — working, waiting on the operator, done, or idle — and each
+  row opens straight onto that pane's own terminal page.
+- **When it refreshes:** the drawer's contents are fetched only while it is
+  open, on a short repeating interval; closing it stops the refresh, so
+  having the drawer available costs nothing while it isn't in use.
+- **Afterwards:** the operator reaches any agent in any project directly
+  from wherever they already are, without first navigating to that
+  project's own page.
+
 ### The terminal switch
 
 The terminal has **no authentication of its own** — no token, no session, no
@@ -193,9 +270,10 @@ anyone who can reach the daemon.
   answers normally to anyone who can reach the daemon. Off, every one of
   those routes is refused.
 - **What's gated:** the Terminal tab and its screen, sending text and keys,
-  the Transcript tab, and starting a new agent — every action listed above.
-  The Unassigned agents page and its contents need this switch **and** their
-  own switch below both on; either alone leaves the group closed.
+  the Transcript tab, the Agents drawer, and starting a new agent — every
+  action listed above. The Unassigned agents page and its contents, and the
+  Unassigned group's entries in the Agents drawer, need this switch **and**
+  their own switch below both on; either alone leaves the group closed.
 - **What's not gated (unchanged by this feature):** every other page in
   mdview — the project list, a project's markdown pages, search, the
   settings page itself, and the plain status/configuration views all remain
@@ -274,6 +352,10 @@ authentication, and each still holds:
 - **Output is escaped before it becomes markup.** A pane's screen is
   translated into safe HTML — nothing in it is interpreted as markup, however
   it got onto that screen.
+- **Colour stays hex-only.** The screen's colour rendering, including its
+  full 24-bit colour support, never places anything but hex digits into
+  that markup, so richer colour never opens a path around the escaping
+  guarantee above.
 - **Named remedies, not raw errors.** A failure names what happened and, where
   there is one, the fix — never a bare stack trace, an internal path, or an
   unexplained status.
@@ -292,6 +374,12 @@ authentication, and each still holds:
   remedy — start herdr, then reload the page — instead of an empty or
   broken-looking tab. mdview never starts herdr on its own unless the "keep
   herdr running" duty below is switched on.
+- A screen poll that fails for any other reason (a dropped connection, a
+  timeout, and so on) is treated differently: the last screen stays on
+  view, marked with a "reconnecting…" indicator, rather than being replaced
+  by the down message — a momentary blip never wipes out what the operator
+  was looking at. Once polling succeeds again, the screen always repaints
+  fresh rather than getting stuck showing stale content.
 
 ### The two background duties
 
@@ -424,6 +512,12 @@ operates mdview every time the network path to its port changes.
 - An agent with no transcript written yet: answered as a named, successful
   "nothing yet" state, never as an empty list indistinguishable from "caught
   up, nothing new."
+- A screen poll failing for a reason other than herdr being down: the last
+  screen stays on view with a "reconnecting…" indicator, never replaced by
+  the down message.
+- A pane's screen diverging while stepped back to older output: the next
+  step falls back once to a full restore-and-replay, and what was
+  remembered about that pane's position is cleared.
 
 ## Open Gaps
 
@@ -437,8 +531,6 @@ operates mdview every time the network path to its port changes.
   properly is the user's call.
 - Confirmation against a real, running herdr (rather than a test double) is
   a manual check at UAT, not something automated coverage certifies.
-- Mobile-specific layout for this surface, carried over as an idea from
-  herdr-go's mobile-first design, is not settled.
 
 ## Visuals
 

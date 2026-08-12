@@ -1,6 +1,6 @@
 ---
 area: daemon
-updated: 2026-07-20
+updated: 2026-08-12
 sources: [daemon-auto-spawn-detach, hostname-port-truth, windows-daemon-fixes]
 decisions: [625c69fa, 1c8473f4, 08b4c8c3, d1429530]
 coverage: partial
@@ -68,6 +68,26 @@ serves (see the web-interface and agent-integration areas for that).
   warning. This is the same display-URL enumeration `open`/`restart` use — a
   display concern only, never the connectivity host.
 - **Afterwards:** it serves until interrupted or `mdview stop`.
+
+### Index reconciliation at startup
+
+- **Triggers:** every daemon start, however it was launched — auto-start,
+  explicit start, or restart.
+- **What it does:** every registered project is re-scanned against what is
+  actually on disk, so files added, changed, or removed while no daemon was
+  running are accounted for. Live change-watching only sees changes from the
+  moment a daemon starts; without this sweep a file written while the viewer
+  was down stays unreadable in the browser until someone reconciles that
+  project by hand, because a file is served from what was indexed, not from a
+  fresh look at the folder.
+- **Ordering:** the sweep does not delay serving. The daemon begins accepting
+  requests immediately and reconciles alongside them, so a large registry
+  never postpones the first page; a request that lands mid-sweep may still be
+  answered from the previous index, and the reader can reconcile that project
+  themselves from the page they land on (see the Web interface spec).
+- **A project whose folder is gone:** it is reported and skipped, and the
+  sweep continues to the remaining projects. One missing folder never
+  abandons the reconciliation of the others.
 
 ### Single-daemon coordination
 

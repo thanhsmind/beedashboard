@@ -1,10 +1,22 @@
+---
+area: bee-cockpit
+updated: 2026-08-12
+sources: [feature-close, agent-board, bee-artifact-rename, archive-visibility, feature-hub, board-declutter, board-trim, feature-titles, hub-fallbacks, detail-desc-wrap]
+decisions: []
+coverage: partial
+---
+
 # Bee Cockpit
 
 A read-only surface inside mdview that shows what the bee harness is doing in a
-registered project: where the active feature sits in its own lifecycle, how much has
-landed, what is happening right now, what needs a human, how fast work is shipping,
-what is in flight broken down by stage, what has already finished, and the backlog,
-sessions and process detail behind any of it.
+registered project: which features are waiting on a person right now, which are
+in progress, which have already shipped, and the backlog and review queue
+behind any of it.
+
+Throughout this surface's own pages, the name shown to a person is **Bee
+Artifact** — page titles, the top bar, and other on-page UI text all read that
+way. This is a display label only: the command a person types, and the
+identifiers this product exposes to other tools, remain **mdview**.
 
 Technology-agnostic: this describes behavior and rules, not the Rust that implements
 them. Code entry points are listed in `reading-map.md`.
@@ -36,190 +48,85 @@ A qualifying project gains an entry point on its home page leading to its board.
 
 The board answers, top to bottom, in a fixed order:
 
-1. A header naming the project and the instant this snapshot was read.
-2. The **lifecycle stepper** — where the active feature sits between exploring and
-   independent review.
-3. **Headline numbers** — how much live work is in each state, and how many features
-   have shipped in total.
-4. **Working on now**, beside **needs attention** — what is happening this minute, next
-   to what of that deserves a human's eyes, so the two are read together rather than
-   one being buried below a scroll of everything else.
-5. **Delivery speed** — how fast the project is shipping.
-6. **Work by phase** — every feature still in flight, grouped by the stage of the bee
-   lifecycle it is in.
-7. **Finished** — every feature that has fully shipped, collapsed by default so it
-   never crowds out the live work above it.
-8. Supporting panels — backlog and review queue, where work is happening, and process
-   health — for the reader who wants to go one level deeper than the headline view.
+1. A top bar naming the project and the instant this snapshot was read.
+2. **Live** — a single dense strip of what is running at this moment, one line each.
+3. The **Feature Hub** — one card per feature, grouped by whether it is waiting on a
+   person, still in progress, or finished.
+4. **Finished (shipped) list** — the complete, permanent record of every feature that
+   has fully shipped, collapsed by default so it never crowds out the live work above
+   it.
+5. **Backlog & Review** — the backlog of proposed work and the state of every review
+   candidate, for the reader who wants to go one level deeper than the headline view.
 
 This order is not decoration; it is the feature. It mirrors the sequence a project
-manager actually asks the questions in: first "where does this sit in its own
-lifecycle," then "how much has landed," then "what's happening right now and what of
-that needs me," then "how fast is this moving," then "what's in flight and how far
-along," then "what's already done," and only after all of that, supporting detail. A
+manager actually asks the questions in: first "what needs me and what's moving right
+now," then "what's already done," and only after that, backlog and review detail. A
 section with nothing to show never disappears and never disturbs this order — it
 renders its own honest empty line in its place (see "Honesty rules that hold
 everywhere," below).
 
-Older revisions of this board also grouped every cell into four buckets by cell
-state — "what is being worked on, what is waiting, what is stuck, what is done" — as
-its own top-level section. That grouping is gone from the board: a project manager
-asks what feature is being built and how far along, not what state an individual cell
-carries. The four cell states still matter — they are what the headline numbers count,
-what a phase card's progress bar is built from, and they still appear as their own
-four-bucket view, one per cell, on each feature's own detail page (see "Drilling in,"
-below) — they are simply no longer their own section of the board itself.
+## Live
 
-## Lifecycle stepper
+Between the top bar and the Hub sits one narrow presence strip answering a single
+question — what is running right now:
 
-Four steps, always in this order: explore, shape, execute, independent review. A step
-reads **done** when its gate is currently recorded as approved — full stop. A gate that
-was approved and later revoked, and has since been approved again, reads as approved
-today; today's record beats a stale revocation. The first step that is not done is the
-**current** one.
+- One line per live session, naming the lane it is working, that lane's current stop,
+  how long ago it last reported in, and the checkout it is working in (the main
+  checkout is named as such rather than left blank). A session with no lane of its own
+  is labelled by the project's active feature, or plainly as having no active lane.
+- One line per branch checkout, naming the branch and the feature it carries, or
+  saying it carries none. A checkout that could not be read says so and why, rather
+  than being dropped or guessed at.
+- Nothing running at all → one line saying so. The strip never disappears.
 
-An undone step's own note distinguishes two different histories: a gate with no
-approval on record ever reads "not yet approved," while a gate that was approved and
-then explicitly revoked reads "approved, then revoked" — it was taken away, not merely
-never reached. The independent-review step is worded differently from every other step
-regardless of which of those two histories it carries: it always reads that it runs
-only when a human invokes it, never automatically. This is deliberate — a stepper that
-told a passerby "review: not yet approved" would misrepresent review as pending
-automatic work, exactly what this board must never imply (see "Independent review is
-always invoked," below).
+This strip is deliberately thin: it carries presence, not detail — no worker rosters,
+no per-file contention, no health scoring. Those readings still exist for the drill-down
+pages; this section is the glance that tells a reader whether anyone is at work before
+they read anything else.
 
-A project with no lifecycle record at all renders one honest line instead of four
-steps all reading "not yet approved" — the absence of a record is not the same claim as
-a record that positively says no.
+## Feature Hub
 
-## Headline numbers
+The board's main section is feature-centric: one card per feature, never one card per
+cell. Every feature the store knows about — whether it still has live work or has
+already shipped — is placed into exactly one of three groups:
 
-Five counts, side by side: how many cells are being worked on right now, how many are
-waiting and unclaimed, how many need a human, how many are finished, and how many
-features have shipped in total. Every one of these is a real, honest count — a bucket
-that genuinely holds zero live cells renders `0`, which is real data, not the "nothing
-to measure" case the honesty rules protect against elsewhere on the board. A cell
-whose own state this board does not recognise, and a cell that was dropped before it
-ever shipped, are counted in none of the four state tallies (see "Honesty rules that
-hold everywhere," below).
+- **Waiting on you** — a feature whose live work is sitting at a gate that has not yet
+  been approved, or that carries a paused handoff note. Two things never place a
+  feature here: the independent-review gate never counts as a stop (see "Independent
+  review is always invoked," below), and a handoff explicitly recorded as a clean,
+  already-claimed handover to the next piece of work — a `planned-next` handoff — never
+  counts as waiting either.
+- **In Progress** — every other feature that still has live work and is not waiting on
+  a person.
+- **Finished** — a feature that has either fully shipped (compounding complete) or been
+  archived. A card in this group carries a chip naming the state of its worktree: still
+  the main checkout, an open worktree, or one already merged.
 
-## Working on now, beside needs attention
+A card shows the feature's human title with its slug as a subtitle beneath it, its
+Feature Boundary sentence, and a description. The title and description are read from
+the first of these that exists: the feature's own `CONTEXT.md` heading and boundary
+text, then the most recent decision scoped to the feature, then the title of its first
+cell. A long description wraps and is visually clamped — on the card, and on the
+feature's own detail page too — rather than overflowing or forcing either page to
+scroll sideways. A card links onward to the feature's own detail page.
 
-### Working on now
+## Finished (shipped) list
 
-Names the one feature currently active, drawn only from the project's own recorded
-state — never guessed from cell data, which would risk the same feature being named a
-second time down in the finished list once it ships. Alongside its name: the recorded
-rationale for why the project is being worked the way it is, progress over that
-feature's own live (non-dropped) cells, and its recorded next action. A card also
-carries its own "Running now" list — every live worker the store currently knows about,
-each naming the cell it is on. When the running worker names a cell the store cannot
-find, or the store's own recorded state for that cell disagrees with what the worker is
-reporting, that disagreement is shown explicitly rather than silently resolved one way
-or the other; a worker whose own session has gone stale is never presented as currently
-running at all. No active feature, no recorded rationale, no live cells yet, and no
-recorded next action each render their own honest line rather than a fabricated
-measurement or a hidden field.
+Every feature that has fully shipped, collapsed by default behind one summary line
+that states the true count of finished features and finished cells even while the
+list itself stays closed — collapsing a list is never allowed to understate what it
+holds. Opening it shows one compact line per feature — never one card per cell —
+naming its cell count and, when both of its timestamps are on record, its time to
+finish. This list is never capped or truncated: every feature that has shipped is
+named here, no matter how many there are. A project with nothing finished yet shows a
+single honest line instead of a collapsible, zeroed list.
 
-### Needs attention
-
-A **generated, severity-ordered list**, not a static panel: independent rules run over
-the same data the rest of the board already read, each one firing on its own — no rule
-depends on another having fired first — and every item that fires names a suggested
-action a human can actually take. Items are ordered heaviest severity first: critical,
-then serious, then warning. An empty list says, in one line, that nothing currently
-needs attention — it is not a hidden or collapsed section.
-
-The rules, as they exist today:
-
-- **Blocked cells** (critical) — fires when at least one cell needs a human right now;
-  names each one. Every blocked cell is treated as its own fix-first item.
-- **Unreadable store files** (critical) — fires when any part of the store could not be
-  read or parsed; names the file(s), and warns that every other number on the page may
-  be incomplete until they are repaired.
-- **Work parked, waiting on a person** (critical) — fires when a handoff note is on
-  record and it is not explicitly marked as a clean, already-claimed handover to the
-  next piece of work; a handoff record with no kind recorded at all is treated the same
-  as an explicit pause. Shows when the note was written and its text, and says plainly
-  that the store never marks a note as consumed — a stale pause reads as a stale pause,
-  dated, never as an invented "probably resolved" judgement.
-- **Open P1 review findings** (critical) — fires when a review session that has not yet
-  been settled (approved or blocked) carries at least one P1 finding.
-- **Unreviewed high-risk work** (serious) — fires when review candidates flagged
-  high-risk have never appeared in any review session at all.
-- **Gate bypass recorded** (warning) — fires whenever the project's tracked
-  configuration records approval gates as being auto-approved at some level; names the
-  level, and states explicitly that this is the recorded setting, not necessarily the
-  one actually in effect (see "What this board does not claim," below).
-- **Knowledge debt** (warning) — fires when the total of (features with capped,
-  behavior-changing work that was never folded into the project's own knowledge base)
-  plus (capture-queue items still waiting) plus (features with an unresolved
-  post-feature proposal note) is greater than zero; the breakdown of that total is
-  shown alongside the count.
-
-## Delivery speed
-
-Three headline numbers, shown once at least one feature has shipped:
-
-- **Shipped per working day** — shipped features divided by the number of distinct days
-  on which something shipped.
-- **Shipped per week** — shipped features across the calendar span from the first ship
-  to the last, expressed as a weekly rate. The span counts **calendar dates**, not a
-  subtraction of timestamps; subtracting timestamps silently discards a partial day and
-  overstates the rate.
-- **Typical time to finish** — the median cycle time across shipped features.
-
-**A feature has shipped when every one of its non-dropped cells is capped.** No merge
-into a main branch is required, and a dropped cell never blocks shipped status. This
-matters because release work, documentation work, and small fixes legitimately land in
-the main checkout with no branch at all; requiring a merge marked roughly a third of
-real features as never-shipped.
-
-**Cycle time** for a shipped feature runs from its earliest cell claim to its latest
-cell cap. A feature missing either timestamp reports no cycle time rather than a
-fabricated zero.
-
-A project that has shipped nothing shows an honest statement to that effect, alongside
-the list of features still open (any feature with at least one live cell that has not
-yet shipped). It never shows zeros dressed as measurements, and no rate ever renders as
-a division artifact.
-
-## Work by phase
-
-Every feature still in flight, one card each, grouped into columns by the phase of the
-bee lifecycle it is recorded as being in — the phase names themselves are whatever the
-store's own records say, never a fixed list this board invents or reorders. Each card
-carries the feature's own progress over its live (non-dropped) cells and its recorded
-next action, and links onward to that feature's own detail page.
-
-**The feature set placed here is the union of every lane record the store carries and
-the one globally active feature the project's own top-level state names** — never the
-lane records alone. A project can have an active feature that carries no lane record of
-its own; a board that trusted the lane list by itself would silently omit the one
-feature actually being worked on. A project with no lane records at all still places
-its one active feature correctly. Phase placement is a pure function of the store's own
-records — a live worker currently active on a cell never re-places that cell's feature
-onto a different phase than the store itself records.
-
-A feature that has fully shipped never appears here — it renders exactly once, down in
-Finished, below. A worktree granted to a different feature never contributes its own
-cells to this project's phase board, its progress counts, or its shipped status; a
-granted worktree's cell ids never appear here at all. A project with nothing tracked by
-phase renders one honest line rather than an empty or hidden section.
-
-## Finished
-
-Every feature that has fully shipped, collapsed by default behind one summary line that
-states the true count of finished features and finished cells even while the list
-itself stays closed — collapsing a list is never allowed to understate what it holds.
-Opening it shows one compact line per feature — never one card per cell — naming its
-cell count and, when both of its timestamps are on record, its time to finish. This
-list is never capped or truncated: every feature that has shipped is named here, no
-matter how many there are. A project with nothing finished yet shows a single honest
-line instead of a collapsible, zeroed list.
-
-A feature is rendered in exactly one of Work by phase or Finished, never both and never
-neither, once it can be placed at all.
+A feature that has fully shipped appears twice on the board by design: once as a card
+in the Feature Hub's own Finished group, and again as a line in this list. The two are
+not competing claims about the same thing — the Hub groups every feature, live or
+shipped, by its current status at a glance, while this list is the complete, standing
+record of everything that has ever shipped, and is the one place that record is
+guaranteed never to be capped.
 
 ## Backlog & Review
 
@@ -227,11 +134,16 @@ Three sub-views in one supporting panel:
 
 - **PBIs by status.** Backlog work items are event-sourced — the same item can appear
   many times as its status changes over time, and its **current** status is whatever
-  its most recent recorded entry says. They are grouped and counted by that current
-  status, with a bounded, recent slice of individual titles beneath the counts; a
-  project with more items than that slice shows the true total alongside the visible
-  subset rather than looking smaller than its real backlog. A project with no backlog
-  items yet says so plainly.
+  its most recent recorded entry says. The browsable list shows only **open** items —
+  anything already done or declined is left out of the list itself — capped at a
+  recent 20; a project with more open items than that shows the true total of open
+  items alongside the visible subset ("Showing X of Y") rather than looking smaller
+  than its real open backlog. The status chips above the list still carry the full
+  count for every status, done and declined included, so closed work is never erased
+  from the numbers, only from the scrollable list. Each item can be expanded to reveal
+  a further line of its own detail. A project with no open items — whether because it
+  has no backlog at all, or because everything in it is already done or declined —
+  says so plainly with its own empty state.
 - **Findings by severity.** Each recorded finding carries a severity of P1, P2 or P3;
   they are summarised by severity, with P1 given visual weight because a P1 finding
   blocks, and the same bounded-recent-slice-with-true-total treatment as PBIs. A
@@ -241,9 +153,8 @@ Three sub-views in one supporting panel:
   session: **unreviewed** (it has never appeared in any session), **in review** (it
   appears in a session whose decision has not yet settled), or **settled** (it appears
   in a session whose decision reached approved or blocked). The count of open P1
-  findings is called out first, worded identically to the matching attention-list rule
-  so the two surfaces never disagree. Every sentence in this panel words independent
-  review as something the project's owner invokes — nothing here ever implies review is
+  findings is called out first. Every sentence in this panel words independent review
+  as something the project's owner invokes — nothing here ever implies review is
   already running or already queued as pending automatic work.
 
 A store with **zero** recorded review candidates is genuinely ambiguous — it is the
@@ -254,57 +165,29 @@ moment even one candidate is recorded, every count is real and computed, includi
 genuine zero for "in review" or "settled" when every recorded candidate really is
 unreviewed.
 
-## Where work is happening
-
-Three sub-views in one supporting panel, each with its own independent honest-empty
-state:
-
-- **Sessions.** Every recorded session, showing where it runs, whether it is currently
-  **live** or has gone **stale**, and how long ago it last reported in, in plain
-  relative language ("4 minutes ago") — never a raw timestamp. A session's transcript
-  path is never shown; it is an absolute path into the user's home directory and has no
-  place on an unauthenticated page (see "Renders nothing that identifies a filesystem
-  outside the project," below).
-- **Worktrees.** Every worktree the project has granted out, shown by its own feature,
-  phase, branch and liveness. A worktree whose directory or own state cannot be
-  resolved is marked plainly unresolved rather than being silently dropped from the
-  list.
-- **Workspaces.** Every workspace record the project's own store knows about, plain.
-
-## Process health
-
-Three or four sub-views in one supporting panel:
-
-- **File-lock contention** — every reservation currently held and not yet released,
-  naming the path, the agent and the cell involved. A released reservation is history,
-  not contention, and is left out. No contention right now renders one honest line.
-- **Model-tier mix** — one count per tier value the store actually used (never limited
-  to a fixed list of expected tiers, so an unrecognised value still shows rather than
-  vanishing), plus the share of tiered cells sitting on the single most expensive tier.
-  No cells to measure, and a store where every cell is untiered, each render their own
-  honest line rather than a fabricated percentage.
-- **Gate bypass** — the project's own tracked bypass setting, worded identically to the
-  matching attention-list rule when it is not off, and a plain statement when it is
-  recorded as off. A project with no tracked configuration file at all, or one that
-  failed to parse, is a distinct "unknown" state, never rendered the same as "off" —
-  off is something the file must have positively recorded.
-- When any part of the store could not be read, that list of unreadable files also
-  appears here — a partly-unreadable store is a process-health signal in its own right,
-  not a separate footer bolted onto the page.
-
 ## Drilling in
 
-Every cell on the board links to its own page, and every feature name links to its own
-page.
+Every feature card links to its own feature detail page.
 
+- A **feature detail page** shows the same human title, slug subtitle, Feature
+  Boundary sentence, and clamped/wrapped description as its Hub card, alongside a row
+  of chips summarising its current state. A **Docs row** links to every markdown file
+  recorded under the feature's own history docs. Below that sit three tabs:
+  **Activity**, **Todos**, and **Terminal** — the Terminal tab lists the project's own
+  live agent-terminal panes; a plain worker list is no longer shown anywhere in this
+  UI.
+
+  A feature's own detail page is not archive-free the way the Hub and the Finished
+  list are: it merges a feature's archived cells (the record `bee close` produces)
+  together with its still-live ones. A feature whose only remaining cells are archived
+  still shows correctly — it reads Closed, and its done-cell count includes the
+  archived ones rather than reading zero.
 - A **cell page** shows that cell in full: what it is, what proves it, its state and
   lane, the files it touches, the decisions it cites, its required outcomes, and its
   whole execution trace — who ran it, when it was claimed and capped, its outcome,
-  recorded deviations, and its test result. The list of files a cell touches lives only
-  here — the board's own cards never carry it, keeping the board itself scannable.
-- A **feature page** shows whether the feature shipped, its cycle time, and all of its
-  cells grouped into the same four cell-state buckets the board's headline numbers
-  count, each linking onward to its cell page.
+  recorded deviations, and its test result. Cells are not surfaced directly on the
+  board any more; each is reached through its own feature's detail page. A cell page
+  resolves an archived cell exactly as it does a live one.
 
 An unknown cell or feature name returns a clean not-found, never a blank page.
 
@@ -333,50 +216,42 @@ the page.** A field that is itself entirely a path is rendered relative to the p
 root, or dropped.
 
 Free text is a harder case, and this board holds the guarantee there too: several
-fields the board renders are free-form prose from the store — a recorded next action, a
-routing rationale, a handoff note, a review finding's own description — and any of
-these can have an absolute path typed into the middle of a sentence, not as the whole
-field. Every one of those fields is scanned for an absolute path embedded anywhere
-inside it, and any path found is reduced the same way a wholly-path field would be,
-while the words around it survive untouched. A project's operator can write "see
-/home/them/notes.txt for context" into a next action and that sentence still renders,
-with the path portion alone reduced.
+fields the board renders are free-form prose from the store — a feature's own boundary
+sentence and description, a review finding's own description, a backlog item's own
+detail — and any of these can have an absolute path typed into the middle of a
+sentence, not as the whole field. Every one of those fields is scanned for an absolute
+path embedded anywhere inside it, and any path found is reduced the same way a
+wholly-path field would be, while the words around it survive untouched. A project's
+operator can write "see /home/them/notes.txt for context" into a feature's description
+and that sentence still renders, with the path portion alone reduced.
 
-A feature name is itself free text from the store, and this board occasionally has to
-join a feature name onto a location on disk — today, only to check whether a feature
-has an unresolved post-feature note waiting. Before any such join happens, the name is
-validated: no path separators, no `..` segment, no leading dot, no control characters,
-and not already an absolute path of any shape. A name that fails validation is never
-looked up at all — the join is never attempted, so a maliciously- or accidentally-
-shaped feature name can never make this board read, or claim to check, anything outside
-the project it was asked about.
+A string shaped like an application route rather than a filesystem path — for example
+`/p/:id/_bee` — is not treated as a path by this scan and is left exactly as written;
+only a string that resolves as a genuine absolute filesystem path is reduced.
+
+A feature name is itself free text from the store, and this board has to join a
+feature name onto a location on disk to list the markdown files recorded under that
+feature's own history docs, for the Docs row on its detail page. Before any such join
+happens, the name is validated: no path separators, no `..` segment, no leading dot,
+no control characters, and not already an absolute path of any shape. A name that
+fails validation is never looked up at all — the join is never attempted, so a
+maliciously- or accidentally-shaped feature name can never make this board read, or
+claim to check, anything outside the project it was asked about.
 
 The tests that guard both halves of this guarantee assert against the **fixture's own
 root path**, not against a literal that merely looks like a production path — a check
 written against one hardcoded prefix would pass green while a real page leaked a real
 path verbatim. See `docs/history/learnings/20260805-toothless-security-assertions.md`.
 
-## What this board does not claim
-
-The gate-bypass value shown anywhere on this board — in the attention list and in
-process health — is the value the project's own **tracked** configuration file
-records, exactly as written. It is not necessarily the **effective** value: bee
-supports a separate, machine-local configuration overlay that is never checked into the
-project and is never read by this board. A project's tracked configuration can record
-bypass as off while a particular machine's own overlay actually has it on, or vice
-versa. This board makes no claim about that overlay at all — it says what the tracked
-file says, and labels it as such, rather than attempting to resolve the effective value
-and risk being confidently wrong on the one machine whose overlay disagrees.
-
 ## Honesty rules that hold everywhere
 
 Four rules apply across every section of this board, not just the ones above that
 happen to illustrate them:
 
-- **A dropped cell counts toward no total and no denominator, anywhere.** Not in the
-  headline numbers, not in a phase card's progress, not in whether a feature counts as
-  shipped. It never shipped, so counting it as done would inflate the picture; it is
-  simply absent from every count that would otherwise include it.
+- **A dropped cell counts toward no total and no denominator, anywhere.** Not in a
+  feature's own progress, not in its cell count on the Finished list, not in whether a
+  feature counts as shipped. It never shipped, so counting it as done would inflate
+  the picture; it is simply absent from every count that would otherwise include it.
 - **A capped or truncated list always states its true total beside the visible
   subset.** A real store can be large — hundreds of backlog rows and findings are
   normal — so detail lists are bounded to a recent slice, and whenever that slice is
@@ -385,28 +260,28 @@ happen to illustrate them:
   silently left off it.
 - **Nothing to measure renders as a stated absence, never as a zero or a division
   artifact.** "No features have shipped yet," "no live cells recorded for this feature
-  yet," a stat tile showing a plain dash instead of a fabricated `0.0` — these are the
-  shape this rule takes. A number that is genuinely, computably zero — a bucket that
-  really does hold no cells right now, or a feature whose real, measured cycle time
-  happens to round to a very small figure — is not what this rule forbids; it forbids
-  manufacturing a number where there was no measurement to take.
+  yet," "no open backlog items yet" — these are the shape this rule takes. A number
+  that is genuinely, computably zero — a bucket that really does hold no cells right
+  now, or a feature whose real, measured time to finish happens to round to a very
+  small figure — is not what this rule forbids; it forbids manufacturing a number
+  where there was no measurement to take.
 - **A store that cannot be fully read says so.** Any single unreadable file — missing,
   empty, truncated, or malformed — degrades the page to a partial view that names what
-  could not be read, both in the needs-attention list and in process health. It never
-  takes down the page, and a malformed line among otherwise-good lines loses only
-  itself. A project with no store at all is a different, earlier case — presence, not
-  degradation — and is a clean not-found, never an empty dashboard (see "Where it
+  could not be read, rather than silently dropping or miscounting the data it held. It
+  never takes down the page, and a malformed line among otherwise-good lines loses
+  only itself. A project with no store at all is a different, earlier case — presence,
+  not degradation — and is a clean not-found, never an empty dashboard (see "Where it
   appears," above).
 
 ## Independent review is always invoked
 
-Wherever this board mentions independent review — the lifecycle stepper, the
-needs-attention rules that reference it, the review queue panel — it is worded the same
-way: review is something the project's owner invokes, never a stage the board implies
-is already running, already queued, or pending on its own. A gate that has not yet been
-through review reads as "not yet approved," never as "review in progress"; a candidate
-that has never appeared in a session reads as "never reviewed," never as "awaiting
-automatic review." This holds even when the count of unreviewed or high-risk work is
+Wherever this board mentions independent review — the Feature Hub's definition of
+"waiting on you," and the review queue panel in Backlog & Review — it is worded the
+same way: review is something the project's owner invokes, never a stage the board
+implies is already running, already queued, or pending on its own. A gate that has not
+yet been through review reads as "not yet approved," never as "review in progress"; a
+candidate that has never appeared in a session reads as "never reviewed," never as
+"awaiting automatic review." This holds even when the count of unreviewed work is
 large enough that a different phrasing might read as more urgent — the wording never
 implies the board itself is doing, or about to do, that work.
 
@@ -417,9 +292,9 @@ backlog rows and thousands of decision events are normal. Detail lists are cappe
 small recent slice, and each panel states its true total when it is showing a capped
 subset (see "Honesty rules that hold everywhere," above).
 
-Only live cells are read. The archive that `bee close` produces is not consulted; at
-the time this was decided, live cells outnumbered archived ones roughly forty to one.
-This is worth revisiting if archiving becomes routine.
+The Feature Hub and the standalone Finished list are archive-free: only live cells
+feed a feature's progress and its shipped status there. A feature's own detail page,
+and a cell page, are not — see "Drilling in," above.
 
 ## Scope
 
