@@ -534,9 +534,20 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    under it stays draggable; the stack takes them back. Out of flow, the
    column still opens no row of its own above the keys, and
    `env(safe-area-inset-bottom)` layered onto the sticky offset keeps it
-   clear of an iPhone's home-indicator strip. */
+   clear of an iPhone's home-indicator strip.
+   fab-sticks-to-bottom: the rail lays its stack out with `justify-content:
+   flex-end`, and that is not cosmetic — it is what makes the sticky offset
+   above mean anything. `position: sticky` with a `bottom` offset only ever
+   pulls an element UP, when it would otherwise fall below the viewport's
+   lower edge; it never pushes one down. As the rail's only in-flow child
+   the stack started at the rail's TOP, already in view, so sticky had
+   nothing to do and the column pinned to the screen's top-right corner and
+   sat there through every scroll. Starting it at the rail's bottom is what
+   gives sticky something to hold. `flex-end` rather than an auto margin:
+   this rule pair carries no margin at all, by test, so the column can never
+   be pushed out of the screen's bounds. */
 .term-screen-wrap { position: relative; display: flow-root; }
-.term-scroll { position: absolute; right: var(--space-3); top: var(--space-3); bottom: var(--space-3); z-index: 2; width: max-content; pointer-events: none; }
+.term-scroll { position: absolute; right: var(--space-3); top: var(--space-3); bottom: var(--space-3); display: flex; flex-direction: column; justify-content: flex-end; z-index: 2; width: max-content; pointer-events: none; }
 .term-scroll__stack { position: sticky; bottom: calc(var(--space-3) + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: var(--space-2); width: max-content; padding: var(--space-1); border-radius: var(--radius-sm); background: var(--color-surface-raised); box-shadow: 0 1px 4px rgb(0 0 0 / 0.35); pointer-events: auto; }
 /* Each button is a fixed-size circle — equal `width`/`height`, not a
    `min-width` — so `border-radius: 50%` draws a true circle rather than a
@@ -4366,6 +4377,19 @@ mod tests {
         assert!(
             !html.contains(".term-scroll { position: sticky"),
             "the rail itself is placed by the screen, never by the flow: {html}"
+        );
+        // (fab-sticks-to-bottom-1) Without this the sticky offset below is
+        // inert: sticky-bottom only pulls an element UP when it would fall
+        // past the viewport's lower edge, so a stack starting at the rail's
+        // top simply stays there — the top-right corner, every scroll long.
+        assert!(
+            html.contains("display: flex; flex-direction: column; justify-content: flex-end;")
+                && html
+                    .split(".term-scroll { ")
+                    .nth(1)
+                    .and_then(|rest| rest.split('}').next())
+                    .is_some_and(|rule| rule.contains("justify-content: flex-end")),
+            "the rail must lay its stack out at the bottom, or the stack's sticky offset holds nothing: {html}"
         );
         assert!(
             html.contains(
