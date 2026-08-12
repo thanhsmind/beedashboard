@@ -4272,6 +4272,73 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&sibling).ok();
     }
 
+    /// (board-liveness-2) The board's own liveness union proven at the HTTP
+    /// layer: a zero-cell feature whose lane names a live session, and a
+    /// second zero-cell feature named only by a granted worktree, both land
+    /// under In Progress — the exact "Waiting 0 / In Progress 0" gap this
+    /// cell closes, reported while every cell was capped between units of
+    /// work but two sessions were still actively on the repo.
+    #[tokio::test]
+    async fn feature_hub_places_session_bound_and_worktree_bound_zero_cell_features_under_in_progress() {
+        let root = fresh_root("hub-liveness-union");
+        write(
+            &root,
+            ".bee/lanes/session-live-feat.json",
+            &lane_json(
+                "session-live-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": true, "execution": true, "review": true"#),
+                None,
+            ),
+        );
+        write(
+            &root,
+            ".bee/sessions/live.json",
+            &format!(
+                r#"{{"id": "live", "started_at": "2026-08-12T05:00:00Z", "last_heartbeat": "{now}", "workspace_id": "main", "source": "startup", "lane": "session-live-feat"}}"#,
+                now = rfc3339_minutes_ago(1)
+            ),
+        );
+
+        write(
+            &root,
+            ".bee/lanes/wt-live-feat.json",
+            &lane_json(
+                "wt-live-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": true, "execution": true, "review": true"#),
+                None,
+            ),
+        );
+        let sibling = make_worktree_sibling("hub-liveness-union-wt");
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"wt-live-feat","mode":"standard"}"#);
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["hub-liveness-union-wt"]));
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-liveness-union");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"2\""), "{body}");
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/session-live-feat\"", project.id)),
+            "the session-bound zero-cell feature must render under In Progress: {body}"
+        );
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/wt-live-feat\"", project.id)),
+            "the worktree-bound zero-cell feature must render under In Progress: {body}"
+        );
+        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"0\""), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
     /// (edge, feature-hub fh-1) An entirely empty store — no cells, no
     /// lanes, no archive — still renders all three groups, each stating
     /// its own honest, distinct empty line (bee-board-pm D5's "sections

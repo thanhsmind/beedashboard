@@ -1620,9 +1620,20 @@ fn bee_board_asof() -> String {
 /// order (D4's "waiting wins over in-progress; finished only when no live
 /// cells"):
 ///
-/// - **Waiting on you**: a feature with live work — `doing`/`waiting`/
-///   `stuck` cells present, or this is `state.feature`, the globally
-///   active one, even with none yet — whose current-stop gate
+/// A feature counts as **live work** (`has_live_work`, board-liveness-2)
+/// when ANY of: it has `doing`/`waiting`/`stuck` cells; it is
+/// `state.feature`, the globally active one, even with none yet; a live
+/// session (`BeeSession.live`, `SESSION_LIVE_MINUTES`) carries a `lane`
+/// naming this feature; or a granted worktree in `snapshot.worktrees`
+/// names this feature as its own active one. A session heartbeat or a
+/// worktree grant is a real signal between units of work — every cell
+/// capped, nothing `doing` — that the pre-liveness cell-only count missed
+/// entirely, reporting "Waiting 0 / In Progress 0" while two sessions were
+/// actively on the repo. Deliberately not phase-based: a lane parked at
+/// `swarming`/`exploring` with no session, no grant and no live cell is
+/// exactly the D4 ghost shape this rule must never resurrect.
+///
+/// - **Waiting on you**: a feature with live work whose current-stop gate
 ///   ([`bee_gate_current_stop`], reused from the retired Review column:
 ///   the independent-review gate itself never counts, since that gate is
 ///   user-invoked on its own schedule, never a blocking stop) is still
@@ -1632,13 +1643,15 @@ fn bee_board_asof() -> String {
 ///   doc comment says so), so it is folded onto whichever feature
 ///   `state.json` currently names active. Either pull yields to Finished
 ///   when the feature has no live cells left: a closed feature owes no
-///   decision, and `state.feature` keeps naming it long after its last
-///   cell was archived.
-/// - **In Progress**: everything left with `doing`/`waiting`/`stuck`
-///   cells — live work not already claimed by Waiting.
-/// - **Finished**: everything left with no live cells AND either a lane
-///   `phase` of exactly `"compounding-complete"` (bee's own terminal
-///   phase — `"terminal"` is a string bee never writes) OR a
+///   decision, and `state.feature`/a bound session/a granted worktree can
+///   all keep naming it long after its last cell was archived.
+/// - **In Progress**: everything left with live work not already claimed
+///   by Waiting, and not yielding to Finished.
+/// - **Finished**: everything left with no live *cells* left (a bound
+///   session or a granted worktree naming a closed feature's lane never
+///   drags it back out — board-finished-wins-1) AND either a lane `phase`
+///   of exactly `"compounding-complete"` (bee's own terminal phase —
+///   `"terminal"` is a string bee never writes) OR a
 ///   `.bee/cells/archive/<feature>/` directory of its own
 ///   (`list_archived_feature_dirs`, checked once up front and reused as a
 ///   set — no extra store read per feature), including every feature that
@@ -1647,9 +1660,9 @@ fn bee_board_asof() -> String {
 ///   done/total counts and last activity, since a finished feature's live
 ///   `cell_counts` are typically zero (its cells already moved to
 ///   archive). A feature that fits neither rule (a pre-build, zero-cell
-///   lane, e.g. still `exploring`) renders nowhere on this list — the
-///   pre-redesign board never showed it either, since it never held a
-///   cell of its own.
+///   lane with no live session and no worktree grant, e.g. still
+///   `exploring`) renders nowhere on this list — the pre-redesign board
+///   never showed it either, since it never held a cell of its own.
 ///
 /// This is also D4's ghost-card fix: the retired Review column rendered a
 /// card for ANY phase_board feature sitting on an unapproved gate,
@@ -1699,7 +1712,15 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
         placed.insert(f.feature.as_str());
         let live = f.cell_counts.doing + f.cell_counts.waiting + f.cell_counts.stuck;
         let is_active = active_feature == Some(f.feature.as_str());
-        let has_live_work = live > 0 || is_active;
+        let session_bound = snapshot
+            .sessions
+            .iter()
+            .any(|s| s.live && s.lane.as_deref() == Some(f.feature.as_str()));
+        let worktree_bound = snapshot
+            .worktrees
+            .iter()
+            .any(|w| w.feature.as_deref() == Some(f.feature.as_str()));
+        let has_live_work = live > 0 || is_active || session_bound || worktree_bound;
 
         let gate_stop =
             bee_gate_current_stop(f.approved_gates.as_ref()).filter(|(key, _)| *key != "review");
@@ -1734,7 +1755,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
                 Some(&reason),
                 docs,
             ));
-        } else if live > 0 {
+        } else if !finished_and_idle && has_live_work {
             in_progress_count += 1;
             let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
             let worktree = bee_hub_worktree_chip(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
@@ -4229,6 +4250,219 @@ mod tests {
         assert!(
             !html.contains("cells done") && !html.contains("No cells recorded."),
             "hub-finished-compact: a Finished row carries no progress count of its own, done or empty: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (board-liveness-2) A feature with zero live cells — its lane's every
+    /// gate is deliberately approved here so an unapproved gate can never be
+    /// the reason it places — still renders under In Progress once a live
+    /// session (`.bee/sessions/*.json`, heartbeat inside
+    /// `SESSION_LIVE_MINUTES`) carries a `lane` naming it. This is exactly
+    /// the shape the pre-liveness board missed: every cell capped between
+    /// units of work, "In Progress 0" while a session actively worked the
+    /// feature.
+    #[test]
+    fn hub_places_a_zero_cell_feature_with_a_live_session_bound_under_in_progress() {
+        let root =
+            std::env::temp_dir().join(format!("mdview-views-hub-session-bound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/session-bound-feat.json",
+            r#"{
+                "feature": "session-bound-feat",
+                "phase": "swarming",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
+            }"#,
+        );
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            ".bee/sessions/live.json",
+            &format!(r#"{{"id": "live", "last_heartbeat": "{now}", "lane": "session-bound-feat"}}"#),
+        );
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/session-bound-feat""#),
+            "a zero-cell feature with a live session bound to its lane must render under In Progress: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/session-bound-feat""#),
+            "with every gate approved, the session-bound feature must not land under Waiting: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (board-liveness-2) The same zero-cell, all-gates-approved shape as
+    /// above, but the liveness signal this time is a granted worktree
+    /// (`.bee/runtime/worktree-grants.json`) whose own sibling
+    /// `.bee/state.json` names this feature as its own active one — never a
+    /// session, never a cell.
+    #[test]
+    fn hub_places_a_zero_cell_feature_named_by_a_granted_worktree_under_in_progress() {
+        let root = std::env::temp_dir().join(format!("mdview-views-hub-wt-bound-{}", std::process::id()));
+        let sibling = std::env::temp_dir().join(format!("mdview-views-hub-wt-bound-sibling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&sibling);
+        let write = |dir: &std::path::Path, rel: &str, body: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            &root,
+            ".bee/lanes/wt-bound-feat.json",
+            r#"{
+                "feature": "wt-bound-feat",
+                "phase": "swarming",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
+            }"#,
+        );
+        std::fs::create_dir_all(&sibling).unwrap();
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"wt-bound-feat","mode":"standard"}"#);
+        let grant_id = sibling.file_name().unwrap().to_string_lossy().to_string();
+        write(&root, ".bee/runtime/worktree-grants.json", &format!(r#"{{"{grant_id}": true}}"#));
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/wt-bound-feat""#),
+            "a zero-cell feature named by a granted worktree's own active feature must render under In Progress: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&sibling);
+    }
+
+    /// (board-liveness-2) A lane parked at `swarming` with no live cells, no
+    /// live session bound and no granted worktree naming it renders nowhere
+    /// on the hub — the exact D4 ghost-card shape this rule must never
+    /// resurrect by going phase-based instead of liveness-based.
+    #[test]
+    fn hub_renders_no_entry_for_a_parked_lane_with_no_liveness_signal_at_all() {
+        let root = std::env::temp_dir().join(format!("mdview-views-hub-parked-lane-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/parked-feat.json",
+            r#"{
+                "feature": "parked-feat",
+                "phase": "swarming",
+                "mode": "standard",
+                "next_action": "none yet"
+            }"#,
+        );
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            !html.contains("parked-feat"),
+            "a parked lane with no live cell, no live session and no worktree grant must render nowhere: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (board-liveness-2, board-finished-wins-1) A closed feature — every
+    /// cell archived, `phase` at `"compounding-complete"` — must stay under
+    /// Finished even while BOTH a live session's own `lane` names it AND
+    /// `.bee/HANDOFF.json` reads as a pause naming `state.feature`: neither
+    /// signal drags a feature with no live cells left back out of Finished.
+    #[test]
+    fn hub_keeps_a_closed_feature_in_finished_even_with_a_bound_session_and_a_pause_handoff() {
+        let root =
+            std::env::temp_dir().join(format!("mdview-views-hub-closed-session-bound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/state.json",
+            r#"{
+                "feature": "closed-session-feat",
+                "phase": "compounding-complete",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": false}
+            }"#,
+        );
+        write(
+            ".bee/HANDOFF.json",
+            r#"{"written_at": "2026-08-10T09:00:00Z", "next_action": "Nothing pending from me.", "kind": "pause"}"#,
+        );
+        write(
+            ".bee/cells/archive/closed-session-feat/cf-1.json",
+            r#"{
+                "id": "cf-1",
+                "feature": "closed-session-feat",
+                "lane": "tiny",
+                "title": "Cell cf-1",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "capped",
+                "tier": "generation",
+                "trace": {"worker": "w1", "claimed_at": "2026-08-10T08:00:00Z", "capped_at": "2026-08-10T08:30:00Z"}
+            }"#,
+        );
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            ".bee/sessions/live.json",
+            &format!(r#"{{"id": "live", "last_heartbeat": "{now}", "lane": "closed-session-feat"}}"#),
+        );
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/closed-session-feat""#),
+            "a closed feature must stay under Finished even with a bound live session: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/closed-session-feat""#),
+            "a closed feature owes no decision even while a session is bound to its lane: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/closed-session-feat""#),
+            "a bound live session must never drag a finished feature back into In Progress: {html}"
         );
 
         let _ = std::fs::remove_dir_all(&root);

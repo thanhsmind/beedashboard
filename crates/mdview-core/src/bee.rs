@@ -468,6 +468,10 @@ pub struct BeeSession {
     pub live: bool,
     pub workspace_id: Option<String>,
     pub source: Option<String>,
+    /// The feature lane this session is bound to, verbatim from the
+    /// session record's `"lane"` key. `None` when the record carries no
+    /// lane (a session that has not claimed a feature yet).
+    pub lane: Option<String>,
 }
 
 /// One `.bee/lanes/<feature>.json` per-feature lane record, mirroring the
@@ -1927,6 +1931,7 @@ fn parse_session(path: &Path, now: time::OffsetDateTime) -> Result<BeeSession, S
     let started_at = v.get("started_at").and_then(Value::as_str).map(String::from);
     let workspace_id = v.get("workspace_id").and_then(Value::as_str).map(String::from);
     let source = v.get("source").and_then(Value::as_str).map(String::from);
+    let lane = v.get("lane").and_then(Value::as_str).map(String::from);
 
     let heartbeat_age_minutes = (now - heartbeat).as_seconds_f64() / 60.0;
     let live = heartbeat_age_minutes <= SESSION_LIVE_MINUTES;
@@ -1938,6 +1943,7 @@ fn parse_session(path: &Path, now: time::OffsetDateTime) -> Result<BeeSession, S
         live,
         workspace_id,
         source,
+        lane,
     })
 }
 
