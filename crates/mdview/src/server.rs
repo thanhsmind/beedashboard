@@ -7657,10 +7657,12 @@ mod bee_route_tests {
     /// it: `compute_d7_buckets` (`mdview_core::bee`) never takes
     /// `running_workers` as an input, so the open cell stays counted as
     /// live on `state.feature`'s own feature-hub card ("demo", the only
-    /// feature this fixture declares — landing under Waiting on you here,
-    /// since `state_json_with_workers` carries no `approved_gates` of its
-    /// own), and its own progress must keep reading "0/1 cell done" even
-    /// though a live worker names its one open cell.
+    /// feature this fixture declares), and its own progress must keep
+    /// reading "0/1 cell done" even though a live worker names its one open
+    /// cell. The card lands under In Progress: the fixture's own session
+    /// beat a minute ago and carries no lane, so `working-now-default-lane-1`
+    /// folds it onto `state.feature` and the unapproved gate stops owing a
+    /// decision while that agent is still on it.
     #[tokio::test]
     async fn d7_buckets_unchanged_by_worker_presence() {
         let root = fresh_root("running-buckets-untouched");
@@ -7683,7 +7685,7 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains("data-hub-group=\"waiting\" data-hub-count=\"1\""),
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""),
             "the still-open cell must keep its feature counted as live work: {body}"
         );
         assert!(

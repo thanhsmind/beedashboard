@@ -1891,10 +1891,20 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
         // (waiting-means-stopped-1) A grant is not a heartbeat: only a
         // session's own recency counts toward "working right now", never a
         // granted worktree on its own.
-        let working_now = snapshot
-            .sessions
-            .iter()
-            .any(|s| s.lane.as_deref() == Some(f.feature.as_str()) && s.heartbeat_age_minutes <= WORKING_MINUTES);
+        // (working-now-default-lane-1) A session running the DEFAULT
+        // pipeline carries no lane of its own — it is tied to its feature
+        // through `state.json`'s own `feature` instead — so matching on the
+        // lane alone missed the very case this rule exists for: an agent
+        // mid-interview on the active feature, its gate not yet asked for.
+        // Folding a lane-less session onto `state.feature` is the same fold
+        // `waiting_via_handoff` and the Live strip's own label already use.
+        let working_now = snapshot.sessions.iter().any(|s| {
+            let names_this_feature = match s.lane.as_deref() {
+                Some(lane) => lane == f.feature.as_str(),
+                None => is_active,
+            };
+            names_this_feature && s.heartbeat_age_minutes <= WORKING_MINUTES
+        });
 
         let gate_stop =
             bee_gate_current_stop(f.approved_gates.as_ref()).filter(|(key, _)| *key != "review");
@@ -4648,6 +4658,139 @@ mod tests {
         assert!(
             !html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/working-feat""#),
             "an agent actively working the feature must never see it under Waiting on you: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (regression, working-now-default-lane-1) The case that prompted the
+    /// working-now rule was itself missed by it: a session running the
+    /// DEFAULT pipeline carries no `lane` of its own, and is tied to its
+    /// feature through `.bee/state.json`'s `feature` instead. Matching on
+    /// the lane alone left the active feature parked under Waiting on you
+    /// while its own agent had beaten a minute earlier. A lane-less session
+    /// now folds onto `state.feature` — the same fold `waiting_via_handoff`
+    /// and the Live strip's label already use — and only onto it: another
+    /// feature's own waiting pull is untouched.
+    #[test]
+    fn hub_counts_a_lane_less_session_as_working_the_active_feature_only() {
+        let root = std::env::temp_dir().join(format!("mdview-views-hub-working-default-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        // The active feature, mid-interview: its explore gate is unapproved.
+        write(
+            ".bee/state.json",
+            r#"{
+                "feature": "active-feat",
+                "phase": "exploring",
+                "approved_gates": {"context": false, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        // A second lane, also gate-stopped, that nobody is working. It
+        // carries a claimed cell of its own so it has live work to be
+        // stopped ON — a zero-cell lane nobody is working renders nowhere
+        // at all, which would prove nothing here.
+        write(
+            ".bee/lanes/other-feat.json",
+            r#"{
+                "feature": "other-feat",
+                "phase": "exploring",
+                "mode": "standard",
+                "approved_gates": {"context": false, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        write(
+            ".bee/cells/other-1.json",
+            r#"{
+                "id": "other-1",
+                "feature": "other-feat",
+                "lane": "tiny",
+                "title": "Cell other-1",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "claimed",
+                "tier": "generation",
+                "trace": {"worker": "w1", "claimed_at": "2026-08-10T08:00:00Z", "capped_at": null}
+            }"#,
+        );
+        let hb = (time::OffsetDateTime::now_utc() - time::Duration::minutes(1))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        // No "lane" key at all — exactly what the default pipeline writes.
+        write(
+            ".bee/sessions/default.json",
+            &format!(r#"{{"id": "default", "last_heartbeat": "{hb}", "workspace_id": "main"}}"#),
+        );
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/active-feat""#),
+            "a lane-less session beating a minute ago works the ACTIVE feature: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/active-feat""#),
+            "the active feature must not sit in Waiting while its own agent is mid-interview: {html}"
+        );
+        assert!(
+            html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/other-feat""#),
+            "a lane-less session must not suppress some OTHER feature's own waiting pull: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (regression, working-now-default-lane-1) The same lane-less session,
+    /// twenty minutes cold: past `WORKING_MINUTES`, so the active feature's
+    /// unapproved gate is owed the owner a decision again.
+    #[test]
+    fn hub_sends_the_active_feature_to_waiting_once_its_lane_less_session_goes_cold() {
+        let root = std::env::temp_dir().join(format!("mdview-views-hub-working-default-cold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/state.json",
+            r#"{
+                "feature": "active-feat",
+                "phase": "exploring",
+                "approved_gates": {"context": false, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        let hb = (time::OffsetDateTime::now_utc() - time::Duration::minutes(20))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            ".bee/sessions/default.json",
+            &format!(r#"{{"id": "default", "last_heartbeat": "{hb}", "workspace_id": "main"}}"#),
+        );
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/active-feat""#),
+            "twenty minutes cold is not working: the gate owes a decision again: {html}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
