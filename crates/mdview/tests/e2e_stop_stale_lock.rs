@@ -53,6 +53,10 @@ fn write_lock(home: &Path, pid: u32, host: &str, port: u16) {
         host: host.to_string(),
         port,
         started_at: "2026-08-06T00:00:00Z".to_string(),
+        // This fork records the binary's own version in the lock file; the
+        // upstream test this file came from predates that field. A stale lock
+        // written by a build that never carried one is exactly the `None` case.
+        version: None,
     };
     std::fs::write(
         lock_path(home),

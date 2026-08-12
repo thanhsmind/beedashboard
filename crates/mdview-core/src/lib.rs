@@ -20,6 +20,7 @@ pub mod paths_boundary;
 pub mod process;
 pub mod render;
 pub mod repository;
+pub mod short_link;
 pub mod transcript;
 
 pub use config::Config;
