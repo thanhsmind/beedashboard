@@ -88,7 +88,7 @@
      ───────────────────────────────────────────────────────── */
   --font-display: ui-sans-serif, system-ui, sans-serif;
   --font-body:    ui-sans-serif, system-ui, sans-serif;
-  --font-mono:    ui-monospace, "SF Mono", Menlo, monospace;
+  --font-mono:    'JetBrains Mono', ui-monospace, "SF Mono", Menlo, monospace;
   --font-accent:  var(--font-display);
   /* Variable-font optical sizing (opsz) — real effect on display/accent
      faces like Fraunces/Newsreader; harmless `auto` on static faces. */
@@ -365,7 +365,7 @@ html[data-scheme="dark"] {
 html[data-theme][data-typeface-set="system"] {
   --font-display: ui-sans-serif, system-ui, sans-serif;
   --font-body:    ui-sans-serif, system-ui, sans-serif;
-  --font-mono:    ui-monospace, "SF Mono", Menlo, monospace;
+  --font-mono:    'JetBrains Mono', ui-monospace, "SF Mono", Menlo, monospace;
   --font-accent:  var(--font-display);
   --font-optical-sizing: auto;
   --weight-regular: 400; --weight-medium: 500; --weight-semibold: 600; --weight-bold: 700;
