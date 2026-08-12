@@ -1683,21 +1683,30 @@ fn bee_live_strip_section(snapshot: &BeeSnapshot) -> String {
             .and_then(|f| f.phase.as_deref())
             .unwrap_or("phase unknown");
         let heartbeat = bee_relative_minutes(s.heartbeat_age_minutes);
-        let workspace = match &s.workspace_id {
-            Some(id) => snapshot
+        // `BeeWorkspace.root` arrives relativized against the project root,
+        // so the MAIN workspace — whose root IS that root — arrives as the
+        // empty string. Naming it by its own id ("main") beats trailing a
+        // separator with nothing after it, which reads as a rendering bug.
+        let workspace = s.workspace_id.as_ref().and_then(|id| {
+            let named = snapshot
                 .workspaces
                 .iter()
                 .find(|w| &w.id == id)
-                .map(|w| w.root.clone())
-                .unwrap_or_else(|| id.clone()),
-            None => "no workspace recorded".to_string(),
+                .map(|w| w.root.trim())
+                .filter(|root| !root.is_empty())
+                .unwrap_or(id.as_str());
+            (!named.is_empty()).then(|| named.to_string())
+        });
+        let workspace_html = match &workspace {
+            Some(name) => format!(" · {}", esc(name)),
+            None => String::new(),
         };
         rows.push_str(&format!(
-            r#"<div class="bee-strip__row" data-live-kind="session"><span class="bee-strip__label">{label}</span><span class="bee-strip__meta">{phase} · beat {heartbeat} · {workspace}</span></div>"#,
+            r#"<div class="bee-strip__row" data-live-kind="session"><span class="bee-strip__label">{label}</span><span class="bee-strip__meta">{phase} · beat {heartbeat}{workspace_html}</span></div>"#,
             label = esc(label),
             phase = esc(phase),
             heartbeat = esc(&heartbeat),
-            workspace = esc(&workspace),
+            workspace_html = workspace_html,
         ));
         row_count += 1;
     }
@@ -4563,6 +4572,62 @@ mod tests {
         assert!(html.contains("executing"), "the row must name that lane's phase: {html}");
         assert!(html.contains("4 minutes ago"), "the row must state the heartbeat age: {html}");
         assert!(html.contains("sibling-dir"), "the row must name the session's own workspace: {html}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (regression, strip-workspace-label-1) `BeeWorkspace.root` arrives
+    /// relativized against the project root, so the MAIN workspace — whose
+    /// root IS that root — arrives as the empty string, and the row used to
+    /// render "swarming · beat 2 minutes ago · " with nothing after the last
+    /// separator: a dangling separator reads as a rendering bug. The row now
+    /// falls back to the workspace's own id, and drops the segment entirely
+    /// when the session records no workspace at all.
+    #[test]
+    fn live_strip_names_the_main_workspace_rather_than_trailing_an_empty_separator() {
+        let root = std::env::temp_dir().join(format!("mdview-views-strip-main-ws-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        let hb = (time::OffsetDateTime::now_utc() - time::Duration::minutes(2))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            ".bee/sessions/main-ws.json",
+            &format!(r#"{{"id": "main-ws", "last_heartbeat": "{hb}", "lane": "main-feat", "workspace_id": "main"}}"#),
+        );
+        // The main workspace's own root is the project root itself, which is
+        // exactly what relativizes away to "".
+        write(
+            ".bee/runtime/workspaces/main.json",
+            &format!(
+                r#"{{"id": "main", "type": "main", "root": "{}", "branch": "main", "attached_sessions": []}}"#,
+                root.to_string_lossy()
+            ),
+        );
+        write(
+            ".bee/sessions/no-ws.json",
+            &format!(r#"{{"id": "no-ws", "last_heartbeat": "{hb}", "lane": "other-feat"}}"#),
+        );
+
+        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let html = bee_live_strip_section(&snapshot);
+
+        assert!(
+            html.contains("beat 2 minutes ago · main"),
+            "the main workspace must be named by its own id, not relativized away: {html}"
+        );
+        assert!(
+            !html.contains("· </span>") && !html.contains(" · <"),
+            "no row may end on a separator with nothing after it: {html}"
+        );
+        assert!(
+            html.contains("beat 2 minutes ago</span>"),
+            "a session with no workspace recorded must drop the segment, separator and all: {html}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
