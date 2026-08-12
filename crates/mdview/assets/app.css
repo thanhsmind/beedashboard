@@ -795,9 +795,14 @@ main.fg-page {
    split into two equal left|right halves (crumbs on the left; the right
    half carries a code file's type/size, when the page has one) ───── */
 .breadcrumb {
-  max-width: var(--reading-col);
-  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  position: sticky;
+  top: 53px; /* below the sticky topbar; matches its rendered height, same
+                offset .sidebar/.rightbar already stick to */
   padding: var(--space-3) var(--space-6);
+  background: var(--color-bg);
+  border-bottom: var(--border-width-hairline) solid var(--color-border);
   font-family: var(--type-body-sm-font);
   font-size: var(--type-body-sm-size);
   color: var(--color-text-muted);
