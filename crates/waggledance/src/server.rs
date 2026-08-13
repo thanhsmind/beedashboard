@@ -32,7 +32,7 @@ pub struct AppState {
     pub highlight_css: Arc<String>,
     /// Overrides `waggledance_core::config::data_dir()` for the settings routes
     /// (`/settings`, `/api/config`) so a route-level test can point config I/O
-    /// at a temp dir instead of the developer's real `~/.mdview`. `None` in
+    /// at a temp dir instead of the developer's real `~/.waggledance`. `None` in
     /// production — those routes then resolve exactly where they always did.
     pub config_data_dir: Option<PathBuf>,
     /// The herdr client (agent-terminal-2): a real `SocketHerdr` in
@@ -45,7 +45,7 @@ pub struct AppState {
     /// root (`terminal_transcript`) so a route-level test can point
     /// transcript I/O at a scratch dir instead of the developer's real
     /// `~/.claude/projects` — the same seam `config_data_dir` gives the
-    /// settings routes over `~/.mdview`. `None` in production: the
+    /// settings routes over `~/.waggledance`. `None` in production: the
     /// transcript reader then resolves the root exactly where Claude Code
     /// itself writes it.
     pub transcript_root: Option<PathBuf>,
@@ -53,8 +53,8 @@ pub struct AppState {
     /// `terminal_attach` stores uploaded images, the same shape
     /// `config_data_dir`/`transcript_root` give other terminal routes above.
     /// `None` in production resolves through `resolve_attach_root`'s
-    /// env-or-home default (`$XDG_RUNTIME_DIR/mdview-attach`, else
-    /// `~/.cache/mdview/attach`); every attach-route test points this at a
+    /// env-or-home default (`$XDG_RUNTIME_DIR/waggledance-attach`, else
+    /// `~/.cache/waggledance/attach`); every attach-route test points this at a
     /// scratch dir instead of the developer's real cache.
     pub attach_root: Option<PathBuf>,
     /// D7's live background manager (agent-terminal-18): reconciled against
@@ -65,7 +65,7 @@ pub struct AppState {
     pub terminal_background: Arc<crate::TerminalBackground>,
     /// The D7/D9 notification outbox (agent-terminal-17): opened once at
     /// startup — in-memory for every route test, so no test ever touches
-    /// the real `~/.mdview/notify.sqlite` — and handed to
+    /// the real `~/.waggledance/notify.sqlite` — and handed to
     /// `terminal_background` on every reconcile rather than reopened per
     /// toggle.
     pub notify_store: Arc<waggledance_core::notify_store::NotifyStore>,
@@ -310,22 +310,22 @@ pub async fn serve() -> Result<()> {
         started_at: now_rfc3339(),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
     })?;
-    tracing::info!("mdview serving on http://{addr}");
+    tracing::info!("waggledance serving on http://{addr}");
     // A wildcard bind (`0.0.0.0`) makes `http://0.0.0.0:PORT` a dead link, so
     // list every address that actually reaches this server — one per LAN
     // interface (loopback when none) or the configured hostname override.
     let urls = runtime::display_urls_for(&cfg.host, addr.port());
     if urls.len() == 1 {
-        println!("mdview serving on {}", urls[0]);
+        println!("waggledance serving on {}", urls[0]);
     } else {
-        println!("mdview serving on:");
+        println!("waggledance serving on:");
         for url in &urls {
             println!("  {url}");
         }
     }
     if !is_loopback_host(&cfg.host) {
         eprintln!(
-            "warning: mdview is bound to a non-loopback address ({}) and has NO \
+            "warning: waggledance is bound to a non-loopback address ({}) and has NO \
              authentication at all — anyone who can reach this port can read \
              every indexed file, each project's filesystem path, and drive the \
              agent terminal. Bind 127.0.0.1 unless you intend LAN exposure.",
@@ -347,7 +347,7 @@ async fn shutdown_signal() {
 }
 
 /// stale-index-refresh-1: reconcile every registered project's index against
-/// its filesystem, through the SAME door `mdview refresh` uses
+/// its filesystem, through the SAME door `waggledance refresh` uses
 /// (`Engine::refresh`, which chains `IndexService::index_project` and
 /// `reindex_links`) -- so this startup sweep and that explicit command can
 /// never drift onto two different reconcile paths. Returns
@@ -360,7 +360,7 @@ async fn shutdown_signal() {
 /// `serve()`'s network bind and process-wide lock file.
 ///
 /// A project whose root has gone missing since the daemon last ran (deleted,
-/// unmounted, renamed outside mdview) is logged by id and root path and
+/// unmounted, renamed outside waggledance) is logged by id and root path and
 /// skipped -- `Engine::refresh` would just silently scan zero files for it
 /// (`scan_markdown_files`'s walker drops an unreadable root rather than
 /// erroring), but checking first makes that skip an explicit, logged fact
@@ -752,7 +752,7 @@ async fn cross_project_rollup(
 }
 
 async fn health() -> impl IntoResponse {
-    Json(json!({ "status": "ok", "app": "mdview", "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({ "status": "ok", "app": "waggledance", "version": env!("CARGO_PKG_VERSION") }))
 }
 
 async fn status(State(st): State<AppState>) -> impl IntoResponse {
@@ -760,7 +760,7 @@ async fn status(State(st): State<AppState>) -> impl IntoResponse {
     let files: usize = st.engine.store.total_file_count().unwrap_or(0);
     Json(json!({
         "running": true,
-        "app": "mdview",
+        "app": "waggledance",
         "version": env!("CARGO_PKG_VERSION"),
         "project_count": projects.len(),
         "indexed_file_count": files,
@@ -828,7 +828,7 @@ async fn api_config(State(st): State<AppState>) -> impl IntoResponse {
     // Read through the same injectable path settings_page_handler and
     // update_config use, rather than the engine's startup-cached config, so
     // all three agree with each other and a route test never touches the
-    // real ~/.mdview.
+    // real ~/.waggledance.
     let cfg = waggledance_core::Config::load_from(&waggledance_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ));
@@ -1088,9 +1088,9 @@ struct RefreshProjectForm {
 /// file that exists on disk but predates the last reconcile — the daemon was
 /// down when it landed, or it landed after the startup sweep
 /// (`stale-index-refresh-1`'s `reconcile_registered_projects`) already ran —
-/// has no terminal handy to run `mdview refresh` in; this route is that
+/// has no terminal handy to run `waggledance refresh` in; this route is that
 /// command, reachable from the page that told them something was missing.
-/// Runs the same door `mdview refresh` and the startup sweep both use
+/// Runs the same door `waggledance refresh` and the startup sweep both use
 /// (`Engine::refresh`), off the async thread via `spawn_blocking` since it
 /// walks the filesystem and writes sqlite — unlike the startup sweep this one
 /// IS awaited, since the redirect that follows depends on it having run.
@@ -1542,7 +1542,7 @@ async fn transcript_page_for_pane(
 
 /// The configured D8 preset **labels** only — read the same injectable
 /// config path every terminal route uses (`terminal_family_enabled`), so a
-/// route test never touches the real `~/.mdview`. `terminal_create_agent`
+/// route test never touches the real `~/.waggledance`. `terminal_create_agent`
 /// reads the full `AgentPreset` list (label + argv) the same way; this is
 /// the labels-only view `terminal_page` renders, since the page never needs
 /// argv at all.
@@ -1559,7 +1559,7 @@ fn configured_preset_labels(st: &AppState) -> Vec<String> {
 
 /// Whether the D7 `terminal.enabled` switch is on, read through the same
 /// injectable config path every settings route uses (`st.config_data_dir`)
-/// so a route test never touches the real `~/.mdview`. Checked on every
+/// so a route test never touches the real `~/.waggledance`. Checked on every
 /// route in the gated terminal family — `terminal_page` above and
 /// `terminal_screen` below — never on `/settings` or
 /// `POST /api/terminal-config`, which must stay reachable so the switch can
@@ -1606,7 +1606,7 @@ fn unassigned_group_enabled(st: &AppState) -> bool {
 }
 
 /// D12's disabled answer for a terminal **page** route (`terminal_page`,
-/// `transcript_page`, `unassigned_terminal_page`): mdview's ordinary
+/// `transcript_page`, `unassigned_terminal_page`): waggledance's ordinary
 /// not-found page — the same `not_found` helper every other page route in
 /// this file already answers with — never the typeless empty `404` the old,
 /// now-removed `terminal_auth` module's opaque 404 gave, which was
@@ -2086,7 +2086,7 @@ struct TranscriptQuery {
 /// and hand back (`assets/app.js`'s transcript poller). `st.transcript_root`
 /// only overrides the *default* Claude Code projects root, for a
 /// route-level test — the same seam `st.config_data_dir` gives the settings
-/// routes over `~/.mdview`; `None` in production resolves exactly where
+/// routes over `~/.waggledance`; `None` in production resolves exactly where
 /// Claude Code itself writes.
 ///
 /// Each returned line is routed through `waggledance_core::ansi::to_html`, the
@@ -2360,10 +2360,10 @@ fn sanitize_attach_segment(raw: &str) -> String {
 /// (plan.md's security notes). `override_root` is `AppState::attach_root`,
 /// the same test seam `config_data_dir`/`transcript_root` already give
 /// other terminal routes; `None` in production resolves the env-or-home
-/// path above. This is a cache directory, not app data, so unlike
-/// `~/.mdview` → `~/.waggledance` (D2) it carries no migration: nothing
-/// here outlives a single attach session, so there is nothing worth
-/// preserving across the rename, and a deliberate choice, not an omission.
+/// path above. This is a cache directory, not app data, so unlike the
+/// config data dir's D2 rename it carries no migration: nothing here
+/// outlives a single attach session, so there is nothing worth preserving
+/// across the rename, and a deliberate choice, not an omission.
 fn resolve_attach_root(override_root: Option<&std::path::Path>) -> PathBuf {
     if let Some(dir) = override_root {
         return dir.to_path_buf();
@@ -2565,7 +2565,7 @@ fn create_error_response(err: herdr::HerdrError) -> Response {
 
 /// `POST /p/:id/_terminal/create/pane` (D8/P4) — open a plain shell in this
 /// project. Modeled on herdr-go's `POST /api/panes`
-/// (`herdr-go/src/web/create.rs`), adapted to mdview's project-scoped model
+/// (`herdr-go/src/web/create.rs`), adapted to waggledance's project-scoped model
 /// (D2 — "the project is the frame"): herdr-go's request body names the
 /// destination `workspace_id` itself; here the URL's project id is the only
 /// destination input, and the workspace is resolved server-side by
@@ -4144,7 +4144,7 @@ mod bee_route_tests {
 
     fn fresh_root(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "mdview-server-bee-{name}-{}-{}",
+            "waggledance-server-bee-{name}-{}-{}",
             std::process::id(),
             name.len(), // cheap per-name salt, keeps directories distinct across test fns
         ));
@@ -4210,7 +4210,7 @@ mod bee_route_tests {
             // `transcript_root_dir` below).
             transcript_root: None,
             // No route test writes into the developer's real
-            // `~/.cache/mdview/attach` — attach-route tests set this
+            // `~/.cache/waggledance/attach` — attach-route tests set this
             // explicitly to a scratch dir (see `attach_fixture` below).
             attach_root: None,
             // A fresh manager per state — no route test shares live
@@ -4230,7 +4230,7 @@ mod bee_route_tests {
     /// `build_state()` plus `config_data_dir` pointed at the scratch `dir`
     /// — every settings/terminal route resolves `config.toml` and the
     /// notify credential file through this override, so a test that leaves
-    /// it unset would silently read/write the real `~/.mdview` instead.
+    /// it unset would silently read/write the real `~/.waggledance` instead.
     fn build_state_with_dir(dir: &Path) -> AppState {
         let mut st = build_state();
         st.config_data_dir = Some(dir.to_path_buf());
@@ -4250,6 +4250,28 @@ mod bee_route_tests {
     async fn body_string(resp: Response) -> String {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// The `server.rs` ↔ `daemon.rs` health handshake, checked across the
+    /// crate boundary rather than each side against its own hardcoded copy
+    /// of the string: a served `/health` body must satisfy
+    /// `waggledance_core::daemon`'s own `looks_like_daemon` predicate — the
+    /// same one `health_check` uses to decide whether a running daemon is
+    /// this daemon. Two independent literals (`"app": "waggledance"` here,
+    /// `contains("\"waggledance\"")` there) can drift apart in silence
+    /// across a rename that only touches one side; this test would catch
+    /// that drift even if a future rename picked a third, different string
+    /// on each side, because it never hardcodes either literal itself.
+    #[tokio::test]
+    async fn health_route_body_satisfies_daemons_own_detection_predicate() {
+        let resp = get(router(build_state()), "/health").await;
+        let body = body_string(resp).await;
+        assert!(
+            waggledance_core::daemon::looks_like_daemon(&body),
+            "the /health route's own body must satisfy daemon.rs's detection \
+             predicate, or auto-spawn silently stops recognising a running \
+             daemon: {body}"
+        );
     }
 
     /// One entry in a `snapshot_tree` — either a directory or a file with
@@ -5017,7 +5039,7 @@ mod bee_route_tests {
             .to_string_lossy()
             .into_owned();
         let outside_abs = std::env::temp_dir()
-            .join("mdview-server-bee-outside-file.rs")
+            .join("waggledance-server-bee-outside-file.rs")
             .to_string_lossy()
             .into_owned();
         let worker_abs = root
@@ -5144,7 +5166,7 @@ mod bee_route_tests {
         let root_str = root.to_string_lossy().into_owned();
         let inside_abs = root.join("src/inside.rs").to_string_lossy().into_owned();
         let outside_abs = std::env::temp_dir()
-            .join("mdview-server-bee-done-section-outside.rs")
+            .join("waggledance-server-bee-done-section-outside.rs")
             .to_string_lossy()
             .into_owned();
         let worker_abs = root.join("workers/reader-1").to_string_lossy().into_owned();
@@ -7439,7 +7461,7 @@ mod bee_route_tests {
         let root_str = root.to_string_lossy().into_owned();
         let inside_abs = root.join("src/inside.rs").to_string_lossy().into_owned();
         let outside_abs = std::env::temp_dir()
-            .join("mdview-server-bee-detail-outside.rs")
+            .join("waggledance-server-bee-detail-outside.rs")
             .to_string_lossy()
             .into_owned();
         let worker_abs = root.join("workers/reader-1").to_string_lossy().into_owned();
@@ -7804,7 +7826,7 @@ mod bee_route_tests {
         let root = fresh_root("feature-docs-abs-leak");
         let root_str = root.to_string_lossy().into_owned();
         let outside_abs = std::env::temp_dir()
-            .join("mdview-server-feature-docs-outside.rs")
+            .join("waggledance-server-feature-docs-outside.rs")
             .to_string_lossy()
             .into_owned();
         write(
@@ -8125,13 +8147,13 @@ mod bee_route_tests {
 
     /// The seam this cell exists to add: `/settings` and `/api/config` must
     /// read through `AppState::config_data_dir` instead of the process-global
-    /// `~/.mdview`, so a route-level test can point at a temp dir and never
+    /// `~/.waggledance`, so a route-level test can point at a temp dir and never
     /// touch the developer's real config file (agent-terminal-1, E0/S1).
     #[tokio::test]
     async fn settings_routes_read_through_the_injected_data_dir_not_real_home() {
         let dir = fresh_root("settings-override-read");
         // A distinctive value that only exists in the override dir's config,
-        // never written to the real ~/.mdview by this test.
+        // never written to the real ~/.waggledance by this test.
         let mut cfg = Config::default();
         cfg.server.port = 47201;
         cfg.save_to(&dir.join("config.toml")).unwrap();
@@ -8160,14 +8182,14 @@ mod bee_route_tests {
         let real_after = std::fs::read(&real_config_path).ok();
         assert_eq!(
             real_before, real_after,
-            "the real ~/.mdview/config.toml was read or written by a route test"
+            "the real ~/.waggledance/config.toml was read or written by a route test"
         );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     /// `update_config` must save through the same injected path — a POST from
-    /// a route test must never land in the real `~/.mdview/config.toml`.
+    /// a route test must never land in the real `~/.waggledance/config.toml`.
     #[tokio::test]
     async fn update_config_writes_only_to_the_injected_data_dir() {
         let dir = fresh_root("settings-override-write");
@@ -8200,7 +8222,7 @@ mod bee_route_tests {
         let real_after = std::fs::read(&real_config_path).ok();
         assert_eq!(
             real_before, real_after,
-            "the real ~/.mdview/config.toml was written by update_config through a route test"
+            "the real ~/.waggledance/config.toml was written by update_config through a route test"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -8218,7 +8240,7 @@ mod bee_route_tests {
     /// control the settings page used to render are gone — not disabled,
     /// not hidden, gone. The settings page has no terminal token section at
     /// all (the "honest empty" this cell's own must-haves name), and both
-    /// routes answer with mdview's ordinary unrouted response now that
+    /// routes answer with waggledance's ordinary unrouted response now that
     /// nothing mounts them.
     #[tokio::test]
     async fn settings_page_carries_no_terminal_token_controls_and_the_routes_are_gone() {
@@ -8268,7 +8290,7 @@ mod bee_route_tests {
 
     /// P3: `POST /api/config` is unauthenticated (D4 leaves it that way), so
     /// it must never be able to move a D7 switch — a supervisor field there
-    /// would let any LAN visitor make mdview spawn a process.
+    /// would let any LAN visitor make waggledance spawn a process.
     #[tokio::test]
     async fn post_api_config_with_terminal_fields_leaves_every_switch_unchanged() {
         let dir = fresh_root("terminal-switches-not-via-api-config");
@@ -9632,7 +9654,7 @@ mod bee_route_tests {
 
     /// A document path an agent printed comes back as a link into this same
     /// project, opening in its own tab — the screen naming a spec is one
-    /// click from the spec. Only markdown under `docs/` qualifies: mdview
+    /// click from the spec. Only markdown under `docs/` qualifies: waggledance
     /// renders markdown, so a directory or an image would link to a page that
     /// does not exist.
     #[tokio::test]
@@ -11925,7 +11947,7 @@ mod bee_route_tests {
     /// enabled, one registered project with one pane genuinely inside its
     /// root (mirroring `terminal_route_lists_only_panes_within_the_project_root_boundary`'s
     /// "included" case), and a fresh scratch attach root via `st.attach_root`
-    /// so no test ever touches the developer's real `~/.cache/mdview/attach`.
+    /// so no test ever touches the developer's real `~/.cache/waggledance/attach`.
     /// Returns the router, the project, the pane id, and the three scratch
     /// directories the caller must remove with `cleanup_attach_fixture`.
     async fn attach_fixture(label: &str) -> (Router, Project, String, PathBuf, PathBuf, PathBuf) {
@@ -12598,7 +12620,7 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// agent-terminal-9, truth: "Text sent to a pane never reaches mdview's
+    /// agent-terminal-9, truth: "Text sent to a pane never reaches waggledance's
     /// logs" — a grep-based proof over this file's own source (the shape
     /// `crates/waggledance-core/src/bee.rs`'s `no_web_framework_dependency_declared`
     /// already uses for a source-level guarantee `cargo test` alone can't
@@ -13409,7 +13431,7 @@ mod bee_route_tests {
         let valid_root = scratch.join("valid-project");
         std::fs::create_dir_all(&stray_root).unwrap();
         std::fs::create_dir_all(&valid_root).unwrap();
-        let denied_root = PathBuf::from("/etc/mdview-test-fixture-nonexistent");
+        let denied_root = PathBuf::from("/etc/waggledance-test-fixture-nonexistent");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
@@ -13733,7 +13755,7 @@ mod bee_route_tests {
     }
 
     /// D12: with the D7 `terminal.enabled` switch off, `/_terminal/unassigned`
-    /// answers with mdview's ordinary not-found page — no cookie, no token,
+    /// answers with waggledance's ordinary not-found page — no cookie, no token,
     /// nothing but the switch decides this. toa-1's deviation from the
     /// plan's keep-list (recorded in this cell's outcome): the keep-list
     /// names six disabled-state tests and omits this one, but it is the only
@@ -14399,7 +14421,7 @@ mod bee_route_tests {
         let scratch = fresh_root("home-badges-unconstructable-scratch");
         let ok_root = scratch.join("demo");
         std::fs::create_dir_all(&ok_root).unwrap();
-        let denied_root = PathBuf::from("/etc/mdview-test-fixture-nonexistent-projects-home-1");
+        let denied_root = PathBuf::from("/etc/waggledance-test-fixture-nonexistent-projects-home-1");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let ok_pane = fake
@@ -15581,7 +15603,7 @@ mod bee_route_tests {
     /// connection from a second connection in the same process, which this
     /// cell found to be unreliable in this workspace (evidence: a dropped
     /// table is visible to a *fresh* connection immediately but not to the
-    /// engine's own long-lived one, most likely because `crates/mdview`'s
+    /// engine's own long-lived one, most likely because `crates/waggledance`'s
     /// dev-only `rusqlite` and `waggledance-core`'s `rusqlite` link two separate
     /// copies of the bundled SQLite that don't share WAL/locking state --
     /// `waggledance-core` has no public seam to inject a failing store, so a
@@ -15596,7 +15618,7 @@ mod bee_route_tests {
         let scratch = fresh_root("unassigned-boundary-unconstructable-scratch");
         let stray_root = scratch.join("stray");
         std::fs::create_dir_all(&stray_root).unwrap();
-        let denied_root = PathBuf::from("/etc/mdview-test-fixture-nonexistent");
+        let denied_root = PathBuf::from("/etc/waggledance-test-fixture-nonexistent");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         // A pane whose cwd sits under the hard-deny-listed project's own
@@ -18300,7 +18322,7 @@ mod bee_route_tests {
         };
         let dir = fresh_root("register-under-home");
         let root = std::path::PathBuf::from(&home)
-            .join("mdview-bee-test-register-under-home-projects-home-3");
+            .join("waggledance-bee-test-register-under-home-projects-home-3");
         std::fs::remove_dir_all(&root).ok();
         std::fs::create_dir_all(&root).unwrap();
 
@@ -18704,7 +18726,7 @@ mod bee_route_tests {
     }
 
     /// Posting the refresh form's own endpoint reindexes the project through
-    /// `Engine::refresh` — the same door `mdview refresh` and the startup
+    /// `Engine::refresh` — the same door `waggledance refresh` and the startup
     /// sweep both use — and redirects the reader straight back to the path
     /// they asked for, which now renders 200 since the reindex just found it.
     #[tokio::test]

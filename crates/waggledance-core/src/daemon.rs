@@ -1,4 +1,4 @@
-//! Single-daemon coordination: the `~/.mdview/daemon.lock` (pid + port) and a
+//! Single-daemon coordination: the `~/.waggledance/daemon.lock` (pid + port) and a
 //! health probe. Shared by the CLI/daemon and the desktop shell so every
 //! launcher agrees on one server (PRD §7.1/§7.5).
 
@@ -14,7 +14,7 @@ use std::time::Duration;
 /// no connect timeout of its own (only the read/write timeouts set after a
 /// connection is established) — on a host/network that silently drops
 /// packets to a dead port instead of answering with an immediate RST, that
-/// connect call blocks indefinitely. This is what made `mdview stop`/
+/// connect call blocks indefinitely. This is what made `waggledance stop`/
 /// `restart` hang against a stale lock naming a dead port: the process kill
 /// itself is fast, but the orphaned-daemon check re-probes the port via
 /// `running_daemon()` → `health_check()`, and that probe never returned.
@@ -72,7 +72,7 @@ pub fn running_daemon() -> Option<DaemonInfo> {
 }
 
 /// True if `host` is a wildcard bind address (`0.0.0.0` / `::` / `[::]`).
-/// Duplicated from `mdview`'s `runtime.rs::is_wildcard` rather than shared:
+/// Duplicated from `waggledance`'s `runtime.rs::is_wildcard` rather than shared:
 /// `waggledance-core` cannot depend on the binary crate (wrong dependency
 /// direction), and this is a 2-line pure predicate with no drift risk.
 fn is_wildcard(host: &str) -> bool {
@@ -97,12 +97,24 @@ pub fn daemon_version(host: &str, port: u16) -> Option<String> {
     Some(rest[open..close].to_string())
 }
 
-/// Minimal blocking HTTP GET /health; true if it looks like mdview.
+/// Minimal blocking HTTP GET /health; true if it looks like waggledance.
 pub fn health_check(host: &str, port: u16) -> bool {
     match health_body(host, port) {
-        Some(buf) => buf.contains("\"mdview\"") || buf.contains("200 OK"),
+        Some(buf) => looks_like_daemon(&buf),
         None => false,
     }
+}
+
+/// The detection half of the `server.rs` ↔ `daemon.rs` health handshake: true
+/// if a raw HTTP response body looks like it came from this daemon's own
+/// `/health` route. Pulled out of `health_check` as its own named predicate
+/// so a test can point it directly at a served `/health` body from
+/// `waggledance`'s `server.rs`, rather than each side asserting against its
+/// own hardcoded copy of the string — two copies of the same literal can
+/// drift apart in silence exactly the way a plain `contains("\"waggledance\"")`
+/// check once did across a rename.
+pub fn looks_like_daemon(body: &str) -> bool {
+    body.contains("\"waggledance\"") || body.contains("200 OK")
 }
 
 /// Raw `GET /health` response text, or `None` if the daemon did not answer.
@@ -182,6 +194,15 @@ mod tests {
     }
 
     #[test]
+    fn looks_like_daemon_accepts_the_apps_own_health_body_shape() {
+        assert!(looks_like_daemon(
+            r#"{"status":"ok","app":"waggledance","version":"0.1.0"}"#
+        ));
+        assert!(looks_like_daemon("HTTP/1.1 200 OK\r\n\r\n"));
+        assert!(!looks_like_daemon(r#"{"status":"ok","app":"some-other-app"}"#));
+    }
+
+    #[test]
     fn health_check_false_on_dead_port() {
         // Nothing listening on this port → false, no panic.
         assert!(!health_check("127.0.0.1", 59_999));
@@ -193,10 +214,10 @@ mod tests {
         // (only the read/write timeouts set after a connection is
         // established), so on a network that drops rather than actively
         // refuses packets to a dead port, the connect call blocked
-        // indefinitely — this is what made `mdview stop`/`restart` hang
+        // indefinitely — this is what made `waggledance stop`/`restart` hang
         // against a stale lock naming a dead port (see cli.rs's
         // `stop_daemon`, and the e2e reproduction in
-        // crates/mdview/tests/e2e_stop_stale_lock.rs). Bound well above the
+        // crates/waggledance/tests/e2e_stop_stale_lock.rs). Bound well above the
         // 500ms connect timeout to keep this from being flaky under load.
         let start = std::time::Instant::now();
         assert!(!health_check("127.0.0.1", 59_998));

@@ -106,13 +106,13 @@ fn ensure_bind() -> (String, u16) {
                 return (info.host, info.port);
             }
             if let Err(e) = spawn_daemon_detached() {
-                eprintln!("mdview: failed to auto-spawn daemon: {e}");
+                eprintln!("waggledance: failed to auto-spawn daemon: {e}");
             }
         }
         Gate::Held => {} // another invocation is spawning; just wait below.
         Gate::Unavailable => {
             if let Err(e) = spawn_daemon_detached() {
-                eprintln!("mdview: failed to auto-spawn daemon: {e}");
+                eprintln!("waggledance: failed to auto-spawn daemon: {e}");
             }
         }
     }
@@ -125,7 +125,7 @@ fn ensure_bind() -> (String, u16) {
     // Daemon never answered: surface it rather than silently handing back a
     // config-default URL that looks live. The URL is still returned for the
     // caller to print, but the operator now sees why it may not respond.
-    eprintln!("mdview: daemon did not become ready in time; the viewer URL may not respond yet.");
+    eprintln!("waggledance: daemon did not become ready in time; the viewer URL may not respond yet.");
     let cfg = Config::load();
     bind_fallback(daemon::read_lock(), &cfg)
 }
@@ -216,7 +216,7 @@ fn build_display_urls(
     vec![url(bind_host)]
 }
 
-/// Spawn `mdview serve` fully detached, so MCP/CLI can guarantee a viewer is up
+/// Spawn `waggledance serve` fully detached, so MCP/CLI can guarantee a viewer is up
 /// and the daemon outlives whatever process spawned it. Without the detach the
 /// daemon shares its spawner's session/process-group and dies with it (SIGHUP
 /// when the terminal/session closes, or a process-group-directed SIGTERM).
@@ -247,7 +247,7 @@ mod tests {
 
     fn gate_tmp(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "mdview-gate-{label}-{}-{}",
+            "waggledance-gate-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
