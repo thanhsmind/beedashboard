@@ -11,8 +11,8 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   *displayed* string, never at the shared underlying field — otherwise the
   connectivity path silently breaks. (2026-07-15,
   `docs/history/learnings/20260715-mdview-hostname-doctor-fix.md`)
-- **`crates/mdview-desktop/src/main.rs` duplicates the daemon-spawn / daemon-URL
-  logic of `crates/mdview/src/runtime.rs` — it is NOT shared code.** Two known
+- **`crates/waggledance-desktop/src/main.rs` duplicates the daemon-spawn / daemon-URL
+  logic of `crates/waggledance/src/runtime.rs` — it is NOT shared code.** Two known
   drifts already: `ensure_daemon()` (URL building) and the non-detached
   serve-spawn (missing the setsid detach that `runtime.rs::spawn_daemon_detached`
   now has). Before changing either in `runtime.rs`, grep the desktop crate for
@@ -30,16 +30,16 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   (blocked by the scout hook) and never let `HOME` overrides break rustup.
   Use: `cd <scratch-dir> && HOME=<fake> RUSTUP_HOME=/home/vantt/.rustup
   CARGO_HOME=/home/vantt/.cargo cargo run -q --manifest-path
-  <repo>/Cargo.toml --bin mdview -- <args>` — cwd of the child process is the
+  <repo>/Cargo.toml --bin waggledance -- <args>` — cwd of the child process is the
   scratch dir, so cwd-relative behavior (e.g. `doctor`'s AGENTS.md/CLAUDE.md
   handling) is exercised correctly. (2026-07-15, same learnings file)
   **This binary has no dedicated config-path override — `HOME` (read via
   `dirs::home_dir()`) is the only isolation lever.** Guessing a plausible but
   wrong env var name (or forgetting to set `HOME` at all) produces no error:
-  the child process silently resolves the REAL `~/.mdview`, so a "scratch"
+  the child process silently resolves the REAL `~/.waggledance`, so a "scratch"
   test can mutate the live daemon's config/registry for real. After any
-  manual run meant to be isolated, spot-check `mdview status` / `mdview list`
-  against the real `~/.mdview` before trusting nothing leaked. (2026-07-16,
+  manual run meant to be isolated, spot-check `waggledance status` / `waggledance list`
+  against the real `~/.waggledance` before trusting nothing leaked. (2026-07-16,
   `20260716-ui-polish-settings-sidebar.md` — a real incident: a bad first
   attempt overwrote the live config's port and registered a scratch project
   into the live registry; caught and reverted before capping.)
@@ -60,7 +60,7 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   this gap from different angles on the same cell during validating: the fix
   was `fn bind_fallback(lock: Option<DaemonInfo>, cfg: &Config) -> (String,
   u16)` in `runtime.rs`, unit-tested with in-memory values only — never
-  writing the real global lock path (`~/.mdview/daemon.lock`) from a test,
+  writing the real global lock path (`~/.waggledance/daemon.lock`) from a test,
   and never sleeping the real poll window. Any future cell testing a
   timing/polling branch needs the same explicit extraction step written into
   its `action`, not just implied by its `plan.md`. (2026-07-16,
@@ -86,9 +86,9 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   Any future path-based guard in this repo needs the same ordering, proven by
   a `#[cfg(unix)]` symlink regression test, not just a traversal test.
   (2026-07-16, `20260716-fix-review-p1-findings.md`)
-- **The `mdview` binary crate layer (`cli.rs`, `mcp.rs`, `server.rs`,
+- **The `waggledance` binary crate layer (`cli.rs`, `mcp.rs`, `server.rs`,
   `views.rs`, `watch.rs`) has a standing habit of manual/live-E2E-only
-  verification — `mdview-core` does not.** Three behavior-change cells in
+  verification — `waggledance-core` does not.** Three behavior-change cells in
   this layer were capped with a prose `verify` field ("live E2E, fake
   EDITOR") instead of a runnable command, and the same failure mode almost
   recurred inside the very fix pass meant to close them. When capping a
@@ -152,11 +152,11 @@ bee-compounding appends hard-won patterns here; keep it short and current.
 - **Cross-crate platform-conditional logic: extract vs. duplicate is decided by
   the *target* crate's CI coverage, not by "is this shared code."** D1
   (`is_wildcard`, a 2-line predicate) was correctly duplicated into
-  `mdview-core/src/daemon.rs` rather than shared with `runtime.rs`'s existing,
+  `waggledance-core/src/daemon.rs` rather than shared with `runtime.rs`'s existing,
   already-tested copy. D3 (`apply_detach`) was correctly extracted into
-  `mdview-core/src/process.rs` — re-exported from `runtime.rs` via
-  `pub(crate) use mdview_core::process::apply_detach;` so its existing test
-  needed zero changes — specifically because `mdview-desktop` has zero
+  `waggledance-core/src/process.rs` — re-exported from `runtime.rs` via
+  `pub(crate) use waggledance_core::process::apply_detach;` so its existing test
+  needed zero changes — specifically because `waggledance-desktop` has zero
   compile coverage anywhere in this repo's CI; writing that logic directly in
   `main.rs` would have made it permanently unverifiable. Same shape of
   decision, opposite correct answers: check the target crate's coverage
@@ -168,8 +168,9 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   of the function under test, not just the test's setup shape.** A cell
   drafted from CONTEXT.md's "bind a real `0.0.0.0` listener and assert
   `health_check` finds it" phrasing instructed a bare `TcpListener` with no
-  responder — but `health_check`'s real success check
-  (`buf.contains("\"mdview\"") || buf.contains("200 OK")`) needs an actual
+  responder — but `health_check`'s real success check (since 2026-08-13 the
+  shared `daemon::looks_like_daemon` predicate; then an inline
+  `buf.contains(...)` of the same shape) needs an actual
   HTTP response body, so the recipe as drafted could never pass. Two
   independent validating-phase reviewers (plan-checker, cell-reviewer)
   converged on the identical root cause from different angles — read the
@@ -210,8 +211,8 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   `TcpStream::connect` unbounded. On a port with nothing listening the usual
   answer is an immediate refusal, so this looked fine for a year; in a
   sandboxed/WSL network the attempt is silently dropped instead, and the probe
-  waits forever. That single unbounded connect is what made `mdview stop` and
-  `mdview restart` hang on a stale daemon lock and left the viewer down until
+  waits forever. That single unbounded connect is what made `waggledance stop` and
+  `waggledance restart` hang on a stale daemon lock and left the viewer down until
   a daemon was started on the port by hand. Reproduced with raw sockets and
   then with the real binary — 25s+ before the fix, ~0.5s after. Any future
   "is it alive?" probe here sets a connect timeout, and its test must run
@@ -220,7 +221,7 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   stop path signalled the recorded process id unconditionally, so a stale
   record whose id had been recycled would have killed an unrelated program —
   confirm the recorded process actually answers as ours before signalling it.
-  (2026-08-06, `daemon-lock-stale`, `crates/mdview/tests/e2e_stop_stale_lock.rs`)
+  (2026-08-06, `daemon-lock-stale`, `crates/waggledance/tests/e2e_stop_stale_lock.rs`)
 - **A route that must be invisible to the wrong caller cannot be made
   invisible by a router fallback — the method oracle is closed by an
   extractor.** An opaque-404 route family leaks its own existence through
@@ -244,7 +245,7 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   happened while the daemon was down did not. Because a file is served from
   the sqlite index (`SqliteStore::get_file`, a `rel_path` row match) and never
   from a fresh look at the folder, a file written with the daemon stopped
-  answered 404 forever, until a human ran `mdview refresh`. Any future cache,
+  answered 404 forever, until a human ran `waggledance refresh`. Any future cache,
   index, mirror or subscription in this repo needs the same pair: a
   reconcile against the source of truth at startup (walk the existing door —
   here `Engine::refresh`, the call the CLI already makes — rather than writing
@@ -271,3 +272,30 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   copied actually does rather than what its output looks like. (2026-08-12,
   `cross-board` D6→D10,
   `docs/history/learnings/20260812-a-sort-key-is-a-data-claim.md`)
+- **A string literal written independently in two places that must agree is a
+  contract, and changing one side fails SILENTLY.** Three in this repo, all
+  found while renaming: the `/health` `app` value versus `daemon.rs`'s detection
+  of it (break it and auto-spawn stops seeing a running daemon — no error, no
+  log); doctor's MCP server key, used as both the lookup key and the inserted
+  key (break it and `--fix` adds a second entry beside a stale one); and the
+  `<!-- ...:START -->` managed-block marker matched by literal `text.find`
+  (break it and the writer appends a second block below the old one). Before
+  changing any such literal, grep for the *value*, not the constant name. The
+  fix is never "rename both sides carefully" — it is a test that compares the
+  two sides **to each other** (`daemon::looks_like_daemon` asserted against a
+  real `/health` body; the mermaid-done event compared dispatch-to-listener). A
+  test that hardcodes the new value twice agrees with itself and proves nothing.
+  (2026-08-13, `waggledance-rename`,
+  `docs/history/learnings/20260813-a-string-in-two-places-is-a-contract.md`)
+- **A one-time filesystem migration belongs at the resolver, never at an entry
+  point.** A migration guarded on "target absent" is permanently disarmed by any
+  unconditional `create_dir_all` upstream of it — and this repo has several
+  (`repository.rs::open`, `Config::save_to`, `write_atomic`), reached by half a
+  dozen commands before any daemon starts, `serve` included. There is no "first"
+  entry point. Related: never let the installer place the binary inside the
+  directory being migrated — renaming a directory that holds the running
+  executable is `ERROR_SHARING_VIOLATION` on Windows. For the test-suite escape
+  hatch prefer **opt-in** (inert by default, armed once in `cli::run`) over
+  opt-out: an opt-out is one missed call site away from renaming a developer's
+  real home directory. (2026-08-13, `waggledance-rename` D2/D7,
+  `docs/history/learnings/20260813-a-string-in-two-places-is-a-contract.md`)
