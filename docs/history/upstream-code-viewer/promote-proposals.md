@@ -14,7 +14,7 @@ bee:
   lifecycle: active
   areas: [web-interface, system-overview]
   required_context: [.bee/logs/scribing-runs.jsonl]
-  sources: [.bee/logs/scribing-runs.jsonl, .bee/cells/upstream-code-viewer-1.json]
+  sources: [.bee/logs/scribing-runs.jsonl, .bee/cells/archive/upstream-code-viewer/upstream-code-viewer-1.json]
 ---
 
 # upstream-code-viewer — Delivery
@@ -39,13 +39,13 @@ Proposed by `bee knowledge promote --work upstream-code-viewer` from 1 capped ce
 
 (b) AREA UPDATES — candidate spec-sync bullets, each citing its cell
 
-areas: from the scribing stamp for "upstream-code-viewer" — .bee/logs/scribing-runs.jsonl's most recent entry (2026-08-13T07:17:32.408Z), the work item declares no bee.areas.
+areas: from the scribing stamp for "upstream-code-viewer" — .bee/logs/scribing-runs.jsonl's most recent entry (2026-08-13T07:20:28.110Z), the work item declares no bee.areas.
 
 area web-interface:
-  - [upstream-code-viewer-1] Code viewer ported from upstream across twelve commits; topbar hand-merged to keep this fork's brand and menu; upstream's auth-dependent tests adapted — feature-wide sync per the scribing stamp, 3 file(s) changed (trace .bee/cells/upstream-code-viewer-1.json)
+  - [upstream-code-viewer-1] Code viewer ported from upstream across twelve commits; topbar hand-merged to keep this fork's brand and menu; upstream's auth-dependent tests adapted — feature-wide sync per the scribing stamp, 3 file(s) changed (trace .bee/cells/archive/upstream-code-viewer/upstream-code-viewer-1.json)
 
 area system-overview:
-  - [upstream-code-viewer-1] Code viewer ported from upstream across twelve commits; topbar hand-merged to keep this fork's brand and menu; upstream's auth-dependent tests adapted — feature-wide sync per the scribing stamp, 3 file(s) changed (trace .bee/cells/upstream-code-viewer-1.json)
+  - [upstream-code-viewer-1] Code viewer ported from upstream across twelve commits; topbar hand-merged to keep this fork's brand and menu; upstream's auth-dependent tests adapted — feature-wide sync per the scribing stamp, 3 file(s) changed (trace .bee/cells/archive/upstream-code-viewer/upstream-code-viewer-1.json)
 
 (c) PATTERN CANDIDATES — candidate bee.pattern concepts, bee.polarity pitfall
 
