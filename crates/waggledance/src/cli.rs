@@ -324,17 +324,38 @@ fn find_project_root(engine: &waggledance_core::Engine, file: &Path) -> PathBuf 
             return p.root_path.clone();
         }
     }
-    const MARKERS: &[&str] = &[".mdview.json", ".git", "CLAUDE.md", "README.md"];
+    root_by_marker(file).unwrap_or_else(|| {
+        file.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf()
+    })
+}
+
+/// Filenames that mark a directory as a project root.
+///
+/// `.mdview.json` is kept on purpose, not left behind (D8). This marker lives in
+/// other people's repositories — it is their file, not ours — so dropping it would
+/// silently lose project-root detection in repos whose owners did nothing wrong.
+const PROJECT_MARKERS: &[&str] = &[
+    ".waggledance.json",
+    ".mdview.json",
+    ".git",
+    "CLAUDE.md",
+    "README.md",
+];
+
+/// Walks up from `file` for the nearest directory carrying a [`PROJECT_MARKERS`]
+/// entry. Split out from [`find_project_root`] so the walk is testable without an
+/// [`waggledance_core::Engine`].
+fn root_by_marker(file: &Path) -> Option<PathBuf> {
     let mut dir = file.parent();
     while let Some(d) = dir {
-        if MARKERS.iter().any(|m| d.join(m).exists()) {
-            return d.to_path_buf();
+        if PROJECT_MARKERS.iter().any(|m| d.join(m).exists()) {
+            return Some(d.to_path_buf());
         }
         dir = d.parent();
     }
-    file.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf()
+    None
 }
 
 fn cmd_list(json: bool) -> Result<()> {
@@ -675,6 +696,38 @@ mod open_url_shape_tests {
         let v = open_json(&u, &long, "a3f9c1d20b74", "proj1");
         assert_eq!(v["long_url"], "http://127.0.0.1:7700/p/proj1/docs/a.md");
         assert_eq!(v["code"], "a3f9c1d20b74");
+    }
+
+    /// D8: the old marker filename keeps working. It sits in repositories this
+    /// project does not own, so a clean break would strand people who did nothing.
+    #[test]
+    fn both_marker_filenames_resolve_a_project_root() {
+        for marker in [".waggledance.json", ".mdview.json"] {
+            let root = std::env::temp_dir().join(format!(
+                "waggledance-marker-{}-{}-{}",
+                marker.trim_start_matches('.'),
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let nested = root.join("docs").join("deep");
+            std::fs::create_dir_all(&nested).unwrap();
+            // Only this one marker exists — no .git, no README.md, nothing else
+            // that could resolve the root for the wrong reason.
+            std::fs::write(root.join(marker), b"{}").unwrap();
+            let file = nested.join("a.md");
+            std::fs::write(&file, b"# a").unwrap();
+
+            assert_eq!(
+                root_by_marker(&file).as_deref(),
+                Some(root.as_path()),
+                "{marker} must mark a project root"
+            );
+
+            std::fs::remove_dir_all(&root).ok();
+        }
     }
 
     #[test]
