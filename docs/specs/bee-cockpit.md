@@ -1,7 +1,7 @@
 ---
 area: bee-cockpit
 updated: 2026-08-13
-sources: [feature-close, agent-board, bee-artifact-rename, archive-visibility, feature-hub, board-declutter, board-trim, feature-titles, hub-fallbacks, detail-desc-wrap, cross-board, board-drop-live]
+sources: [feature-close, agent-board, bee-artifact-rename, archive-visibility, feature-hub, board-declutter, board-trim, feature-titles, hub-fallbacks, detail-desc-wrap, cross-board, board-drop-live, card-terminals]
 decisions: []
 coverage: partial
 ---
@@ -147,6 +147,34 @@ text, then the most recent decision scoped to the feature, then the title of its
 cell. A long description wraps and is visually clamped — on the card, and on the
 feature's own detail page too — rather than overflowing or forcing either page to
 scroll sideways. A card links onward to the feature's own detail page.
+
+### The terminals running behind a card
+
+On the cross-project board, a Waiting on you or In Progress card also carries one
+marker per terminal session running in that feature's own checkout, each showing
+that session's state and the program it runs, and each opening that session's own
+terminal view. Finished rows carry none.
+
+Which sessions those are is decided by the checkout, not by the feature, because
+nothing in the record ties a session to a feature: a session knows which feature
+it is working, but not which terminal it occupies, and a terminal knows which
+directory it sits in, but not which feature. The directory is the only thing both
+sides share. So:
+
+- A feature with its own branch checkout is marked with the sessions running
+  inside that checkout, and with no others. For such a feature the marking is
+  exact.
+- A feature working in the project's main checkout is marked with the sessions
+  running there and in no branch checkout — which every other main-checkout
+  feature of that project shares. The markers are therefore labelled as the
+  terminals of *this checkout*, never as the feature's own; claiming otherwise
+  would be a lie the reader could not check.
+
+A feature with no session in its checkout shows no marker and no empty frame for
+them. When the terminal switch is off, or the session host cannot be reached or
+does not answer promptly, no card carries a marker and the board renders exactly
+as it otherwise would — the same rule the project list already follows. The
+per-project board carries no such markers.
 
 ### How each group is ordered, and how Finished is cut short
 
