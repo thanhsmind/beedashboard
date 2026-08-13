@@ -1,14 +1,14 @@
-//! mdview desktop shell (Tauri v2). A thin native window onto the local mdview
-//! daemon (PRD §7.1/§7.5): ensure the daemon is up (spawn `mdview serve` if
-//! not), open a window pointing at its URL, keep it alive in the tray, and
-//! coordinate a single instance.
+//! waggledance desktop shell (Tauri v2). A thin native window onto the local
+//! waggledance daemon (PRD §7.1/§7.5): ensure the daemon is up (spawn
+//! `waggledance serve` if not), open a window pointing at its URL, keep it
+//! alive in the tray, and coordinate a single instance.
 //!
 //! NOTE: not compiled in the default workspace build — Tauri needs system libs
 //! (webkit2gtk/gtk3 on Linux). See README.md for prerequisites.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use mdview_core::daemon;
+use waggledance_core::daemon;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -25,9 +25,9 @@ fn main() {
     // point the user at the web UI (the daemon is already running) instead.
     #[cfg(target_os = "linux")]
     if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
-        eprintln!("mdview-desktop needs a graphical display, but none was found");
+        eprintln!("waggledance-desktop needs a graphical display, but none was found");
         eprintln!("(DISPLAY / WAYLAND_DISPLAY unset — e.g. a plain SSH session).\n");
-        eprintln!("The mdview server is running — just open it in a browser:");
+        eprintln!("The waggledance server is running — just open it in a browser:");
         eprintln!("    {base}\n");
         eprintln!("To get the native window, run this on a desktop session, or over");
         eprintln!("SSH with X forwarding: ssh -X <host>");
@@ -45,7 +45,7 @@ fn main() {
         .setup(move |app| {
             let url = tauri::Url::parse(&base).expect("valid daemon url");
             let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-                .title("mdview")
+                .title("waggledance")
                 .inner_size(1200.0, 800.0)
                 .min_inner_size(600.0, 400.0)
                 .build()?;
@@ -64,16 +64,16 @@ fn main() {
             Ok(())
         })
         .run(tauri::generate_context!())
-        .expect("error while running mdview desktop");
+        .expect("error while running waggledance desktop");
 }
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Show mdview", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "show", "Show waggledance", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &quit])?;
 
     let mut builder = TrayIconBuilder::new()
-        .tooltip("mdview")
+        .tooltip("waggledance")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main(app),
@@ -100,45 +100,45 @@ fn show_main(app: &tauri::AppHandle) {
     }
 }
 
-/// Attach to a running daemon, or spawn `mdview serve` and wait for it.
+/// Attach to a running daemon, or spawn `waggledance serve` and wait for it.
 fn ensure_daemon() -> String {
     if let Some(info) = daemon::running_daemon() {
         return info.base_url();
     }
-    let _ = spawn_mdview_serve();
+    let _ = spawn_waggledance_serve();
     for _ in 0..30 {
         std::thread::sleep(Duration::from_millis(150));
         if let Some(info) = daemon::running_daemon() {
             return info.base_url();
         }
     }
-    let cfg = mdview_core::Config::load();
+    let cfg = waggledance_core::Config::load();
     format!("http://{}:{}", cfg.server.host, cfg.server.port)
 }
 
-fn spawn_mdview_serve() -> std::io::Result<()> {
-    let mut cmd = std::process::Command::new(find_mdview());
+fn spawn_waggledance_serve() -> std::io::Result<()> {
+    let mut cmd = std::process::Command::new(find_waggledance());
     cmd.arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    mdview_core::process::apply_detach(&mut cmd);
+    waggledance_core::process::apply_detach(&mut cmd);
     cmd.spawn().map(|_| ())
 }
 
-/// Prefer a `mdview` binary next to this executable; else rely on PATH.
-fn find_mdview() -> PathBuf {
+/// Prefer a `waggledance` binary next to this executable; else rely on PATH.
+fn find_waggledance() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let sibling = dir.join(if cfg!(windows) {
-                "mdview.exe"
+                "waggledance.exe"
             } else {
-                "mdview"
+                "waggledance"
             });
             if sibling.exists() {
                 return sibling;
             }
         }
     }
-    PathBuf::from("mdview")
+    PathBuf::from("waggledance")
 }

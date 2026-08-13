@@ -1,7 +1,7 @@
-# mdview-desktop
+# waggledance-desktop
 
-Native desktop shell for mdview (Tauri v2). A thin window onto the local mdview
-daemon: it ensures the daemon is running (spawning `mdview serve` if needed),
+Native desktop shell for waggledance (Tauri v2). A thin window onto the local
+waggledance daemon: it ensures the daemon is running (spawning `waggledance serve` if needed),
 opens a native window pointing at the daemon URL, keeps running in the system
 tray when the window is closed, and coordinates a single instance. See PRD.md
 §7.1/§7.5 for the design.
@@ -22,12 +22,12 @@ core/CLI build never depends on these system libraries.
 - **Linux:** `libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev build-essential`
 - **macOS:** Xcode command line tools
 - **Windows:** WebView2 runtime (preinstalled on Win 11) + MSVC toolchain
-- The `mdview` binary must be installed (the shell spawns `mdview serve`).
+- The `waggledance` binary must be installed (the shell spawns `waggledance serve`).
 
 ## Build & run
 
 ```sh
-cd crates/mdview-desktop
+cd crates/waggledance-desktop
 
 # icons are required only for bundling; generate them once:
 #   cargo tauri icon path/to/logo.png
@@ -41,9 +41,9 @@ in `tauri.conf.json`, add icons, and use `cargo tauri build`.
 
 ## How it works
 
-1. `ensure_daemon()` checks `~/.mdview/daemon.lock` + `/health`
-   (`mdview_core::daemon`). If no daemon answers, it spawns `mdview serve` and
-   waits for the lock.
+1. `ensure_daemon()` checks `~/.waggledance/daemon.lock` + `/health`
+   (`waggledance_core::daemon`). If no daemon answers, it spawns
+   `waggledance serve` and waits for the lock.
 2. Opens a `WebviewWindow` at the daemon URL (e.g. `http://127.0.0.1:7700`).
 3. Closing the window hides to tray (daemon keeps serving); Quit exits.
 4. `tauri-plugin-single-instance` focuses the existing window on a second launch.
