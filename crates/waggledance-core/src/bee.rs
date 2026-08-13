@@ -1042,7 +1042,26 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     // see `latest_decisions_by_scope`'s own doc comment for why this is not
     // simply `decisions.recent` filtered by scope.
     let decision_scopes = latest_decisions_by_scope(&bee_dir, root);
-    let feature_docs = read_feature_docs_all(root, feature_names.iter().copied(), &decision_scopes, &all_cells);
+    // archived-cell-fallback: a `tiny`/`small` feature writes no
+    // `CONTEXT.md` and no `plan.md` — its cell is the plan — so its own
+    // cell title is the only description it will ever have, and once that
+    // cell archives, `all_cells` no longer holds it. Only a feature with
+    // NO live cell of its own is read out of the archive here: a feature
+    // still live already has its fallback in `all_cells`, and reading
+    // every archive dir on every snapshot would put a whole closed
+    // history behind each page load.
+    let live_features: std::collections::BTreeSet<&str> = all_cells.iter().map(|c| c.feature.as_str()).collect();
+    let mut fallback_cells: Vec<BeeCell> = Vec::new();
+    for name in &archived_feature_names {
+        if live_features.contains(name.as_str()) {
+            continue;
+        }
+        if let Some(first) = read_archived_cells(root, name).into_iter().next() {
+            fallback_cells.push(first);
+        }
+    }
+    let docs_cells: Vec<BeeCell> = all_cells.iter().cloned().chain(fallback_cells).collect();
+    let feature_docs = read_feature_docs_all(root, feature_names.iter().copied(), &decision_scopes, &docs_cells);
     let promote_proposals = read_promote_proposals(root, feature_names.into_iter());
 
     // bbp-13: review join, capture queue, scribing debt — see the
@@ -6348,6 +6367,34 @@ mod tests {
             "the same union feeds promote proposals: {:?}",
             snap.promote_proposals
         );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (archived-cell-fallback) A `tiny`/`small` feature writes no
+    /// `CONTEXT.md` and no `plan.md` at all — its cell IS the plan — so
+    /// once that cell archives, the cell-title fallback is the only
+    /// description the detail page can ever show. Reading it means
+    /// reaching into the archive: the live cell list has nothing left to
+    /// offer for this feature.
+    #[test]
+    fn feature_docs_fall_back_to_an_archived_cell_title_when_no_live_cell_exists() {
+        let root = fresh_root("feature-docs-archived-fallback");
+        write(&root, ".bee/state.json", r#"{"phase":"idle"}"#);
+        write(
+            &root,
+            ".bee/cells/archive/gone/a.json",
+            &feature_cell_json("a", "gone", "capped", Some("2026-01-01T00:00:00Z"), Some("2026-01-02T00:00:00Z")),
+        );
+
+        let snap = read_snapshot(&root);
+        let docs = snap
+            .feature_docs
+            .get("gone")
+            .expect("an archived-only feature's own cell must still describe it");
+        assert_eq!(docs.description, Some("Cell a".to_string()));
+        assert_eq!(docs.title, Some("Gone".to_string()));
+        assert!(docs.docs.is_empty(), "this fixture writes no docs dir at all");
 
         std::fs::remove_dir_all(&root).ok();
     }
