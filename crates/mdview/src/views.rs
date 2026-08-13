@@ -2401,10 +2401,24 @@ fn bee_hub_feature_cells<'a, 'b>(
         .filter(move |c| c.feature == feature)
 }
 
-/// The first gate in bee's fixed order (context, shape, execution, review)
-/// that is not yet approved for one `approved_gates` record — `None` once
-/// every gate is approved. Applied here to a feature's own current-stop gate
-/// ([`bee_feature_hub_section`]'s Waiting on you group).
+/// The gate a feature is actually stopped at, in bee's fixed order
+/// (context, shape, execution, review) — `None` once nothing is owed.
+/// Applied to a feature's own current-stop gate ([`bee_feature_hub_section`]'s
+/// Waiting on you group).
+///
+/// A gate that a LATER gate has already been approved past is not a stop
+/// (gate-stop-superseded-1). The scan therefore starts after the last
+/// approved gate rather than at the beginning: a lane carrying
+/// `context=false, shape=true, execution=true` has plainly been through
+/// explore and shape whatever its context flag says, and reporting "Explore
+/// gate awaiting your decision" for it names a decision nobody is waiting
+/// on — the shape this rule was written from, a lane at `planning` with six
+/// of seven cells capped and an unstamped context flag, sat in Waiting on
+/// you for exactly that reason. The narrower alternative, dropping the
+/// context gate from this rule the way `review` is dropped at the call site,
+/// was rejected: it would also hide a feature whose interview really did
+/// stop for an answer and never went further, which is the case the Waiting
+/// group exists to catch.
 fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static str, &'static str)> {
     const GATES: [(&str, &str); 4] = [
         ("context", "Explore"),
@@ -2423,7 +2437,9 @@ fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static s
             })
             .unwrap_or(false)
     };
-    GATES.into_iter().find(|(key, _)| !flag(key))
+    let last_approved = GATES.iter().rposition(|(key, _)| flag(key));
+    let start = last_approved.map_or(0, |i| i + 1);
+    GATES.into_iter().skip(start).find(|(key, _)| !flag(key))
 }
 
 /// One group column of the feature hub (`bee_feature_hub_section`): a
@@ -5023,6 +5039,45 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&sibling);
+    }
+
+    /// (gate-stop-superseded-1) A gate a later gate has already been
+    /// approved past is not a stop. The shape this came from: a lane at
+    /// `planning` with six of seven cells capped, carrying
+    /// `context=false, shape=true, execution=true`, reported "Explore gate
+    /// awaiting your decision" and sat under Waiting on you.
+    #[test]
+    fn gate_stop_skips_a_gate_a_later_approval_already_passed() {
+        let gates = |c: Option<bool>, s: Option<bool>, e: Option<bool>, r: Option<bool>| BeeApprovedGates {
+            context: c,
+            shape: s,
+            execution: e,
+            review: r,
+        };
+
+        // The reported shape: explore unstamped, but shape and execution
+        // both approved — nothing is owed before review.
+        let g = gates(Some(false), Some(true), Some(true), Some(false));
+        assert_eq!(bee_gate_current_stop(Some(&g)), Some(("review", "Independent review")));
+
+        // A feature that really did stop at its interview still reports it.
+        let g = gates(Some(false), Some(false), Some(false), Some(false));
+        assert_eq!(bee_gate_current_stop(Some(&g)), Some(("context", "Explore")));
+
+        // Context approved, shape not: the shape gate is the stop.
+        let g = gates(Some(true), Some(false), Some(false), Some(false));
+        assert_eq!(bee_gate_current_stop(Some(&g)), Some(("shape", "Shape")));
+
+        // Execution approved past an unstamped shape: review is next.
+        let g = gates(Some(true), Some(false), Some(true), Some(false));
+        assert_eq!(bee_gate_current_stop(Some(&g)), Some(("review", "Independent review")));
+
+        // Everything approved: nothing owed at all.
+        let g = gates(Some(true), Some(true), Some(true), Some(true));
+        assert_eq!(bee_gate_current_stop(Some(&g)), None);
+
+        // No record at all reads as nothing approved yet.
+        assert_eq!(bee_gate_current_stop(None), Some(("context", "Explore")));
     }
 
     /// (waiting-means-stopped-1) The bug this cell fixes: an unapproved
