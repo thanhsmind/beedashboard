@@ -25,7 +25,7 @@ content itself.
   folder, a reading breadcrumb above the article, and (when the file has
   headings and/or is linked from elsewhere) a right-hand panel.
 - Clicking "Settings" in the top bar → the settings page.
-- Clicking the brand ("mdview") → the project list.
+- Clicking the brand ("Bee Artifact") → the project list.
 - Clicking a heading link in the right-hand "On this page" list, or a
   "Linked from" entry → jumps to that heading, or opens the linking file.
 - Scrolling a file's content → the right-hand "On this page" list tracks
@@ -35,7 +35,7 @@ content itself.
 
 | # | Element | Meaning | Values |
 |---|---|---|---|
-| 1 | Brand | Always-present link back to the project list | "mdview" |
+| 1 | Brand | Always-present link back to the project list | "Bee Artifact" — the display name these pages use; the command and the identifiers handed to other tools stay "mdview" (see `bee-cockpit.md`) |
 | 2 | Center slot | Page-specific orientation text in the top bar | a file's `project / path`, "· search", "Settings", or empty |
 | 3 | Settings link | Always-present link to the settings page | — |
 | 4 | Theme toggle | Always-present light/dark switch (behavior in the Appearance spec) | — |
