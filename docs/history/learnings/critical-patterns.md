@@ -253,3 +253,21 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   surface the failure appeared on, since "the user can run the command" is
   only true where the user has a shell. (2026-08-12, `stale-index-refresh`
   cells 1 and 2, `docs/history/learnings/20260812-a-serve-loop-that-only-watches-forward.md`)
+- **An ordering, grouping, or threshold offered in a shaping interview is a
+  claim about a field, and the field must be checked before the option is
+  offered.** cross-board asked the user how a cross-project Finished column
+  should sort and recommended "most recently shipped first". Both premises were
+  false and neither was visible from inside the interview: the per-project board
+  it was copying sorts alphabetically (`views.rs`, the feature list sorted by
+  slug — the supplied screenshot showed exactly that and was read as arbitrary),
+  and the obvious timestamp, `BeeShippedFeature.cycle_time.ended_at`, is
+  `Option` *and* computed from `.bee/cells/*.json` only, excluding the archive
+  where most finished features live — so roughly four in five would have landed
+  in an undated tail. Plan review caught it; measuring then found the real
+  source (`trace.capped_at` on the archived cells, latest-wins: 140 of 144
+  features covered, ~46 ms to scan all eight projects) and the decision was
+  re-put with numbers and re-locked. Before offering any such option, read the
+  struct, count the `None`s against real data, and read what the surface being
+  copied actually does rather than what its output looks like. (2026-08-12,
+  `cross-board` D6→D10,
+  `docs/history/learnings/20260812-a-sort-key-is-a-data-claim.md`)
