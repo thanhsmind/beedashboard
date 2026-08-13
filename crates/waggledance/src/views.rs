@@ -583,6 +583,20 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    phone's worth of room for the one field an operator actually types into. */
 .term-reply { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
 .term-reply__text { width: 100%; min-width: 0; box-sizing: border-box; padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); line-height: 1.35; background: var(--color-bg); color: var(--color-text); resize: vertical; }
+/* Safari on iOS zooms the page whenever it focuses a control smaller than
+   16px, and the zoom sticks — on a phone, one tap into the reply box left
+   the operator looking at a magnified card. The box is deliberately 13px on
+   a desktop, so the size is raised only where a touch pointer is doing the
+   focusing. This rule has to live here rather than in `app.css`: each
+   terminal page's `<style>` block is inlined into `head_extra`, which
+   `layout` emits AFTER the stylesheet link, so an `app.css` rule of equal
+   specificity would lose the cascade to the `.term-reply__text` declaration
+   above. 16px is the browser's threshold, not a design token — hence the
+   literal. The viewport meta tag stays as it is: suppressing the zoom with
+   `user-scalable=no` would cost every reader pinch-zoom. */
+@media (pointer: coarse) {
+  .term-reply__text { font-size: 16px; }
+}
 .term-reply__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
 .term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-3); min-height: 44px; border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; }
 /* Send is the primary of the pair — Stage beside it stays the quiet one. */
@@ -5053,6 +5067,42 @@ mod tests {
                 && narrow.contains(".pane-menu__toggle:checked ~ .pane-menu__panel"),
             "under the breakpoint the pane panel must be closed until the toggle is checked"
         );
+    }
+
+    /// A touch browser zooms the page when it focuses a control under 16px,
+    /// and the zoom sticks — the layout is left magnified after one tap into
+    /// a field. Both stylesheets have to carry the coarse-pointer override,
+    /// because they own different halves of the app's fields: `app.css` the
+    /// settings forms, `PROJECT_TAB_STYLE` the terminal reply box (whose
+    /// declaration is inlined after the stylesheet link and would otherwise
+    /// win the cascade). Desktop sizes stay as designed, so the override is
+    /// asserted to live inside the media query rather than beside it.
+    #[test]
+    fn a_touch_pointer_gets_fields_big_enough_not_to_trigger_zoom() {
+        for (name, css, selector) in [
+            ("app.css", include_str!("../assets/app.css"), ".fg-input"),
+            (
+                "the terminal style block",
+                PROJECT_TAB_STYLE,
+                ".term-reply__text",
+            ),
+        ] {
+            let query = css
+                .find("@media (pointer: coarse) {")
+                .unwrap_or_else(|| panic!("{name} carries no coarse-pointer block"));
+            let block_end = css[query..]
+                .find("\n}")
+                .unwrap_or_else(|| panic!("{name}'s coarse-pointer block never closes"));
+            let block = &css[query..query + block_end];
+            assert!(
+                block.contains(selector) && block.contains("font-size: 16px"),
+                "{name} must raise {selector} to 16px on a touch pointer: {block}"
+            );
+            assert!(
+                !css[..query].contains("font-size: 16px"),
+                "{name} must keep the 16px size inside the media query, not at every width"
+            );
+        }
     }
 
     /// agent-terminal-13, must-have: "with no presets configured, the

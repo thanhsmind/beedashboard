@@ -1780,3 +1780,18 @@ pre.mermaid.zoomable:focus-within .mermaid-controls {
   font-family: var(--type-body-sm-font);
   font-size: var(--type-body-sm-size);
 }
+/* Safari on iOS zooms the whole page whenever it focuses a form control
+   whose font-size is under 16px, and the zoom stays after the field is left
+   — one tap into a field and the layout is stuck magnified. Atelier sizes
+   the fields at `--type-ui-size` (14px), under that threshold, so raise them
+   to exactly 16px where a touch pointer is what focuses them; a mouse keeps
+   the compact size the page was designed at. The threshold is the browser's,
+   not a design choice, which is why the number is literal here rather than a
+   type token. The viewport meta tag is deliberately untouched: killing the
+   zoom with `user-scalable=no` would take pinch-zoom away from everyone. */
+@media (pointer: coarse) {
+  .fg-input,
+  .fg-select select {
+    font-size: 16px;
+  }
+}
