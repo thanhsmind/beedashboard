@@ -1026,6 +1026,17 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     for cell in &all_cells {
         feature_names.insert(cell.feature.as_str());
     }
+    // archived-feature-docs: `all_cells` is live-only (D9), so a feature
+    // whose every cell has moved to `.bee/cells/archive/<feature>/` drops
+    // out of the union above and loses its docs entirely — while the
+    // detail route still renders it from the archive
+    // (`read_archived_cells`). Its archive directory name is the one place
+    // that feature is still named, so it joins the union here, ahead of
+    // every reader below.
+    let archived_feature_names = list_archived_feature_dirs(root);
+    for name in &archived_feature_names {
+        feature_names.insert(name.as_str());
+    }
     // hub-fallbacks: every feature's own most recent decision, keyed by
     // `scope`, read once and reused across the whole `feature_names` set —
     // see `latest_decisions_by_scope`'s own doc comment for why this is not
@@ -6303,6 +6314,40 @@ mod tests {
         assert_eq!(no_docs.title, Some("No Docs".to_string()));
         assert_eq!(no_docs.description, Some("Cell a".to_string()));
         assert!(no_docs.docs.is_empty(), "no docs dir exists for this fixture's \"no-docs\" feature");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (archived-feature-docs) A feature whose every cell has moved to
+    /// `.bee/cells/archive/<feature>/` is invisible to the live D7 read,
+    /// but its docs on disk did not move — the detail page still renders
+    /// that feature, so its Docs row, title and promote-proposal must
+    /// survive the archive. The archive directory name is the only place
+    /// its name is still written down.
+    #[test]
+    fn feature_docs_and_promote_proposals_cover_an_archived_only_feature() {
+        let root = fresh_root("feature-docs-archived-only");
+        write(&root, ".bee/state.json", r#"{"phase":"idle"}"#);
+        write(
+            &root,
+            ".bee/cells/archive/gone/a.json",
+            &feature_cell_json("a", "gone", "capped", Some("2026-01-01T00:00:00Z"), Some("2026-01-02T00:00:00Z")),
+        );
+        write(&root, "docs/history/gone/promote-proposals.md", "proposal body");
+
+        let snap = read_snapshot(&root);
+        let docs = snap
+            .feature_docs
+            .get("gone")
+            .expect("an archived-only feature must still report the docs its dir holds");
+        assert_eq!(docs.docs, vec!["promote-proposals.md".to_string()]);
+        assert_eq!(docs.title, Some("Gone".to_string()));
+        assert_eq!(
+            snap.promote_proposals.get("gone"),
+            Some(&true),
+            "the same union feeds promote proposals: {:?}",
+            snap.promote_proposals
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
