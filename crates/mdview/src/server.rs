@@ -664,27 +664,23 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                 .map(|(p, _, _)| p.clone())
                 .filter(is_bee_project)
                 .collect();
-            let (cross_live_html, cross_features_html) = if bee_projects.is_empty() {
-                // D9: nothing qualifies, so neither section is built at all —
+            let cross_features_html = if bee_projects.is_empty() {
+                // D9: nothing qualifies, so the section is not built at all —
                 // no roll-up read, no `spawn_blocking` task, and
-                // `views::home_page` below reads this pair of empties as
+                // `views::home_page` below reads this empty string as
                 // "render exactly `project_list_page`'s own output".
-                (String::new(), String::new())
+                String::new()
             } else {
                 let rollups = cross_project_rollup(bee_projects).await;
                 let pairs: Vec<(&mdview_core::domain::Project, &mdview_core::bee::BeeProjectRollup)> =
                     rollups.iter().map(|(p, r)| (p, r)).collect();
-                (
-                    views::bee_cross_project_live_section(&pairs),
-                    views::bee_cross_project_features_section(&pairs),
-                )
+                views::bee_cross_project_features_section(&pairs)
             };
             Html(views::home_page(
                 &with_counts,
                 unassigned_visible,
                 &suggestions,
                 flag.register_error.as_deref(),
-                &cross_live_html,
                 &cross_features_html,
             ))
             .into_response()
@@ -14472,13 +14468,14 @@ mod bee_route_tests {
         );
     }
 
-    /// (cross-board D1/D8) Several qualifying projects, each with its own
-    /// live session and in-progress feature: the home page renders Live and
-    /// Features above the project list, and both sections carry entries
-    /// from more than one project — the whole point of D4's flat merge
-    /// rather than one block per project.
+    /// (board-drop-live, superseding cross-board D1) Several qualifying
+    /// projects, each with its own live session and in-progress feature:
+    /// the home page renders Features above the project list, carrying
+    /// entries from more than one project — the whole point of D4's flat
+    /// merge rather than one block per project — and emits no Live section
+    /// at all, cross-project or otherwise.
     #[tokio::test]
-    async fn home_page_renders_cross_project_live_and_features_above_the_project_list_from_several_projects() {
+    async fn home_page_renders_cross_project_features_above_the_project_list_and_no_live_section() {
         let dir = fresh_root("home-cross-several");
         let st = build_state_with_dir(&dir);
         let root_a = dir.join("proj-a");
@@ -14494,31 +14491,31 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        let live_at = body
-            .find(r#"data-feature-hub="cross-project-live""#)
-            .expect(&format!("the cross-project Live strip must render: {body}"));
         let features_at = body
             .find(r#"data-feature-hub="cross-project""#)
-            .filter(|&i| i != live_at)
             .expect(&format!("the cross-project Features section must render: {body}"));
         let list_at = body
             .find("<ul class=\"proj-list\">")
             .expect(&format!("the project list must still render: {body}"));
 
-        assert!(live_at < features_at, "Live must render above Features (D1): {body}");
         assert!(features_at < list_at, "Features must render above the project list (D1): {body}");
         assert!(body.contains("feat-a") && body.contains("feat-b"), "both projects' features must appear: {body}");
         assert!(
             body.contains("Project A") && body.contains("Project B"),
             "both projects' own names must label their entries: {body}"
         );
+        assert!(
+            !body.contains(r#"data-feature-hub="cross-project-live""#) && !body.contains(r#"class="bee-strip""#),
+            "the home page must emit no Live section at all: {body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// (cross-board D9) No registered project has a `.bee/` directory: the
-    /// home page must carry neither new section and must match the page's
-    /// own pre-feature markup.
+    /// (cross-board D9, board-drop-live) No registered project has a
+    /// `.bee/` directory: the home page must carry no cross-project
+    /// section — Live or Features — and must match the page's own plain
+    /// project-list markup.
     #[tokio::test]
     async fn home_page_omits_cross_project_sections_when_no_project_qualifies() {
         let dir = fresh_root("home-cross-none");
