@@ -1,7 +1,7 @@
 ---
 area: bee-cockpit
 updated: 2026-08-13
-sources: [feature-close, agent-board, bee-artifact-rename, archive-visibility, feature-hub, board-declutter, board-trim, feature-titles, hub-fallbacks, detail-desc-wrap, cross-board, board-drop-live, card-terminals]
+sources: [feature-close, agent-board, bee-artifact-rename, archive-visibility, feature-hub, board-declutter, board-trim, feature-titles, hub-fallbacks, detail-desc-wrap, cross-board, board-drop-live, card-terminals, gate-stop-superseded]
 decisions: []
 coverage: partial
 ---
@@ -129,11 +129,16 @@ cell. Every feature the store knows about — whether it still has live work or 
 already shipped — is placed into exactly one of three groups:
 
 - **Waiting on you** — a feature whose live work is sitting at a gate that has not yet
-  been approved, or that carries a paused handoff note. Two things never place a
+  been approved, or that carries a paused handoff note. Three things never place a
   feature here: the independent-review gate never counts as a stop (see "Independent
-  review is always invoked," below), and a handoff explicitly recorded as a clean,
+  review is always invoked," below); a handoff explicitly recorded as a clean,
   already-claimed handover to the next piece of work — a `planned-next` handoff — never
-  counts as waiting either.
+  counts as waiting either; and an unapproved gate that a **later** gate has already
+  been approved past is not a stop at all. Work that reached the execution gate has
+  plainly been through the earlier ones whatever their flags say, and naming an
+  earlier one would claim a decision is owed that nobody is waiting on. A feature
+  whose interview genuinely stopped for an answer — nothing approved after it — is
+  still placed here, which is the case this group exists to catch.
 - **In Progress** — every other feature that still has live work and is not waiting on
   a person.
 - **Finished** — a feature that has either fully shipped (compounding complete) or been
