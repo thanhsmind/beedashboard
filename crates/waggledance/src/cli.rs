@@ -94,11 +94,21 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum ConfigAction {
-    /// Open the config file (`~/.mdview/config.toml`) in $EDITOR.
+    /// Open the config file (`~/.waggledance/config.toml`) in $EDITOR.
     Edit,
 }
 
 pub fn run(cli: Cli) -> Result<()> {
+    // D2: arm the `~/.mdview` → `~/.waggledance` one-time migration for the
+    // rest of this process. `run` is the single dispatch point every real
+    // subcommand passes through (including `mcp` and `doctor`, which live
+    // in their own modules), so arming it once here — before any of them
+    // gets a chance to resolve the data directory — covers all of them
+    // without a matching call at each one, and a re-exec of this same
+    // binary (`runtime::spawn_daemon_detached`) re-arms itself the same way
+    // by calling back into this function. No test in this workspace calls
+    // `run`, so the migration stays disarmed for the entire test suite.
+    waggledance_core::config::arm_data_dir_migration();
     match cli.command {
         Command::Serve { port, host } => cmd_serve(port, host),
         Command::Register { path, name, json } => cmd_register(&path, name.as_deref(), json),
@@ -122,7 +132,7 @@ pub fn run(cli: Cli) -> Result<()> {
         },
         Command::Version => {
             // Single source of truth: the workspace Cargo package version.
-            println!("mdview {}", env!("CARGO_PKG_VERSION"));
+            println!("waggledance {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
     }
@@ -162,11 +172,11 @@ fn classify_config_edit_outcome(path: &Path, read_result: std::io::Result<String
     match read_result {
         Ok(text) => match toml::from_str::<Config>(&text) {
             Ok(_) => format!(
-                "Saved {}.\nRestart the daemon to apply: mdview restart",
+                "Saved {}.\nRestart the daemon to apply: waggledance restart",
                 path.display()
             ),
             Err(e) => format!(
-                "Warning: {} is not valid TOML ({e}).\nmdview will ignore it and fall back to defaults until you fix it.",
+                "Warning: {} is not valid TOML ({e}).\nwaggledance will ignore it and fall back to defaults until you fix it.",
                 path.display()
             ),
         },
@@ -215,7 +225,7 @@ fn cmd_serve(port: Option<u16>, host: Option<String>) -> Result<()> {
         cfg.save().ok();
     }
     if runtime::running_daemon().is_some() {
-        println!("A mdview daemon is already running.");
+        println!("A waggledance daemon is already running.");
         return Ok(());
     }
     let rt = tokio::runtime::Runtime::new()?;
@@ -422,7 +432,7 @@ fn cmd_unregister(id: &str) -> Result<()> {
 /// when a lock existed, or `None` when no daemon was recorded.
 fn stop_daemon() -> Option<(u32, bool)> {
     let info = runtime::read_lock()?;
-    // Confirm the lock's host:port actually answers as an mdview daemon
+    // Confirm the lock's host:port actually answers as an waggledance daemon
     // BEFORE sending a kill signal by pid. A stale lock's pid may since have
     // been recycled by an unrelated live process; killing by pid alone,
     // without this check, would signal that unrelated process even though
@@ -506,7 +516,7 @@ fn cmd_restart() -> Result<()> {
             return Ok(());
         }
     }
-    println!("Started daemon; not yet confirmed up (check `mdview status`).");
+    println!("Started daemon; not yet confirmed up (check `waggledance status`).");
     Ok(())
 }
 
@@ -546,15 +556,15 @@ mod config_edit_tests {
 
     #[test]
     fn valid_toml_reports_saved() {
-        let path = Path::new("/tmp/mdview-test-config.toml");
+        let path = Path::new("/tmp/waggledance-test-config.toml");
         let msg = classify_config_edit_outcome(path, Ok(String::new()));
         assert!(msg.starts_with("Saved "));
-        assert!(msg.contains("Restart the daemon to apply: mdview restart"));
+        assert!(msg.contains("Restart the daemon to apply: waggledance restart"));
     }
 
     #[test]
     fn invalid_toml_reports_warning() {
-        let path = Path::new("/tmp/mdview-test-config.toml");
+        let path = Path::new("/tmp/waggledance-test-config.toml");
         let msg = classify_config_edit_outcome(path, Ok("not = [valid".to_string()));
         assert!(msg.starts_with("Warning: "));
         assert!(msg.contains("is not valid TOML"));
@@ -562,7 +572,7 @@ mod config_edit_tests {
 
     #[test]
     fn unreadable_file_reports_read_error() {
-        let path = Path::new("/tmp/mdview-test-config.toml");
+        let path = Path::new("/tmp/waggledance-test-config.toml");
         let err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
         let msg = classify_config_edit_outcome(path, Err(err));
         assert!(msg.starts_with("Could not re-read "));

@@ -1,4 +1,4 @@
-//! Real end-to-end coverage for `mdview stop` against a stale
+//! Real end-to-end coverage for `waggledance stop` against a stale
 //! `daemon.lock` (dls-1). Reported symptom: a lock naming a pid that had
 //! already exited and a port nothing listens on made `stop` hang instead of
 //! returning promptly. Root cause found by reproduction, not guessed:
@@ -7,7 +7,7 @@
 //! dead port instead of answering with an immediate RST, that connect call
 //! blocked indefinitely. The pid-kill step itself was never the slow part.
 //!
-//! `stop_daemon()` (`crates/mdview/src/cli.rs`) was also fixed to confirm
+//! `stop_daemon()` (`crates/waggledance/src/cli.rs`) was also fixed to confirm
 //! liveness via `health_check` *before* sending a kill signal by pid — a
 //! stale lock's pid can be recycled by an unrelated live process, and
 //! killing by pid alone would have signaled that process.
@@ -32,19 +32,19 @@ impl Drop for ChildGuard {
 
 fn scratch_home(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "mdview-e2e-stop-{label}-{}-{}",
+        "waggledance-e2e-stop-{label}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     ));
-    std::fs::create_dir_all(dir.join(".mdview")).expect("create scratch HOME/.mdview dir");
+    std::fs::create_dir_all(dir.join(".waggledance")).expect("create scratch HOME/.waggledance dir");
     dir
 }
 
 fn lock_path(home: &Path) -> PathBuf {
-    home.join(".mdview").join("daemon.lock")
+    home.join(".waggledance").join("daemon.lock")
 }
 
 fn write_lock(home: &Path, pid: u32, host: &str, port: u16) {
@@ -132,7 +132,7 @@ fn wait_for_health(host: &str, port: u16, timeout: Duration) -> bool {
     }
 }
 
-/// Runs `mdview <args>` against `home`, returning `None` if it did not exit
+/// Runs `waggledance <args>` against `home`, returning `None` if it did not exit
 /// within `timeout` (killing it so the test doesn't itself hang). This is
 /// the reproduction harness: before the fix, `stop` against a stale lock
 /// never returns, so this returns `None` and the caller's assertion fails —
@@ -145,7 +145,7 @@ fn run_with_timeout(bin: &str, args: &[&str], home: &Path, timeout: Duration) ->
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn mdview");
+        .expect("spawn waggledance");
 
     let deadline = Instant::now() + timeout;
     loop {
@@ -193,7 +193,7 @@ fn stop_returns_promptly_against_a_stale_lock_and_clears_it() {
     let start = Instant::now();
     let output = run_with_timeout(bin, &["stop"], &home, bound).unwrap_or_else(|| {
         panic!(
-            "mdview stop did not return within {bound:?} against a stale lock \
+            "waggledance stop did not return within {bound:?} against a stale lock \
              (dead pid {pid}, dead port {port}) -- this is the hang this test reproduces"
         )
     });
@@ -201,13 +201,13 @@ fn stop_returns_promptly_against_a_stale_lock_and_clears_it() {
 
     assert!(
         output.status.success(),
-        "mdview stop exited non-zero: stdout={} stderr={}",
+        "waggledance stop exited non-zero: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
         elapsed < bound,
-        "mdview stop took {elapsed:?} against a stale lock, expected well under {bound:?}"
+        "waggledance stop took {elapsed:?} against a stale lock, expected well under {bound:?}"
     );
     assert!(
         !lock_path(&home).exists(),
@@ -223,7 +223,7 @@ fn stop_with_no_lock_reports_no_daemon_running() {
     let home = scratch_home("no-lock");
 
     let output = run_with_timeout(bin, &["stop"], &home, Duration::from_secs(5))
-        .expect("mdview stop did not return promptly with no lock at all");
+        .expect("waggledance stop did not return promptly with no lock at all");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -233,7 +233,7 @@ fn stop_with_no_lock_reports_no_daemon_running() {
     );
 }
 
-/// Edge: a lock naming a pid that is alive but is not mdview (e.g. a
+/// Edge: a lock naming a pid that is alive but is not waggledance (e.g. a
 /// recycled pid) must not be killed, and must not be treated as a running
 /// daemon.
 #[cfg(unix)]
@@ -252,12 +252,12 @@ fn stop_does_not_kill_an_unrelated_live_process_named_by_a_stale_lock() {
     let unrelated_pid = unrelated.id();
     let mut guard = ChildGuard(unrelated);
 
-    // Port is dead, so this pid is alive but is not actually serving mdview.
+    // Port is dead, so this pid is alive but is not actually serving waggledance.
     let port = cold_dead_port(1);
     write_lock(&home, unrelated_pid, "127.0.0.1", port);
 
     let output = run_with_timeout(bin, &["stop"], &home, Duration::from_secs(5))
-        .expect("mdview stop did not return promptly against an unrelated-pid lock");
+        .expect("waggledance stop did not return promptly against an unrelated-pid lock");
     assert!(output.status.success());
 
     // Still alive: try_wait() returns None only while the process is running.
@@ -289,7 +289,7 @@ fn stop_still_stops_a_genuinely_live_daemon() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn mdview serve");
+        .expect("spawn waggledance serve");
     let mut guard = ChildGuard(child);
 
     let info = wait_for_lock(&home, Duration::from_secs(10));
@@ -301,7 +301,7 @@ fn stop_still_stops_a_genuinely_live_daemon() {
     );
 
     let output = run_with_timeout(bin, &["stop"], &home, Duration::from_secs(5))
-        .expect("mdview stop did not return promptly against a live daemon");
+        .expect("waggledance stop did not return promptly against a live daemon");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -335,7 +335,7 @@ fn stop_keeps_the_lock_when_kill_fails_but_the_daemon_still_answers() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn mdview serve");
+        .expect("spawn waggledance serve");
     let guard = ChildGuard(child);
 
     let info = wait_for_lock(&home, Duration::from_secs(10));
@@ -353,7 +353,7 @@ fn stop_keeps_the_lock_when_kill_fails_but_the_daemon_still_answers() {
     write_lock(&home, dead, &info.host, info.port);
 
     let output = run_with_timeout(bin, &["stop"], &home, Duration::from_secs(5))
-        .expect("mdview stop did not return promptly against the orphaned-guard scenario");
+        .expect("waggledance stop did not return promptly against the orphaned-guard scenario");
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

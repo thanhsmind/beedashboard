@@ -1,4 +1,4 @@
-//! Real end-to-end coverage for `mdview open` (D3/PBI-14): spawns the actual
+//! Real end-to-end coverage for `waggledance open` (D3/PBI-14): spawns the actual
 //! compiled binary as a daemon, then runs `open --json` against it and
 //! asserts the returned URL's port matches the daemon's real bound port.
 //! This exercises the D3 happy path (loopback bind, no timeout fallback);
@@ -26,7 +26,7 @@ impl Drop for DaemonGuard {
 
 fn scratch_home(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "mdview-e2e-{label}-{}-{}",
+        "waggledance-e2e-{label}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -38,7 +38,7 @@ fn scratch_home(label: &str) -> PathBuf {
 }
 
 fn lock_path(home: &Path) -> PathBuf {
-    home.join(".mdview").join("daemon.lock")
+    home.join(".waggledance").join("daemon.lock")
 }
 
 /// Poll for `serve()`'s daemon.lock (written immediately after bind, per
@@ -108,7 +108,7 @@ fn cmd_open_json_url_port_matches_real_daemon_bound_port() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn mdview serve");
+        .expect("spawn waggledance serve");
     let _guard = DaemonGuard(child);
 
     let info = wait_for_lock(&home, Duration::from_secs(10));
@@ -123,16 +123,16 @@ fn cmd_open_json_url_port_matches_real_daemon_bound_port() {
         .args(["open", doc_path.to_str().unwrap(), "--json"])
         .env("HOME", &home)
         .output()
-        .expect("run mdview open");
+        .expect("run waggledance open");
     assert!(
         output.status.success(),
-        "mdview open failed: {}",
+        "waggledance open failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("mdview open --json did not print valid JSON ({e}): {stdout}"));
+        .unwrap_or_else(|e| panic!("waggledance open --json did not print valid JSON ({e}): {stdout}"));
 
     let url = json["url"].as_str().expect("url field present");
     let urls = json["urls"].as_array().expect("urls field present");
@@ -145,7 +145,7 @@ fn cmd_open_json_url_port_matches_real_daemon_bound_port() {
     let url_port = port_of(url);
     assert_eq!(
         url_port, info.port,
-        "mdview open returned a URL whose port ({url_port}) does not match \
+        "waggledance open returned a URL whose port ({url_port}) does not match \
          the daemon's real bound port ({})",
         info.port
     );
@@ -180,7 +180,7 @@ fn write_file(path: &Path, body: &[u8]) {
     std::fs::write(path, body).unwrap();
 }
 
-/// Registers a project via `mdview open <readme>` (the same mechanism the
+/// Registers a project via `waggledance open <readme>` (the same mechanism the
 /// existing test above uses — both the daemon and the CLI share the same
 /// on-disk index under `HOME`, so registering via the CLI is visible to the
 /// already-running daemon immediately) and returns its `project_id`.
@@ -189,15 +189,15 @@ fn open_project(bin: &str, home: &Path, readme: &Path) -> String {
         .args(["open", readme.to_str().unwrap(), "--json"])
         .env("HOME", home)
         .output()
-        .expect("run mdview open");
+        .expect("run waggledance open");
     assert!(
         output.status.success(),
-        "mdview open failed: {}",
+        "waggledance open failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let json: serde_json::Value =
         serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
-            .expect("mdview open --json printed valid JSON");
+            .expect("waggledance open --json printed valid JSON");
     json["project_id"]
         .as_str()
         .expect("project_id present")
@@ -222,7 +222,7 @@ fn code_section_lists_dirs_highlights_files_and_denies_sensitive_paths() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn mdview serve");
+        .expect("spawn waggledance serve");
     let _guard = DaemonGuard(child);
 
     let info = wait_for_lock(&home, Duration::from_secs(10));
@@ -356,7 +356,7 @@ fn code_view_sidebar_splits_folders_files_and_breadcrumb_shows_type_and_size() {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn mdview serve");
+        .expect("spawn waggledance serve");
     let _guard = DaemonGuard(child);
 
     let info = wait_for_lock(&home, Duration::from_secs(10));

@@ -1,9 +1,11 @@
-//! Config (`~/.mdview/config.toml`). Atomic write, resilient load (corrupt → default).
+//! Config (`~/.waggledance/config.toml`). Atomic write, resilient load (corrupt → default).
 //! Mirrors PRD §10.
 
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Once;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -68,10 +70,10 @@ pub struct TerminalConfig {
     /// The terminal surface itself (D2/D3) — panes and screens are reachable
     /// only once this is on.
     pub enabled: bool,
-    /// D7: keep the herdr supervisor process alive. mdview spawns nothing
+    /// D7: keep the herdr supervisor process alive. waggledance spawns nothing
     /// while this is off.
     pub supervisor_enabled: bool,
-    /// D7: Telegram notification on agent status change. mdview makes no
+    /// D7: Telegram notification on agent status change. waggledance makes no
     /// outbound call while this is off.
     pub notify_enabled: bool,
     /// toa-4 (D9): the Unassigned group — panes that live outside every
@@ -89,9 +91,9 @@ pub struct TerminalConfig {
     pub unassigned_enabled: bool,
     /// D8/P4: operator-authored agent-create presets, keyed by label — the
     /// terminal page's creation controls
-    /// (`crates/mdview/src/views.rs::terminal_create_controls`) offer
+    /// (`crates/waggledance/src/views.rs::terminal_create_controls`) offer
     /// exactly these labels and nothing else, and
-    /// `crates/mdview/src/server.rs::terminal_create_agent` is the only
+    /// `crates/waggledance/src/server.rs::terminal_create_agent` is the only
     /// place a label is ever turned into the argv it keys into. No HTTP
     /// request ever supplies or reads an `argv` — this config field is the
     /// only source. Defaults to empty: a fresh install refuses every
@@ -104,7 +106,7 @@ pub struct TerminalConfig {
     /// destination, not a credential, so it is an ordinary `Config` field:
     /// visible on `GET /api/config` and in the settings HTML like any other
     /// setting. `None` (the default) means no destination is configured —
-    /// `TelegramNotifier::new` (`crates/mdview/src/notify/telegram.rs`)
+    /// `TelegramNotifier::new` (`crates/waggledance/src/notify/telegram.rs`)
     /// requires both halves, so a configuration missing this one never
     /// attempts a delivery no matter what the switch says.
     #[serde(default)]
@@ -114,7 +116,7 @@ pub struct TerminalConfig {
 /// One D8 agent-create preset: a label the terminal page's creation
 /// controls offer, keyed to the argv that is started when a client picks it
 /// by name. Operator-authored config only — never populated from, or
-/// exposed raw to, an HTTP request body (`crates/mdview/src/server.rs`'s
+/// exposed raw to, an HTTP request body (`crates/waggledance/src/server.rs`'s
 /// create routes deserialize only a `preset` label, never `argv`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -178,24 +180,124 @@ impl Default for SearchConfig {
         }
     }
 }
-/// `~/.mdview/` — the app data directory (created on demand).
+/// `~/.waggledance/` — the app data directory (created on demand).
 pub fn data_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".waggledance")
+}
+
+/// The pre-rename data directory (`~/.mdview/`), read only by the D2
+/// migration below.
+fn legacy_data_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".mdview")
 }
 
-/// `data_dir()`, or `override_dir` when given. Callers that must be testable
-/// without touching the developer's real `~/.mdview` (route handlers exercised
-/// through a test harness) resolve the data directory through this instead of
-/// calling `data_dir()` directly. With `override_dir` unset this returns
-/// exactly what `data_dir()` returns.
-pub fn resolve_data_dir(override_dir: Option<&Path>) -> PathBuf {
-    override_dir.map(Path::to_path_buf).unwrap_or_else(data_dir)
+/// D2: armed only by `crate::cli::run` in the `waggledance` binary crate —
+/// the single dispatch point every real subcommand (`serve`, `open`,
+/// `doctor`, `mcp`, …) passes through, and re-armed the same way in a
+/// re-exec'd daemon process (`spawn_daemon_detached`). Defaults to
+/// disarmed, so this crate's own unit tests *and* every downstream crate
+/// that links `waggledance-core` as an ordinary dependency (`#[cfg(test)]`
+/// here never activates for them) can call `resolve_data_dir`/`data_dir`
+/// through any of dozens of route-level tests with no override and never
+/// reach a real, unoverridden `~/.mdview` or `~/.waggledance` — the "opt
+/// out that the test suite sets" this migration needs, expressed as an
+/// opt-in only the real CLI entry point ever exercises, because auditing
+/// every test call site for an opt-out would have been both impractical and
+/// one missed call away from renaming a developer's real home directory.
+static DATA_DIR_MIGRATION_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Arms the D2 migration for the remainder of this process. See
+/// [`DATA_DIR_MIGRATION_ARMED`].
+pub fn arm_data_dir_migration() {
+    DATA_DIR_MIGRATION_ARMED.store(true, Ordering::SeqCst);
 }
 
+static MIGRATE_DATA_DIR_ONCE: Once = Once::new();
+
+/// D2: `~/.mdview` → `~/.waggledance`, attempted at most once per process,
+/// only when armed (see [`DATA_DIR_MIGRATION_ARMED`]). A no-op when the new
+/// directory already exists (never overwrite it, and never touch the old
+/// one) or when the old directory does not exist (nothing to migrate).
+fn migrate_data_dir_once() {
+    if !DATA_DIR_MIGRATION_ARMED.load(Ordering::SeqCst) {
+        return;
+    }
+    MIGRATE_DATA_DIR_ONCE.call_once(|| {
+        let old_dir = legacy_data_dir();
+        let new_dir = data_dir();
+        if let Err(e) = migrate_data_dir(&old_dir, &new_dir) {
+            tracing::warn!(
+                "failed to migrate data directory from {} to {}: {e}",
+                old_dir.display(),
+                new_dir.display()
+            );
+        }
+    });
+}
+
+/// The D2 migration's testable core: renames `old_dir` to `new_dir` exactly
+/// when `new_dir` is absent and `old_dir` exists. Idempotent by
+/// construction — a second call after the first has succeeded already sees
+/// `old_dir` gone (or `new_dir` present) and returns `Ok(())` without
+/// touching the filesystem again.
+fn migrate_data_dir(old_dir: &Path, new_dir: &Path) -> std::io::Result<()> {
+    if new_dir.exists() || !old_dir.exists() {
+        return Ok(());
+    }
+    rename_data_dir(old_dir, new_dir)
+}
+
+/// Unconditionally attempts the rename and logs exactly one line naming
+/// both paths on success. `cmd_open` (`crates/waggledance/src/cli.rs`)
+/// resolves the data directory and then spawns the daemon as a *separate*
+/// process, so two processes can race this same rename. `fs::rename` is
+/// atomic on unix; the losing process's `old_dir` is already gone by the
+/// time its own `rename` call runs, which surfaces as `NotFound` — treated
+/// here as success, never an error, so an ordinary `open` that merely lost
+/// the race never aborts because of it.
+fn rename_data_dir(old_dir: &Path, new_dir: &Path) -> std::io::Result<()> {
+    match std::fs::rename(old_dir, new_dir) {
+        Ok(()) => {
+            tracing::info!(
+                "migrated data directory from {} to {}",
+                old_dir.display(),
+                new_dir.display()
+            );
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// `data_dir()`, or `override_dir` when given. Callers that must be testable
+/// without touching the developer's real `~/.waggledance` (route handlers
+/// exercised through a test harness) resolve the data directory through
+/// this instead of calling `data_dir()` directly. With `override_dir` unset
+/// this returns exactly what `data_dir()` returns, after giving the D2
+/// migration (armed only in the real CLI process) its one chance per
+/// process to run.
+pub fn resolve_data_dir(override_dir: Option<&Path>) -> PathBuf {
+    match override_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => {
+            migrate_data_dir_once();
+            data_dir()
+        }
+    }
+}
+
+/// Routes through [`resolve_data_dir`] (not `data_dir()` directly) so every
+/// caller — `doctor`, `build_engine()`, the MCP server, `cmd_config_edit`,
+/// `serve` — gets the D2 migration's one chance to run before it ever
+/// creates `~/.waggledance/` itself, without each of those call sites
+/// needing its own migration call.
 pub fn config_path() -> PathBuf {
-    data_dir().join("config.toml")
+    resolve_data_dir(None).join("config.toml")
 }
 
 /// `config_path()`, or `override_dir/config.toml` when given.
@@ -203,18 +305,22 @@ pub fn config_path_override(override_dir: Option<&Path>) -> PathBuf {
     resolve_data_dir(override_dir).join("config.toml")
 }
 
+/// See [`config_path`]'s doc comment: routes through [`resolve_data_dir`]
+/// for the same reason.
 pub fn registry_db_path() -> PathBuf {
-    data_dir().join("registry.db")
+    resolve_data_dir(None).join("registry.db")
 }
 
+/// See [`config_path`]'s doc comment: routes through [`resolve_data_dir`]
+/// for the same reason.
 pub fn daemon_lock_path() -> PathBuf {
-    data_dir().join("daemon.lock")
+    resolve_data_dir(None).join("daemon.lock")
 }
 
 /// `<data_dir>/notify.sqlite`, or `override_dir/notify.sqlite` when given —
 /// the D7/D9 notification outbox (`crate::notify_store::NotifyStore`),
 /// mirroring `config_path_override` so a route-level test never touches the
-/// real `~/.mdview`.
+/// real `~/.waggledance`.
 pub fn notify_store_path_override(override_dir: Option<&Path>) -> PathBuf {
     resolve_data_dir(override_dir).join("notify.sqlite")
 }
@@ -229,7 +335,7 @@ const NOTIFY_CREDENTIAL_FILE_NAME: &str = "telegram.token";
 
 /// `<data_dir>/telegram.token`, or `override_dir/telegram.token` when given
 /// — mirrors `config_path_override` so a route-level test never touches the
-/// real `~/.mdview`.
+/// real `~/.waggledance`.
 pub fn notify_credential_path_override(override_dir: Option<&Path>) -> PathBuf {
     resolve_data_dir(override_dir).join(NOTIFY_CREDENTIAL_FILE_NAME)
 }
@@ -240,9 +346,9 @@ pub fn notify_credential_path_override(override_dir: Option<&Path>) -> PathBuf {
 /// (unix `0600`), then `rename`d over the target — so the target path is
 /// always either the previous complete file or the new one, never a partial
 /// write, and a failed write never touches it at all. Lives in
-/// `waggledance-core` rather than the `mdview` binary crate because both the
-/// settings route (`crates/mdview/src/server.rs`) and the notify reconciler
-/// (`crates/mdview/src/main.rs`) must reach it.
+/// `waggledance-core` rather than the `waggledance` binary crate because both the
+/// settings route (`crates/waggledance/src/server.rs`) and the notify reconciler
+/// (`crates/waggledance/src/main.rs`) must reach it.
 ///
 /// The temp file's name carries fresh randomness (agent-terminal-21) rather
 /// than `std::process::id()` alone. A fixed, pid-only name is stable for the
@@ -251,7 +357,7 @@ pub fn notify_credential_path_override(override_dir: Option<&Path>) -> PathBuf {
 /// previous crash left its temp file behind before the rename landed)
 /// collide on the exact same path and fail permanently, silently, while a
 /// caller that discards the `Result` (as
-/// `crates/mdview/src/server.rs::update_terminal_config` does today) goes
+/// `crates/waggledance/src/server.rs::update_terminal_config` does today) goes
 /// on to report success anyway. A fresh random suffix on every call makes
 /// that collision astronomically unlikely instead.
 ///
@@ -314,7 +420,7 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 /// The credential currently on disk, or `None` if it has never been saved.
-/// Returns the raw secret — callers (the notify reconciler in the `mdview`
+/// Returns the raw secret — callers (the notify reconciler in the `waggledance`
 /// binary crate) may use it only to build an outbound client, never to
 /// answer an HTTP response. Use [`masked_notify_credential`] for anything
 /// rendered to a client.
@@ -396,7 +502,7 @@ mod tests {
 
     #[test]
     fn corrupt_config_falls_back_to_default() {
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("config.toml");
         std::fs::write(&p, "this is not = valid : toml ][").unwrap();
@@ -407,7 +513,7 @@ mod tests {
 
     #[test]
     fn roundtrip_atomic_save_load() {
-        let dir = std::env::temp_dir().join(format!("mdview-cfg2-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg2-{}", std::process::id()));
         let p = dir.join("config.toml");
         let mut c = Config::default();
         c.server.port = 9999;
@@ -419,7 +525,7 @@ mod tests {
 
     #[test]
     fn resolve_data_dir_uses_override_when_set() {
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-override-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-override-{}", std::process::id()));
         assert_eq!(resolve_data_dir(Some(&dir)), dir);
         assert_eq!(
             config_path_override(Some(&dir)),
@@ -429,8 +535,146 @@ mod tests {
 
     #[test]
     fn resolve_data_dir_falls_back_to_data_dir_when_unset() {
+        // Safe by construction, not by any per-test action: `resolve_data_dir(None)`
+        // does call the D2 migration's gate on the way to `data_dir()`, but that gate
+        // is disarmed (`DATA_DIR_MIGRATION_ARMED` defaults `false`) everywhere except
+        // inside `crate::cli::run`, which nothing in this test binary ever calls — so
+        // this assertion can compare against the developer's real, unoverridden
+        // `~/.waggledance` without ever renaming it.
+        assert!(!DATA_DIR_MIGRATION_ARMED.load(Ordering::SeqCst));
         assert_eq!(resolve_data_dir(None), data_dir());
         assert_eq!(config_path_override(None), config_path());
+    }
+
+    /// D2's required proof, from the top: the suite can never touch the real
+    /// home directory. `data_dir()`/`config_path()`/`registry_db_path()`/
+    /// `daemon_lock_path()`/`resolve_data_dir(None)` all route through the
+    /// same migration gate, and that gate reads disarmed here — the same
+    /// invariant the previous test leans on, asserted on its own so a
+    /// regression in *this* fact fails loudly instead of only as a side
+    /// effect of an unrelated assertion.
+    #[test]
+    fn migration_is_disarmed_by_default_so_the_suite_never_touches_real_home() {
+        assert!(!DATA_DIR_MIGRATION_ARMED.load(Ordering::SeqCst));
+    }
+
+    /// A fresh scratch pair of directories under `std::env::temp_dir()` —
+    /// every migration test below uses this instead of the real
+    /// `dirs::home_dir()`-derived paths, and exercises `migrate_data_dir`
+    /// directly rather than through `resolve_data_dir`, so none of them
+    /// depend on (or risk) the migration ever being armed.
+    fn scratch_migration_dirs(label: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "waggledance-migrate-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let old_dir = base.join("old-data-dir");
+        let new_dir = base.join("new-waggledance");
+        std::fs::create_dir_all(&base).unwrap();
+        (base, old_dir, new_dir)
+    }
+
+    #[test]
+    fn migrates_once_and_registry_db_survives_with_its_rows_intact() {
+        let (base, old_dir, new_dir) = scratch_migration_dirs("basic");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        // Stands in for real row data: the migration must move bytes
+        // unchanged, never open or reinterpret the sqlite file.
+        let registry_bytes = b"sqlite-format-3\x00fake-rows-abc123";
+        std::fs::write(old_dir.join("registry.db"), registry_bytes).unwrap();
+        std::fs::write(old_dir.join("config.toml"), b"[server]\nport = 4242\n").unwrap();
+
+        let result = migrate_data_dir(&old_dir, &new_dir);
+        assert!(result.is_ok(), "migration must succeed: {result:?}");
+        assert!(!old_dir.exists(), "old directory must be gone after migration");
+        assert!(new_dir.exists(), "new directory must exist after migration");
+        assert_eq!(
+            std::fs::read(new_dir.join("registry.db")).unwrap(),
+            registry_bytes,
+            "registry.db's rows must survive the migration unchanged"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("config.toml")).unwrap(),
+            "[server]\nport = 4242\n"
+        );
+
+        // Idempotent: a second call (the "run once per process" guard's
+        // effect, proved at the pure-function level) is a safe no-op.
+        let second = migrate_data_dir(&old_dir, &new_dir);
+        assert!(second.is_ok(), "a repeat migration call must stay Ok: {second:?}");
+        assert_eq!(
+            std::fs::read(new_dir.join("registry.db")).unwrap(),
+            registry_bytes,
+            "a repeat call must never touch the already-migrated data"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn skipped_when_the_new_dir_already_exists() {
+        let (base, old_dir, new_dir) = scratch_migration_dirs("new-exists");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("registry.db"), b"old-untouched-data").unwrap();
+        std::fs::create_dir_all(&new_dir).unwrap();
+        std::fs::write(new_dir.join("registry.db"), b"already-migrated-data").unwrap();
+
+        let result = migrate_data_dir(&old_dir, &new_dir);
+        assert!(result.is_ok());
+        assert!(
+            old_dir.exists(),
+            "the old directory must never be touched once the new one exists"
+        );
+        assert_eq!(
+            std::fs::read(new_dir.join("registry.db")).unwrap(),
+            b"already-migrated-data",
+            "an existing new directory must never be overwritten"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn no_op_when_the_old_dir_is_absent() {
+        let (base, old_dir, new_dir) = scratch_migration_dirs("old-absent");
+        // old_dir deliberately never created.
+        let result = migrate_data_dir(&old_dir, &new_dir);
+        assert!(result.is_ok());
+        assert!(
+            !new_dir.exists(),
+            "nothing to migrate must never create the new directory"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The exact defect the concurrency note calls out: `cmd_open` resolves
+    /// the data directory and then spawns the daemon as a separate process,
+    /// so two processes can race this rename. The losing process's source
+    /// directory is already gone by the time its own `fs::rename` call
+    /// runs — `NotFound` — and that must read as success, never an error,
+    /// or an ordinary `open` that merely lost the race would abort.
+    #[test]
+    fn the_losing_side_of_a_concurrent_rename_returns_success_not_an_error() {
+        let (base, old_dir, new_dir) = scratch_migration_dirs("race-loser");
+        // old_dir is never created here: this is exactly the state the
+        // losing process's `old_dir.exists()` check would already see if it
+        // ran after the winner's rename completed. Calling the unconditional
+        // rename helper directly (bypassing that check) proves the
+        // `fs::rename` failure itself — not just the guard in front of it —
+        // is what turns "already gone" into `Ok(())`.
+        let result = rename_data_dir(&old_dir, &new_dir);
+        assert!(
+            result.is_ok(),
+            "a rename racing an already-vanished source must succeed, not error: {result:?}"
+        );
+        assert!(!new_dir.exists());
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -451,7 +695,7 @@ mod tests {
         assert!(!c.terminal.unassigned_enabled);
 
         // Round-trips through TOML with no token anywhere in the section.
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-terminal-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-terminal-{}", std::process::id()));
         let p = dir.join("config.toml");
         c.save_to(&p).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
@@ -475,7 +719,7 @@ mod tests {
         // build that predates this switch entirely — has never heard of
         // `unassigned_enabled`, and loading it must still resolve to off,
         // not fail to parse and not silently read as on.
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-unassigned-absent-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-unassigned-absent-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("config.toml");
         std::fs::write(&p, "[terminal]\nenabled = true\nsupervisor_enabled = true\n").unwrap();
@@ -494,7 +738,7 @@ mod tests {
         let c = Config::default();
         assert!(c.terminal.agent_presets.is_empty());
 
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-presets-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-presets-{}", std::process::id()));
         let p = dir.join("config.toml");
         let mut c = Config::default();
         c.terminal.agent_presets = vec![AgentPreset {
@@ -516,7 +760,7 @@ mod tests {
     fn hostname_defaults_to_none_and_roundtrips_when_set() {
         assert_eq!(ServerConfig::default().hostname, None);
 
-        let dir = std::env::temp_dir().join(format!("mdview-cfg3-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg3-{}", std::process::id()));
         let p = dir.join("config.toml");
         let mut c = Config::default();
         c.server.hostname = Some("my-machine.local".into());
@@ -533,7 +777,7 @@ mod tests {
         // every other setting.
         assert_eq!(Config::default().terminal.notify_chat_id, None);
 
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-chatid-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-chatid-{}", std::process::id()));
         let p = dir.join("config.toml");
         let mut c = Config::default();
         c.terminal.notify_chat_id = Some("-100123456789".into());
@@ -545,7 +789,7 @@ mod tests {
 
     #[test]
     fn notify_credential_absent_until_saved_then_masked_never_full() {
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-cred-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = notify_credential_path_override(Some(&dir));
 
@@ -584,7 +828,7 @@ mod tests {
         // beside), not a hardcoded literal — a decorative assertion would
         // stay green even if the credential quietly became a Config field
         // under a different name.
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-leak-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-cred-leak-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cred_path = notify_credential_path_override(Some(&dir));
         let secret = "definitely-a-secret-value-42";
@@ -618,7 +862,7 @@ mod tests {
     /// succeed regardless of scheduling.
     #[test]
     fn concurrent_saves_never_collide_on_the_temp_name() {
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-race-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-cred-race-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = notify_credential_path_override(Some(&dir));
 
@@ -650,7 +894,7 @@ mod tests {
     /// never block a later save from succeeding.
     #[test]
     fn a_leftover_temp_file_never_blocks_a_later_save() {
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-leftover-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-cred-leftover-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = notify_credential_path_override(Some(&dir));
 
@@ -676,7 +920,7 @@ mod tests {
     fn a_save_that_cannot_write_reports_the_failure() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-denied-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-cred-denied-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = notify_credential_path_override(Some(&dir));
         // No write permission on the containing directory: `create_new`
@@ -706,7 +950,7 @@ mod tests {
     fn credential_file_is_created_owner_only_on_unix() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("mdview-cfg-cred-mode-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-cfg-cred-mode-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = notify_credential_path_override(Some(&dir));
         save_notify_credential(&path, "mode-check-secret").unwrap();

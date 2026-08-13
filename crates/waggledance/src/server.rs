@@ -2270,7 +2270,7 @@ const ATTACH_MAX_FILES_PER_PANE: usize = 32;
 
 /// terminal-image-attach-3 P2: the age past which a stored attach file is
 /// pruned before the `ATTACH_MAX_FILES_PER_PANE` count cap is enforced.
-/// `~/.cache/mdview/attach` (the `XDG_RUNTIME_DIR`-unset fallback, the
+/// `~/.cache/waggledance/attach` (the `XDG_RUNTIME_DIR`-unset fallback, the
 /// common WSL case) never clears on logout the way the runtime-dir root
 /// does, so without this a pane's directory only grows and every upload
 /// past its lifetime 32nd is refused forever. 24 hours comfortably outlives
@@ -2354,26 +2354,29 @@ fn sanitize_attach_segment(raw: &str) -> String {
     }
 }
 
-/// D3's storage root: `$XDG_RUNTIME_DIR/mdview-attach` when that env var is
-/// set and non-empty, else `~/.cache/mdview/attach` — never bare `/tmp`,
-/// which is world-writable (1777) and symlink-preseedable (plan.md's
-/// security notes). `override_root` is `AppState::attach_root`, the same
-/// test seam `config_data_dir`/`transcript_root` already give other
-/// terminal routes; `None` in production resolves the env-or-home path
-/// above.
+/// D3's storage root: `$XDG_RUNTIME_DIR/waggledance-attach` when that env
+/// var is set and non-empty, else `~/.cache/waggledance/attach` — never
+/// bare `/tmp`, which is world-writable (1777) and symlink-preseedable
+/// (plan.md's security notes). `override_root` is `AppState::attach_root`,
+/// the same test seam `config_data_dir`/`transcript_root` already give
+/// other terminal routes; `None` in production resolves the env-or-home
+/// path above. This is a cache directory, not app data, so unlike
+/// `~/.mdview` → `~/.waggledance` (D2) it carries no migration: nothing
+/// here outlives a single attach session, so there is nothing worth
+/// preserving across the rename, and a deliberate choice, not an omission.
 fn resolve_attach_root(override_root: Option<&std::path::Path>) -> PathBuf {
     if let Some(dir) = override_root {
         return dir.to_path_buf();
     }
     if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         if !runtime_dir.is_empty() {
-            return PathBuf::from(runtime_dir).join("mdview-attach");
+            return PathBuf::from(runtime_dir).join("waggledance-attach");
         }
     }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".cache")
-        .join("mdview")
+        .join("waggledance")
         .join("attach")
 }
 
