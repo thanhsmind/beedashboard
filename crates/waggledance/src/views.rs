@@ -20,12 +20,25 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} · Bee Artifact</title>
+<title>{title} · Waggle Dance</title>
 <script>
 // No-flash: apply saved scheme before body renders.
 (function() {{
   try {{
-    var t = localStorage.getItem('mdview-theme') || 'system';
+    // One-shot storage-key migration (D5 of the waggledance rename): read
+    // the new key first; if it is absent, fall back to the old "mdview-theme"
+    // key, copy it forward, and delete it — inert on every run after the
+    // first, so a user's chosen theme is never silently lost.
+    var t = localStorage.getItem('waggledance-theme');
+    if (t === null) {{
+      var old = localStorage.getItem('mdview-theme');
+      if (old !== null) {{
+        try {{ localStorage.setItem('waggledance-theme', old); }} catch (e) {{}}
+        try {{ localStorage.removeItem('mdview-theme'); }} catch (e) {{}}
+        t = old;
+      }}
+    }}
+    t = t || 'system';
     var dark = t === 'dark' || (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
     document.documentElement.setAttribute('data-scheme', dark ? 'dark' : 'light');
   }} catch (e) {{}}
@@ -173,7 +186,7 @@ fn project_list_main(
     register_error: Option<&str>,
 ) -> String {
     let listing = if projects.is_empty() {
-        "<p class=\"fg-empty\">Chưa có project nào trong Bee Artifact. Đăng ký: <code>mdview register &lt;dir&gt;</code> hoặc gọi MCP <code>mdview_view_file</code>.</p>".to_string()
+        "<p class=\"fg-empty\">Chưa có project nào trong Waggle Dance. Đăng ký: <code>waggledance register &lt;dir&gt;</code> hoặc gọi MCP <code>waggledance_view_file</code>.</p>".to_string()
     } else {
         // One row per project, not a grid of cards: a card's width was spent on
         // air while the names — which is what the eye is actually scanning for —
@@ -226,7 +239,7 @@ fn project_list_main(
   </a>
   {badges}
   <form class="proj-row__delete" method="post" action="/api/projects/{id}/unregister" data-project="{name}">
-    <button type="submit" class="proj-card__del" aria-label="Remove {name} from Bee Artifact" title="Remove from Bee Artifact">✕</button>
+    <button type="submit" class="proj-card__del" aria-label="Remove {name} from Waggle Dance" title="Remove from Waggle Dance">✕</button>
   </form>
 </li>"#,
                 row_class = row_class,
@@ -839,7 +852,7 @@ pub struct TerminalPaneView {
 
 /// D3's status pill: maps a [`TerminalPaneView::status`] value onto
 /// `.fg-status`'s three tone modifiers
-/// (`crates/mdview/assets/atelier/components.css:145-151`). `done` reads
+/// (`crates/waggledance/assets/atelier/components.css:145-151`). `done` reads
 /// ready, `working` reads warn, `blocked` reads blocked; `idle`, `unknown`
 /// (`herdr::wire::AgentStatus::Unknown`) and `shell` (no agent at all) all
 /// keep the bare, unmodified `.fg-status` — the neutral dot — so a status a
@@ -944,8 +957,8 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str, attach: bool) -> Stri
 /// poller on the next render.
 ///
 /// agent-terminal-13: not folded into `assets/app.js` — that file is not
-/// among this cell's declared files (`crates/mdview/src/server.rs`,
-/// `crates/mdview/src/views.rs`, `crates/waggledance-core/src/config.rs`), so the
+/// among this cell's declared files (`crates/waggledance/src/server.rs`,
+/// `crates/waggledance/src/views.rs`, `crates/waggledance-core/src/config.rs`), so the
 /// creation controls' own click wiring lives here instead, the same
 /// deliberate duplication `UNASSIGNED_TERMINAL_SCRIPT` already documents for
 /// the same reason ("a later cell to fold both into one shared script once
@@ -1360,7 +1373,7 @@ pub fn unassigned_terminal_down_page() -> String {
   <h2 class="fg-pagehead__title">Unassigned agents</h2>
   <div class="fg-card term-pane">
     <div class="fg-card__title">herdr is not running</div>
-    <div class="term-pane__meta">Start herdr, then reload this page — Bee Artifact does not start it for you unless the herdr supervisor is switched on in Settings.</div>
+    <div class="term-pane__meta">Start herdr, then reload this page — Waggle Dance does not start it for you unless the herdr supervisor is switched on in Settings.</div>
   </div>
 </main>"#,
         topbar = topbar("<span class=\"crumb\">Unassigned agents</span>"),
@@ -1381,7 +1394,7 @@ pub fn terminal_down_page(project: &Project) -> String {
   <h2 class="fg-pagehead__title">{name}</h2>
   <div class="fg-card term-pane">
     <div class="fg-card__title">herdr is not running</div>
-    <div class="term-pane__meta">Start herdr, then reload this page — Bee Artifact does not start it for you unless the herdr supervisor is switched on in Settings.</div>
+    <div class="term-pane__meta">Start herdr, then reload this page — Waggle Dance does not start it for you unless the herdr supervisor is switched on in Settings.</div>
   </div>
 </main>"#,
         topbar = topbar_full(
@@ -3756,7 +3769,7 @@ pub fn file_page(
     var dark = document.documentElement.getAttribute('data-scheme') === 'dark';
     try { window.mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default' }); }
     catch (e) { fail('initialize: ' + ((e && e.message) || e)); return; }
-    var done = function () { document.dispatchEvent(new Event('mdview:mermaid-done')); };
+    var done = function () { document.dispatchEvent(new Event('waggledance:mermaid-done')); };
     var onErr = function (e) { fail((e && e.message) || String(e)); done(); };
     try {
       var r = window.mermaid.run({ querySelector: 'pre.mermaid' });
@@ -4305,7 +4318,7 @@ fn topbar(center: &str) -> String {
 /// app.css); on narrower viewports they stay a plain flex row. That structure
 /// comes from upstream; the brand text, the fourth `nav` slot and the menu
 /// below are this fork's and are kept across it — the name shown to a person
-/// on these pages is "Bee Artifact" by a locked decision (`bee-cockpit.md`),
+/// on these pages is "Waggle Dance" by a locked decision (`bee-cockpit.md`),
 /// never the identifier the command line uses.
 ///
 /// The nav slot and the Settings link share one menu. On a wide screen the
@@ -4327,7 +4340,7 @@ fn topbar_full(lead: &str, center: &str, actions: &str, nav: &str) -> String {
         r#"<header class="topbar">
   <div class="topbar__left">
     {lead}
-    <a href="/" class="home">Bee Artifact</a>
+    <a href="/" class="home">Waggle Dance</a>
   </div>
   <div class="topbar__center">
     {center}
@@ -4428,7 +4441,7 @@ pub fn settings_page(
     let banner = if notify_credential_save_failed {
         "<div class=\"fg-banner fg-banner--danger\"><span class=\"fg-banner__dot\"></span><span class=\"fg-banner__body\">The Telegram bot token could not be saved. Notifications will keep using the previous token, if any — try again.</span></div>"
     } else if saved {
-        "<div class=\"fg-banner fg-banner--success\"><span class=\"fg-banner__dot\"></span><span class=\"fg-banner__body\">Saved. Server &amp; indexing changes apply after restart (<code>mdview stop &amp;&amp; mdview serve</code>).</span></div>"
+        "<div class=\"fg-banner fg-banner--success\"><span class=\"fg-banner__dot\"></span><span class=\"fg-banner__body\">Saved. Server &amp; indexing changes apply after restart (<code>waggledance stop &amp;&amp; waggledance serve</code>).</span></div>"
     } else {
         ""
     };
@@ -4453,7 +4466,7 @@ pub fn settings_page(
     let body = format!(
         r#"{topbar}
 <main class="fg-page">
-  <h2 class="fg-pagehead__title">Settings <span class="t-caption fg-settings__version">mdview v{version}</span></h2>
+  <h2 class="fg-pagehead__title">Settings <span class="t-caption fg-settings__version">waggledance v{version}</span></h2>
   {banner}
   <form class="fg-settings" method="post" action="/api/config">
     <fieldset><legend>Server <span class="fg-chip fg-chip--neutral">restart</span></legend>
@@ -4529,7 +4542,7 @@ pub fn settings_page(
       <label class="fg-check"><input type="checkbox" name="supervisor_enabled" {term_supervisor}><span class="fg-check__text">Keep herdr running (supervisor)</span></label>
       <label class="fg-check"><input type="checkbox" name="notify_enabled" {term_notify}><span class="fg-check__text">Notify on agent status change</span></label>
       <label class="fg-check"><input type="checkbox" name="unassigned_enabled" {term_unassigned}><span class="fg-check__text">Show unassigned agent panes</span></label>
-      <span class="fg-field__hint">Off by default. Turning this on makes every agent pane on this machine readable and writable through the browser, including ones outside any project mdview knows about — unrelated repositories, root shells, other people's agents. It has no boundary check of its own.</span>
+      <span class="fg-field__hint">Off by default. Turning this on makes every agent pane on this machine readable and writable through the browser, including ones outside any project waggledance knows about — unrelated repositories, root shells, other people's agents. It has no boundary check of its own.</span>
     </fieldset>
     <fieldset><legend>Telegram notification</legend>
       <div class="fg-field">
@@ -4592,7 +4605,7 @@ pub fn error_page(status: u16, msg: &str) -> String {
 /// while the daemon was down (or between the startup reconcile sweep and
 /// now — `stale-index-refresh-1`) stays invisible until something reindexes
 /// it, and a reader who followed a link straight to this page has no
-/// terminal handy to run `mdview refresh` in. This renders `error_page`'s
+/// terminal handy to run `waggledance refresh` in. This renders `error_page`'s
 /// same status/message body, then — under the message, not replacing it — a
 /// plain HTML `<form>` posting to `server.rs::refresh_project`
 /// (`/api/projects/<id>/refresh`) with a hidden `redirect` field carrying the
@@ -5217,7 +5230,7 @@ mod tests {
     /// (hub-finished-compact).
     #[test]
     fn hub_sends_a_closed_feature_to_finished_even_while_a_pause_handoff_names_it() {
-        let root = std::env::temp_dir().join(format!("mdview-views-hub-closed-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-closed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -5299,7 +5312,7 @@ mod tests {
     #[test]
     fn hub_places_a_zero_cell_feature_with_a_live_session_bound_under_in_progress() {
         let root =
-            std::env::temp_dir().join(format!("mdview-views-hub-session-bound-{}", std::process::id()));
+            std::env::temp_dir().join(format!("waggledance-views-hub-session-bound-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -5348,8 +5361,8 @@ mod tests {
     /// session, never a cell.
     #[test]
     fn hub_places_a_zero_cell_feature_named_by_a_granted_worktree_under_in_progress() {
-        let root = std::env::temp_dir().join(format!("mdview-views-hub-wt-bound-{}", std::process::id()));
-        let sibling = std::env::temp_dir().join(format!("mdview-views-hub-wt-bound-sibling-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-wt-bound-{}", std::process::id()));
+        let sibling = std::env::temp_dir().join(format!("waggledance-views-hub-wt-bound-sibling-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&sibling);
         let write = |dir: &std::path::Path, rel: &str, body: &str| {
@@ -5434,7 +5447,7 @@ mod tests {
     /// right now" and keeps the card in In Progress instead.
     #[test]
     fn hub_keeps_a_gate_stopped_feature_working_right_now_under_in_progress() {
-        let root = std::env::temp_dir().join(format!("mdview-views-hub-working-now-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-working-now-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -5487,7 +5500,7 @@ mod tests {
     /// feature's own waiting pull is untouched.
     #[test]
     fn hub_counts_a_lane_less_session_as_working_the_active_feature_only() {
-        let root = std::env::temp_dir().join(format!("mdview-views-hub-working-default-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-working-default-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -5573,7 +5586,7 @@ mod tests {
     /// unapproved gate is owed the owner a decision again.
     #[test]
     fn hub_sends_the_active_feature_to_waiting_once_its_lane_less_session_goes_cold() {
-        let root = std::env::temp_dir().join(format!("mdview-views-hub-working-default-cold-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-working-default-cold-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -5617,7 +5630,7 @@ mod tests {
     /// window — keeps its own row on the Live strip.
     #[test]
     fn hub_sends_a_gate_stopped_feature_to_waiting_once_its_session_goes_stale_enough() {
-        let root = std::env::temp_dir().join(format!("mdview-views-hub-working-stale-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-working-stale-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -5670,7 +5683,7 @@ mod tests {
     /// suppresses the pull when an agent really is on it.
     #[test]
     fn hub_sends_a_pause_handoff_feature_to_waiting_when_nobody_is_working_it() {
-        let root = std::env::temp_dir().join(format!("mdview-views-hub-handoff-idle-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-handoff-idle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -5719,9 +5732,9 @@ mod tests {
     /// case Waiting exists for.
     #[test]
     fn hub_worktree_grant_alone_does_not_suppress_the_waiting_pull() {
-        let root = std::env::temp_dir().join(format!("mdview-views-hub-wt-no-working-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-wt-no-working-{}", std::process::id()));
         let sibling =
-            std::env::temp_dir().join(format!("mdview-views-hub-wt-no-working-sibling-{}", std::process::id()));
+            std::env::temp_dir().join(format!("waggledance-views-hub-wt-no-working-sibling-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&sibling);
         let write = |dir: &std::path::Path, rel: &str, body: &str| {
@@ -5773,7 +5786,7 @@ mod tests {
     /// (`bee_relative_minutes`), and its workspace's own `root`.
     #[test]
     fn live_strip_names_a_live_sessions_lane_phase_and_heartbeat_age() {
-        let root = std::env::temp_dir().join(format!("mdview-views-strip-session-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-strip-session-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -5820,7 +5833,7 @@ mod tests {
     /// when the session records no workspace at all.
     #[test]
     fn live_strip_names_the_main_workspace_rather_than_trailing_an_empty_separator() {
-        let root = std::env::temp_dir().join(format!("mdview-views-strip-main-ws-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-strip-main-ws-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -5873,8 +5886,8 @@ mod tests {
     /// live session in the fixture at all.
     #[test]
     fn live_strip_names_a_resolved_worktrees_branch_and_active_feature() {
-        let root = std::env::temp_dir().join(format!("mdview-views-strip-wt-{}", std::process::id()));
-        let sibling = std::env::temp_dir().join(format!("mdview-views-strip-wt-sibling-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-strip-wt-{}", std::process::id()));
+        let sibling = std::env::temp_dir().join(format!("waggledance-views-strip-wt-sibling-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&sibling);
         let write = |dir: &std::path::Path, rel: &str, body: &str| {
@@ -5908,9 +5921,9 @@ mod tests {
     /// in its own row rather than rendering nothing for that grant.
     #[test]
     fn live_strip_names_an_unresolved_worktree_grants_reason_rather_than_dropping_it() {
-        let root = std::env::temp_dir().join(format!("mdview-views-strip-wt-unresolved-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-strip-wt-unresolved-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let dangling_id = format!("mdview-views-strip-wt-ghost-{}", std::process::id());
+        let dangling_id = format!("waggledance-views-strip-wt-ghost-{}", std::process::id());
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join(&dangling_id));
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -5935,7 +5948,7 @@ mod tests {
     /// strip renders one honest empty line rather than an absent section.
     #[test]
     fn live_strip_renders_one_honest_line_when_nothing_is_live() {
-        let root = std::env::temp_dir().join(format!("mdview-views-strip-empty-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-strip-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".bee")).unwrap();
 
@@ -5957,7 +5970,7 @@ mod tests {
     /// resurrect by going phase-based instead of liveness-based.
     #[test]
     fn hub_renders_no_entry_for_a_parked_lane_with_no_liveness_signal_at_all() {
-        let root = std::env::temp_dir().join(format!("mdview-views-hub-parked-lane-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-parked-lane-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -5995,7 +6008,7 @@ mod tests {
     #[test]
     fn hub_keeps_a_closed_feature_in_finished_even_with_a_bound_session_and_a_pause_handoff() {
         let root =
-            std::env::temp_dir().join(format!("mdview-views-hub-closed-session-bound-{}", std::process::id()));
+            std::env::temp_dir().join(format!("waggledance-views-hub-closed-session-bound-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -6253,9 +6266,9 @@ mod tests {
     /// in, and must carry that project's own name.
     #[test]
     fn cross_project_places_each_feature_in_the_column_its_own_project_would_and_labels_it() {
-        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-a-{}", std::process::id()));
-        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-b-{}", std::process::id()));
-        let root_c = std::env::temp_dir().join(format!("mdview-views-cross-c-{}", std::process::id()));
+        let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("waggledance-views-cross-b-{}", std::process::id()));
+        let root_c = std::env::temp_dir().join(format!("waggledance-views-cross-c-{}", std::process::id()));
         for r in [&root_a, &root_b, &root_c] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -6374,8 +6387,8 @@ mod tests {
     /// by feature name across both projects, not grouped by project.
     #[test]
     fn cross_project_finished_orders_timed_newest_first_then_untimed_alphabetically() {
-        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-d10-a-{}", std::process::id()));
-        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-d10-b-{}", std::process::id()));
+        let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-d10-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("waggledance-views-cross-d10-b-{}", std::process::id()));
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -6447,8 +6460,8 @@ mod tests {
     /// computed, and never paged, per project.
     #[test]
     fn cross_project_finished_pages_more_than_ten_combined_entries_behind_show_10_more() {
-        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-cap-a-{}", std::process::id()));
-        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-cap-b-{}", std::process::id()));
+        let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-cap-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("waggledance-views-cross-cap-b-{}", std::process::id()));
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -6506,8 +6519,8 @@ mod tests {
     /// labels, different links -- never merged or deduplicated into one.
     #[test]
     fn cross_project_same_feature_slug_in_two_projects_renders_two_distinct_rows() {
-        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-dup-a-{}", std::process::id()));
-        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-dup-b-{}", std::process::id()));
+        let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-dup-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("waggledance-views-cross-dup-b-{}", std::process::id()));
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -6565,8 +6578,8 @@ mod tests {
     /// merged section reads exactly as if that project were absent.
     #[test]
     fn cross_project_a_project_contributing_no_features_changes_nothing() {
-        let root_a = std::env::temp_dir().join(format!("mdview-views-cross-empty-a-{}", std::process::id()));
-        let root_b = std::env::temp_dir().join(format!("mdview-views-cross-empty-b-{}", std::process::id()));
+        let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-empty-a-{}", std::process::id()));
+        let root_b = std::env::temp_dir().join(format!("waggledance-views-cross-empty-b-{}", std::process::id()));
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -6689,7 +6702,7 @@ mod tests {
     /// archived feature into the open flow.
     #[test]
     fn hub_finished_group_pages_more_than_ten_archived_features_behind_a_details() {
-        let root = std::env::temp_dir().join(format!("mdview-views-hub-finished-paged-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-finished-paged-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         for n in 0..12 {
             let feature = format!("finished-feat-{n:02}");
@@ -6742,5 +6755,100 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// waggledance-rename D5/W5: the display brand shown on every rendered
+    /// page is "Waggle Dance", not the old "Bee Artifact" or the binary
+    /// name `mdview`/`waggledance`.
+    #[test]
+    fn rendered_page_title_says_waggle_dance() {
+        let html = layout("My Doc", "", "<p>body</p>");
+        assert!(
+            html.contains("<title>My Doc · Waggle Dance</title>"),
+            "{html}"
+        );
+    }
+
+    /// waggledance-rename D5: renaming `mdview-theme` / `mdview-folders-open`
+    /// to `waggledance-*` must not silently drop the theme or folder state a
+    /// user already has stored under the old key — so a one-shot fallback
+    /// (read old, write new, delete old) survives in exactly two places:
+    /// the no-flash theme reader this function inlines into every page, and
+    /// the folder-open readers in `assets/app.js`. Nowhere else may the
+    /// string "mdview" appear in what actually reaches a browser.
+    #[test]
+    fn served_html_and_js_never_mention_mdview_outside_the_storage_fallback() {
+        let html = layout("t", "", "<p>body</p>");
+        let sources: [(&str, &str); 2] = [("layout() HTML", html.as_str()), ("assets/app.js", APP_JS)];
+        for (label, text) in sources {
+            for line in text.lines() {
+                if line.contains("mdview") {
+                    assert!(
+                        line.contains("mdview-theme") || line.contains("mdview-folders-open"),
+                        "{label} has a stray 'mdview' outside the one-shot storage fallback: {line}"
+                    );
+                }
+            }
+        }
+        assert!(
+            !APP_CSS.contains("mdview"),
+            "APP_CSS must not mention 'mdview' at all — it has no storage fallback"
+        );
+    }
+
+    /// waggledance-rename W5: `mdview:mermaid-done` was renamed on both the
+    /// dispatch side (`file_page`'s embedded script) and the listener side
+    /// (`assets/app.js`). Comparing the two sides to each other — instead of
+    /// each to its own hardcoded copy of the new name — is what would have
+    /// caught a rename that only touched one of them.
+    #[test]
+    fn mermaid_done_event_name_matches_between_dispatch_and_listener() {
+        let project = sample_project();
+        let file = IndexedFile {
+            project_id: project.id.clone(),
+            abs_path: std::path::PathBuf::from("/tmp/proj-1/a.md"),
+            rel_path: "a.md".into(),
+            title: "A".into(),
+            size_bytes: 10,
+            modified_at: "2026-08-05T00:00:00Z".into(),
+        };
+        let page = RenderedPage {
+            html: "<p>x</p>".into(),
+            title: "A".into(),
+            headings: vec![],
+            has_mermaid: true,
+            source: "x".into(),
+        };
+        let html = file_page(&project, &file, &page, std::slice::from_ref(&file), &[]);
+
+        let dispatch_marker = "document.dispatchEvent(new Event('";
+        let dispatch_start = html
+            .find(dispatch_marker)
+            .expect("mermaid dispatch site must render when has_mermaid is true")
+            + dispatch_marker.len();
+        let dispatch_end = html[dispatch_start..]
+            .find('\'')
+            .expect("unterminated dispatched event name")
+            + dispatch_start;
+        let dispatch_event = &html[dispatch_start..dispatch_end];
+
+        // Anchored on the shared callback name, `enhanceAll`, never on the
+        // event name itself — so this test cannot pass by hardcoding the
+        // new name on both sides.
+        let listen_suffix = "\", enhanceAll);";
+        let listen_end = APP_JS
+            .find(listen_suffix)
+            .expect("mermaid listener 'addEventListener(\"...\", enhanceAll);' must be present");
+        let listen_marker = "document.addEventListener(\"";
+        let listen_start = APP_JS[..listen_end]
+            .rfind(listen_marker)
+            .expect("listener must be wired via document.addEventListener(\"...\", enhanceAll)")
+            + listen_marker.len();
+        let listen_event = &APP_JS[listen_start..listen_end];
+
+        assert_eq!(
+            dispatch_event, listen_event,
+            "the mermaid-done event name must be identical on both sides of the handshake"
+        );
     }
 }

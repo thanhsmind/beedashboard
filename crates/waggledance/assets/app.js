@@ -2,6 +2,23 @@
 (function () {
   "use strict";
 
+  // One-shot storage-key migration (D5 of the waggledance rename): the old
+  // "mdview-theme" / "mdview-folders-open" key is read exactly once, copied
+  // to its new "waggledance-*" key, then deleted — so neither the user's
+  // theme nor their open-folder state is silently lost, and every read
+  // after the first is a plain hit on the new key with the old one gone.
+  function migrateStorageKey(storage, oldKey, newKey) {
+    try {
+      if (storage.getItem(newKey) === null) {
+        var old = storage.getItem(oldKey);
+        if (old !== null) {
+          storage.setItem(newKey, old);
+          storage.removeItem(oldKey);
+        }
+      }
+    } catch (e) {}
+  }
+
   function applyTheme(t) {
     var dark = t === "dark" || (t === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
     document.documentElement.setAttribute("data-scheme", dark ? "dark" : "light");
@@ -12,7 +29,7 @@
     toggle.addEventListener("click", function () {
       var cur = document.documentElement.getAttribute("data-scheme");
       var next = cur === "dark" ? "light" : "dark";
-      try { localStorage.setItem("mdview-theme", next); } catch (e) {}
+      try { localStorage.setItem("waggledance-theme", next); } catch (e) {}
       applyTheme(next);
       // Re-render mermaid diagrams for the new theme, if present.
       if (window.__mermaid) {
@@ -51,7 +68,10 @@
     // Whether the subfolders disclosure is expanded — remembered for the
     // session (auto-opens when a folder has no files of its own, see below).
     var foldersOpen = false;
-    try { foldersOpen = sessionStorage.getItem("mdview-folders-open") === "1"; } catch (e) {}
+    try {
+      migrateStorageKey(sessionStorage, "mdview-folders-open", "waggledance-folders-open");
+      foldersOpen = sessionStorage.getItem("waggledance-folders-open") === "1";
+    } catch (e) {}
 
     function render() {
       root.textContent = "";
@@ -102,7 +122,7 @@
         bar.appendChild(el("span", "chap-folders__count", String(folderNames.length)));
         bar.addEventListener("click", function () {
           foldersOpen = !box.classList.contains("is-open");
-          try { sessionStorage.setItem("mdview-folders-open", foldersOpen ? "1" : "0"); } catch (e) {}
+          try { sessionStorage.setItem("waggledance-folders-open", foldersOpen ? "1" : "0"); } catch (e) {}
           box.classList.toggle("is-open", foldersOpen);
           bar.setAttribute("aria-expanded", foldersOpen ? "true" : "false");
         });
@@ -152,7 +172,10 @@
     var bars = document.querySelectorAll(".chap-folders__bar");
     if (!bars.length) return;
     var remembered = false;
-    try { remembered = sessionStorage.getItem("mdview-folders-open") === "1"; } catch (e) {}
+    try {
+      migrateStorageKey(sessionStorage, "mdview-folders-open", "waggledance-folders-open");
+      remembered = sessionStorage.getItem("waggledance-folders-open") === "1";
+    } catch (e) {}
     bars.forEach(function (bar) {
       var box = bar.closest(".chap-folders");
       if (!box) return;
@@ -164,7 +187,7 @@
         var open = !box.classList.contains("is-open");
         box.classList.toggle("is-open", open);
         bar.setAttribute("aria-expanded", open ? "true" : "false");
-        try { sessionStorage.setItem("mdview-folders-open", open ? "1" : "0"); } catch (e) {}
+        try { sessionStorage.setItem("waggledance-folders-open", open ? "1" : "0"); } catch (e) {}
       });
     });
   })();
@@ -376,7 +399,7 @@
       f.addEventListener("submit", function (e) {
         var name = f.getAttribute("data-project") || "this project";
         var ok = window.confirm(
-          "Remove “" + name + "” from mdview?\n\n" +
+          "Remove “" + name + "” from waggledance?\n\n" +
           "The files stay on disk — only the registry entry and its index are removed. " +
           "Re-registering re-scans them."
         );
@@ -730,7 +753,7 @@
     //   1. the explicit "done" event the page fires after mermaid.run() resolves,
     //   2. a DOM observer catching the injected <svg>,
     //   3. timed sweeps as a final backstop.
-    document.addEventListener("mdview:mermaid-done", enhanceAll);
+    document.addEventListener("waggledance:mermaid-done", enhanceAll);
     var obs = new MutationObserver(enhanceAll);
     obs.observe(document.body, { childList: true, subtree: true });
     [200, 800, 2000, 4000].forEach(function (t) { setTimeout(enhanceAll, t); });
@@ -819,7 +842,7 @@
   // Terminal screen poll (agent-terminal-6, ANSI rendering agent-terminal-12):
   // each pane's `.term-screen` viewport polls its own
   // `/p/:id/_terminal/:pane_id/screen` endpoint on a fixed interval. The
-  // server (`mdview_core::ansi::to_html`) has already translated herdr's raw
+  // server (`waggledance_core::ansi::to_html`) has already translated herdr's raw
   // ANSI screen into safe, escaped HTML carrying `ansi-*` colour/attribute
   // classes — never xterm.js, this is a polled snapshot, not a live PTY — so
   // the poller assigns it via `innerHTML`, not `textContent`. A `revision`
@@ -1199,12 +1222,12 @@
   // `/p/:id/_terminal/:pane_id/transcript` endpoint on the same fixed
   // interval as the screen poller above. The cursor the endpoint returns is
   // held here, client-side, per pane — nothing about the transcript is ever
-  // stored server-side (`mdview-core`'s transcript module doc) — and every
+  // stored server-side (`waggledance-core`'s transcript module doc) — and every
   // poll *appends* the newly returned records rather than replacing the
   // viewport's contents, so nothing already shown is ever lost between
   // polls, unlike the screen poller's full-repaint `innerHTML` above.
   //
-  // `body.lines` already carries safe, pre-escaped HTML from mdview-core's
+  // `body.lines` already carries safe, pre-escaped HTML from waggledance-core's
   // ansi translator — the same one the screen poller uses — so each line is
   // assigned via `innerHTML`, never `textContent`, matching that precedent.
   //

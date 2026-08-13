@@ -1195,7 +1195,7 @@ pre.mermaid.zoomable:focus-within .mermaid-controls {
 
 /* =====================================================   ANSI terminal rendering (agent-terminal-12)
 
-   `crates/mdview-core/src/ansi.rs` translates a pane's ANSI screen
+   `crates/waggledance-core/src/ansi.rs` translates a pane's ANSI screen
    snapshot into these classes server-side (never xterm.js — this is a
    polled snapshot, not a live PTY). The sixteen basic colours below are
    deliberately aliases of the existing theme tokens (defined per
