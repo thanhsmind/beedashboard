@@ -1,7 +1,7 @@
 ---
 area: web-interface
 updated: 2026-08-13
-sources: [file-nav-ux, ui-polish-settings-sidebar, agent-terminal, terminal-open-access, cross-board, board-drop-live, upstream-short-link]
+sources: [file-nav-ux, ui-polish-settings-sidebar, agent-terminal, terminal-open-access, cross-board, board-drop-live, upstream-short-link, upstream-code-viewer]
 decisions: [12d62831, 99e8df73, 184c77b0]
 coverage: partial
 ---
@@ -150,9 +150,35 @@ content itself.
 - **What it shows:** the project name followed by each path segment of the
   file being viewed, for orientation above the article. This is distinct
   from the chapter sidebar's zoom breadcrumb (element 6), which is
-  interactive and scoped to folders, not the file path.
+  interactive and scoped to folders, not the file path. It sits in a bar
+  that stays put as the page scrolls, split into two halves: the path on the
+  left, and on the right whatever the page has to say about the thing being
+  viewed — for a source file, its language and size; for a document, nothing.
 - **Afterwards:** the operator can see where the current file sits in the
-  project without it crowding the article title directly below it.
+  project without it crowding the article title directly below it, and
+  without scrolling back up to find out.
+
+### Code — reading a project's source
+
+- **Triggers:** choosing Code in the section switch that sits beside the
+  project name at the top of every project page, or opening a source file's
+  own address directly.
+- **What it shows:** the project's files as they sit on disk, not only the
+  markdown the reader normally sees. A folder shows what it contains, folders
+  before files. A file shows its contents with its syntax coloured and every
+  line numbered, so a line can be pointed at.
+- **What it will not show:** anything outside the project's own root. A path
+  that climbs out of the project, or follows a link out of it, is refused
+  rather than served — the same containment rule every other file surface
+  here holds.
+- **Alongside it:** the same sidebar shape the document view uses — the
+  folders of the place being viewed, disclosed and collapsed the same way,
+  and the ancestors of that place as a trail back up. A folder holding only
+  more folders opens its own disclosure, since collapsing it would leave the
+  sidebar showing nothing at all.
+- **Afterwards:** the reader can move between a project's prose and its
+  source without leaving the viewer, and the two sections read as one place
+  rather than two.
 
 ### Right panel — table of contents + backlinks (file pages)
 

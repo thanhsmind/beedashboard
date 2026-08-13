@@ -59,6 +59,12 @@ launcher — CLI, MCP, future desktop — coordinates through `~/.mdview/daemon.
 - **Live reload** — a filesystem watcher (debounced) updates the index on change
   and pushes a reload signal over WebSocket; the browser reloads the page.
 - **Search** — full-text (keyword) across a project or all projects.
+- **Code** — a second way to read a project: its files as they sit on disk,
+  folders before files, each source file shown with its syntax coloured and
+  its lines numbered. Bounded by the same containment rule as every other file
+  surface — nothing outside the project's own root is served, links out
+  included. Reached from a switch beside the project name, so prose and source
+  read as one place.
 - **Short file links** — every indexed file also answers at a short, opaque
   address of its own, alongside its full path-shaped URL. The short address is
   stable for a given file and is what tools hand to a person, so a link stays
