@@ -1,7 +1,7 @@
 ---
 area: web-interface
 updated: 2026-08-13
-sources: [file-nav-ux, ui-polish-settings-sidebar, agent-terminal, terminal-open-access, cross-board]
+sources: [file-nav-ux, ui-polish-settings-sidebar, agent-terminal, terminal-open-access, cross-board, board-drop-live]
 decisions: [12d62831, 99e8df73, 184c77b0]
 coverage: partial
 ---
@@ -54,13 +54,12 @@ content itself.
 
 - **Triggers:** opening `/` or clicking the brand from anywhere.
 - **What sits above it:** when at least one registered project carries a bee
-  store, this page opens with two roll-up sections — what is running right now
-  across every such project, then those projects' features in one board — and the
-  project list follows beneath them. When no project carries a bee store, neither
-  section appears and the page is the project list alone. Nothing inside the list
-  itself changes either way: same rows, same order, same markers, same
-  suggestions. Those two sections belong to the bee surface and are specified in
-  `bee-cockpit.md`.
+  store, this page opens with one roll-up section — those projects' features in a
+  single board — and the project list follows beneath it. When no project carries
+  a bee store, the section does not appear and the page is the project list
+  alone. Nothing inside the list itself changes either way: same rows, same
+  order, same markers, same suggestions. That section belongs to the bee surface
+  and is specified in `bee-cockpit.md`.
 - **What it shows:** one row per registered project, every name on the same
   left edge. A row links to the project's default file and shows its name,
   file count, and last-seen time — never the filesystem path (per R5). Each

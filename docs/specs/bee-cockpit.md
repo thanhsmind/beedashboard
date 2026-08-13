@@ -1,7 +1,7 @@
 ---
 area: bee-cockpit
 updated: 2026-08-13
-sources: [feature-close, agent-board, bee-artifact-rename, archive-visibility, feature-hub, board-declutter, board-trim, feature-titles, hub-fallbacks, detail-desc-wrap, cross-board]
+sources: [feature-close, agent-board, bee-artifact-rename, archive-visibility, feature-hub, board-declutter, board-trim, feature-titles, hub-fallbacks, detail-desc-wrap, cross-board, board-drop-live]
 decisions: []
 coverage: partial
 ---
@@ -47,22 +47,26 @@ A qualifying project gains an entry point on its home page leading to its board.
 ## The cross-project board
 
 The same surface also exists once for everything at once. The viewer's own front
-page — the page a person lands on before choosing a project — leads with two
-sections rolled up across **every** qualifying project, and only then shows the
-list of registered projects that page has always shown:
+page — the page a person lands on before choosing a project — leads with the
+Features board rolled up across **every** qualifying project, and only then shows
+the list of registered projects that page has always shown:
 
-1. **Live**, across all projects.
-2. **Features**, across all projects.
-3. The project list, unchanged — same rows, same order, same everything below it.
+1. **Features**, across all projects.
+2. The project list, unchanged — same rows, same order, same everything below it.
 
-Qualification is the same rule stated above, and it decides only what feeds those
-two sections: a registered project without a `.bee/` store still appears in the
-list below, exactly as before. When no project qualifies at all, neither section is
-built and the front page is precisely the page it was — a person with no bee
-projects is never shown two empty frames.
+There is deliberately no cross-project Live strip. Presence across many projects
+answered nothing the Features columns did not already answer, while taking the
+top of the page to do it; the Live strip stays where it earns its place, on a
+single project's own board, where it answers who is at work in *this* project.
 
-The two rolled-up sections read the same way their per-project counterparts do,
-with three differences that follow from having more than one project in view:
+Qualification is the same rule stated above, and it decides only what feeds the
+Features section: a registered project without a `.bee/` store still appears in
+the list below, exactly as before. When no project qualifies at all, the section
+is not built and the front page is precisely the page it was — a person with no
+bee projects is never shown an empty frame.
+
+The rolled-up board reads the same way its per-project counterpart does, with
+three differences that follow from having more than one project in view:
 
 - Every entry names the project it belongs to. Without that, a merged list is
   unreadable.
