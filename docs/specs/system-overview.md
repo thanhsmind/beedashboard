@@ -100,17 +100,19 @@ launcher — CLI, MCP, future desktop — coordinates through `~/.mdview/daemon.
 - **Agent terminal** — a per-project Terminal tab and Transcript tab for
   watching and replying to the coding agents herdr is running under that
   project's root, plus two off-by-default background duties (keeping herdr
-  alive, notifying on status change). The only mdview surface gated by
-  authentication. See the Agent terminal spec.
+  alive, notifying on status change). The only mdview surface gated at all —
+  and what gates it is a single switch the operator turns on, not a
+  credential: there is nothing to log in to. See the Agent terminal spec.
 
 ## Boundaries (non-goals)
 
 Not a static site generator, editor, or public host. No cross-project link
-resolution, no semantic search. No authentication outside the agent terminal
-family's token gate (terminal, transcript, and agent-creation routes only —
-see the Agent terminal spec); every other route, including the document
-viewer itself, stays open exactly as before. Read-only outside that family:
-the viewer itself never writes user files.
+resolution, no semantic search. **No authentication anywhere** — the terminal,
+transcript, and agent-creation routes are reachable by anyone who can reach the
+daemon once their switch is on, and every other route, including the document
+viewer itself, was always open. Anyone standing this up on a reachable address
+is choosing that. Read-only outside the terminal family: the viewer itself
+never writes user files.
 
 ## Status
 
