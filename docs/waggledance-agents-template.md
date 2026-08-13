@@ -1,19 +1,19 @@
-# MDView Integration (template)
+# Waggledance Integration (template)
 
 Copy this snippet into your project's `AGENTS.md` or global `~/.claude/CLAUDE.md`
-so agents surface a viewable URL after writing markdown. mdview runs locally at
+so agents surface a viewable URL after writing markdown. waggledance runs locally at
 `http://localhost:7700`.
 
 ---
 
-## Documentation Viewing (MDView)
+## Documentation Viewing (Waggledance)
 
 After creating or updating any markdown file, make it viewable in ONE call —
 no project registration step needed:
 
 ### Using MCP (preferred)
 
-Call `mdview_view_file` with:
+Call `waggledance_view_file` with:
 
 - `project_root`: absolute path to the project root
 - `relative_path`: the file path relative to that root
@@ -25,7 +25,7 @@ immediately.
 ### Using CLI fallback
 
 ```sh
-mdview open <absolute-path-to-file.md>
+waggledance open <absolute-path-to-file.md>
 ```
 
 ### When to render

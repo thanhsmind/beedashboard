@@ -13,7 +13,7 @@ domains_covered: [rendering, live-reload, http-serving, link-resolution, file-in
 Rust CLI markdown preview server for AI coding agents (single binary, Axum).
 Serves one file or one directory (non-recursive), live-reloads over WebSocket,
 renders GFM + Mermaid, ships a Claude Code plugin/skill. Directly named in
-mdview's PRD landscape as the closest prior art. Snapshot: `f84ae3e`.
+waggledance's PRD landscape as the closest prior art. Snapshot: `f84ae3e`.
 
 Line anchors live in prose, not `Where:` (checker verifies bare paths).
 
@@ -183,7 +183,7 @@ Line anchors live in prose, not `Where:` (checker verifies bare paths).
 - **Where:** `src/app.rs`
 - **Notable:** Ignoring delete events (v0.5.1 fix) is the non-obvious robustness
   lesson — naive watchers 404 mid-save. Non-recursive is a deliberate constraint
-  (simpler state + security), and is precisely the gap mdview's PRD calls out.
+  (simpler state + security), and is precisely the gap waggledance's PRD calls out.
 - **Keywords:** notify, fs watch, atomic save, rename, debounce
 - **Seen:** f84ae3e
 
@@ -221,9 +221,9 @@ Line anchors live in prose, not `Where:` (checker verifies bare paths).
   (`src/app.rs:453-471`, `src/app.rs:500-510`). Markdown links are served AS-IS
   with NO rewriting; the renderer emits `<a href>` with original hrefs untouched.
 - **Where:** `src/app.rs`
-- **Notable:** This is the *deliberate absence* mdview exists to fix: no
+- **Notable:** This is the *deliberate absence* waggledance exists to fix: no
   cross-folder link resolution, no link rewriting, no recursive tree. Recording
-  it as the baseline mdview must exceed (PRD G2).
+  it as the baseline waggledance must exceed (PRD G2).
 - **Keywords:** link resolution, href rewrite, relative links, 404
 - **Seen:** f84ae3e
 
@@ -271,7 +271,7 @@ Line anchors live in prose, not `Where:` (checker verifies bare paths).
 - **Where:** `CLAUDE.md`
 - **Notable:** Same scope-guarding pattern as marky's `claude-md-conventions`
   (negative rules keep a viewer from bloating) — **independent convergence across
-  both references**, a strong signal for mdview to adopt a written non-goals
+  both references**, a strong signal for waggledance to adopt a written non-goals
   charter. Also documents the canonical build/test commands.
 - **Keywords:** non-goals, design constraints, agent-companion scope, CLAUDE.md
 - **Seen:** f84ae3e

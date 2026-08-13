@@ -1,11 +1,11 @@
-//! herdr port — mdview is a **client of the herdr server** (peer to the
+//! herdr port — waggledance is a **client of the herdr server** (peer to the
 //! TUI), talking `herdr.sock`'s JSON request/response API (DISCOVERY 2026-07-18).
 //!
 //! Ported from herdr-go (`docs/history/agent-terminal/CONTEXT.md` D1) into
-//! the `mdview` binary crate, not `waggledance-core`: `waggledance-core` is enforced
+//! the `waggledance` binary crate, not `waggledance-core`: `waggledance-core` is enforced
 //! async-runtime-free (`bee::tests::no_web_framework_dependency_declared`
 //! asserts no `tokio`/`axum`/`hyper` in its `Cargo.toml`), and this client
-//! needs `tokio` for the socket I/O. `mdview` already depends on both tokio
+//! needs `tokio` for the socket I/O. `waggledance` already depends on both tokio
 //! and axum, so it carries the extra weight this port needs no axum for.
 //! `pane_scroller.rs` ports herdr-go's alt-screen scrollback nudger; it has
 //! no route-level consumer yet (see its own module doc).
@@ -136,7 +136,7 @@ where
     })
 }
 
-/// Everything mdview needs from herdr — all request/response.
+/// Everything waggledance needs from herdr — all request/response.
 #[async_trait]
 pub trait Herdr: Send + Sync {
     /// Snapshot the server's runtime (the flat agent list).

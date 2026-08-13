@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn scans_recursively_and_indexes_with_titles() {
-        let dir = std::env::temp_dir().join(format!("mdview-idx-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-idx-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write(&dir, "README.md", "# Root Readme\nhello");
         write(&dir, "docs/guide.md", "# Guide\ncontent");
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn bounded_scan_accepts_a_small_tree_within_both_bounds() {
-        let dir = std::env::temp_dir().join(format!("mdview-bscan-ok-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-bscan-ok-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write(&dir, "README.md", "# Root");
         write(&dir, "docs/guide.md", "# Guide");
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn bounded_scan_refuses_past_the_file_cap() {
-        let dir = std::env::temp_dir().join(format!("mdview-bscan-cap-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-bscan-cap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         for i in 0..5 {
             write(&dir, &format!("f{i}.md"), "# x");
@@ -324,7 +324,7 @@ mod tests {
 
     #[test]
     fn bounded_scan_refuses_past_the_time_budget() {
-        let dir = std::env::temp_dir().join(format!("mdview-bscan-slow-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-bscan-slow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write(&dir, "a.md", "# a");
         write(&dir, "b.md", "# b");
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn bounded_scan_respects_the_same_exclude_patterns_as_scan_markdown_files() {
-        let dir = std::env::temp_dir().join(format!("mdview-bscan-excl-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-bscan-excl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write(&dir, "README.md", "# Root");
         write(&dir, "node_modules/pkg/x.md", "# Should be excluded");

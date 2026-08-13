@@ -1122,13 +1122,13 @@ pub struct BeeProjectRollup {
 /// module is deliberately framework-free
 /// (`no_web_framework_dependency_declared` fails if `axum`, `tokio`, or
 /// `hyper` ever appears in this crate's manifest), so scheduling multiple
-/// roots concurrently is the caller's job (`crates/mdview`, cross-board-3),
+/// roots concurrently is the caller's job (`crates/waggledance`, cross-board-3),
 /// never this one's.
 ///
 /// D8's `.bee/`-qualification rule (a project must be registered AND have a
 /// `.bee/` root) is deliberately not applied here: the caller passes roots
 /// it has already qualified through `is_bee_project`
-/// (`crates/mdview/src/server.rs`), and duplicating that rule in two crates
+/// (`crates/waggledance/src/server.rs`), and duplicating that rule in two crates
 /// is exactly what this function must avoid. A root with no `.bee/` at all
 /// simply reads as [`BeeSnapshot::absent`] with no archived features, same
 /// as calling [`read_snapshot`] on it directly.
@@ -1845,7 +1845,7 @@ pub fn read_archived_cells(root: &Path, feature: &str) -> Vec<BeeCell> {
 /// deviation from feature-hub-1's own file list (`crates/waggledance-core` is
 /// out of scope for that cell except for exactly this kind of helper,
 /// recorded here rather than reinterpreted silently): the feature hub's
-/// Finished group (`bee_feature_hub_section`, `mdview::views`) needs to
+/// Finished group (`bee_feature_hub_section`, `waggledance::views`) needs to
 /// name every feature that is archive-only — no live lane, no active
 /// placement — and no existing reader names that set. Unlike
 /// [`read_archived_cells`] this never opens or parses a single cell file,
@@ -3400,7 +3400,7 @@ mod tests {
 
     fn fresh_root(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "mdview-bee-{name}-{}-{}",
+            "waggledance-bee-{name}-{}-{}",
             std::process::id(),
             name.len() // cheap per-name salt, keeps directories distinct across test fns
         ));
@@ -3573,7 +3573,7 @@ mod tests {
         let root = fresh_root("security");
         let root_str = root.to_string_lossy().into_owned();
         let outside_abs = std::env::temp_dir()
-            .join("mdview-bee-outside-file.rs")
+            .join("waggledance-bee-outside-file.rs")
             .to_string_lossy()
             .into_owned();
         let inside_abs = root.join("src/inside.rs").to_string_lossy().into_owned();
@@ -4325,7 +4325,7 @@ mod tests {
     fn workspace_root_is_relativized_or_reduced_never_absolute() {
         let root = fresh_root("workspace-abs");
         let sibling = std::env::temp_dir()
-            .join("mdview-bee-workspace-outside-root")
+            .join("waggledance-bee-workspace-outside-root")
             .to_string_lossy()
             .into_owned();
         write(
@@ -4366,7 +4366,7 @@ mod tests {
             ),
         );
         let outside_abs = std::env::temp_dir()
-            .join("mdview-bee-slice2-outside-workspace")
+            .join("waggledance-bee-slice2-outside-workspace")
             .to_string_lossy()
             .into_owned();
         write(
@@ -4798,7 +4798,7 @@ mod tests {
         assert_eq!(scrub_paths(&inside, &root), relativize(&inside, &root));
 
         let outside = std::env::temp_dir()
-            .join("mdview-bee-scrub-wholly-outside")
+            .join("waggledance-bee-scrub-wholly-outside")
             .to_string_lossy()
             .into_owned();
         assert_eq!(scrub_paths(&outside, &root), relativize(&outside, &root));
@@ -4810,7 +4810,7 @@ mod tests {
     fn scrub_paths_redacts_an_embedded_path_outside_the_root_rather_than_relativizing_it() {
         let root = fresh_root("scrub-outside-embedded");
         let outside = std::env::temp_dir()
-            .join("mdview-bee-scrub-outside-embedded-target")
+            .join("waggledance-bee-scrub-outside-embedded-target")
             .join("secret.txt")
             .to_string_lossy()
             .into_owned();
@@ -4949,7 +4949,7 @@ mod tests {
     fn scrub_paths_reduces_a_wrapped_path_outside_the_root_to_the_shared_redaction_text() {
         let root = fresh_root("scrub-wrap-outside");
         let outside = std::env::temp_dir()
-            .join("mdview-bee-scrub-wrap-outside-target")
+            .join("waggledance-bee-scrub-wrap-outside-target")
             .join("secret.txt")
             .to_string_lossy()
             .into_owned();
@@ -6839,7 +6839,7 @@ mod tests {
             ".bee/reservations.json",
             r#"{"reservations": [
                 {"agent": "healthread", "cell": "bbp-15", "path": "crates/waggledance-core/src/bee.rs", "kind": "lease", "session": "s1", "reserved_at": "2026-08-06T17:29:44.227Z", "released_at": null},
-                {"agent": "otheragent", "cell": "bbp-14", "path": "crates/mdview/src/server.rs", "kind": "intent", "session": "s2", "reserved_at": "2026-08-06T10:00:00.000Z", "released_at": "2026-08-06T11:00:00.000Z"}
+                {"agent": "otheragent", "cell": "bbp-14", "path": "crates/waggledance/src/server.rs", "kind": "intent", "session": "s2", "reserved_at": "2026-08-06T10:00:00.000Z", "released_at": "2026-08-06T11:00:00.000Z"}
             ]}"#,
         );
 

@@ -1,4 +1,4 @@
-//! Core error type for mdview. Adapters map these to HTTP/MCP/CLI surfaces.
+//! Core error type for waggledance. Adapters map these to HTTP/MCP/CLI surfaces.
 
 use std::path::PathBuf;
 

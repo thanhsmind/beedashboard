@@ -1,7 +1,7 @@
 //! Telegram channel — outbound `sendMessage` via the Bot API (D1: ported
 //! from herdr-go's `notify::telegram`). The bot token is never a `Config`
 //! field or logged (P1, extended by agent-terminal-21): the caller
-//! (`crates/mdview/src/server.rs::telegram_credentials`) resolves it from
+//! (`crates/waggledance/src/server.rs::telegram_credentials`) resolves it from
 //! its own owner-only file beside the config
 //! (`waggledance_core::config::save_notify_credential`/`load_notify_credential`),
 //! not the environment, and hands it to [`TelegramNotifier::new`] already

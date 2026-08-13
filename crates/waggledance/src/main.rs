@@ -1,4 +1,4 @@
-//! mdview — multi-project markdown viewer for AI agent workflows.
+//! waggledance — multi-project markdown viewer for AI agent workflows.
 
 mod cli;
 mod doctor;
@@ -24,7 +24,7 @@ fn main() {
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "mdview=info,warn".into()),
+                .unwrap_or_else(|_| "waggledance=info,warn".into()),
         )
         .init();
 
@@ -168,7 +168,7 @@ impl TerminalBackground {
                     control,
                     Arc::new(supervisor::SpawnHerdr {
                         binary: supervisor::herdr_binary_from_env(),
-                        // mdview has no multi-session concept of its own
+                        // waggledance has no multi-session concept of its own
                         // today (only `default_socket_path()` is ever
                         // resolved) — "default" is the session
                         // `resolve_socket_path` treats identically to the

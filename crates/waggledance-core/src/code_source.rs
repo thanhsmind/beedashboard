@@ -250,7 +250,7 @@ mod tests {
 
     fn tmp(tag: &str) -> PathBuf {
         let dir =
-            std::env::temp_dir().join(format!("mdview-code-src-{tag}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("waggledance-code-src-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -270,7 +270,7 @@ mod tests {
         let dir = tmp("symlink-out");
         write(&dir, "readme.md", "# root");
         let outside = std::env::temp_dir().join(format!(
-            "mdview-code-src-outside-{}.txt",
+            "waggledance-code-src-outside-{}.txt",
             std::process::id()
         ));
         fs::write(&outside, "secret-outside").unwrap();

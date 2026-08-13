@@ -1,8 +1,8 @@
-//! Turn documentation paths an agent prints into links back into mdview.
+//! Turn documentation paths an agent prints into links back into waggledance.
 //!
 //! An agent working in a bee project names its own documents constantly —
 //! `docs/specs/agent-terminal.md`, `docs/history/<feature>/CONTEXT.md` — and
-//! every one of them is a file mdview already renders. The screen showing
+//! every one of them is a file waggledance already renders. The screen showing
 //! those names is one click away from the document itself, and this module is
 //! that click.
 //!
@@ -13,7 +13,7 @@
 //! there — the `<span class="…">` wrappers each styled run gets — which
 //! [`linkify_docs`] does by tracking whether it currently sits inside a tag.
 //!
-//! Only `docs/…/*.md` becomes a link. mdview serves rendered markdown; a
+//! Only `docs/…/*.md` becomes a link. waggledance serves rendered markdown; a
 //! directory or a `.png` under the same root would produce a link to a page
 //! that does not exist, which is worse than plain text (decision locked with
 //! the feature: "chỉ file .md dưới docs/").
@@ -184,8 +184,8 @@ mod tests {
     #[test]
     fn base_uses_a_configured_hostname() {
         assert_eq!(
-            link_base("bee", Some("mdview.gogl.be")),
-            "https://mdview.gogl.be/p/bee/"
+            link_base("bee", Some("waggledance.gogl.be")),
+            "https://waggledance.gogl.be/p/bee/"
         );
         assert_eq!(
             link_base("bee", Some("http://box.local:7700/")),

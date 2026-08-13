@@ -1137,7 +1137,7 @@ mod tests {
 
     /// The injected seam replacing herdr-go's `crate::config::native_roaming_app_data()`
     /// edge (herdr-go/src/herdr/socket.rs:35) -- proves the Windows config dir
-    /// resolves purely from an injected closure, with no reach into mdview's
+    /// resolves purely from an injected closure, with no reach into waggledance's
     /// own config module.
     #[cfg(windows)]
     #[test]

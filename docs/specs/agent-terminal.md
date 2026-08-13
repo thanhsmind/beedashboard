@@ -8,12 +8,12 @@ coverage: partial
 
 # Spec: Agent terminal
 
-mdview absorbs herdr-go, the standalone mobile-first gateway that watched and
+waggledance absorbs herdr-go, the standalone mobile-first gateway that watched and
 replied to coding agents running under herdr. herdr-go is retired; this is
-its successor inside mdview. Every registered project gains a Terminal tab
+its successor inside waggledance. Every registered project gains a Terminal tab
 (watch and reply to the agents running under it) and a Transcript tab (each
 agent's own activity log), plus two background duties herdr-go used to
-carry, both off until an operator switches them on. mdview never runs a
+carry, both off until an operator switches them on. waggledance never runs a
 terminal of its own — it always talks to a running herdr, the same way
 herdr-go did.
 
@@ -40,7 +40,7 @@ implementation. Code entry points are listed in `reading-map.md`.
   off, the card does not appear at all.
 - The settings page → where the terminal switch, the Unassigned group's own
   switch, and the two background duties are turned on, alongside every
-  other, unrelated mdview setting — see Actors & Access for what this
+  other, unrelated waggledance setting — see Actors & Access for what this
   surface's safety now rests on.
 - A fixed tab on the Terminal or Transcript page's edge → a slide-in drawer
   listing every agent across every registered project, for switching
@@ -59,8 +59,8 @@ implementation. Code entry points are listed in `reading-map.md`.
 | 5 | Terminal switch | The one switch standing between anyone who can reach the daemon and the terminal, transcript, and agent-creation family — there is no credential behind it | on / off, off by default |
 | 6 | Unassigned agents | Agents whose working directory is outside every registered project's root | listed on their own page, reachable only while both the terminal switch and this group's own switch (below) are on |
 | 7 | Unassigned group switch | The Unassigned group's own switch, separate from the terminal switch above — turning the terminal switch on alone does not open this group | on / off, off by default |
-| 8 | Keep herdr running | Opt-in duty: mdview keeps the herdr process alive on the operator's behalf | on / off, off by default |
-| 9 | Notify on status change | Opt-in duty: mdview sends a notification message when a watched agent's status changes | on / off, off by default; needs a destination and a credential configured separately |
+| 8 | Keep herdr running | Opt-in duty: waggledance keeps the herdr process alive on the operator's behalf | on / off, off by default |
+| 9 | Notify on status change | Opt-in duty: waggledance sends a notification message when a watched agent's status changes | on / off, off by default; needs a destination and a credential configured separately |
 | 10 | Notify credential | The secret used to send that notification message | write-only: once saved, it is never shown again in full — only a masked hint — and it never appears in any viewed or exported configuration; if a save fails, the operator is told it failed — it is never reported as saved |
 
 ## Behaviors & Operations
@@ -88,7 +88,7 @@ implementation. Code entry points are listed in `reading-map.md`.
 - **How the screen renders:** a path to one of the project's own markdown
   docs, wherever it appears in the screen or the transcript, is shown as a
   clickable link to that doc. The monospaced type used for the screen ships
-  with mdview itself, so opening the tab never depends on reaching an
+  with waggledance itself, so opening the tab never depends on reaching an
   outside font service, and it covers the box-drawing characters, Vietnamese
   text, and other characters an agent's screen may use. A run of box-drawing
   lines an agent draws — a table or a frame — always keeps its original
@@ -286,7 +286,7 @@ anyone who can reach the daemon.
   Unassigned group's entries in the Agents drawer, need this switch **and**
   their own switch below both on; either alone leaves the group closed.
 - **What's not gated (unchanged by this feature):** every other page in
-  mdview — the project list, a project's markdown pages, search, the
+  waggledance — the project list, a project's markdown pages, search, the
   settings page itself, and the plain status/configuration views all remain
   reachable to anyone who can reach the server, exactly as before this
   feature. The project list reveals no agent name and no working directory to
@@ -297,7 +297,7 @@ anyone who can reach the daemon.
   behaves as though the feature did not exist and asks this host nothing (see
   the Web interface spec).
 - **Off answers:** a page route (the Terminal tab, the Transcript tab, the
-  Unassigned agents page) gets mdview's ordinary not-found page — the same
+  Unassigned agents page) gets waggledance's ordinary not-found page — the same
   page an unregistered project id gets, never a blank or typeless response.
   A route the client polls for data (a pane's screen or transcript, sending
   input, starting a pane) gets a not-found answer carrying a plain reason a
@@ -321,7 +321,7 @@ anyone who can reach the daemon.
 - **The condition this rests on.** Nothing above proves who is asking — the
   terminal's safety depends entirely on the daemon's port being unreachable
   except through an authenticating front door placed in front of it (a
-  reverse proxy, a VPN, a firewall rule — mdview provides none of these
+  reverse proxy, a VPN, a firewall rule — waggledance provides none of these
   itself). If that front door is ever removed or misconfigured so the port
   becomes directly reachable, the terminal is unauthenticated remote code
   execution for anyone who can reach it: they can read and drive every
@@ -383,7 +383,7 @@ authentication, and each still holds:
   screen, while herdr cannot be reached.
 - **What it shows:** an explicit "herdr is not running" message naming the
   remedy — start herdr, then reload the page — instead of an empty or
-  broken-looking tab. mdview never starts herdr on its own unless the "keep
+  broken-looking tab. waggledance never starts herdr on its own unless the "keep
   herdr running" duty below is switched on.
 - A screen poll that fails for any other reason (a dropped connection, a
   timeout, and so on) is treated differently: the last screen stays on
@@ -394,16 +394,16 @@ authentication, and each still holds:
 
 ### The two background duties
 
-- **Keep herdr running:** when switched on, mdview keeps the herdr process
-  alive on the operator's behalf. Off by default; mdview spawns no process of
+- **Keep herdr running:** when switched on, waggledance keeps the herdr process
+  alive on the operator's behalf. Off by default; waggledance spawns no process of
   its own until this is turned on. If herdr keeps dying, restarts do not
   hammer it: each retry waits progressively longer than the last, up to a
   cap, and every backoff step is logged rather than only the first.
-- **Notify on status change:** when switched on, mdview sends a notification
+- **Notify on status change:** when switched on, waggledance sends a notification
   message when a watched agent's status changes (this also needs a
   destination and a credential configured separately; the credential is
   never shown again in full once saved, and never appears in any viewed or
-  exported configuration). Off by default; mdview makes no outbound call
+  exported configuration). Off by default; waggledance makes no outbound call
   until this is turned on.
 - Both duties, together with the notification destination and credential,
   are switched on and changed from the settings page, the same as every
@@ -413,7 +413,7 @@ authentication, and each still holds:
 
 ## Actors & Access
 
-One local operator per install, same as the rest of mdview. The terminal,
+One local operator per install, same as the rest of waggledance. The terminal,
 transcript, and agent-creation family carries **no authentication of its
 own** — no token, no session, no login, no cookie. Reaching any of it
 requires only that the terminal switch (and, for the Unassigned group, its
@@ -421,19 +421,19 @@ own switch too) is on — the same single condition that gates every route in
 this family, described in full under "The terminal switch" above.
 
 The settings page that hosts these switches is itself unauthenticated, like
-every other page in mdview — reaching it is enough to view or change every
+every other page in waggledance — reaching it is enough to view or change every
 setting on it, this family's switches, the notify destination, and the
 notify credential included. Nothing on that page is carved out behind a
 session any more; see the Settings spec.
 
-**This surface's safety rests entirely on something outside mdview.**
-mdview proves nothing about who is asking. Whoever can reach the daemon's
+**This surface's safety rests entirely on something outside waggledance.**
+waggledance proves nothing about who is asking. Whoever can reach the daemon's
 port can drive this family exactly as the operator can, the moment the
 terminal switch is on. What keeps that from being anyone on the internet, or
 anyone on the operator's network, is a front door placed in front of the
 port that does authenticate — a reverse proxy with its own login, a VPN, a
 firewall rule restricting reachability to the operator's own machine — none
-of which mdview provides. If that front door is ever removed, disabled, or
+of which waggledance provides. If that front door is ever removed, disabled, or
 misconfigured so the port becomes reachable without it, the terminal is
 unauthenticated remote code execution for anyone who reaches it: they can
 read and drive every agent running under every registered project, start
@@ -441,7 +441,7 @@ new ones, and, if the Unassigned switch is also on, read and drive every
 pane on the host, not only ones belonging to a registered project. This is
 not a residual risk to be hardened later — it is the condition the entire
 surface is built to run under, and it must be re-verified by whoever
-operates mdview every time the network path to its port changes.
+operates waggledance every time the network path to its port changes.
 
 ## Business Rules
 
@@ -480,7 +480,7 @@ operates mdview every time the network path to its port changes.
 - **Off until switched on (D7).** The terminal switch, the Unassigned
   group's own switch, the "keep herdr running" duty, and the "notify on
   status change" duty are each independently off until an operator turns
-  them on from the settings page; none of them changes mdview's behavior for
+  them on from the settings page; none of them changes waggledance's behavior for
   an install that never visits that page.
 - **Screen vs. transcript (D9).** The screen is a periodic, coloured snapshot
   redrawn on each poll; the transcript is the agent's own gap-free log. They
@@ -507,7 +507,7 @@ operates mdview every time the network path to its port changes.
 ## Edge Cases Settled
 
 - Terminal switched off: a page route (the Terminal tab, the Transcript tab,
-  the Unassigned agents page) answers with mdview's ordinary not-found page;
+  the Unassigned agents page) answers with waggledance's ordinary not-found page;
   a route the client polls for data answers not-found with a plain,
   script-readable reason. Neither is a blank or typeless response.
 - Herdr not reachable: every affected view degrades to the named "herdr is
@@ -549,16 +549,16 @@ No settled screenshot captured yet.
 
 ## Pointers (implementation)
 
-- `crates/mdview/src/server.rs` — the image attach route
+- `crates/waggledance/src/server.rs` — the image attach route
   (`POST /p/:id/_terminal/:pane_id/attach`): raw-body upload, declared-MIME
   allowlist + magic-byte sniff, explicit 10 MB check answering in the
   terminal JSON error shape under a higher `DefaultBodyLimit`, 24h mtime
-  prune then 32-file cap, storage at `$XDG_RUNTIME_DIR/mdview-attach` else
-  `~/.cache/mdview/attach` with `[A-Za-z0-9-]`-sanitized project/pane
+  prune then 32-file cap, storage at `$XDG_RUNTIME_DIR/waggledance-attach` else
+  `~/.cache/waggledance/attach` with `[A-Za-z0-9-]`-sanitized project/pane
   segments and `rand`-hex leaf names; client wiring in
-  `crates/mdview/assets/app.js` (composer IIFE: upload/chips/composeMessage)
-  and gated markup via `pane_cards(..., attach)` in `crates/mdview/src/views.rs`.
-- `crates/mdview/src/server.rs` — the routes themselves (`/p/:id/_terminal`,
+  `crates/waggledance/assets/app.js` (composer IIFE: upload/chips/composeMessage)
+  and gated markup via `pane_cards(..., attach)` in `crates/waggledance/src/views.rs`.
+- `crates/waggledance/src/server.rs` — the routes themselves (`/p/:id/_terminal`,
   `/p/:id/_transcript`, their per-pane `pane/:pane_id` pages, their
   screen/input/keys/create children, and the `/_terminal/unassigned` family),
   each gated behind `terminal_family_enabled`
@@ -580,26 +580,26 @@ No settled screenshot captured yet.
   are changed" above); `terminal_disabled_page`/`terminal_disabled_json_404`
   are the two disabled-state answers, for page routes and polled data routes
   respectively.
-- `crates/mdview/src/herdr/` — the client that talks to a running herdr over
+- `crates/waggledance/src/herdr/` — the client that talks to a running herdr over
   its socket (or named pipe on Windows).
-- `crates/mdview/src/supervisor.rs`, `crates/mdview/src/notify/` — the two
+- `crates/waggledance/src/supervisor.rs`, `crates/waggledance/src/notify/` — the two
   opt-in background duties.
-- `crates/mdview/src/views.rs` — the tab pages, the pane tab strip and its
+- `crates/waggledance/src/views.rs` — the tab pages, the pane tab strip and its
   per-pane hrefs, the `<workspace> · <tab>` identity and the `.fg-status`
   pill that carries a session's status, screen/transcript rendering, the
   44px arrow target (`.term-controls > .term-keys button`), the herdr-down
   state's wording, and `project_list_page`'s presence-only Unassigned card.
-- `crates/mdview-core/src/config.rs` — the D7 switches and the agent-create
+- `crates/waggledance-core/src/config.rs` — the D7 switches and the agent-create
   presets in `Config`; `masked_notify_credential`/`save_notify_credential`
   keep the notify credential write-only.
-- `crates/mdview-core/src/transcript.rs` — reading an agent's own session
+- `crates/waggledance-core/src/transcript.rs` — reading an agent's own session
   log.
-- `crates/mdview-core/src/paths_boundary.rs` — the containment check that
+- `crates/waggledance-core/src/paths_boundary.rs` — the containment check that
   scopes panes to a project's root (`Boundary::validate_existing`'s 7 steps,
   including traversal rejection and symlink resolution).
-- `crates/mdview-core/src/notify_store.rs` — the notification outbox used
+- `crates/waggledance-core/src/notify_store.rs` — the notification outbox used
   only when the notify duty is on.
-- `crates/mdview-core/src/ansi.rs` — translating a raw screen into safe,
+- `crates/waggledance-core/src/ansi.rs` — translating a raw screen into safe,
   coloured HTML.
 - `docs/history/agent-terminal/CONTEXT.md` — Outstanding Questions, for the
   agent-vs-pane gap above.

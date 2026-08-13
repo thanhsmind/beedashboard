@@ -5,7 +5,7 @@
 //! from surfacing as a fresh event.
 //!
 //! Wired in behind the D7 opt-in switch by `crate::TerminalBackground`
-//! (`crates/mdview/src/main.rs`): `reconcile` is the only place a
+//! (`crates/waggledance/src/main.rs`): `reconcile` is the only place a
 //! [`PollWatcher`] is ever run, and a switch left off drives it to poll
 //! nothing.
 

@@ -141,14 +141,14 @@ authentication. The scheme choice is per-browser (local), not shared or synced.
 
 ## Pointers (implementation)
 
-- `crates/mdview/assets/atelier/` — vendored Atelier design system (contract
+- `crates/waggledance/assets/atelier/` — vendored Atelier design system (contract
   tokens, core roles, editorial pattern, theme with Light + Dark schemes).
-- `crates/mdview/assets/app.css` — app-side glue authored from Atelier tokens.
-- `crates/mdview/src/views.rs` — `layout()` sets `data-theme="atelier"` +
+- `crates/waggledance/assets/app.css` — app-side glue authored from Atelier tokens.
+- `crates/waggledance/src/views.rs` — `layout()` sets `data-theme="atelier"` +
   `class="fg-root"` and the no-flash scheme script; `APP_CSS` concatenates the
   bundle + glue; `.fg-*` roles across the page builders.
-- `crates/mdview/assets/app.js` — scheme toggle + mermaid re-init, keyed off
+- `crates/waggledance/assets/app.js` — scheme toggle + mermaid re-init, keyed off
   `data-scheme`.
-- `crates/mdview/src/server.rs` — `build_highlight_css` emits the dark syntect
+- `crates/waggledance/src/server.rs` — `build_highlight_css` emits the dark syntect
   palette (`base16-ocean.dark`) scoped by `data-scheme`.
-- `crates/mdview-desktop/ui/index.html` — desktop splash, `prefers-color-scheme`.
+- `crates/waggledance-desktop/ui/index.html` — desktop splash, `prefers-color-scheme`.

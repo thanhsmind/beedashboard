@@ -8,7 +8,7 @@ coverage: partial
 
 # Bee Cockpit
 
-A read-only surface inside mdview that shows what the bee harness is doing in a
+A read-only surface inside waggledance that shows what the bee harness is doing in a
 registered project: which features are waiting on a person right now, which are
 in progress, which have already shipped, and the backlog and review queue
 behind any of it.
@@ -16,7 +16,7 @@ behind any of it.
 Throughout this surface's own pages, the name shown to a person is **Bee
 Artifact** — page titles, the top bar, and other on-page UI text all read that
 way. This is a display label only: the command a person types, and the
-identifiers this product exposes to other tools, remain **mdview**.
+identifiers this product exposes to other tools, remain **waggledance**.
 
 Technology-agnostic: this describes behavior and rules, not the Rust that implements
 them. Code entry points are listed in `reading-map.md`.
@@ -34,7 +34,7 @@ is it stuck.
 
 A project qualifies for the bee surface when **both** hold:
 
-1. It is registered with mdview (it appears in the project registry).
+1. It is registered with waggledance (it appears in the project registry).
 2. Its root directory contains a `.bee/` directory.
 
 A registered project without `.bee/` behaves exactly as it always did — opening it
@@ -298,7 +298,7 @@ that check.
 
 ### It renders nothing that identifies a filesystem outside the project
 
-This surface carries no authentication of its own — nothing in mdview does, including
+This surface carries no authentication of its own — nothing in waggledance does, including
 the agent terminal (see the Agent terminal spec) — and can be bound to a non-loopback
 address. bee's store is full of absolute paths — the files a cell touches,
 a worker's identity, a session's transcript, a workspace root. **None of them may reach

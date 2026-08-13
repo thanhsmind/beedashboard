@@ -510,7 +510,7 @@ fn check_mcp_antigravity(dry_run: bool, fix: bool) -> Check {
 
 /// Preamble + `---` + the actual agent-facing snippet; only the latter half
 /// gets copied into AGENTS.md/CLAUDE.md.
-const AGENT_TEMPLATE: &str = include_str!("../../../docs/mdview-agents-template.md");
+const AGENT_TEMPLATE: &str = include_str!("../../../docs/waggledance-agents-template.md");
 
 fn agent_instruction_snippet() -> &'static str {
     AGENT_TEMPLATE
@@ -649,7 +649,7 @@ fn check_agent_instruction(dry_run: bool, fix: bool) -> Check {
 /// globally so it works in any project. waggledance owns this file entirely,
 /// so the check is a whole-file content match rather than a shared marker
 /// block.
-const SKILL_TEMPLATE: &str = include_str!("../../../docs/mdview-skill-template.md");
+const SKILL_TEMPLATE: &str = include_str!("../../../docs/waggledance-skill-template.md");
 
 /// `~/.claude/skills/waggledance/SKILL.md` — the global (not per-project)
 /// skill file.
@@ -787,17 +787,17 @@ mod agent_instruction_tests {
     #[test]
     fn snippet_strips_preamble() {
         let s = agent_instruction_snippet();
-        assert!(s.starts_with("## Documentation Viewing (MDView)"));
+        assert!(s.starts_with("## Documentation Viewing (Waggledance)"));
         assert!(!s.contains("Copy this snippet"));
     }
 
     #[test]
     fn skill_template_is_a_valid_skill_file() {
         assert!(SKILL_TEMPLATE.starts_with("---"));
-        assert!(SKILL_TEMPLATE.contains("name: mdview"));
+        assert!(SKILL_TEMPLATE.contains("name: waggledance"));
         // Carries the CLI-vs-MCP guidance the feature is about.
-        assert!(SKILL_TEMPLATE.contains("mdview_view_file"));
-        assert!(SKILL_TEMPLATE.contains("mdview open"));
+        assert!(SKILL_TEMPLATE.contains("waggledance_view_file"));
+        assert!(SKILL_TEMPLATE.contains("waggledance open"));
     }
 
     #[test]

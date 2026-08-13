@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/waggledance-core", "crates/waggledance"]
 # Desktop shell (Tauri) is excluded from the default workspace build because it
 # requires system libraries (webkit2gtk/gtk3 on Linux) not present everywhere.
-# Build it explicitly from its own directory — see crates/mdview-desktop/README.md.
+# Build it explicitly from its own directory — see crates/waggledance-desktop/README.md.
 exclude = ["crates/waggledance-desktop"]
 
 [workspace.package]

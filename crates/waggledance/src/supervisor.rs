@@ -1,13 +1,13 @@
 //! herdr supervisor — an in-process watchdog that pings herdr and relaunches
 //! it when it is down (D1: ported from herdr-go's `supervisor.rs`). NOT
-//! external software: a tokio loop inside `mdview` itself. Restarting herdr
+//! external software: a tokio loop inside `waggledance` itself. Restarting herdr
 //! recovers workspace/tab/pane structure and relaunches agents via native
 //! resume — it does **not** rescue an agent's in-flight work that died with
-//! herdr (a herdr limitation, not mdview's). The supervisor never
+//! herdr (a herdr limitation, not waggledance's). The supervisor never
 //! force-kills anything.
 //!
 //! Wired in behind the D7 opt-in switch by `crate::TerminalBackground`
-//! (`crates/mdview/src/main.rs`): `reconcile` is the only place a
+//! (`crates/waggledance/src/main.rs`): `reconcile` is the only place a
 //! [`Supervisor`] is ever constructed, and a switch left off drives it to
 //! spawn nothing.
 
@@ -31,7 +31,7 @@ pub struct SpawnHerdr {
 }
 
 /// The herdr binary path, from `WAGGLEDANCE_HERDR_BINARY` when set, else `herdr`
-/// on `PATH`. Named in mdview's own env namespace — herdr-go's
+/// on `PATH`. Named in waggledance's own env namespace — herdr-go's
 /// `HERDR_GO_HERDR_BINARY` does not travel with the port (D1 retires
 /// herdr-go as a separate product, so its env-var namespace retires too).
 pub fn herdr_binary_from_env() -> String {
@@ -145,7 +145,7 @@ impl Supervisor {
             Err(_) => {
                 // Check cancellation immediately before spawning — the last
                 // possible moment, and strictly before the one action here
-                // with an external side effect (`crates/mdview/src/main.rs`,
+                // with an external side effect (`crates/waggledance/src/main.rs`,
                 // this cell's trace).
                 if self.cancelled.load(Ordering::SeqCst) {
                     return (Health::Down, false);
@@ -160,7 +160,7 @@ impl Supervisor {
     /// check (a real, externally-observable side effect of the loop still
     /// running) — the loop stopping is provable by this counter no longer
     /// advancing, not merely by the caller's own bookkeeping having emptied
-    /// a slot (`crates/mdview/src/main.rs`'s `TerminalBackground`, this
+    /// a slot (`crates/waggledance/src/main.rs`'s `TerminalBackground`, this
     /// cell's trace). `on_transition` fires only when health flips
     /// (up→down or down→up); `on_backoff` fires on every restart attempt,
     /// reporting the 1-indexed consecutive-restart step and the wait about

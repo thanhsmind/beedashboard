@@ -95,7 +95,7 @@ impl Engine {
         Err(Error::Other("could not allocate project id".into()))
     }
 
-    /// The core `mdview_view_file` use case: ensure project, index the file now,
+    /// The core `waggledance_view_file` use case: ensure project, index the file now,
     /// return its app URL.
     pub fn view_file(&self, project_root: &Path, rel_path: &str) -> Result<ViewFile> {
         let project = self.ensure_project(project_root, None)?;
@@ -322,7 +322,7 @@ pub enum CodeView {
 }
 
 /// Extensions asset_path serves. Mirrors the 9 tokens
-/// `crates/mdview/src/server.rs::content_type()` already recognizes;
+/// `crates/waggledance/src/server.rs::content_type()` already recognizes;
 /// waggledance-core cannot import across the crate boundary, so keep this list in
 /// sync if content_type() ever changes.
 const ALLOWED_ASSET_EXTENSIONS: &[&str] = &[
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn view_file_auto_creates_project_and_returns_url() {
-        let dir = std::env::temp_dir().join(format!("mdview-eng-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-eng-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write(
             &dir,
@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn asset_path_enforces_allowlist_exclude_patterns_and_traversal_guard() {
-        let dir = std::env::temp_dir().join(format!("mdview-asset-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("waggledance-asset-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
         write(&dir, "readme.md", "# root");
@@ -451,7 +451,7 @@ mod tests {
             // extension passes, so only the containment guard (starts_with on
             // the canonical path) rejects it — lock that in.
             let outside =
-                std::env::temp_dir().join(format!("mdview-outside-{}.png", std::process::id()));
+                std::env::temp_dir().join(format!("waggledance-outside-{}.png", std::process::id()));
             std::fs::write(&outside, "out-of-root-bytes").unwrap();
             let esc_link = dir.join("images/escape.png");
             std::os::unix::fs::symlink(&outside, &esc_link).unwrap();

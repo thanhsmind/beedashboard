@@ -309,8 +309,8 @@ fn flush_run(out: &mut String, text: &str, style: &Style) {
 }
 
 /// HTML-escape text for safe embedding — the same four metacharacters
-/// `crates/mdview/src/views.rs::esc` escapes, kept as an independent copy
-/// since this crate never depends on the `mdview` binary crate.
+/// `crates/waggledance/src/views.rs::esc` escapes, kept as an independent copy
+/// since this crate never depends on the `waggledance` binary crate.
 fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

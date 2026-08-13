@@ -48,7 +48,7 @@ type code here.**
 | 🗂️ **Every agent, one drawer** | A slide-in list of every agent across every project, grouped by status. Switch panes without switching windows. |
 | 📖 **Read the docs** | Whole-project markdown: cross-folder links that never 404, full-text search (SQLite FTS5), Mermaid you can pan and zoom, live reload on save. |
 | 💻 **Read the code** | A second reading surface: the project's source as it sits on disk, syntax-coloured, line-numbered. For pointing at a line, not for changing it. |
-| 🤖 **Agent-native** | One MCP tool, `mdview_view_file`, hands an agent a clickable URL the moment it writes a doc. |
+| 🤖 **Agent-native** | One MCP tool, `waggledance_view_file`, hands an agent a clickable URL the moment it writes a doc. |
 | 📱 **Conduct from a phone** | Responsive layout, sidebar drawer, light & dark. Over the LAN or an SSH tunnel. |
 | 🦀 **One binary** | Rust. No runtime, no Node, no Docker. |
 
@@ -73,31 +73,31 @@ type code here.**
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/vantt/mdview/main/install.sh | sh
-mdview doctor --fix     # wire up Claude Code MCP integration
+curl -fsSL https://raw.githubusercontent.com/thanhsmind/waggledance/main/install.sh | sh
+waggledance doctor --fix     # wire up Claude Code MCP integration
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/vantt/mdview/main/install.ps1 | iex
-mdview doctor --fix     # wire up Claude Code MCP integration
+irm https://raw.githubusercontent.com/thanhsmind/waggledance/main/install.ps1 | iex
+waggledance doctor --fix     # wire up Claude Code MCP integration
 ```
 
 Or from source (needs Rust):
 
 ```sh
-cargo install --git https://github.com/vantt/mdview mdview
+cargo install --git https://github.com/thanhsmind/waggledance waggledance
 ```
 
-The CLI binary is `mdview`.
+The CLI binary is `waggledance`.
 
 ---
 
 ## Use in 30 seconds
 
 ```sh
-mdview open docs/architecture.md
+waggledance open docs/architecture.md
 ```
 
 The daemon **auto-starts**, indexes the project, resolves the links, and prints a browser
@@ -170,16 +170,16 @@ Neither surface edits. Line numbers exist so a line can be pointed at.
 ## Agent integration (MCP)
 
 ```sh
-mdview doctor --fix
+waggledance doctor --fix
 ```
 
 Registers an MCP server for whichever of **Claude Code, Codex, and Antigravity** it detects
 on your machine — it never writes config for a tool you don't have — exposing one tool:
 
-- **`mdview_view_file(project_root, relative_path)`** → a clickable `url` to the rendered
+- **`waggledance_view_file(project_root, relative_path)`** → a clickable `url` to the rendered
   file, **auto-registering** the project and indexing it on first use.
 
-Drop the snippet from [`docs/mdview-agents-template.md`](docs/mdview-agents-template.md)
+Drop the snippet from [`docs/waggledance-agents-template.md`](docs/waggledance-agents-template.md)
 into your project's `AGENTS.md` / `CLAUDE.md` and your agents will hand you a viewable URL
 the moment they finish writing.
 
@@ -188,14 +188,14 @@ the moment they finish writing.
 ## CLI
 
 ```sh
-mdview open <file.md>                # print the browser URL (auto-starts the daemon)
-mdview register <dir> [--name ...]   # recursive scan + index a project
-mdview search "query"                # full-text search (FTS5)
-mdview status                        # is the daemon up?
-mdview config edit                   # edit ~/.mdview/config.toml in $EDITOR
-mdview restart                       # restart the daemon (apply config changes)
-mdview doctor [--fix]                # diagnose & repair the integration
-mdview serve [--host H] [--port P]   # optional: pre-start / bind a custom address
+waggledance open <file.md>                # print the browser URL (auto-starts the daemon)
+waggledance register <dir> [--name ...]   # recursive scan + index a project
+waggledance search "query"                # full-text search (FTS5)
+waggledance status                        # is the daemon up?
+waggledance config edit                   # edit ~/.waggledance/config.toml in $EDITOR
+waggledance restart                       # restart the daemon (apply config changes)
+waggledance doctor [--fix]                # diagnose & repair the integration
+waggledance serve [--host H] [--port P]   # optional: pre-start / bind a custom address
 ```
 
 Most commands accept `--json`. Full reference, SSH workflows, and settings live in the
@@ -205,7 +205,7 @@ Most commands accept `--json`. Full reference, SSH workflows, and settings live 
 
 ## How it works
 
-One daemon owns the registry (`~/.mdview/registry.db`); browser tabs are just clients. On a
+One daemon owns the registry (`~/.waggledance/registry.db`); browser tabs are just clients. On a
 `view_file` call the server auto-creates the project, scans it recursively, indexes the
 target file, resolves its links, and returns the URL. A filesystem watcher keeps the index
 current and pushes reload signals over WebSocket. Board data is read from each project's
@@ -228,7 +228,7 @@ default for a reason: an exposed daemon with the terminal switch on is *unauthen
 remote code execution*, because replying to an agent pane is arbitrary input to a shell.
 
 Bind it to localhost. Reach it over SSH forwarding, a VPN, or an authenticating reverse
-proxy. `mdview serve --host 0.0.0.0` on a network you don't fully trust is not a
+proxy. `waggledance serve --host 0.0.0.0` on a network you don't fully trust is not a
 supported posture. Details in the [usage guide](docs/usage.md).
 
 ---

@@ -1,17 +1,17 @@
 ---
 area: settings
 updated: 2026-08-07
-sources: [mdview-hostname-doctor-fix, hostname-port-truth, ui-polish-settings-sidebar, agent-terminal, terminal-open-access]
+sources: [waggledance-hostname-doctor-fix, hostname-port-truth, ui-polish-settings-sidebar, agent-terminal, terminal-open-access]
 decisions: [07c1ac9f, bcfcf737]
 coverage: partial
 ---
 
 # Spec: Settings
 
-The single place to view and change mdview's local configuration: server
+The single place to view and change waggledance's local configuration: server
 binding, the renderer theme, indexing behavior, the MCP integration, and
 every switch the agent terminal depends on. There is one operator (whoever
-runs mdview on their own machine) and no authentication anywhere in mdview,
+runs waggledance on their own machine) and no authentication anywhere in waggledance,
 this page included (see the Agent terminal spec) — anyone who can reach the
 settings page can view or change every setting on it, with no field carved
 out behind a session or a login. That is true of the terminal's own
@@ -26,7 +26,7 @@ and credential are ordinary settings like any other on this page.
   running server restarts).
 - `/settings?saved=1` → the same page with a "Saved" confirmation banner,
   reached automatically right after a successful save.
-- The settings page shows the running application version (`mdview v<version>`)
+- The settings page shows the running application version (`waggledance v<version>`)
   beside the page title — the same single-source version reported by the CLI
   and `/health`.
 - Save button on the settings page → posts the form, then redirects back to
@@ -34,7 +34,7 @@ and credential are ordinary settings like any other on this page.
 - Start-up CLI overrides (`serve --host <host> --port <port>`) → persist the
   given value(s) into configuration before the server starts, without visiting
   the settings page.
-- `mdview config edit` (CLI) → opens the configuration file in the operator's
+- `waggledance config edit` (CLI) → opens the configuration file in the operator's
   `$EDITOR` (a full-file text edit, all fields at once — the terminal counterpart
   to the `/settings` form). The file is created with current/default values first
   so nothing is blank; after saving, an invalid edit is warned about (the server
@@ -55,10 +55,10 @@ and credential are ordinary settings like any other on this page.
 | 8 | Max file size (MB) | Files larger than this are skipped by the indexer | megabytes, ≥1 | no (a value below 1 is ignored, keeping the previous size) | 10 |
 | 9 | Exclude patterns | Folder/file name patterns the indexer never scans | one pattern per line; blank lines and surrounding whitespace are dropped | no | `.git`, `node_modules`, `.venv`, `target`, `dist` |
 | 10 | MCP enabled | Whether the agent-integration tool is available | on / off | no | on |
-| 11 | MCP transport | How an agent's MCP client talks to mdview | `stdio` · `http` | no (an unrecognized value is ignored, keeping the previous value) | `stdio` |
+| 11 | MCP transport | How an agent's MCP client talks to waggledance | `stdio` · `http` | no (an unrecognized value is ignored, keeping the previous value) | `stdio` |
 | 12 | Enable the terminal | Whether the agent terminal, transcript, and agent-creation routes answer at all (see the Agent terminal spec) | on / off | no | off |
-| 13 | Keep herdr running | Opt-in duty: mdview keeps the herdr process alive on the operator's behalf | on / off | no | off |
-| 14 | Notify on status change | Opt-in duty: mdview sends a notification message when a watched agent's status changes | on / off | no (also needs a destination and a credential configured below to actually send anything) | off |
+| 13 | Keep herdr running | Opt-in duty: waggledance keeps the herdr process alive on the operator's behalf | on / off | no | off |
+| 14 | Notify on status change | Opt-in duty: waggledance sends a notification message when a watched agent's status changes | on / off | no (also needs a destination and a credential configured below to actually send anything) | off |
 | 15 | Show unassigned agent panes | Whether the terminal's Unassigned group — every herdr pane on the host outside any registered project's root — is reachable at all | on / off | no | off |
 | 16 | Notify destination | Where a status-change notification is delivered | destination address/identifier, or left blank | no | blank (unset) |
 | 17 | Notify credential | The secret used to authenticate that notification delivery | any value, or left blank; write-only — never shown again once saved, only a masked hint | no | blank (unset) |
@@ -73,7 +73,7 @@ and credential are ordinary settings like any other on this page.
 - **Side effects:** none.
 - **Afterwards:** the operator sees every current value pre-filled, grouped
   into Server, MCP, Renderer, and Indexing sections in that order, plus a
-  note that Server/Indexing/MCP changes need a restart (`mdview stop && mdview
+  note that Server/Indexing/MCP changes need a restart (`waggledance stop && waggledance
   serve`) to take effect. Host and Port are shown side by side as a pair, as
   are Debounce and Max file size — the rest of each section's fields (Display
   hostname, Exclude patterns, etc.) each take their own row.
@@ -94,7 +94,7 @@ and credential are ordinary settings like any other on this page.
 
 ### Start with CLI overrides
 
-- **Triggers:** `mdview serve --host <h>` and/or `--port <p>`.
+- **Triggers:** `waggledance serve --host <h>` and/or `--port <p>`.
 - **What changes:** the given value(s) are saved to configuration before the
   server binds, so they take effect on this very start (no separate save +
   restart needed).
@@ -104,7 +104,7 @@ and credential are ordinary settings like any other on this page.
 ## Actors & Access
 
 Not applicable in the role sense — there is exactly one actor (the local
-operator running mdview) and no login; anything reachable at the bound
+operator running waggledance) and no login; anything reachable at the bound
 Host/Port can view and change every setting on this page, with no field
 carved out — enabling the terminal, keeping herdr running, notifying on
 status change, showing unassigned agent panes, and the notify destination
@@ -117,7 +117,7 @@ Agent integration area.
 
 - **R1 (per D 07c1ac9f).** When Display hostname is set to a non-blank value,
   every link handed back to a person or an agent (the browser URL from the
-  CLI `open` command, and the URL returned by the `mdview_view_file` MCP tool)
+  CLI `open` command, and the URL returned by the `waggledance_view_file` MCP tool)
   uses Display hostname in place of Host. The server's actual bind address and
   its own health check always use Host — Display hostname is a display-only
   substitution and never changes what address the server listens on or is
@@ -127,7 +127,7 @@ Agent integration area.
   explicitly at save time.
 - **R3.** When Host is a wildcard bind (any-interface, e.g. `0.0.0.0`) **and**
   Display hostname is blank, every link-returning entry point — the
-  `mdview_view_file` MCP tool, and the CLI `mdview open`/`mdview restart`
+  `waggledance_view_file` MCP tool, and the CLI `waggledance open`/`waggledance restart`
   commands (per D bcfcf737) — returns **one viewable link per reachable
   machine IP** (loopback and link-local excluded) instead of a single
   unusable wildcard link, so a caller on another host can pick an address
@@ -162,21 +162,21 @@ No settled screenshot captured for `/settings` yet — see Open Gaps.
 
 ## Pointers (implementation)
 
-- `crates/mdview-core/src/config.rs` — `Config`/`ServerConfig`/etc. structs,
-  defaults, load/save (`~/.mdview/config.toml`, TOML, atomic write).
-- `crates/mdview/src/server.rs` — `settings_page_handler`, `SettingsForm`,
+- `crates/waggledance-core/src/config.rs` — `Config`/`ServerConfig`/etc. structs,
+  defaults, load/save (`~/.waggledance/config.toml`, TOML, atomic write).
+- `crates/waggledance/src/server.rs` — `settings_page_handler`, `SettingsForm`,
   `update_config` (routes `/settings`, `/api/config`).
-- `crates/mdview/src/views.rs` — `settings_page` (form rendering).
-- `crates/mdview/src/runtime.rs` — `ensure_daemon_bases`/`build_display_urls`/
+- `crates/waggledance/src/views.rs` — `settings_page` (form rendering).
+- `crates/waggledance/src/runtime.rs` — `ensure_daemon_bases`/`build_display_urls`/
   `machine_ipv4s` (single entry point for both Display hostname substitution
   and R3's multi-IP link list; used by every link-returning caller — the
   single-URL `ensure_daemon_base`/`display_base_url` helpers were retired
   once the last single-URL caller switched over).
-- `crates/mdview-core/src/daemon.rs` — `DaemonInfo`/`base_url`/`health_check`
+- `crates/waggledance-core/src/daemon.rs` — `DaemonInfo`/`base_url`/`health_check`
   (the real bind/connect host, unaffected by Display hostname).
-- `crates/mdview/src/cli.rs` — `Command::Serve { port, host }`, `cmd_serve`
+- `crates/waggledance/src/cli.rs` — `Command::Serve { port, host }`, `cmd_serve`
   (CLI override path); `cmd_open`/`cmd_restart` (R3 multi-IP `--json` output:
   `url` + `urls`).
-- `crates/mdview/tests/e2e_open.rs` — end-to-end coverage: a real daemon is
-  started and `mdview open --json` is asserted to return the daemon's actual
+- `crates/waggledance/tests/e2e_open.rs` — end-to-end coverage: a real daemon is
+  started and `waggledance open --json` is asserted to return the daemon's actual
   bound port, not a stale configured one.

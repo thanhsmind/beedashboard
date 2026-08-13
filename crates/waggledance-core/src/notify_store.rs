@@ -8,7 +8,7 @@
 //! (`bee::tests::no_web_framework_dependency_declared` asserts no
 //! `tokio`/`axum`/`hyper` in this crate's `Cargo.toml`), so every call here
 //! is a synchronous SQLite statement — the async watcher/notifier that live
-//! in the `mdview` binary crate call it directly, the same way
+//! in the `waggledance` binary crate call it directly, the same way
 //! `repository::SqliteStore` is called from async handlers today: behind a
 //! `Mutex<Connection>` (Send+Sync), never behind an async trait.
 

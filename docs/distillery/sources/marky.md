@@ -11,7 +11,7 @@ domains_covered: [rendering, live-reload, file-indexing, ux, tooling, safety, co
 # marky — Feature Index
 
 Marky = desktop markdown **viewer** (Tauri v2 + React + markdown-it), "open `.md`
-từ terminal, render đẹp, live reload". Cùng category với mdview nhưng là native app
+từ terminal, render đẹp, live reload". Cùng category với waggledance nhưng là native app
 (không web server, không remote view, không MCP, không multi-project registry).
 Đối trọng của mdserve trên hầu hết trục — điền cột marky trong comparison-matrix.
 
@@ -86,7 +86,7 @@ từ terminal, render đẹp, live reload". Cùng category với mdview nhưng l
 ### folder-workspace-tree
 - **What:** Sidebar trái: nhiều folder "workspace" bền vững (kiểu Obsidian), mỗi folder render tree đệ quy, group theo git repo_root (hoặc flat), collapse per-folder/per-group, hover hiện nút xóa.
 - **Where:** `src/components/FolderSidebar.tsx`, `src/components/FileTree.tsx`, `src-tauri/src/folder.rs`
-- **Notable:** Tree build ở Rust bằng `ignore::WalkBuilder` (tôn trọng .gitignore) lọc chỉ `.md/.markdown/.mdx`, prune dir rỗng; grouping repo tính `find_git_repo_root` (đi lên tìm `.git`, dừng ở home). Đối chiếu mdserve flat non-recursive → marky recursive hierarchical (đúng khoảng trống mdview nhắm).
+- **Notable:** Tree build ở Rust bằng `ignore::WalkBuilder` (tôn trọng .gitignore) lọc chỉ `.md/.markdown/.mdx`, prune dir rỗng; grouping repo tính `find_git_repo_root` (đi lên tìm `.git`, dừng ở home). Đối chiếu mdserve flat non-recursive → marky recursive hierarchical (đúng khoảng trống waggledance nhắm).
 - **Keywords:** WalkBuilder, ignore, repo_root grouping, TreeNode, recursive
 - **Seen:** 5d02237
 
@@ -189,7 +189,7 @@ từ terminal, render đẹp, live reload". Cùng category với mdview nhưng l
 ### settings-persistence
 - **What:** Prefs 2 lớp: localStorage (nhanh) + Tauri backend (bền), reconcile lúc mount, `persistToBackend` debounce 300ms. Backend ghi `data_dir()/marky/settings.json` atomic (temp + rename), load resilient (JSON hỏng → default, không crash).
 - **Where:** `src-tauri/src/settings.rs`, `src/lib/preferences.tsx`
-- **Notable:** `data_dir()` cross-platform (`dirs`): macOS Application Support, Linux `~/.local/share`, Windows `%APPDATA%`. `folders` field có `alias="vaults"` để tương thích ngược. recent_files dedup, cap 20. Atomic write chống corruption khi crash (mdview PRD cũng yêu cầu atomic registry write).
+- **Notable:** `data_dir()` cross-platform (`dirs`): macOS Application Support, Linux `~/.local/share`, Windows `%APPDATA%`. `folders` field có `alias="vaults"` để tương thích ngược. recent_files dedup, cap 20. Atomic write chống corruption khi crash (waggledance PRD cũng yêu cầu atomic registry write).
 - **Keywords:** settings.json, atomic write, data_dir, localStorage, debounce, resilient load
 - **Seen:** 5d02237
 
@@ -228,7 +228,7 @@ từ terminal, render đẹp, live reload". Cùng category với mdview nhưng l
 ### claude-md-conventions
 - **What:** `CLAUDE.md` là doc "authoritative stack + rules": liệt kê stack, layout, convention Rust/frontend, folder model, security, và loạt rule "No …" (No Electron, No editor, No data ngoài app_data_dir, No remote fetch, Don't over-abstract).
 - **Where:** `CLAUDE.md`
-- **Notable:** Rule dạng phủ định (non-goals) giữ scope viewer chặt — mẫu tốt cho mdview tự ràng buộc scope.
+- **Notable:** Rule dạng phủ định (non-goals) giữ scope viewer chặt — mẫu tốt cho waggledance tự ràng buộc scope.
 - **Keywords:** CLAUDE.md, conventions, non-goals, stack authoritative
 - **Seen:** 5d02237
 

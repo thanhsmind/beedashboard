@@ -1,4 +1,4 @@
-//! Cross-folder link resolution (PRD §7.3 / FR-11) — mdview's core differentiator.
+//! Cross-folder link resolution (PRD §7.3 / FR-11) — waggledance's core differentiator.
 //!
 //! Rewrites an internal markdown link into the app URL namespace, resolving
 //! `../` across folders within a single project. Cross-project lookup is

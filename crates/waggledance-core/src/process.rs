@@ -1,5 +1,5 @@
 //! Cross-platform process-spawn helpers shared by every crate that launches
-//! a detached daemon (`mdview` binary today, `mdview-desktop` next).
+//! a detached daemon (`waggledance` binary today, `waggledance-desktop` next).
 
 /// Apply the platform detach settings to `cmd` so a spawned child outlives its
 /// spawner: a new session on Unix (`setsid`), a detached console + new process

@@ -15,8 +15,8 @@ bee:
 
 ## What shipped
 
-- **agent-terminal-1** — Config resolves its data directory through an injectable override so settings handlers can be tested without touching the real ~/.mdview (2 file(s) changed)
-- **agent-terminal-2** — Ported herdr client into crates/mdview (mdview-core stays async-runtime-free) and the path boundary into crates/mdview-core/src/paths_boundary.rs, both with their existing tests green (12 file(s) changed)
+- **agent-terminal-1** — Config resolves its data directory through an injectable override so settings handlers can be tested without touching the real ~/.waggledance (2 file(s) changed)
+- **agent-terminal-2** — Ported herdr client into crates/waggledance (waggledance-core stays async-runtime-free) and the path boundary into crates/waggledance-core/src/paths_boundary.rs, both with their existing tests green (12 file(s) changed)
 - **agent-terminal-3** — Add terminal_auth module: token store (0600 file), constant-time verify, session set, reveal-once masking, rotation clears sessions; opaque-404 extractor generic over HasTerminalAuth; no route mounted (2 file(s) changed)
 - **agent-terminal-4** — Issued and rotated the terminal token on the settings page (reveal-once, mask-after), and gated the D7 switches behind a terminal_auth-only endpoint separate from POST /api/config (3 file(s) changed)
 - **agent-terminal-5** — Added the gated GET /p/:id/_terminal pane list (D2/D4/D6), the project tab strip, and the MethodGate carry-over fix for POST /api/terminal-config (2 file(s) changed)
@@ -29,7 +29,7 @@ bee:
 - **agent-terminal-12** — Server-side ANSI-to-HTML translation renders coloured/styled terminal screens; unrecognised escapes dropped, text escaped before markup (6 file(s) changed)
 - **agent-terminal-13** — Added gated pane/agent creation routes with server-side workspace resolution and preset-based agent start; terminal page offers configured preset labels (3 file(s) changed)
 - **agent-terminal-14** — ANSI parser now drops DCS/APC/PM/SOS bodies whole and re-emits malformed-CSI abort bytes as text; creation routes gain MethodGate isolation and create_error_response coverage tests (2 file(s) changed)
-- **agent-terminal-15** — Ported herdr-go's gap-free transcript tailer into mdview-core with its full test suite and cursor path-escape guard (2 file(s) changed)
+- **agent-terminal-15** — Ported herdr-go's gap-free transcript tailer into waggledance-core with its full test suite and cursor path-escape guard (2 file(s) changed)
 - **agent-terminal-16** — Added the Transcript tab (D9) beside Terminal with a gated, cursor-based activity endpoint sharing the terminal family's full guard stack (3 file(s) changed)
 - **agent-terminal-17** — Ported the status watcher, herdr supervisor and at-least-once notification outbox (Notifier trait + null/Telegram) from herdr-go, inert — main.rs only declares the modules, guarded by a source-scan test proving nothing constructs or starts them (9 file(s) changed)
 - **agent-terminal-18** — Wired the supervisor and Telegram notifier behind their D7 switches via a new live-reconciling TerminalBackground manager; the credential follows the terminal-token secret-file pattern (4 file(s) changed)

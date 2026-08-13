@@ -1,8 +1,8 @@
-//! waggledance-core — domain + application + adapters for the mdview markdown server.
+//! waggledance-core — domain + application + adapters for the waggledance markdown server.
 //!
 //! Dependency rule (PRD §7.4): this crate never depends on Axum/Tauri. Adapters
 //! (SQLite, notify) live here behind ports; the HTTP/MCP/CLI wiring is in the
-//! `mdview` binary crate.
+//! `waggledance` binary crate.
 
 pub mod ansi;
 pub mod bee;

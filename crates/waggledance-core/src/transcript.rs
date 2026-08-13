@@ -15,7 +15,7 @@
 //! later call returns only what was appended since, merged across files by
 //! record timestamp. This module keeps no per-pane state — the cursor lives
 //! in the caller and comes back on each request. Nothing is ever persisted
-//! server-side: the transcript is the agent's own artifact, not mdview's.
+//! server-side: the transcript is the agent's own artifact, not waggledance's.
 //!
 //! Ported from herdr-go's `src/transcript/mod.rs`, which had zero
 //! dependencies on any other herdr-go module. This port adds one guard the
@@ -94,8 +94,8 @@ pub fn encode_project_dir(cwd: &str) -> String {
 
 /// `$CLAUDE_CONFIG_DIR/projects` when set, else `<home>/.claude/projects`
 /// (`USERPROFILE` on Windows, `HOME` elsewhere — same env Claude Code uses).
-/// This is Claude Code's own configuration surface, unrelated to mdview's or
-/// to herdr's — mdview never reads a herdr configuration file here.
+/// This is Claude Code's own configuration surface, unrelated to waggledance's or
+/// to herdr's — waggledance never reads a herdr configuration file here.
 fn claude_projects_root() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
         return Some(PathBuf::from(dir).join("projects"));

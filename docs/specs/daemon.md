@@ -15,15 +15,15 @@ serves (see the web-interface and agent-integration areas for that).
 
 ## Entry Points & Triggers
 
-- `mdview open <file>` (CLI) → if no daemon is running, one is started
+- `waggledance open <file>` (CLI) → if no daemon is running, one is started
   automatically before the URL is returned.
 - An agent's `view_file` call (MCP) → same automatic start if none is running.
-- `mdview serve [--host <h>] [--port <p>]` → starts the daemon explicitly. This
+- `waggledance serve [--host <h>] [--port <p>]` → starts the daemon explicitly. This
   is optional; its only reasons to exist are pre-starting the daemon or binding
   a non-default host/port.
-- `mdview status` → reports whether a daemon is currently running and where.
-- `mdview stop` → stops the running daemon.
-- `mdview restart` → stops the running daemon (if any) and starts a fresh
+- `waggledance status` → reports whether a daemon is currently running and where.
+- `waggledance stop` → stops the running daemon.
+- `waggledance restart` → stops the running daemon (if any) and starts a fresh
   detached one; used to apply config changes to the live server.
 
 ## Data Dictionary
@@ -41,7 +41,7 @@ serves (see the web-interface and agent-integration areas for that).
 
 ### Automatic start (on first use)
 
-- **Triggers:** a `mdview open` or an agent `view_file` when no daemon is
+- **Triggers:** a `waggledance open` or an agent `view_file` when no daemon is
   running.
 - **What changes:** a daemon is launched in the background and, once it answers,
   becomes the single live daemon.
@@ -51,10 +51,10 @@ serves (see the web-interface and agent-integration areas for that).
 - **Afterwards:** the caller gets a viewable URL. The daemon keeps running
   after the launching command exits, after the launching agent/session ends,
   and after the launching terminal closes — until it is explicitly stopped or
-  the machine restarts (per R1). The operator never has to run `mdview serve`
+  the machine restarts (per R1). The operator never has to run `waggledance serve`
   first.
 
-### Explicit start (`mdview serve`)
+### Explicit start (`waggledance serve`)
 
 - **Blocked when:** a daemon is already running — the command reports that and
   does nothing rather than starting a second one (per R2).
@@ -67,7 +67,7 @@ serves (see the web-interface and agent-integration areas for that).
   that one. When the bind is non-loopback it also prints the no-auth exposure
   warning. This is the same display-URL enumeration `open`/`restart` use — a
   display concern only, never the connectivity host.
-- **Afterwards:** it serves until interrupted or `mdview stop`.
+- **Afterwards:** it serves until interrupted or `waggledance stop`.
 
 ### Index reconciliation at startup
 
@@ -106,10 +106,10 @@ serves (see the web-interface and agent-integration areas for that).
   operating systems could wrongly conclude an all-interfaces-bound daemon was
   not running and start a duplicate.
 
-### Stop (`mdview stop`)
+### Stop (`waggledance stop`)
 
 - **What changes:** the running daemon is terminated and its record removed.
-- **Afterwards:** `mdview status` reports "not running"; the next `open`/agent
+- **Afterwards:** `waggledance status` reports "not running"; the next `open`/agent
   call auto-starts a new one.
 - **Stale record:** when the record names a process that is already gone, stop
   says so and clears the record. It returns promptly in every case — deciding
@@ -118,10 +118,10 @@ serves (see the web-interface and agent-integration areas for that).
   the attempt silently instead. An unbounded liveness check is what once left
   stop waiting indefinitely and the viewer down.
 - **Recycled process id:** a process id is only signalled when the recorded
-  daemon actually answers as mdview. A stale record whose id has since been
+  daemon actually answers as waggledance. A stale record whose id has since been
   reused by an unrelated program never causes that program to be signalled.
 
-### Restart (`mdview restart`)
+### Restart (`waggledance restart`)
 
 - **What it does:** stops the running daemon (if any), waits for it to exit, then
   starts a fresh **detached** daemon that outlives the command — the way to apply
@@ -158,7 +158,7 @@ serves (see the web-interface and agent-integration areas for that).
   rather than failing outright.
 - Daemon record present but the process is dead → treated as not running; a new
   daemon can start.
-- `mdview serve` while one is already running → no-op with a message, never a
+- `waggledance serve` while one is already running → no-op with a message, never a
   duplicate daemon.
 - Configured port already in use (auto-increment landed on a different port)
   **and** the new daemon is still within its readiness wait when a caller asks
@@ -187,19 +187,19 @@ Not applicable — background process, no screen.
 
 ## Pointers (implementation)
 
-- `crates/mdview/src/runtime.rs` — `ensure_bind`/`ensure_daemon_bases`
+- `crates/waggledance/src/runtime.rs` — `ensure_bind`/`ensure_daemon_bases`
   (auto-start + readiness wait; `bind_fallback` is the pure function deciding
   real-record-port vs. configured-port on a readiness timeout, per D 1c8473f4);
   re-exports the shared `apply_detach` (below) as its own `spawn_daemon_detached`
   detach step.
-- `crates/mdview-core/src/process.rs` — `apply_detach` (the session-detach
+- `crates/waggledance-core/src/process.rs` — `apply_detach` (the session-detach
   guarantee behind R1, per D d1429530: Unix `setsid`, Windows
   `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`), shared by every launcher.
-- `crates/mdview-core/src/daemon.rs` — the daemon record (`~/.mdview/daemon.lock`),
+- `crates/waggledance-core/src/daemon.rs` — the daemon record (`~/.waggledance/daemon.lock`),
   `running_daemon`, `health_check` (dials loopback instead of an all-interfaces
   bind address when checking liveness, per D 08b4c8c3).
-- `crates/mdview/src/server.rs` — `serve` (bind with port auto-increment, write
+- `crates/waggledance/src/server.rs` — `serve` (bind with port auto-increment, write
   the record, print every reachable URL via `runtime::display_urls_for`).
-- `crates/mdview/src/cli.rs` — `serve` / `status` / `stop` commands.
-- `crates/mdview-desktop/src/main.rs` — `spawn_mdview_serve` (the desktop
+- `crates/waggledance/src/cli.rs` — `serve` / `status` / `stop` commands.
+- `crates/waggledance-desktop/src/main.rs` — `spawn_waggledance_serve` (the desktop
   shell's launcher; calls the same shared `apply_detach`, per D d1429530).
