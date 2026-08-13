@@ -672,9 +672,26 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                 String::new()
             } else {
                 let rollups = cross_project_rollup(bee_projects).await;
+                // card-terminals-1: the JOIN between a feature and the
+                // terminals running in its own checkout lives here, never in
+                // the view — `views::TerminalPaneView.cwd` is resolved
+                // through a `Boundary` by `project_feature_panes` below, and
+                // `bee_cross_project_features_section` only looks the
+                // already-resolved map up. Reuses `snapshot` — the same
+                // single herdr snapshot `with_counts` above was built from —
+                // so the switch-off/herdr-down case (`snapshot: None`) flows
+                // through as an empty map for every project, same as it
+                // already does for every other pane list on this page.
+                let feature_panes: std::collections::HashMap<
+                    String,
+                    std::collections::HashMap<String, Vec<views::TerminalPaneView>>,
+                > = rollups
+                    .iter()
+                    .map(|(p, r)| (p.id.clone(), project_feature_panes(snapshot.as_ref(), p, r)))
+                    .collect();
                 let pairs: Vec<(&mdview_core::domain::Project, &mdview_core::bee::BeeProjectRollup)> =
                     rollups.iter().map(|(p, r)| (p, r)).collect();
-                views::bee_cross_project_features_section(&pairs)
+                views::bee_cross_project_features_section(&pairs, &feature_panes)
             };
             Html(views::home_page(
                 &with_counts,
@@ -2683,6 +2700,74 @@ fn project_panes(
             })
         })
         .collect()
+}
+
+/// card-terminals-1: one project's per-feature terminal panes for the
+/// cross-project Features board — the JOIN this cell exists to make, kept
+/// here rather than in `views.rs` since only this module holds the herdr
+/// snapshot and `Boundary`. There is no field joining a bee feature to a
+/// herdr pane (`BeeSession.lane` names a feature but carries no pane id;
+/// herdr's `Pane` carries `cwd` but no lane); the checkout directory is the
+/// only thing both sides share, per the locked decision.
+///
+/// For every granted worktree naming a feature (`BeeWorktree.feature`), that
+/// feature owns the panes whose `cwd` resolves inside the worktree's own
+/// sibling directory — `BeeWorktree.id` is that directory's own name beside
+/// `project.root_path`, resolved with its own `Boundary` exactly the way
+/// [`project_panes`] resolves a project's; a worktree whose directory does
+/// not resolve simply contributes no panes (its `feature` still keeps that
+/// feature out of the "no worktree" bucket below) rather than failing the
+/// whole page. Every remaining pane — inside the project root but inside no
+/// worktree directory, i.e. exactly [`project_panes`] over the project's own
+/// boundary — belongs to every phase-board feature that has no worktree of
+/// its own (the cards that carry the "Main" chip,
+/// `views::bee_hub_worktree_chip`'s own rule). Only phase-board features are
+/// keyed here: Finished rows never render badges, so an archive-only
+/// feature needs no entry.
+///
+/// `snapshot: None` (the terminal switch off, or herdr unreachable) returns
+/// an empty map with no boundary resolution and no herdr read at all — the
+/// same fail-open shape `index_page` already gives every other pane list on
+/// this page.
+fn project_feature_panes(
+    snapshot: Option<&herdr::Snapshot>,
+    project: &mdview_core::domain::Project,
+    rollup: &mdview_core::bee::BeeProjectRollup,
+) -> std::collections::HashMap<String, Vec<views::TerminalPaneView>> {
+    let mut out: std::collections::HashMap<String, Vec<views::TerminalPaneView>> =
+        std::collections::HashMap::new();
+    let Some(snap) = snapshot else {
+        return out;
+    };
+
+    let mut worktree_features: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for w in &rollup.snapshot.worktrees {
+        let Some(feature) = w.feature.as_deref() else {
+            continue;
+        };
+        worktree_features.insert(feature);
+        let Some(sibling) = project.root_path.parent().map(|p| p.join(&w.id)) else {
+            continue;
+        };
+        let Ok(boundary) = mdview_core::paths_boundary::Boundary::new(vec![sibling]) else {
+            continue;
+        };
+        out.insert(feature.to_string(), project_panes(snap, &boundary));
+    }
+
+    let Ok(project_boundary) = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()]) else {
+        return out;
+    };
+    let main_panes = project_panes(snap, &project_boundary);
+    if main_panes.is_empty() {
+        return out;
+    }
+    for f in &rollup.snapshot.phase_board {
+        if !worktree_features.contains(f.feature.as_str()) {
+            out.insert(f.feature.clone(), main_panes.clone());
+        }
+    }
+    out
 }
 
 /// D5's partition: every herdr pane whose working directory sits under **no**
@@ -14592,6 +14677,252 @@ mod bee_route_tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- card-terminals-1: cross-project feature cards badge their own checkout's panes ---
+
+    /// A live feature with no worktree, and its own live sibling.
+    fn write_cross_project_live_feature(root: &Path, feature: &str, session_id: &str) {
+        write(
+            root,
+            &format!(".bee/lanes/{feature}.json"),
+            &format!(
+                r#"{{
+                    "feature": "{feature}",
+                    "phase": "swarming",
+                    "mode": "standard",
+                    "next_action": "keep going",
+                    "approved_gates": {{"context": true, "shape": true, "execution": true, "review": true}}
+                }}"#
+            ),
+        );
+        write(
+            root,
+            &format!(".bee/sessions/{session_id}.json"),
+            &format!(
+                r#"{{"id": "{session_id}", "last_heartbeat": "{hb}", "lane": "{feature}"}}"#,
+                hb = rfc3339_minutes_ago(0)
+            ),
+        );
+    }
+
+    /// (must-have) A pane running in a feature's own granted worktree
+    /// appears on that feature's card and on no other; a pane running in
+    /// the project's main checkout appears on the card of *every* feature
+    /// with no worktree of its own, and never on the worktree feature's
+    /// card. Three live features on one project: `feat-main` and
+    /// `feat-also-main` both carry no worktree of their own (the "Main"
+    /// chip, sharing the same checkout); `feat-wt` is named by a granted
+    /// worktree whose sibling directory holds its own live pane.
+    #[tokio::test]
+    async fn home_page_cross_project_card_badges_the_pane_in_its_own_checkout_and_no_other_card() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let config_dir = fresh_root("card-terminals-cross-config");
+        enable_terminal(&config_dir);
+        let root = fresh_root("card-terminals-cross-project");
+        let sibling = make_worktree_sibling("card-terminals-cross-wt");
+
+        write_cross_project_live_feature(&root, "feat-main", "live-main");
+        write_cross_project_live_feature(&root, "feat-also-main", "live-also-main");
+        write_cross_project_live_feature(&root, "feat-wt", "live-wt");
+        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-wt","mode":"standard"}"#);
+        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["card-terminals-cross-wt"]));
+        write(
+            &root,
+            ".bee/runtime/workspaces/w.json",
+            &workspace_json("card-terminals-cross-wt", &sibling.to_string_lossy(), "wt/feat-wt", &[]),
+        );
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let main_pane = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let wt_pane = fake
+            .agent_start("w1", Some(&sibling.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&config_dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "card-terminals-cross-project");
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        // Scoped to the cross-project Features section itself: the plain
+        // project row below it (`project_badges`) also links to the main
+        // checkout's own pane, which is a separate, pre-existing feature
+        // and not what this test is proving.
+        let section_start = body
+            .find(r#"data-feature-hub="cross-project""#)
+            .unwrap_or_else(|| panic!("the cross-project Features section must render: {body}"));
+        let section = &body[section_start..body[section_start..].find("</section>").map(|i| section_start + i).unwrap_or(body.len())];
+
+        let main_href = format!("href=\"/p/{}/_terminal/pane/{}\"", project.id, main_pane.pane_id);
+        let wt_href = format!("href=\"/p/{}/_terminal/pane/{}\"", project.id, wt_pane.pane_id);
+        let feat_also_main_card_at = section
+            .find(&format!("href=\"/p/{}/_bee/feature/feat-also-main\"", project.id))
+            .unwrap_or_else(|| panic!("feat-also-main's own card must render: {section}"));
+        let feat_main_card_at = section
+            .find(&format!("href=\"/p/{}/_bee/feature/feat-main\"", project.id))
+            .unwrap_or_else(|| panic!("feat-main's own card must render: {section}"));
+        let feat_wt_card_at = section
+            .find(&format!("href=\"/p/{}/_bee/feature/feat-wt\"", project.id))
+            .unwrap_or_else(|| panic!("feat-wt's own card must render: {section}"));
+        let main_badges_at: Vec<usize> = section.match_indices(main_href.as_str()).map(|(i, _)| i).collect();
+        let wt_badge_at = section
+            .find(&wt_href)
+            .unwrap_or_else(|| panic!("the worktree's own pane must badge some card: {section}"));
+
+        assert_eq!(
+            main_badges_at.len(),
+            2,
+            "the main checkout's pane must badge every no-worktree card exactly once each in this section: {section}"
+        );
+        assert!(
+            main_badges_at.iter().all(|&at| at < feat_wt_card_at),
+            "the main checkout's pane must badge feat-also-main's and feat-main's cards, both before feat-wt's card begins: {section}"
+        );
+        assert!(
+            feat_also_main_card_at < main_badges_at[0] && main_badges_at[0] < feat_main_card_at,
+            "the main pane's first badge must sit on feat-also-main's card, ahead of feat-main's own card: {section}"
+        );
+        assert_eq!(section.matches(wt_href.as_str()).count(), 1, "the worktree pane's badge must render exactly once in this section: {section}");
+        assert!(
+            feat_wt_card_at < wt_badge_at,
+            "the worktree's own pane must badge feat-wt's card, its own checkout: {section}"
+        );
+        assert!(
+            section.contains("Terminals in this checkout"),
+            "the badge group's accessible label must name the checkout, never the feature: {section}"
+        );
+
+        std::fs::remove_dir_all(&config_dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// (must-have) A feature with no pane at all in its own checkout renders
+    /// no badge container — not an empty one.
+    #[tokio::test]
+    async fn home_page_cross_project_card_with_no_pane_renders_no_badge_container() {
+        let config_dir = fresh_root("card-terminals-cross-empty-config");
+        enable_terminal(&config_dir);
+        let root = fresh_root("card-terminals-cross-empty-project");
+        write_cross_project_live_feature(&root, "feat-quiet", "live-quiet");
+
+        // A fresh FakeHerdr's seeded default panes sit in fixed test
+        // directories unrelated to this project's own root, so this project
+        // genuinely has no pane in its own checkout.
+        let st = build_state_with_dir(&config_dir);
+        let project = register(&st, &root, "card-terminals-cross-empty-project");
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/feat-quiet\"", project.id)),
+            "the feature's own card must still render: {body}"
+        );
+        assert!(
+            !body.contains("proj-row__badges"),
+            "a feature with no pane in its own checkout must render no badge container: {body}"
+        );
+
+        std::fs::remove_dir_all(&config_dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (must-have) With the terminal switch off, no cross-project feature
+    /// card carries a badge or a badge container, even when a pane sits
+    /// squarely inside the project's own checkout.
+    #[tokio::test]
+    async fn home_page_cross_project_cards_carry_no_badges_when_terminal_switch_is_off() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let config_dir = fresh_root("card-terminals-cross-switch-off-config");
+        let root = fresh_root("card-terminals-cross-switch-off-project");
+        write_cross_project_live_feature(&root, "feat-main", "live-main");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let pane = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&config_dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "card-terminals-cross-switch-off-project");
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/feat-main\"", project.id)),
+            "the feature card itself must still render with the switch off: {body}"
+        );
+        assert!(
+            !body.contains("proj-row__badges") && !body.contains(&pane.pane_id),
+            "the switch off must carry no badge container and no pane id anywhere on the page: {body}"
+        );
+
+        std::fs::remove_dir_all(&config_dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (must-have) A Finished row carries no badge even when its feature's
+    /// own worktree still holds a live pane — Finished rows render through
+    /// `bee_hub_finished_row`, which never takes a `panes` argument at all.
+    #[tokio::test]
+    async fn home_page_cross_project_finished_row_carries_no_badge() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let config_dir = fresh_root("card-terminals-cross-finished-config");
+        enable_terminal(&config_dir);
+        let root = fresh_root("card-terminals-cross-finished-project");
+        write(
+            &root,
+            ".bee/cells/archive/finished-feat/c-1.json",
+            &feature_cell_json("c-1", "finished-feat", "capped", Some(&rfc3339_minutes_ago(60)), Some(&rfc3339_minutes_ago(30))),
+        );
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let pane = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&config_dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "card-terminals-cross-finished-project");
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        // Scoped to the cross-project Features section: the plain project
+        // row below it (`project_badges`) legitimately links to this same
+        // pane, which is a separate, pre-existing feature this test is not
+        // about.
+        let section_start = body
+            .find(r#"data-feature-hub="cross-project""#)
+            .unwrap_or_else(|| panic!("the cross-project Features section must render: {body}"));
+        let section = &body[section_start..body[section_start..].find("</section>").map(|i| section_start + i).unwrap_or(body.len())];
+
+        assert!(
+            section.contains(&format!("data-hub-group=\"finished\" href=\"/p/{}/_bee/feature/finished-feat\"", project.id)),
+            "the finished feature must still render its row: {section}"
+        );
+        assert!(
+            !section.contains("proj-row__badges") && !section.contains(&pane.pane_id),
+            "a Finished row must carry no badge, even with a live pane in the project: {section}"
+        );
+
+        std::fs::remove_dir_all(&config_dir).ok();
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// (cross-board, proof shape) A timeout around `spawn_blocking` would

@@ -371,11 +371,26 @@ fn register_error_message(code: &str) -> Option<&'static str> {
 /// before this feature (D6) — not an empty `<nav>` that would say the same
 /// thing twice.
 fn project_badges(project_id: &str, panes: &[TerminalPaneView]) -> String {
+    terminal_badges_nav(project_id, panes, "Terminal panes")
+}
+
+/// The badge markup itself, factored out of [`project_badges`]
+/// (card-terminals-1) so [`bee_hub_card`] can reuse the exact same nav/pill
+/// markup for a feature card's own checkout panes -- same classes, same
+/// per-pane anchor to `/p/{project_id}/_terminal/pane/{pane_id}`, same
+/// [`status_pill`] and program text -- while carrying its own accessible
+/// label instead of `project_badges`'s "Terminal panes": a feature card's
+/// panes are the terminals running in that feature's own *checkout*, not
+/// panes that belong to the feature itself (a Main feature's checkout is
+/// shared with every other Main feature of that project, so a label
+/// claiming otherwise would be false for every one of them). An empty
+/// `panes` renders no container at all, for either caller.
+fn terminal_badges_nav(project_id: &str, panes: &[TerminalPaneView], aria_label: &str) -> String {
     if panes.is_empty() {
         return String::new();
     }
     let pid = esc(project_id);
-    let mut out = String::from(r#"<nav class="proj-row__badges" aria-label="Terminal panes">"#);
+    let mut out = format!(r#"<nav class="proj-row__badges" aria-label="{}">"#, esc(aria_label));
     for p in panes {
         out.push_str(&format!(
             r#"<a class="proj-row__badge" href="/p/{pid}/_terminal/pane/{pane_id}">{status_pill}<span class="proj-row__badge-program">{program}</span></a>"#,
@@ -804,6 +819,11 @@ fn project_tabs(project_id: &str, active: &str) -> String {
 /// `status` admits a pane with no agent (terminal-pane-scope D2/D3): the
 /// caller sets it to `"shell"` rather than borrowing an `AgentStatus`
 /// vocabulary the row does not have.
+///
+/// card-terminals-1: `Clone` so `server.rs::project_feature_panes` can hand
+/// the same project-boundary pane list to every feature card that has no
+/// worktree of its own, without re-resolving it per feature.
+#[derive(Clone)]
 pub struct TerminalPaneView {
     pub pane_id: String,
     pub kind: String,
@@ -2118,7 +2138,11 @@ fn bee_classify_features(
 /// exactly the section [`bee_feature_hub_section`] rendered before
 /// cross-board-2 (D2) -- every card and row carries no project label
 /// (`bee_hub_card`/`bee_hub_finished_row`'s `project_label: None`),
-/// matching this project's page having only ever shown itself.
+/// matching this project's page having only ever shown itself. Passes an
+/// empty pane slice to every card (card-terminals-1): the per-project board
+/// at `/p/:id/_bee` does not read herdr today, and giving it terminal
+/// badges is deliberately out of scope for that cell -- this keeps its
+/// output byte-identical.
 fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> String {
     let mut waiting_cards = String::new();
     let mut in_progress_cards = String::new();
@@ -2142,6 +2166,7 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> 
                     data.reason.as_deref(),
                     data.docs.as_ref(),
                     None,
+                    &[],
                 ));
             }
             BeeHubPlacement::InProgress(data) => {
@@ -2157,6 +2182,7 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> 
                     data.reason.as_deref(),
                     data.docs.as_ref(),
                     None,
+                    &[],
                 ));
             }
             BeeHubPlacement::Finished(data) => {
@@ -2218,11 +2244,24 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> 
 /// still renders the same three empty columns [`bee_hub_group`] always
 /// shows for a column with nothing in it; whether to call this at all when
 /// nothing qualifies (D9) is the caller's decision.
-pub fn bee_cross_project_features_section(rollups: &[(&Project, &BeeProjectRollup)]) -> String {
+///
+/// `feature_panes` (card-terminals-1) is the already-resolved join
+/// (`server.rs::project_feature_panes`): for each project id, a map from
+/// feature name to the terminal panes running in that feature's own
+/// checkout. This function performs no boundary resolution of its own --
+/// it only looks the pane list up per `(project.id, feature)` and hands it
+/// to [`bee_hub_card`]. A project or feature absent from the map (the
+/// switch off, herdr unreachable, or genuinely no pane) looks up to an
+/// empty slice, which `bee_hub_card` renders as no badge container.
+pub fn bee_cross_project_features_section(
+    rollups: &[(&Project, &BeeProjectRollup)],
+    feature_panes: &std::collections::HashMap<String, std::collections::HashMap<String, Vec<TerminalPaneView>>>,
+) -> String {
     let mut waiting_cards = String::new();
     let mut in_progress_cards = String::new();
     let mut waiting_count = 0usize;
     let mut in_progress_count = 0usize;
+    let no_panes: Vec<TerminalPaneView> = Vec::new();
 
     struct FinishedEntry {
         shipped_at: Option<time::OffsetDateTime>,
@@ -2240,12 +2279,16 @@ pub fn bee_cross_project_features_section(rollups: &[(&Project, &BeeProjectRollu
             .iter()
             .map(|a| (a.feature.as_str(), a.shipped_at.as_deref()))
             .collect();
+        let project_panes = feature_panes.get(project.id.as_str());
 
         let placements = bee_classify_features(&rollup.snapshot, &archived_names);
         for placement in placements {
             match placement {
                 BeeHubPlacement::Waiting(data) => {
                     waiting_count += 1;
+                    let panes = project_panes
+                        .and_then(|m| m.get(data.feature.as_str()))
+                        .unwrap_or(&no_panes);
                     waiting_cards.push_str(&bee_hub_card(
                         &project.id,
                         &data.feature,
@@ -2257,10 +2300,14 @@ pub fn bee_cross_project_features_section(rollups: &[(&Project, &BeeProjectRollu
                         data.reason.as_deref(),
                         data.docs.as_ref(),
                         Some(&project.name),
+                        panes,
                     ));
                 }
                 BeeHubPlacement::InProgress(data) => {
                     in_progress_count += 1;
+                    let panes = project_panes
+                        .and_then(|m| m.get(data.feature.as_str()))
+                        .unwrap_or(&no_panes);
                     in_progress_cards.push_str(&bee_hub_card(
                         &project.id,
                         &data.feature,
@@ -2272,6 +2319,7 @@ pub fn bee_cross_project_features_section(rollups: &[(&Project, &BeeProjectRollu
                         data.reason.as_deref(),
                         data.docs.as_ref(),
                         Some(&project.name),
+                        panes,
                     ));
                 }
                 BeeHubPlacement::Finished(data) => {
@@ -2430,6 +2478,21 @@ fn bee_hub_group_label(key: &str) -> (&'static str, &'static str) {
 /// is cross-board D5's project name, rendered as one more chip in the
 /// existing chip row when `Some`; `None` (every per-project board call)
 /// renders no such chip, byte-identical to before cross-board-2.
+///
+/// `panes` (card-terminals-1) is the terminal panes running in this
+/// feature's own checkout -- the worktree-vs-main-checkout join is already
+/// resolved by the caller (`server.rs::project_feature_panes`); this
+/// function only renders them, as a sibling `<nav>` after the card's own
+/// `<a>` rather than nested inside it (an anchor inside an anchor is
+/// invalid HTML, the same reason `project_badges` sits beside
+/// `proj-row__link` rather than inside it). Reuses
+/// [`terminal_badges_nav`]'s exact markup, carrying the accessible label
+/// "Terminals in this checkout" rather than anything naming the feature:
+/// for a Main feature the panes are shared with every other Main feature of
+/// that project, so the label must not claim otherwise. Empty `panes`
+/// renders no container at all -- the per-project board's own call
+/// (`bee_render_hub_section`) always passes an empty slice, so this stays
+/// byte-identical to before cross-board-2 there.
 fn bee_hub_card(
     project_id: &str,
     feature: &str,
@@ -2441,6 +2504,7 @@ fn bee_hub_card(
     reason: Option<&str>,
     docs: Option<&mdview_core::bee::BeeFeatureDocs>,
     project_label: Option<&str>,
+    panes: &[TerminalPaneView],
 ) -> String {
     let (group_label, group_tone) = bee_hub_group_label(group_key);
     let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
@@ -2487,8 +2551,13 @@ fn bee_hub_card(
         Some(label) => format!(r#"<span class="fg-chip fg-chip--neutral">{}</span>"#, esc(label)),
         None => String::new(),
     };
+    // card-terminals-1: a sibling of the card's own `<a>`, never nested
+    // inside it (see this function's doc comment) -- empty when `panes` is
+    // empty, so a feature with no pane in its own checkout renders no
+    // container at all.
+    let terminal_badges_html = terminal_badges_nav(project_id, panes, "Terminals in this checkout");
     format!(
-        r#"<a class="fg-card bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}<div class="bee-hub__chips">{project_chip_html}<span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{desc_html}{progress_html}{reason_html}{activity_html}</a>"#,
+        r#"<a class="fg-card bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}<div class="bee-hub__chips">{project_chip_html}<span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{desc_html}{progress_html}{reason_html}{activity_html}</a>{terminal_badges_html}"#,
         group_key = group_key,
         pid = esc(project_id),
         feature_href = esc(feature),
@@ -2502,6 +2571,7 @@ fn bee_hub_card(
         progress_html = progress_html,
         reason_html = reason_html,
         activity_html = activity_html,
+        terminal_badges_html = terminal_badges_html,
     )
 }
 
@@ -5861,7 +5931,7 @@ mod tests {
         let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone(), root_c.clone()]);
         let pairs: Vec<(&Project, &BeeProjectRollup)> =
             vec![(&project_a, &rollups[0]), (&project_b, &rollups[1]), (&project_c, &rollups[2])];
-        let html = bee_cross_project_features_section(&pairs);
+        let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"data-hub-group="waiting" href="/p/proj-a/_bee/feature/waiting-feat""#),
@@ -5947,7 +6017,7 @@ mod tests {
 
         let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
         let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
-        let html = bee_cross_project_features_section(&pairs);
+        let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         let pos_newer = html.find("newer-feat").expect("newer-feat must render");
         let pos_older = html.find("older-feat").expect("older-feat must render");
@@ -6014,7 +6084,7 @@ mod tests {
 
         let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
         let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
-        let html = bee_cross_project_features_section(&pairs);
+        let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"data-hub-group="finished" data-hub-count="13""#),
@@ -6067,7 +6137,7 @@ mod tests {
 
         let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
         let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
-        let html = bee_cross_project_features_section(&pairs);
+        let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"href="/p/proj-a/_bee/feature/auth""#),
@@ -6125,8 +6195,8 @@ mod tests {
             vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
         let without_empty: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_b, &rollups[1])];
 
-        let html_with = bee_cross_project_features_section(&with_empty);
-        let html_without = bee_cross_project_features_section(&without_empty);
+        let html_with = bee_cross_project_features_section(&with_empty, &std::collections::HashMap::new());
+        let html_without = bee_cross_project_features_section(&without_empty, &std::collections::HashMap::new());
 
         assert_eq!(
             html_with, html_without,
@@ -6136,6 +6206,79 @@ mod tests {
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
+    }
+
+    /// (card-terminals-1) `bee_hub_card`'s `panes` argument renders the
+    /// exact badge markup [`project_badges`] already emits for a project
+    /// row -- same `.proj-row__badges` container, same `.proj-row__badge`
+    /// anchors, same status pill and program text -- linking to the pane's
+    /// own terminal view, but carrying its own accessible label rather than
+    /// reusing `project_badges`'s "Terminal panes" wording (a feature
+    /// card's panes belong to the checkout, never to the feature itself).
+    /// The badges are a sibling of the card's own `<a>`, never nested
+    /// inside it -- an anchor inside an anchor is invalid HTML.
+    #[test]
+    fn bee_hub_card_emits_terminal_badges_matching_project_badges_markup_shape() {
+        let panes = vec![TerminalPaneView {
+            pane_id: "w1:p1".into(),
+            kind: "claude".into(),
+            name: "agent-name-must-not-appear".into(),
+            status: "working".into(),
+            title: String::new(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+        }];
+        let worktree = ("Main".to_string(), "neutral");
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "waiting", 1, 2, None, &worktree, None, None, None, &panes,
+        );
+        // project_badges' own markup, with only its aria-label swapped for
+        // the checkout-naming one this card must carry -- proving the rest
+        // of the shape (container class, anchor class, status pill, program
+        // span, href) is exactly project_badges' own, unchanged.
+        let expected_badges =
+            project_badges("proj-a", &panes).replace("Terminal panes", "Terminals in this checkout");
+        assert!(
+            card_html.ends_with(&expected_badges),
+            "the card must append project_badges' own markup shape (aria-label aside) as a trailing sibling: {card_html}"
+        );
+        assert!(
+            card_html.contains(r#"aria-label="Terminals in this checkout""#),
+            "the badge group's accessible label must name the checkout, never the feature: {card_html}"
+        );
+        assert!(
+            card_html.contains(r#"href="/p/proj-a/_terminal/pane/w1:p1""#),
+            "the badge must link to the pane's own terminal view: {card_html}"
+        );
+        assert!(
+            !card_html.contains("agent-name-must-not-appear"),
+            "the pane's own agent name must never reach this markup (D1a's rule, reused here): {card_html}"
+        );
+        let card_a_end = card_html.find("</a>").expect("the card's own anchor must close");
+        let badge_nav_start = card_html
+            .find(r#"<nav class="proj-row__badges""#)
+            .expect("badges must render");
+        assert!(
+            badge_nav_start > card_a_end,
+            "the badge nav must be a sibling after the card's own </a>, not nested inside it: {card_html}"
+        );
+    }
+
+    /// (card-terminals-1) An empty `panes` slice -- the switch off, herdr
+    /// unreachable, or genuinely no pane in this feature's checkout --
+    /// renders no badge container at all, byte-identical to `bee_hub_card`
+    /// before this feature.
+    #[test]
+    fn bee_hub_card_with_no_panes_renders_no_badge_container() {
+        let worktree = ("Main".to_string(), "neutral");
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "waiting", 1, 2, None, &worktree, None, None, None, &[],
+        );
+        assert!(
+            !card_html.contains("proj-row__badges"),
+            "an empty pane list must render no badge container: {card_html}"
+        );
     }
 
     /// (hub-finished-compact, integration) The paging arithmetic itself is
