@@ -1,10 +1,10 @@
-//! `mdview doctor` — diagnose & auto-fix integration (PRD FR-33). Idempotent.
+//! `waggledance doctor` — diagnose & auto-fix integration (PRD FR-33). Idempotent.
 
 use crate::runtime;
 use anyhow::Result;
-use waggledance_core::config::{self, Config};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use waggledance_core::config::{self, Config};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Status {
@@ -68,7 +68,7 @@ pub fn run(as_json: bool, dry_run: bool, fix: bool) -> Result<()> {
             serde_json::to_string_pretty(&json!({ "checks": arr }))?
         );
     } else {
-        println!("mdview doctor\n");
+        println!("waggledance doctor\n");
         for c in &checks {
             println!("  [{}] {:<22} {}", c.status.mark(), c.name, c.detail);
         }
@@ -87,14 +87,14 @@ fn check_binary_in_path() -> Check {
     let found = std::env::var_os("PATH")
         .map(|paths| {
             std::env::split_paths(&paths)
-                .any(|d| d.join("mdview").exists() || d.join("mdview.exe").exists())
+                .any(|d| d.join("waggledance").exists() || d.join("waggledance.exe").exists())
         })
         .unwrap_or(false);
     if found {
         Check {
             name: "binary in PATH".into(),
             status: Status::Ok,
-            detail: "mdview found on PATH".into(),
+            detail: "waggledance found on PATH".into(),
         }
     } else {
         let exe = std::env::current_exe()
@@ -103,7 +103,7 @@ fn check_binary_in_path() -> Check {
         Check {
             name: "binary in PATH".into(),
             status: Status::Warn,
-            detail: format!("mdview not on PATH (running from {exe}); add its dir to PATH"),
+            detail: format!("waggledance not on PATH (running from {exe}); add its dir to PATH"),
         }
     }
 }
@@ -162,7 +162,7 @@ fn check_daemon() -> Check {
         None => Check {
             name: "daemon".into(),
             status: Status::Warn,
-            detail: "not running — start with `mdview serve`".into(),
+            detail: "not running — start with `waggledance serve`".into(),
         },
     }
 }
@@ -183,14 +183,14 @@ fn daemon_version_verdict(
             Status::Manual,
             format!(
                 "{running} is v{v} but this binary is v{expected} — \
-                 short links will 404 until you run `mdview restart`"
+                 short links will 404 until you run `waggledance restart`"
             ),
         ),
         None => (
             Status::Manual,
             format!(
                 "{running} predates version reporting, so it is older than \
-                 v{expected} — run `mdview restart`"
+                 v{expected} — run `waggledance restart`"
             ),
         ),
     }
@@ -200,7 +200,7 @@ fn daemon_version_verdict(
 ///
 /// Opening the store is what migrates it, so this check both reports and (as a
 /// side effect of the normal open path) completes any pending upgrade — there is
-/// no separate `mdview migrate` command to forget to run.
+/// no separate `waggledance migrate` command to forget to run.
 fn check_index_schema() -> Check {
     let path = config::registry_db_path();
     if !path.exists() {
@@ -222,7 +222,7 @@ fn check_index_schema() -> Check {
                 status: Status::Manual,
                 detail: format!(
                     "v{version}, but {unhashed} file(s) still have no short-link code — \
-                     run `mdview refresh`"
+                     run `waggledance refresh`"
                 ),
             },
             Err(e) => Check {
@@ -263,7 +263,7 @@ fn home() -> PathBuf {
 fn current_exe_str() -> String {
     std::env::current_exe()
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "mdview".to_string())
+        .unwrap_or_else(|_| "waggledance".to_string())
 }
 
 /// The `<name>.bak` sibling of `path`, written before an in-place config edit.
@@ -275,6 +275,12 @@ fn backup_path(path: &Path) -> PathBuf {
     name.push(".bak");
     path.with_file_name(name)
 }
+
+/// The MCP server key this doctor registers under today.
+const MCP_SERVER_NAME: &str = "waggledance";
+/// A pre-rename install's leftover key, swept out of every config we touch —
+/// otherwise it keeps pointing at a binary that no longer exists.
+const OLD_MCP_SERVER_NAME: &str = "mdview";
 
 // ── Detection: only ever register for a tool that is actually installed ──
 
@@ -289,27 +295,46 @@ fn antigravity_present() -> bool {
     home().join(".gemini").join("config").is_dir() || bin_on_path("antigravity")
 }
 
-/// Register the `mdview` MCP server in a JSON config using the standard
+/// Register the `waggledance` MCP server in a JSON config using the standard
 /// `mcpServers` object — Claude Code's `~/.claude.json` and Antigravity's
-/// `~/.gemini/config/mcp_config.json` share this shape. Merge-safe; backs up first.
+/// `~/.gemini/config/mcp_config.json` share this shape. Merge-safe; backs up
+/// first, and sweeps out a pre-rename `mdview` entry in the same write (D9: a
+/// file that fails to parse is refused, never rewritten as `{}`).
 fn register_json_mcp(path: &Path, dry_run: bool, fix: bool) -> (Status, String) {
-    let mut root: Value = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| json!({}));
+    let text = std::fs::read_to_string(path).ok();
+    let mut root: Value = match &text {
+        None => json!({}),
+        Some(t) if t.trim().is_empty() => json!({}),
+        Some(t) => match serde_json::from_str(t) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    Status::Warn,
+                    format!("{} is not valid JSON ({e}); left unchanged", path.display()),
+                );
+            }
+        },
+    };
 
-    let already = root
+    let has_new = root
         .get("mcpServers")
-        .and_then(|m| m.get("mdview"))
+        .and_then(|m| m.get(MCP_SERVER_NAME))
         .is_some();
-    if already {
+    let has_old = root
+        .get("mcpServers")
+        .and_then(|m| m.get(OLD_MCP_SERVER_NAME))
+        .is_some();
+    // Only "new present, old already gone" is a true no-op; a config still
+    // carrying the old key needs the sweep below even though it is already
+    // "registered" in the sense a pre-rename doctor would have reported.
+    if has_new && !has_old {
         return (Status::Ok, format!("registered in {}", path.display()));
     }
     if dry_run || !fix {
         return (
             Status::Manual,
             format!(
-                "not registered in {} — run `mdview doctor --fix`",
+                "not registered in {} — run `waggledance doctor --fix`",
                 path.display()
             ),
         );
@@ -330,8 +355,9 @@ fn register_json_mcp(path: &Path, dry_run: bool, fix: bool) -> (Status, String) 
         .entry("mcpServers")
         .or_insert_with(|| json!({}));
     if let Some(obj) = servers.as_object_mut() {
+        obj.remove(OLD_MCP_SERVER_NAME);
         obj.insert(
-            "mdview".to_string(),
+            MCP_SERVER_NAME.to_string(),
             json!({ "command": current_exe_str(), "args": ["mcp"] }),
         );
     }
@@ -347,26 +373,38 @@ fn register_json_mcp(path: &Path, dry_run: bool, fix: bool) -> (Status, String) 
     }
 }
 
-/// Register the `mdview` MCP server in a TOML config using `[mcp_servers.<name>]`
-/// — Codex's `~/.codex/config.toml`. Uses `toml_edit` so the user's existing
-/// settings and comments survive; a malformed file is left untouched, never clobbered.
+/// Register the `waggledance` MCP server in a TOML config using
+/// `[mcp_servers.<name>]` — Codex's `~/.codex/config.toml`. Uses `toml_edit`
+/// so the user's existing settings and comments survive; a malformed file is
+/// left untouched, never clobbered. Sweeps out a pre-rename `mdview` entry in
+/// the same write.
 fn register_toml_mcp(path: &Path, dry_run: bool, fix: bool) -> (Status, String) {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     let parsed = existing.parse::<toml_edit::DocumentMut>();
 
-    let already = parsed
+    let has_new = parsed
         .as_ref()
         .ok()
-        .and_then(|d| d.get("mcp_servers").and_then(|m| m.get("mdview")))
+        .and_then(|d| d.get("mcp_servers").and_then(|m| m.get(MCP_SERVER_NAME)))
         .is_some();
-    if already {
+    let has_old = parsed
+        .as_ref()
+        .ok()
+        .and_then(|d| {
+            d.get("mcp_servers")
+                .and_then(|m| m.get(OLD_MCP_SERVER_NAME))
+        })
+        .is_some();
+    // Only "new present, old already gone" is a true no-op; a config still
+    // carrying the old key needs the sweep below.
+    if has_new && !has_old {
         return (Status::Ok, format!("registered in {}", path.display()));
     }
     if dry_run || !fix {
         return (
             Status::Manual,
             format!(
-                "not registered in {} — run `mdview doctor --fix`",
+                "not registered in {} — run `waggledance doctor --fix`",
                 path.display()
             ),
         );
@@ -383,21 +421,25 @@ fn register_toml_mcp(path: &Path, dry_run: bool, fix: bool) -> (Status, String) 
         }
     };
 
-    // Build explicit (non-inline) tables so this renders as `[mcp_servers.mdview]`.
-    // An inline `mcp_servers = { ... }` would clash with a later
-    // `[mcp_servers.other]` section (a TOML duplicate-key error).
+    // Build explicit (non-inline) tables so this renders as
+    // `[mcp_servers.waggledance]`. An inline `mcp_servers = { ... }` would
+    // clash with a later `[mcp_servers.other]` section (a TOML duplicate-key
+    // error).
     use toml_edit::{Array, Item, Table};
     if !doc.contains_key("mcp_servers") {
         let mut parent = Table::new();
         parent.set_implicit(true); // omit the bare `[mcp_servers]` header
         doc.insert("mcp_servers", Item::Table(parent));
     }
+    if let Some(servers) = doc["mcp_servers"].as_table_mut() {
+        servers.remove(OLD_MCP_SERVER_NAME);
+    }
     let mut server = Table::new();
     server.insert("command", toml_edit::value(current_exe_str()));
     let mut args = Array::new();
     args.push("mcp");
     server.insert("args", toml_edit::value(args));
-    doc["mcp_servers"]["mdview"] = Item::Table(server);
+    doc["mcp_servers"][MCP_SERVER_NAME] = Item::Table(server);
 
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -477,25 +519,37 @@ fn agent_instruction_snippet() -> &'static str {
         .unwrap_or(AGENT_TEMPLATE)
 }
 
-/// Markers delimiting mdview's managed instruction block. Everything between
-/// them is owned by `doctor --fix`; a sync replaces only that region and never
-/// touches the user's own content around it.
-const MDVIEW_START: &str = "<!-- mdview:START -->";
-const MDVIEW_END: &str = "<!-- mdview:END -->";
+/// Markers delimiting waggledance's managed instruction block. Everything
+/// between them is owned by `doctor --fix`; a sync replaces only that region
+/// and never touches the user's own content around it.
+const WAGGLEDANCE_START: &str = "<!-- waggledance:START -->";
+const WAGGLEDANCE_END: &str = "<!-- waggledance:END -->";
+/// A pre-rename install's markers. Found so a stale block is *replaced*, not
+/// left in place while a second, new-marker block is appended beside it.
+const OLD_MDVIEW_START: &str = "<!-- mdview:START -->";
+const OLD_MDVIEW_END: &str = "<!-- mdview:END -->";
 
 /// The full managed block: the current snippet wrapped in the markers.
 fn agent_block() -> String {
     format!(
-        "{MDVIEW_START}\n{}\n{MDVIEW_END}\n",
+        "{WAGGLEDANCE_START}\n{}\n{WAGGLEDANCE_END}\n",
         agent_instruction_snippet().trim_end()
     )
 }
 
-/// Byte range `[start, end)` of the managed block (markers included), or `None`
-/// when a well-formed block (START before END) is not present.
+/// Byte range `[start, end)` of the managed block (markers included), or
+/// `None` when no well-formed block (START before END, either marker
+/// generation) is present. Checks the current markers first, falling back to
+/// the pre-rename markers so a stale block is found and replaced rather than
+/// left orphaned beside a freshly appended one.
 fn managed_block_range(text: &str) -> Option<(usize, usize)> {
-    let start = text.find(MDVIEW_START)?;
-    let end = text[start..].find(MDVIEW_END)? + start + MDVIEW_END.len();
+    find_marked_range(text, WAGGLEDANCE_START, WAGGLEDANCE_END)
+        .or_else(|| find_marked_range(text, OLD_MDVIEW_START, OLD_MDVIEW_END))
+}
+
+fn find_marked_range(text: &str, start_marker: &str, end_marker: &str) -> Option<(usize, usize)> {
+    let start = text.find(start_marker)?;
+    let end = text[start..].find(end_marker)? + start + end_marker.len();
     Some((start, end))
 }
 
@@ -550,7 +604,7 @@ fn check_agent_instruction(dry_run: bool, fix: bool) -> Check {
         return Check {
             name: "agent instruction".into(),
             status: Status::Ok,
-            detail: "AGENTS.md and CLAUDE.md carry the current MDView block".into(),
+            detail: "AGENTS.md and CLAUDE.md carry the current Waggledance block".into(),
         };
     }
 
@@ -559,7 +613,7 @@ fn check_agent_instruction(dry_run: bool, fix: bool) -> Check {
             name: "agent instruction".into(),
             status: Status::Manual,
             detail: format!(
-                "missing or outdated MDView block in: {} (see `mdview` docs §5.7) — run `mdview doctor --fix`",
+                "missing or outdated Waggledance block in: {} (see `waggledance` docs §5.7) — run `waggledance doctor --fix`",
                 needs_sync.join(", ")
             ),
         };
@@ -578,7 +632,7 @@ fn check_agent_instruction(dry_run: bool, fix: bool) -> Check {
             name: "agent instruction".into(),
             status: Status::Fixed,
             detail: format!(
-                "synced MDView block (<!-- mdview:START/END -->) in {}",
+                "synced Waggledance block (<!-- waggledance:START/END -->) in {}",
                 fixed.join(", ")
             ),
         }
@@ -591,16 +645,26 @@ fn check_agent_instruction(dry_run: bool, fix: bool) -> Check {
     }
 }
 
-/// The mdview Claude Code skill (`/mdview <path>`), installed globally so it
-/// works in any project. mdview owns this file entirely, so the check is a
-/// whole-file content match rather than a shared marker block.
+/// The waggledance Claude Code skill (`/waggledance <path>`), installed
+/// globally so it works in any project. waggledance owns this file entirely,
+/// so the check is a whole-file content match rather than a shared marker
+/// block.
 const SKILL_TEMPLATE: &str = include_str!("../../../docs/mdview-skill-template.md");
 
-/// `~/.claude/skills/mdview/SKILL.md` — the global (not per-project) skill file.
+/// `~/.claude/skills/waggledance/SKILL.md` — the global (not per-project)
+/// skill file.
 fn skill_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".claude/skills/mdview/SKILL.md")
+        .join(".claude/skills/waggledance/SKILL.md")
+}
+
+/// The pre-rename skill directory sitting beside `path`'s own skill
+/// directory (`…/skills/mdview` next to `…/skills/waggledance`), derived
+/// rather than hardcoded so it stays testable against a temp `path`.
+fn old_skill_dir_for(path: &Path) -> Option<PathBuf> {
+    let skills_dir = path.parent()?.parent()?;
+    Some(skills_dir.join("mdview"))
 }
 
 fn check_skill(dry_run: bool, fix: bool) -> Check {
@@ -611,40 +675,60 @@ fn check_skill(dry_run: bool, fix: bool) -> Check {
     check_skill_at(&skill_path(), dry_run, fix)
 }
 
-/// Install/verify the global mdview skill at `path`. Split from `check_skill` so
-/// the write/idempotency logic is testable without touching the real HOME.
+/// Install/verify the global waggledance skill at `path`, and remove the
+/// stale `.../skills/mdview/` directory a pre-rename install left behind —
+/// otherwise it keeps telling agents to run a deleted binary and call a tool
+/// that no longer exists. Split from `check_skill` so the write/idempotency
+/// logic is testable without touching the real HOME.
 fn check_skill_at(path: &std::path::Path, dry_run: bool, fix: bool) -> Check {
+    let old_dir = old_skill_dir_for(path);
+    let old_present = old_dir.as_deref().is_some_and(|d| d.exists());
+
     let in_sync = std::fs::read_to_string(path)
         .map(|t| t == SKILL_TEMPLATE)
         .unwrap_or(false);
-    if in_sync {
+    if in_sync && !old_present {
         return Check {
             name: "skill".into(),
             status: Status::Ok,
-            detail: "global /mdview skill is installed and current".into(),
+            detail: "global /waggledance skill is installed and current".into(),
         };
     }
     if dry_run || !fix {
+        let detail = if in_sync {
+            format!(
+                "stale {} present — run `waggledance doctor --fix` to remove it",
+                old_dir.as_deref().unwrap_or(Path::new("")).display()
+            )
+        } else {
+            format!(
+                "global /waggledance skill missing or outdated at {} — run `waggledance doctor --fix`",
+                path.display()
+            )
+        };
         return Check {
             name: "skill".into(),
             status: Status::Manual,
-            detail: format!(
-                "global /mdview skill missing or outdated at {} — run `mdview doctor --fix`",
-                path.display()
-            ),
+            detail,
         };
     }
     let write = || -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        config::write_atomic(path, SKILL_TEMPLATE.as_bytes()).map_err(anyhow::Error::from)
+        config::write_atomic(path, SKILL_TEMPLATE.as_bytes()).map_err(anyhow::Error::from)?;
+        if let Some(dir) = &old_dir {
+            if dir.exists() {
+                std::fs::remove_dir_all(dir)?;
+            }
+        }
+        Ok(())
     };
     match write() {
         Ok(()) => Check {
             name: "skill".into(),
             status: Status::Fixed,
-            detail: format!("installed global /mdview skill at {}", path.display()),
+            detail: format!("installed global /waggledance skill at {}", path.display()),
         },
         Err(e) => Check {
             name: "skill".into(),
@@ -671,7 +755,7 @@ mod daemon_version_tests {
     fn an_older_running_daemon_asks_for_a_restart() {
         let (status, detail) = daemon_version_verdict("running on x", Some("0.5.2"), "0.6.0");
         assert_eq!(status, Status::Manual);
-        assert!(detail.contains("mdview restart"), "got: {detail}");
+        assert!(detail.contains("waggledance restart"), "got: {detail}");
         assert!(detail.contains("0.5.2") && detail.contains("0.6.0"));
     }
 
@@ -681,7 +765,7 @@ mod daemon_version_tests {
     fn a_daemon_reporting_no_version_is_treated_as_stale() {
         let (status, detail) = daemon_version_verdict("running on x", None, "0.6.0");
         assert_eq!(status, Status::Manual);
-        assert!(detail.contains("mdview restart"), "got: {detail}");
+        assert!(detail.contains("waggledance restart"), "got: {detail}");
     }
 }
 
@@ -691,7 +775,7 @@ mod agent_instruction_tests {
 
     fn tmp_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "mdview-doctor-{label}-{}-{}",
+            "waggledance-doctor-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -719,7 +803,7 @@ mod agent_instruction_tests {
     #[test]
     fn skill_installs_then_reports_in_sync_idempotently() {
         let base = tmp_path("skill");
-        let path = base.join("skills/mdview/SKILL.md");
+        let path = base.join("skills/waggledance/SKILL.md");
         // Missing → Manual on a dry run (no write).
         assert!(matches!(
             check_skill_at(&path, true, false).status,
@@ -740,6 +824,37 @@ mod agent_instruction_tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// A pre-rename install left `.../skills/mdview/` behind — it still tells
+    /// agents to run a deleted binary and call a tool that no longer exists,
+    /// so `--fix` must remove the whole directory, not just skip past it.
+    #[test]
+    fn skill_removes_stale_directory_on_fix() {
+        let base = tmp_path("skill-stale");
+        let old_dir = base.join("skills/mdview");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("SKILL.md"), "old content, old binary").unwrap();
+        let path = base.join("skills/waggledance/SKILL.md");
+
+        // The stale directory alone makes a dry run report Manual, even
+        // before the new skill file exists.
+        assert!(matches!(
+            check_skill_at(&path, true, false).status,
+            Status::Manual
+        ));
+        assert!(matches!(
+            check_skill_at(&path, false, true).status,
+            Status::Fixed
+        ));
+        assert!(!old_dir.exists(), "stale skill directory should be removed");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SKILL_TEMPLATE);
+        // Idempotent: nothing left to sweep, so a re-run reports OK.
+        assert!(matches!(
+            check_skill_at(&path, false, true).status,
+            Status::Ok
+        ));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn block_sync_detection() {
         // A file that is exactly the managed block is in sync.
@@ -747,8 +862,11 @@ mod agent_instruction_tests {
         // No markers → not in sync.
         assert!(!agent_block_in_sync("nothing relevant here"));
         // Markers present but stale inner → not in sync.
-        let stale = format!("{MDVIEW_START}\nold text\n{MDVIEW_END}\n");
+        let stale = format!("{WAGGLEDANCE_START}\nold text\n{WAGGLEDANCE_END}\n");
         assert!(!agent_block_in_sync(&stale));
+        // Pre-rename markers → not in sync (needs the sweep to new markers).
+        let old = format!("{OLD_MDVIEW_START}\nold text\n{OLD_MDVIEW_END}\n");
+        assert!(!agent_block_in_sync(&old));
     }
 
     #[test]
@@ -757,7 +875,7 @@ mod agent_instruction_tests {
         let name = path.to_str().unwrap();
         write_agent_snippet(name).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains(MDVIEW_START) && text.contains(MDVIEW_END));
+        assert!(text.contains(WAGGLEDANCE_START) && text.contains(WAGGLEDANCE_END));
         assert!(agent_block_in_sync(&text));
         assert!(!path.with_extension("md.bak").exists());
         std::fs::remove_file(&path).ok();
@@ -783,7 +901,7 @@ mod agent_instruction_tests {
         // Pre-existing file with a STALE managed block plus user content around it.
         std::fs::write(
             &path,
-            format!("# proj\n\n{MDVIEW_START}\nOLD STALE\n{MDVIEW_END}\n\ntail line\n"),
+            format!("# proj\n\n{WAGGLEDANCE_START}\nOLD STALE\n{WAGGLEDANCE_END}\n\ntail line\n"),
         )
         .unwrap();
         let name = path.to_str().unwrap();
@@ -794,10 +912,37 @@ mod agent_instruction_tests {
         assert!(agent_block_in_sync(&text));
         assert!(text.contains("# proj") && text.contains("tail line"));
         // Exactly one block — the region is replaced, never duplicated.
-        assert_eq!(text.matches(MDVIEW_START).count(), 1);
+        assert_eq!(text.matches(WAGGLEDANCE_START).count(), 1);
         // A second run changes nothing (idempotent).
         write_agent_snippet(name).unwrap();
         assert_eq!(text, std::fs::read_to_string(&path).unwrap());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A file carrying the *pre-rename* marker block (what this repo's own
+    /// AGENTS.md/CLAUDE.md carry today) must end up with exactly one block,
+    /// under the new markers — never a second block appended beside the
+    /// stale one.
+    #[test]
+    fn write_snippet_replaces_old_marker_block_in_place() {
+        let path = tmp_path("replace-old");
+        std::fs::write(
+            &path,
+            format!("# proj\n\n{OLD_MDVIEW_START}\nOLD SNIPPET\n{OLD_MDVIEW_END}\n\ntail line\n"),
+        )
+        .unwrap();
+        let name = path.to_str().unwrap();
+        write_agent_snippet(name).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // Old block gone entirely — no leftover markers or stale content.
+        assert!(!text.contains(OLD_MDVIEW_START));
+        assert!(!text.contains(OLD_MDVIEW_END));
+        assert!(!text.contains("OLD SNIPPET"));
+        assert!(agent_block_in_sync(&text));
+        assert!(text.contains("# proj") && text.contains("tail line"));
+        // Exactly one block, under the new markers — never duplicated.
+        assert_eq!(text.matches(WAGGLEDANCE_START).count(), 1);
+        assert_eq!(text.matches(WAGGLEDANCE_END).count(), 1);
         std::fs::remove_file(&path).ok();
     }
 }
@@ -808,7 +953,7 @@ mod mcp_register_tests {
 
     fn tmp(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "mdview-mcp-{label}-{}-{}",
+            "waggledance-mcp-{label}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -817,21 +962,96 @@ mod mcp_register_tests {
         ))
     }
 
+    // ── JSON (Claude Code's ~/.claude.json, Antigravity's mcp_config.json) ──
+
     #[test]
-    fn json_registers_preserving_others_and_is_idempotent() {
-        let p = tmp("json");
+    fn json_holds_neither_adds_new() {
+        let p = tmp("json-neither");
         std::fs::write(&p, r#"{"mcpServers":{"other":{"command":"x"}},"foo":1}"#).unwrap();
         let (s, _) = register_json_mcp(&p, false, true);
         assert_eq!(s, Status::Fixed);
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-        assert_eq!(v["mcpServers"]["mdview"]["args"][0].as_str(), Some("mcp"));
+        assert_eq!(
+            v["mcpServers"]["waggledance"]["args"][0].as_str(),
+            Some("mcp")
+        );
+        assert!(v["mcpServers"].get("mdview").is_none());
         assert_eq!(v["mcpServers"]["other"]["command"], "x"); // untouched
         assert_eq!(v["foo"], 1); // unrelated key untouched
         assert!(backup_path(&p).exists());
-        let (s2, _) = register_json_mcp(&p, false, true);
-        assert_eq!(s2, Status::Ok); // idempotent
         std::fs::remove_file(&p).ok();
         std::fs::remove_file(backup_path(&p)).ok();
+    }
+
+    #[test]
+    fn json_holds_old_only_sweeps_to_new() {
+        let p = tmp("json-old");
+        std::fs::write(
+            &p,
+            r#"{"mcpServers":{"mdview":{"command":"/old/path","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+        let (s, _) = register_json_mcp(&p, false, true);
+        assert_eq!(s, Status::Fixed);
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let servers = v["mcpServers"].as_object().unwrap();
+        assert_eq!(servers.len(), 1, "exactly one entry, got: {servers:?}");
+        assert!(servers.contains_key("waggledance"));
+        assert!(!servers.contains_key("mdview"));
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_file(backup_path(&p)).ok();
+    }
+
+    #[test]
+    fn json_holds_both_only_new_survives() {
+        let p = tmp("json-both");
+        std::fs::write(
+            &p,
+            r#"{"mcpServers":{"mdview":{"command":"/old/path","args":["mcp"]},"waggledance":{"command":"/old/path","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+        let (s, _) = register_json_mcp(&p, false, true);
+        assert_eq!(s, Status::Fixed);
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let servers = v["mcpServers"].as_object().unwrap();
+        assert_eq!(
+            servers.len(),
+            1,
+            "only the new entry should survive, got: {servers:?}"
+        );
+        assert!(servers.contains_key("waggledance"));
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_file(backup_path(&p)).ok();
+    }
+
+    #[test]
+    fn json_already_correct_is_idempotent_and_unchanged() {
+        let p = tmp("json-correct");
+        std::fs::write(
+            &p,
+            r#"{"mcpServers":{"waggledance":{"command":"/bin/waggledance","args":["mcp"]},"other":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        let before: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let (s, _) = register_json_mcp(&p, false, true);
+        assert_eq!(s, Status::Ok); // no write needed
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        assert_eq!(before, after); // parsed content unchanged (BTreeMap may reorder bytes on a write, but there was none)
+        assert!(!backup_path(&p).exists()); // no write happened, so no backup either
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn json_malformed_is_refused_byte_identical() {
+        let p = tmp("json-malformed");
+        std::fs::write(&p, "{ this is not valid json").unwrap();
+        let before = std::fs::read(&p).unwrap();
+        let (s, _) = register_json_mcp(&p, false, true);
+        assert_eq!(s, Status::Warn);
+        let after = std::fs::read(&p).unwrap();
+        assert_eq!(before, after, "malformed file must be left byte-identical");
+        assert!(!backup_path(&p).exists());
+        std::fs::remove_file(&p).ok();
     }
 
     #[test]
@@ -842,9 +1062,11 @@ mod mcp_register_tests {
         assert!(!p.exists());
     }
 
+    // ── TOML (Codex's ~/.codex/config.toml) ──
+
     #[test]
-    fn toml_registers_preserving_user_config_and_is_idempotent() {
-        let p = tmp("toml");
+    fn toml_holds_neither_adds_new() {
+        let p = tmp("toml-neither");
         std::fs::write(
             &p,
             "# my codex config\nmodel = \"gpt-5\"\n\n[mcp_servers.other]\ncommand = \"x\"\n",
@@ -857,19 +1079,81 @@ mod mcp_register_tests {
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
         assert_eq!(doc["model"].as_str(), Some("gpt-5")); // user setting survives
         assert_eq!(doc["mcp_servers"]["other"]["command"].as_str(), Some("x")); // other server survives
-        assert!(doc["mcp_servers"]["mdview"]["command"].is_str()); // mdview added
+        assert!(doc["mcp_servers"]["waggledance"]["command"].is_str());
+        assert!(doc["mcp_servers"].get("mdview").is_none());
         assert_eq!(
-            doc["mcp_servers"]["mdview"]["args"]
+            doc["mcp_servers"]["waggledance"]["args"]
                 .as_array()
                 .and_then(|a| a.get(0))
                 .and_then(|v| v.as_str()),
             Some("mcp")
         );
         assert!(backup_path(&p).exists());
-        let (s2, _) = register_toml_mcp(&p, false, true);
-        assert_eq!(s2, Status::Ok); // idempotent
         std::fs::remove_file(&p).ok();
         std::fs::remove_file(backup_path(&p)).ok();
+    }
+
+    #[test]
+    fn toml_holds_old_only_sweeps_to_new() {
+        let p = tmp("toml-old");
+        std::fs::write(
+            &p,
+            "model = \"gpt-5\"\n\n[mcp_servers.mdview]\ncommand = \"/old/path\"\nargs = [\"mcp\"]\n",
+        )
+        .unwrap();
+        let (s, _) = register_toml_mcp(&p, false, true);
+        assert_eq!(s, Status::Fixed);
+        let out = std::fs::read_to_string(&p).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        let servers = doc["mcp_servers"].as_table().unwrap();
+        assert_eq!(servers.iter().count(), 1, "exactly one entry, got:\n{out}");
+        assert!(doc["mcp_servers"]["waggledance"]["command"].is_str());
+        assert!(doc["mcp_servers"].get("mdview").is_none());
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_file(backup_path(&p)).ok();
+    }
+
+    #[test]
+    fn toml_holds_both_only_new_survives() {
+        let p = tmp("toml-both");
+        std::fs::write(
+            &p,
+            "[mcp_servers.mdview]\ncommand = \"/old/path\"\nargs = [\"mcp\"]\n\n\
+             [mcp_servers.waggledance]\ncommand = \"/old/path\"\nargs = [\"mcp\"]\n",
+        )
+        .unwrap();
+        let (s, _) = register_toml_mcp(&p, false, true);
+        assert_eq!(s, Status::Fixed);
+        let out = std::fs::read_to_string(&p).unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().unwrap();
+        let servers = doc["mcp_servers"].as_table().unwrap();
+        assert_eq!(
+            servers.iter().count(),
+            1,
+            "only the new entry should survive, got:\n{out}"
+        );
+        assert!(doc["mcp_servers"]["waggledance"]["command"].is_str());
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_file(backup_path(&p)).ok();
+    }
+
+    #[test]
+    fn toml_already_correct_is_idempotent_and_unchanged() {
+        let p = tmp("toml-correct");
+        std::fs::write(
+            &p,
+            "model = \"gpt-5\"\n\n[mcp_servers.waggledance]\ncommand = \"/bin/waggledance\"\nargs = [\"mcp\"]\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&p).unwrap();
+        let (s, _) = register_toml_mcp(&p, false, true);
+        assert_eq!(s, Status::Ok); // no write needed
+        let after = std::fs::read_to_string(&p).unwrap();
+        let before_doc: toml_edit::DocumentMut = before.parse().unwrap();
+        let after_doc: toml_edit::DocumentMut = after.parse().unwrap();
+        assert_eq!(before_doc.to_string(), after_doc.to_string());
+        assert!(!backup_path(&p).exists()); // no write happened, so no backup either
+        std::fs::remove_file(&p).ok();
     }
 
     #[test]
@@ -880,9 +1164,9 @@ mod mcp_register_tests {
         let out = std::fs::read_to_string(&p).unwrap();
         // Section form, not an inline `mcp_servers = { ... }` (which would clash
         // with a later `[mcp_servers.other]`).
-        assert!(out.contains("[mcp_servers.mdview]"), "got:\n{out}");
+        assert!(out.contains("[mcp_servers.waggledance]"), "got:\n{out}");
         let doc: toml_edit::DocumentMut = out.parse().unwrap();
-        assert!(doc["mcp_servers"]["mdview"]["command"].is_str());
+        assert!(doc["mcp_servers"]["waggledance"]["command"].is_str());
         std::fs::remove_file(&p).ok();
     }
 
@@ -894,6 +1178,7 @@ mod mcp_register_tests {
         let (s, _) = register_toml_mcp(&p, false, true);
         assert_eq!(s, Status::Warn);
         assert_eq!(std::fs::read_to_string(&p).unwrap(), before); // never clobbered
+        assert!(!backup_path(&p).exists());
         std::fs::remove_file(&p).ok();
     }
 }

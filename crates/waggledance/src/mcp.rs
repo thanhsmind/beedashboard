@@ -1,14 +1,15 @@
 //! Minimal MCP server over stdio (newline-delimited JSON-RPC 2.0).
-//! Exposes the single tool `mdview_view_file` (PRD §5.5). Hand-rolled to avoid
-//! a heavy SDK dependency; the protocol surface here is intentionally small.
+//! Exposes the single tool `waggledance_view_file` (PRD §5.5). Hand-rolled to
+//! avoid a heavy SDK dependency; the protocol surface here is intentionally
+//! small.
 
 use crate::runtime;
 use anyhow::Result;
-use waggledance_core::config::registry_db_path;
-use waggledance_core::{Config, Engine, SqliteStore};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::Path;
+use waggledance_core::config::registry_db_path;
+use waggledance_core::{Config, Engine, SqliteStore};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -36,7 +37,7 @@ pub fn run() -> Result<()> {
                 json!({
                     "protocolVersion": PROTOCOL_VERSION,
                     "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "mdview", "version": env!("CARGO_PKG_VERSION") }
+                    "serverInfo": { "name": "waggledance", "version": env!("CARGO_PKG_VERSION") }
                 }),
             )),
             "tools/list" => Some(ok(id, json!({ "tools": [tool_schema()] }))),
@@ -56,7 +57,7 @@ pub fn run() -> Result<()> {
 
 fn tool_schema() -> Value {
     json!({
-        "name": "mdview_view_file",
+        "name": "waggledance_view_file",
         "description": "Make a markdown file viewable in the browser and return its URL. \
     Auto-registers the project on first use and indexes the file immediately. \
     Pass the project root and the file path relative to that root.",
@@ -82,7 +83,7 @@ fn handle_tool_call(id: Option<Value>, engine: &Engine, req: &Value) -> Value {
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
         .unwrap_or("");
-    if name != "mdview_view_file" {
+    if name != "waggledance_view_file" {
         return err(id, -32602, "unknown tool");
     }
     let root = args
@@ -182,12 +183,12 @@ mod tests {
         let text = viewable_text(
             &["http://design-lap:7700/s/a3f9c1d20b74".into()],
             "docs/history/short-link/DISCUSSION.md",
-            "mdview",
+            "waggledance",
         );
         assert_eq!(
             text,
             "Viewable at: docs/history/short-link/DISCUSSION.md → \
-             http://design-lap:7700/s/a3f9c1d20b74\nproject_id: mdview"
+             http://design-lap:7700/s/a3f9c1d20b74\nproject_id: waggledance"
         );
         assert_eq!(text.lines().count(), 2);
     }
@@ -200,7 +201,7 @@ mod tests {
                 "http://10.0.0.5:7700/s/a3f9c1d20b74".into(),
             ],
             "docs/a.md",
-            "mdview",
+            "waggledance",
         );
         assert!(text.contains("pick a reachable IP"));
         assert!(text.contains("  docs/a.md → http://192.168.1.10:7700/s/a3f9c1d20b74"));
@@ -215,7 +216,7 @@ mod tests {
         let text = viewable_text(
             &["http://design-lap:7700/s/a3f9c1d20b74".into()],
             deep,
-            "mdview",
+            "waggledance",
         );
         let url_line = text.lines().next().unwrap();
         let url = url_line.split(" → ").nth(1).unwrap();
