@@ -59,16 +59,16 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release -p mdview --target ${{ matrix.target }}
+            cross build --release -p waggledance --target ${{ matrix.target }}
           else
-            cargo build --release -p mdview --target ${{ matrix.target }}
+            cargo build --release -p waggledance --target ${{ matrix.target }}
           fi
 
       - name: Package
         shell: bash
         run: |
-          bin="target/${{ matrix.target }}/release/mdview"
-          asset="mdview-${{ matrix.target }}"
+          bin="target/${{ matrix.target }}/release/waggledance"
+          asset="waggledance-${{ matrix.target }}"
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             bin="$bin.exe"; asset="$asset.exe"
           fi

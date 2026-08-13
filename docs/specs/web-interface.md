@@ -25,7 +25,7 @@ content itself.
   folder, a reading breadcrumb above the article, and (when the file has
   headings and/or is linked from elsewhere) a right-hand panel.
 - Clicking "Settings" in the top bar → the settings page.
-- Clicking the brand ("Bee Artifact") → the project list.
+- Clicking the brand ("Waggle Dance") → the project list.
 - Clicking a heading link in the right-hand "On this page" list, or a
   "Linked from" entry → jumps to that heading, or opens the linking file.
 - Scrolling a file's content → the right-hand "On this page" list tracks
@@ -35,7 +35,7 @@ content itself.
 
 | # | Element | Meaning | Values |
 |---|---|---|---|
-| 1 | Brand | Always-present link back to the project list | "Bee Artifact" — the display name these pages use; the command and the identifiers handed to other tools stay "mdview" (see `bee-cockpit.md`) |
+| 1 | Brand | Always-present link back to the project list | "Waggle Dance" — the display name these pages use; the command and the identifiers handed to other tools stay "waggledance" (see `bee-cockpit.md`) |
 | 2 | Center slot | Page-specific orientation text in the top bar | a file's `project / path`, "· search", "Settings", or empty |
 | 3 | Settings link | Always-present link to the settings page | — |
 | 4 | Theme toggle | Always-present light/dark switch (behavior in the Appearance spec) | — |
@@ -116,7 +116,7 @@ content itself.
   to confirm, then removes the project from the registry and returns to the
   list. This removes only the registry entry and its index — **the files on
   disk are untouched**, and re-registering re-scans them. The endpoint is
-  unauthenticated, like every route in mdview, the agent terminal family
+  unauthenticated, like every route in waggledance, the agent terminal family
   included (see the Agent terminal spec), so anyone who can reach it can
   unregister a project (reversible; no data loss).
 - **Which file a project opens to:** a fixed, predictable rule (never "whatever
@@ -289,7 +289,7 @@ content itself.
 
 Not applicable in the role sense — a single local operator in a browser; no
 authentication and no distinct roles for anything this spec covers, or
-anywhere else in mdview, the agent terminal family included (it is gated
+anywhere else in waggledance, the agent terminal family included (it is gated
 only by its own switch — see the Agent terminal spec). A file page's
 sidebar data is the project's file list (paths + titles); no other actor
 consumes it.
@@ -404,20 +404,20 @@ snapshot under `docs/specs/visuals/web-interface/` is an open item.
 
 ## Pointers (implementation)
 
-- `crates/mdview/src/views.rs` — `topbar()` (shared header), `file_tree`
+- `crates/waggledance/src/views.rs` — `topbar()` (shared header), `file_tree`
   (chapter sidebar: ships the file list as JSON + focus data), `project_list_page`,
   `breadcrumb()` (reading breadcrumb), `right_panel()` (TOC + backlinks), page
   functions.
-- `crates/mdview/src/server.rs` — `index_page` (one timeout-bounded herdr
+- `crates/waggledance/src/server.rs` — `index_page` (one timeout-bounded herdr
   snapshot behind the terminal switch, matched per project through
   `paths_boundary::Boundary` + `project_panes`), `register_project` and its
   `validate_register_path` guard chain (`paths_boundary::is_denied_root`, the
   canonical duplicate lookup, `indexer::bounded_scan_markdown_files`), all of
   it inside one `spawn_blocking`.
-- `crates/mdview/assets/app.js` — chapter renderer (breadcrumb zoom in/out,
+- `crates/waggledance/assets/app.js` — chapter renderer (breadcrumb zoom in/out,
   files by title), TOC scrollspy (`IntersectionObserver` over the article's
   headings, toggles the matching TOC link's active state).
-- `crates/mdview/assets/app.css` — `.chapter` / `.chap-*` styles, `.toc` /
+- `crates/waggledance/assets/app.css` — `.chapter` / `.chap-*` styles, `.toc` /
   `.backlinks`, `.breadcrumb`, `.fg-sidebar-search`.
-- `crates/mdview/assets/atelier/components.css` — `.fg-input` / `.fg-select`
+- `crates/waggledance/assets/atelier/components.css` — `.fg-input` / `.fg-select`
   (shared form-field skeleton used by the sidebar search box too).

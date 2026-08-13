@@ -1,5 +1,5 @@
 # Learning-domain taxonomy — one kebab-case domain per line, '#' comments allowed.
-# Realigned 2026-07-15 for a markdown-viewer/server project (mdview): added the
+# Realigned 2026-07-15 for a markdown-viewer/server project (waggledance): added the
 # server-mechanics domains, retired the agent-tooling defaults that never applied.
 # repo-layout + testing-evals kept — marky populates them with real content.
 rendering

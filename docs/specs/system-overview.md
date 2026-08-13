@@ -1,25 +1,25 @@
 # System Overview
 
-Technology-agnostic description of what mdview does and how its areas fit
+Technology-agnostic description of what waggledance does and how its areas fit
 together. First read for anyone new to the repo. (Implementation: Rust; this
 spec avoids code detail — see PRD.md for design and crates/ for code.)
 
 ## What it is
 
-mdview is a local background server that makes a project's markdown viewable in
+waggledance is a local background server that makes a project's markdown viewable in
 a browser with **working cross-folder links**, live reload, full-text search,
 and a one-call agent integration over MCP. One daemon owns all state; browser
-tabs (and, later, a desktop window) are clients of it. mdview has absorbed
+tabs (and, later, a desktop window) are clients of it. waggledance has absorbed
 herdr-go, the standalone gateway that watched and replied to coding agents
 running under [herdr](https://github.com/ogulcancelik/herdr): every registered
 project now also has a Terminal tab and a Transcript tab for the agents
-running under it. herdr-go is retired; mdview is its successor. See the
+running under it. herdr-go is retired; waggledance is its successor. See the
 Agent terminal spec.
 
 ## Core invariant
 
-**At most one daemon** owns the registry (`~/.mdview/registry.db`). Every
-launcher — CLI, MCP, future desktop — coordinates through `~/.mdview/daemon.lock`
+**At most one daemon** owns the registry (`~/.waggledance/registry.db`). Every
+launcher — CLI, MCP, future desktop — coordinates through `~/.waggledance/daemon.lock`
 (pid + port). No second server ever writes the same registry.
 
 ## Areas
@@ -70,7 +70,7 @@ launcher — CLI, MCP, future desktop — coordinates through `~/.mdview/daemon.
   stable for a given file and is what tools hand to a person, so a link stays
   short enough to paste into a chat, a commit message, or a terminal without
   wrapping. Both addresses reach the same page; neither replaces the other.
-- **Agent integration (MCP)** — a single tool, `mdview_view_file(project_root,
+- **Agent integration (MCP)** — a single tool, `waggledance_view_file(project_root,
   relative_path)`, that ensures the project exists, indexes the file, ensures the
   daemon is up, and returns a viewable URL. It returns the short address, and
   names the file's own path beside it in plain text — the short address is
@@ -95,12 +95,12 @@ launcher — CLI, MCP, future desktop — coordinates through `~/.mdview/daemon.
   URL through this substitution.
 - **Doctor** — diagnoses and safely repairs setup: config presence, daemon
   health, Claude Code MCP registration, and an AGENTS.md/CLAUDE.md mention of
-  mdview's agent tool (all merged idempotently, with a backup where content
+  waggledance's agent tool (all merged idempotently, with a backup where content
   already existed).
 - **Agent terminal** — a per-project Terminal tab and Transcript tab for
   watching and replying to the coding agents herdr is running under that
   project's root, plus two off-by-default background duties (keeping herdr
-  alive, notifying on status change). The only mdview surface gated at all —
+  alive, notifying on status change). The only waggledance surface gated at all —
   and what gates it is a single switch the operator turns on, not a
   credential: there is nothing to log in to. See the Agent terminal spec.
 

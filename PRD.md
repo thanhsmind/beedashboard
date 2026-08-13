@@ -1,18 +1,18 @@
-# PRD: MDView — Multi-Project Markdown Viewer for AI Agent Workflows
+# PRD: Waggledance — Multi-Project Markdown Viewer for AI Agent Workflows
 
 **Version:** 1.2  
 **Date:** July 2026  
 **Status:** Draft
 
 > **Changelog**
-> - **1.2** — Đơn giản hoá MCP còn **1 tool** (`mdview_view_file`); project registry chuyển sang **implicit** (auto-create khi register file); yêu cầu code theo **clean architecture** (ports & adapters, service/command/DTO). Xem §5.1, §5.5, §7.4.
+> - **1.2** — Đơn giản hoá MCP còn **1 tool** (`waggledance_view_file`); project registry chuyển sang **implicit** (auto-create khi register file); yêu cầu code theo **clean architecture** (ports & adapters, service/command/DTO). Xem §5.1, §5.5, §7.4.
 > - **1.1** — Bổ sung **desktop viewer** (Linux/Windows/macOS) qua Tauri như lớp phủ trên cùng core, không đổi ngôn ngữ. Xem §7.1, §7.5, §9, NFR-04.
 
 ---
 
 ## 1. Tóm tắt (Executive Summary)
 
-MDView là một ứng dụng chạy nền trên máy cục bộ, đóng vai trò là **markdown server đa-project**. Nó giải quyết vấn đề broken links khi navigate giữa các markdown files thuộc cùng một project nhưng nằm ở nhiều folder khác nhau — một vấn đề phổ biến trong workflow làm việc với AI agents (Claude Code, Cursor, Aider, v.v.) tạo ra cấu trúc docs phức tạp.
+Waggledance là một ứng dụng chạy nền trên máy cục bộ, đóng vai trò là **markdown server đa-project**. Nó giải quyết vấn đề broken links khi navigate giữa các markdown files thuộc cùng một project nhưng nằm ở nhiều folder khác nhau — một vấn đề phổ biến trong workflow làm việc với AI agents (Claude Code, Cursor, Aider, v.v.) tạo ra cấu trúc docs phức tạp.
 
 App cung cấp giao diện web đẹp, truy cập được từ bất kỳ browser nào trên cùng network, có thể giao tiếp với agents qua MCP server hoặc CLI, và tự động quản lý file index để mọi internal link trong project đều được resolve chính xác. Cùng một core còn chạy được như **desktop app native** (Linux/Windows/macOS) — cửa sổ Tauri nhìn vào chính daemon đó (§7.1, §7.5).
 
@@ -104,17 +104,17 @@ Khi tool hiện tại serve thư mục `docs/`, người dùng click link `../sr
 - `created_at`: thời điểm đăng ký
 - `last_seen_at`: lần cuối có file activity
 
-**FR-02.** Registry được persist xuống disk (SQLite database hoặc JSON file ở `~/.mdview/registry.json`) và tự động load lại khi app restart.
+**FR-02.** Registry được persist xuống disk (SQLite database hoặc JSON file ở `~/.waggledance/registry.json`) và tự động load lại khi app restart.
 
-**FR-03.** Mỗi project có thể tùy chọn file marker để auto-detect root: `.mdview.json`, `CLAUDE.md`, hoặc `README.md` tại thư mục gốc.
+**FR-03.** Mỗi project có thể tùy chọn file marker để auto-detect root: `.waggledance.json`, `CLAUDE.md`, hoặc `README.md` tại thư mục gốc.
 
 **FR-04.** Đăng ký project theo hai đường:
-- **Implicit (mặc định, qua MCP):** project được **tự tạo** ở lần đầu một file thuộc `project_root` mới được register qua `mdview_view_file` (§5.5) — agent KHÔNG cần bước đăng ký project riêng. Server sinh `id` từ tên thư mục gốc (hoặc marker FR-03), set `root_path = project_root`, rồi recursive scan nền (FR-06).
-- **Explicit (qua CLI, tuỳ chọn):** `mdview register /path/to/project [--name "My Project"]` cho ai muốn đăng ký trước từ terminal.
+- **Implicit (mặc định, qua MCP):** project được **tự tạo** ở lần đầu một file thuộc `project_root` mới được register qua `waggledance_view_file` (§5.5) — agent KHÔNG cần bước đăng ký project riêng. Server sinh `id` từ tên thư mục gốc (hoặc marker FR-03), set `root_path = project_root`, rồi recursive scan nền (FR-06).
+- **Explicit (qua CLI, tuỳ chọn):** `waggledance register /path/to/project [--name "My Project"]` cho ai muốn đăng ký trước từ terminal.
 
 **FR-05.** Hỗ trợ xóa project khỏi registry mà không xóa files:
-- MCP: `mdview_unregister_project`
-- CLI: `mdview unregister <project-id>`
+- MCP: `waggledance_unregister_project`
+- CLI: `waggledance unregister <project-id>`
 
 ### 5.2 File Indexing & Watching
 
@@ -137,9 +137,9 @@ Khi tool hiện tại serve thư mục `docs/`, người dùng click link `../sr
 
 **FR-09.** Debounce file events: đợi 200ms sau sự kiện cuối cùng trước khi update index và push live reload signal, để tránh spam khi agent đang viết file liên tục.
 
-**FR-09b. Index tăng dần + re-scan reconcile.** Watcher cập nhật index **incremental** theo từng event (KHÔNG re-walk toàn tree — đáp ứng NFR-03 ở 100k files). Bổ sung một **full re-scan trigger** làm lưới an toàn chống drift: (a) **tự động** sau khi watcher lỗi rồi recover (NFR-02) để reconcile event bị miss, (b) **thủ công** qua CLI `mdview refresh [project-id]`. Incremental là steady-state; re-scan là đối chiếu.
+**FR-09b. Index tăng dần + re-scan reconcile.** Watcher cập nhật index **incremental** theo từng event (KHÔNG re-walk toàn tree — đáp ứng NFR-03 ở 100k files). Bổ sung một **full re-scan trigger** làm lưới an toàn chống drift: (a) **tự động** sau khi watcher lỗi rồi recover (NFR-02) để reconcile event bị miss, (b) **thủ công** qua CLI `waggledance refresh [project-id]`. Incremental là steady-state; re-scan là đối chiếu.
 
-**FR-10.** Khi agent register file qua MCP (`mdview_view_file`, §5.5), app ưu tiên index file đó ngay lập tức thay vì đợi filesystem event; nếu `project_root` chưa có trong registry thì tự tạo project trước (FR-04 implicit).
+**FR-10.** Khi agent register file qua MCP (`waggledance_view_file`, §5.5), app ưu tiên index file đó ngay lập tức thay vì đợi filesystem event; nếu `project_root` chưa có trong registry thì tự tạo project trước (FR-04 implicit).
 
 ### 5.3 Link Resolution
 
@@ -205,13 +205,13 @@ Resolve:
 - **Indexing:** debounce ms, max file size, exclude patterns
 - **MCP:** enabled, transport (stdio/http)
 
-Thay đổi được validate và ghi **atomic** xuống `~/.mdview/config.toml` (§10). UI đánh dấu rõ mục nào áp dụng nóng vs mục nào cần restart (vd đổi bind host). Registry (danh sách projects) KHÔNG sửa ở đây — đó là §5.1.
+Thay đổi được validate và ghi **atomic** xuống `~/.waggledance/config.toml` (§10). UI đánh dấu rõ mục nào áp dụng nóng vs mục nào cần restart (vd đổi bind host). Registry (danh sách projects) KHÔNG sửa ở đây — đó là §5.1.
 
 ### 5.5 MCP Server Interface
 
 App chạy kèm một **MCP server** (stdio hoặc HTTP/SSE transport). Bề mặt MCP được giữ **tối thiểu — đúng 1 tool** cho workflow chính; mọi thứ khác server tự lo. Nguyên tắc thiết kế: agent KHÔNG quản project, KHÔNG quản index, KHÔNG gọi nhiều bước — chỉ báo "file này, ở project root này".
 
-**FR-23 (Core — tool DUY NHẤT).** `mdview_view_file` — làm một file xem được và trả link. Gộp thay thế `register_project` + `notify_file` + `open_file`.
+**FR-23 (Core — tool DUY NHẤT).** `waggledance_view_file` — làm một file xem được và trả link. Gộp thay thế `register_project` + `notify_file` + `open_file`.
 ```
 Input:
   - project_root:  string (absolute path đến thư mục gốc project)
@@ -234,17 +234,17 @@ Một lời gọi, hai tham số, không tiền-đăng-ký. Đây là 90% workfl
 
 #### 5.5.1 Deferred MCP tools (future — NGOÀI scope hiện tại)
 
-Các tool dưới đây **cố tình để dành** (YAGNI): chỉ thêm lại khi có nhu cầu thật, không implement ở các phase đầu. Chức năng của chúng hoặc đã gộp vào `mdview_view_file`, hoặc đã có qua CLI (§5.6) cho người dùng ở terminal.
+Các tool dưới đây **cố tình để dành** (YAGNI): chỉ thêm lại khi có nhu cầu thật, không implement ở các phase đầu. Chức năng của chúng hoặc đã gộp vào `waggledance_view_file`, hoặc đã có qua CLI (§5.6) cho người dùng ở terminal.
 
 | Deferred tool | Vì sao hoãn / thay thế bằng |
 |---|---|
-| `mdview_register_project` | Gộp vào `mdview_view_file` (auto-create). Explicit vẫn có qua CLI `mdview register`. |
-| `mdview_notify_file` | Gộp vào `mdview_view_file` (index ngay). Sự kiện delete/update do filesystem watcher lo (FR-08). |
-| `mdview_open_file` | Url đã trả sẵn trong `mdview_view_file`. Side-effect auto-navigate browser để hoãn. |
-| `mdview_list_projects` | Có qua CLI `mdview list` / web `/` / REST `/api/projects`. |
-| `mdview_search` | Có qua CLI `mdview search` / web `/search`. |
-| `mdview_status` | Có qua CLI `mdview status` / `/health`. Lỗi khi gọi `mdview_view_file` cũng đủ báo server sống/chết. |
-| `mdview_unregister_project` | Có qua CLI `mdview unregister`. |
+| `waggledance_register_project` | Gộp vào `waggledance_view_file` (auto-create). Explicit vẫn có qua CLI `waggledance register`. |
+| `waggledance_notify_file` | Gộp vào `waggledance_view_file` (index ngay). Sự kiện delete/update do filesystem watcher lo (FR-08). |
+| `waggledance_open_file` | Url đã trả sẵn trong `waggledance_view_file`. Side-effect auto-navigate browser để hoãn. |
+| `waggledance_list_projects` | Có qua CLI `waggledance list` / web `/` / REST `/api/projects`. |
+| `waggledance_search` | Có qua CLI `waggledance search` / web `/search`. |
+| `waggledance_status` | Có qua CLI `waggledance status` / `/health`. Lỗi khi gọi `waggledance_view_file` cũng đủ báo server sống/chết. |
+| `waggledance_unregister_project` | Có qua CLI `waggledance unregister`. |
 
 ### 5.6 CLI Interface
 
@@ -252,34 +252,34 @@ Các tool dưới đây **cố tình để dành** (YAGNI): chỉ thêm lại kh
 
 ```bash
 # Khởi động server (daemon mode)
-mdview serve [--port 7700] [--host 0.0.0.0]
+waggledance serve [--port 7700] [--host 0.0.0.0]
 
 # Đăng ký project
-mdview register /path/to/project [--name "My App"] [--id my-app]
+waggledance register /path/to/project [--name "My App"] [--id my-app]
 
 # Mở file trong browser
-mdview open /path/to/file.md
+waggledance open /path/to/file.md
 
 # Liệt kê projects
-mdview list
+waggledance list
 
 # Tìm kiếm
-mdview search "query" [--project my-app]
+waggledance search "query" [--project my-app]
 
 # Xem status
-mdview status
+waggledance status
 
 # Re-scan reconcile index (FR-09b)
-mdview refresh [<project-id>]
+waggledance refresh [<project-id>]
 
 # Chẩn đoán & tự fix integration (FR-33)
-mdview doctor [--json] [--dry-run] [--fix]
+waggledance doctor [--json] [--dry-run] [--fix]
 
 # Xóa project
-mdview unregister <project-id>
+waggledance unregister <project-id>
 
 # Dừng server
-mdview stop
+waggledance stop
 ```
 
 **FR-30.** CLI output hỗ trợ `--json` flag để pipe vào các tool khác hoặc scripts.
@@ -290,13 +290,13 @@ mdview stop
 
 Nội dung mẫu:
 ```markdown
-## MDView Integration
+## Waggledance Integration
 
 After creating or updating any markdown file, make it viewable in ONE call —
 no project registration step needed:
 
 ### Using MCP (preferred)
-Call `mdview_view_file` with:
+Call `waggledance_view_file` with:
 - project_root:  absolute path to the project root
 - relative_path: the file path relative to that root
 It returns a browser `url`. Show the user: "You can view this at: <url>".
@@ -304,7 +304,7 @@ The server auto-registers the project on first use and indexes the file
 immediately.
 
 ### Using CLI fallback
-Run: `mdview open <absolute-path>`
+Run: `waggledance open <absolute-path>`
 ```
 
 ---
@@ -313,14 +313,14 @@ Run: `mdview open <absolute-path>`
 
 Mục tiêu: end-user cài đặt **nhanh và dễ nhất có thể**, và sau khi cài tự tích hợp được vào Claude/Claude Code không cần chỉnh tay.
 
-**FR-32. One-command install.** Script `install.sh` (`curl … | bash`) tự: phát hiện OS/arch (Linux x86_64/aarch64, macOS), tải binary release mới nhất từ GitHub, đặt vào PATH (env override → `/usr/local/bin` → `~/.local/bin` → `~/.mdview/bin`), cảnh báo nếu dir không nằm trong PATH, rồi gợi ý chạy `mdview doctor`. Kèm kênh khác: Homebrew tap, `cargo install mdview`, và Tauri bundle cho desktop (NFR-04). Tham khảo mdserve multi-channel-install.
+**FR-32. One-command install.** Script `install.sh` (`curl … | bash`) tự: phát hiện OS/arch (Linux x86_64/aarch64, macOS), tải binary release mới nhất từ GitHub, đặt vào PATH (env override → `/usr/local/bin` → `~/.local/bin` → `~/.waggledance/bin`), cảnh báo nếu dir không nằm trong PATH, rồi gợi ý chạy `waggledance doctor`. Kèm kênh khác: Homebrew tap, `cargo install waggledance`, và Tauri bundle cho desktop (NFR-04). Tham khảo mdserve multi-channel-install.
 
-**FR-33. `mdview doctor` — tự chẩn đoán & fix integration.** Sau khi cài, `mdview doctor` kiểm tra và **tự sửa an toàn** các điểm tích hợp, mỗi mục trả `OK | FIXED | MANUAL` (kèm lệnh gợi ý):
-- Binary `mdview` có trong PATH.
-- `~/.mdview/config.toml` hợp lệ (tạo mặc định nếu thiếu).
-- Server sống (`/health`) + `~/.mdview/daemon.lock` hợp lệ; port cấu hình rảnh.
-- **MCP registration:** phát hiện & ghi entry `mdview` vào file cấu hình MCP của Claude Code (`~/.claude.json`, project `.mcp.json`, hoặc `claude_desktop_config.json` tuỳ client) — **merge idempotent, backup trước khi sửa**, không phá config sẵn có.
-- **Agent instruction:** kiểm tra AGENTS.md/CLAUDE.md có snippet MDView (§5.7); offer chèn.
+**FR-33. `waggledance doctor` — tự chẩn đoán & fix integration.** Sau khi cài, `waggledance doctor` kiểm tra và **tự sửa an toàn** các điểm tích hợp, mỗi mục trả `OK | FIXED | MANUAL` (kèm lệnh gợi ý):
+- Binary `waggledance` có trong PATH.
+- `~/.waggledance/config.toml` hợp lệ (tạo mặc định nếu thiếu).
+- Server sống (`/health`) + `~/.waggledance/daemon.lock` hợp lệ; port cấu hình rảnh.
+- **MCP registration:** phát hiện & ghi entry `waggledance` vào file cấu hình MCP của Claude Code (`~/.claude.json`, project `.mcp.json`, hoặc `claude_desktop_config.json` tuỳ client) — **merge idempotent, backup trước khi sửa**, không phá config sẵn có.
+- **Agent instruction:** kiểm tra AGENTS.md/CLAUDE.md có snippet Waggledance (§5.7); offer chèn.
 
 Flags: `--json` (machine output), `--dry-run` (chỉ báo, không sửa), `--fix` (tự sửa; mặc định hỏi/không sửa mục ghi đè). Idempotent — chạy nhiều lần an toàn.
 
@@ -356,8 +356,8 @@ Flags: `--json` (machine output), `--dry-run` (chỉ báo, không sửa), `--fix
 
 **NFR-06. Observability**
 - Structured logging với level control (DEBUG/INFO/WARN/ERROR).
-- Log file tại `~/.mdview/mdview.log` với rotation.
-- `/health` endpoint trả về JSON status (dùng cho agent `mdview_status`).
+- Log file tại `~/.waggledance/waggledance.log` với rotation.
+- `/health` endpoint trả về JSON status (dùng cho agent `waggledance_status`).
 
 ---
 
@@ -365,7 +365,7 @@ Flags: `--json` (machine output), `--dry-run` (chỉ báo, không sửa), `--fix
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                     MDView App                          │
+│                     Waggledance App                     │
 │                                                         │
 │  ┌─────────────┐    ┌──────────────┐   ┌────────────┐  │
 │  │  MCP Server │    │  HTTP/WS     │   │   CLI      │  │
@@ -398,11 +398,11 @@ Flags: `--json` (machine output), `--dry-run` (chỉ báo, không sửa), `--fix
 
 ### 7.1 Deployment Topology — Một Daemon, Nhiều Client
 
-MDView chạy như **một server (daemon) duy nhất**; browser tab và cửa sổ desktop chỉ là **client** nhìn vào nó. Bất biến bắt buộc: **không bao giờ có 2 daemon cùng ghi một registry SQLite.**
+Waggledance chạy như **một server (daemon) duy nhất**; browser tab và cửa sổ desktop chỉ là **client** nhìn vào nó. Bất biến bắt buộc: **không bao giờ có 2 daemon cùng ghi một registry SQLite.**
 
 ```
    agent (MCP) ─┐        ┌─────────────────────────┐
-   CLI ─────────┼──────► │  mdview daemon           │ ──► ~/.mdview/registry.db
+   CLI ─────────┼──────► │  waggledance daemon           │ ──► ~/.waggledance/registry.db
                          │  Axum :7700 + MCP + WS   │      (nguồn sự thật duy nhất)
                          └───────────┬─────────────┘
                                      │ HTTP / WebSocket
@@ -412,8 +412,8 @@ MDView chạy như **một server (daemon) duy nhất**; browser tab và cửa s
               (localhost)      (native + tray)   (remote view LAN)
 ```
 
-- **Web (phần lớn thời gian):** agent gọi `mdview_view_file` → daemon trả url → user click → xem trong browser. Desktop không cần bật.
-- **Desktop (thỉnh thoảng):** bật app ở terminal khác / icon Windows. App đọc `~/.mdview/daemon.lock`: có daemon sống → cửa sổ chỉ attach (webview → :7700); chưa có → app tự spawn daemon rồi mới hiện cửa sổ. Vòng đời chi tiết: §7.5.
+- **Web (phần lớn thời gian):** agent gọi `waggledance_view_file` → daemon trả url → user click → xem trong browser. Desktop không cần bật.
+- **Desktop (thỉnh thoảng):** bật app ở terminal khác / icon Windows. App đọc `~/.waggledance/daemon.lock`: có daemon sống → cửa sổ chỉ attach (webview → :7700); chưa có → app tự spawn daemon rồi mới hiện cửa sổ. Vòng đời chi tiết: §7.5.
 
 Hệ quả DRY: chỉ **một** web UI — xem qua browser hay qua Tauri webview đều cùng một code path render; live reload / registry / MCP share tự động vì cùng một daemon.
 
@@ -437,7 +437,7 @@ Hệ quả DRY: chỉ **một** web UI — xem qua browser hay qua Tauri webview
 ```python
 def resolve_link(source_file_abs_path, link_href, project) -> Optional[str]:
     """
-    Returns the MDView URL for a link, or None if external/unresolvable.
+    Returns the Waggledance URL for a link, or None if external/unresolvable.
     """
     # 1. Skip external links
     if link_href.startswith(("http://", "https://", "mailto:", "#")):
@@ -480,11 +480,11 @@ Yêu cầu chất lượng: code tổ chức clean-code, tách **domain** khỏi
 **Workspace Rust** (một core, nhiều adapter):
 
 ```
-mdview-core/    (lib)  DOMAIN + APPLICATION: registry, indexer, link resolver, search,
+waggledance-core/    (lib)  DOMAIN + APPLICATION: registry, indexer, link resolver, search,
                        render (comrak). Định nghĩa PORTS (trait): FileStore, Watcher,
                        Clock, ProjectRepository. KHÔNG phụ thuộc Axum / Tauri / SQLite.
-mdview/         (bin)  Adapter CLI + daemon: HTTP/WS (Axum), MCP server, clap CLI.
-mdview-desktop/ (bin)  Adapter Tauri: cửa sổ native + tray, attach/spawn daemon.
+waggledance/         (bin)  Adapter CLI + daemon: HTTP/WS (Axum), MCP server, clap CLI.
+waggledance-desktop/ (bin)  Adapter Tauri: cửa sổ native + tray, attach/spawn daemon.
 adapters/              SQLite (rusqlite) impl ProjectRepository; notify impl Watcher; ...
 ```
 
@@ -498,17 +498,17 @@ Nhờ đó: thêm adapter mới (HTTP SSE cho MCP, desktop, DB khác) không đ�
 
 ### 7.5 Desktop Shell & Daemon Lifecycle
 
-Desktop = binary `mdview-desktop` (Tauri v2), mỏng, tái dùng pattern từ marky (single-instance, capability allowlist least-privilege, atomic settings, bundle config).
+Desktop = binary `waggledance-desktop` (Tauri v2), mỏng, tái dùng pattern từ marky (single-instance, capability allowlist least-privilege, atomic settings, bundle config).
 
 **Khởi động desktop:**
-1. Đọc `~/.mdview/daemon.lock` (port + pid).
+1. Đọc `~/.waggledance/daemon.lock` (port + pid).
 2. Daemon sống (lock hợp lệ, `/health` trả lời) → cửa sổ Tauri **attach**: webview trỏ `http://127.0.0.1:{port}`.
 3. Không có daemon → app **tự spawn daemon** (bind `127.0.0.1` mặc định, NFR-05), ghi lock, rồi hiện cửa sổ. → Windows: double-click icon là chạy, không cần terminal.
 4. Bật lần 2 → `tauri-plugin-single-instance` focus cửa sổ cũ, không mở thêm.
 
 **Đóng cửa sổ:** thu vào **system tray**, daemon **vẫn chạy** để agent tiếp tục push file; click tray mở lại cửa sổ. Quit hẳn từ tray mới dừng daemon (nếu daemon do chính app này spawn).
 
-**Bất biến single-daemon:** mọi launcher (CLI `mdview serve` hay desktop) đều đi qua `daemon.lock` — sống thì attach/reuse, chết thì lên làm daemon. Không bao giờ 2 server cùng registry.
+**Bất biến single-daemon:** mọi launcher (CLI `waggledance serve` hay desktop) đều đi qua `daemon.lock` — sống thì attach/reuse, chết thì lên làm daemon. Không bao giờ 2 server cùng registry.
 
 **Read-only:** desktop không ghi vào file/folder user; state riêng (window, prefs) ở app-data-dir cross-platform (macOS Application Support, Linux `~/.local/share`, Windows `%APPDATA%`).
 
@@ -525,7 +525,7 @@ Desktop = binary `mdview-desktop` (Tauri v2), mỏng, tái dùng pattern từ ma
 
 ### Phase 2 — Agent Integration (2-3 tuần)
 - [ ] MCP server (stdio transport)
-- [ ] **Tool duy nhất `mdview_view_file`** (§5.5) + implicit project auto-create (FR-04)
+- [ ] **Tool duy nhất `waggledance_view_file`** (§5.5) + implicit project auto-create (FR-04)
 - [ ] AGENTS.md template (mẫu 1-tool, §5.7)
 - [ ] CLI hoàn chỉnh (tất cả commands FR-29) — status/list/search sống ở CLI, không ở MCP
 
@@ -539,7 +539,7 @@ Desktop = binary `mdview-desktop` (Tauri v2), mỏng, tái dùng pattern từ ma
 - [x] Màn hình Settings (`/settings`, FR-22b) + `/api/config` (GET/POST)
 
 ### Phase 4 — Production Hardiness + Desktop (2-3 tuần)
-- [ ] **Desktop shell `mdview-desktop` (Tauri)**: attach/spawn daemon, tray, single-instance (§7.5)
+- [ ] **Desktop shell `waggledance-desktop` (Tauri)**: attach/spawn daemon, tray, single-instance (§7.5)
 - [ ] Binary packaging: single CLI binary + Tauri bundle (.dmg/.deb/.AppImage/.exe), Homebrew tap
 - [ ] Logging + log rotation
 - [ ] Performance tuning cho large projects
@@ -562,7 +562,7 @@ Desktop = binary `mdview-desktop` (Tauri v2), mỏng, tái dùng pattern từ ma
 | MCP SDK | **rmcp** hoặc **mcp-rs** | Rust MCP server implementation |
 | Desktop shell | **Tauri v2** | Cửa sổ native + tray, tái dùng core Rust + web UI, binary nhỏ (<15MB). Tham khảo marky. Không Electron, không Go. |
 | Desktop frontend | Web UI hiện có (native webview) | DRY: cùng UI với browser (WebView2/WKWebView/WebKitGTK), không render lại |
-| Kiến trúc code | **Ports & adapters (hexagonal)** mức đủ dùng | Core (`mdview-core`) tách khỏi Axum/Tauri/SQLite; service/command/DTO; test domain không cần server/DB (§7.4) |
+| Kiến trúc code | **Ports & adapters (hexagonal)** mức đủ dùng | Core (`waggledance-core`) tách khỏi Axum/Tauri/SQLite; service/command/DTO; test domain không cần server/DB (§7.4) |
 
 **Alternative:** Nếu muốn prototype nhanh hơn, có thể dùng **Node.js + Fastify** cho Phase 1-2, sau đó rewrite Rust ở Phase 3-4 nếu cần.
 
@@ -570,7 +570,7 @@ Desktop = binary `mdview-desktop` (Tauri v2), mỏng, tái dùng pattern từ ma
 
 ## 10. Configuration
 
-File config tại `~/.mdview/config.toml`:
+File config tại `~/.waggledance/config.toml`:
 
 ```toml
 [server]
@@ -603,28 +603,28 @@ enable_semantic = false  # Deferred (YAGNI) — FTS5 keyword đủ; bật lại 
 File này có thể đặt trong project's `CLAUDE.md` hoặc global `~/.claude/CLAUDE.md`:
 
 ```markdown
-## Documentation Viewing (MDView)
+## Documentation Viewing (Waggledance)
 
-MDView is running locally at http://localhost:7700 as a multi-project 
+Waggledance is running locally at http://localhost:7700 as a multi-project 
 markdown server. Use it to let the user view generated docs in browser.
 
 ### After creating/updating markdown files:
-1. Call `mdview_notify_file` with the absolute file path
-2. Call `mdview_open_file` to get the browser URL
+1. Call `waggledance_notify_file` with the absolute file path
+2. Call `waggledance_open_file` to get the browser URL
 3. Tell the user: "You can view this at: <url>"
 
 ### Registering a new project (first time only):
-Call `mdview_register_project` with:
+Call `waggledance_register_project` with:
 - root_path: absolute path to project root
 - name: human-readable project name
 
 ### MCP tools available:
-- mdview_status — check if MDView is running
-- mdview_register_project — register a project
-- mdview_notify_file — notify of file changes
-- mdview_open_file — get browser URL for a file
-- mdview_search — search across project files
-- mdview_list_projects — list registered projects
+- waggledance_status — check if Waggledance is running
+- waggledance_register_project — register a project
+- waggledance_notify_file — notify of file changes
+- waggledance_open_file — get browser URL for a file
+- waggledance_search — search across project files
+- waggledance_list_projects — list registered projects
 ```
 
 ---
@@ -644,7 +644,7 @@ Call `mdview_register_project` with:
 
 ## Appendix A: Comparison với Tools Hiện Tại
 
-| Feature | MDView (proposed) | Marky | mdserve | markdown-vault-mcp |
+| Feature | Waggledance (proposed) | Marky | mdserve | markdown-vault-mcp |
 |---|---|---|---|---|
 | Web server (remote view) | ✅ | ❌ (desktop app) | ✅ | ❌ |
 | Multi-project registry | ✅ | ❌ | ❌ | Partial |

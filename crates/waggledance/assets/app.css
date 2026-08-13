@@ -1,0 +1,1782 @@
+/* ============================================================
+   app.css — Atelier app-side GLUE (D2)
+
+   Loaded LAST, after the vendored Atelier bundle (contract.css +
+   components.css + editorial.css + atelier.css). Styles ONLY the
+   app-specific chrome that has no Atelier .fg-* core role: the
+   page layout grid (sidebar / content / right rail), the sidebar
+   file tree, the right TOC + backlinks panel, the breadcrumb, and
+   the topbar layout (no horizontal app-bar core role exists —
+   .fg-nav is a vertical rail, a different concept).
+
+   Every color/type/radius/elevation value below reads a Tier-2/3
+   token. Raw px appears only for structural geometry not on any
+   token scale (fixed column widths, the topbar's rendered-height
+   sticky offset) per docs/design/AGENTS.md. This file must never
+   redefine an Atelier token custom property.
+   ============================================================ */
+
+/* No Atelier reset ever zeroed the UA default `body` margin (8px). Harmless
+   on a normally-scrolling page, but on Code view — whose layout math (topbar
+   53px + .content--code's calc(100vh - 53px)) already sums to exactly the
+   viewport height — that stray 8px was enough to force a second, redundant
+   outer/page scrollbar alongside `.codeview`'s own inner one. */
+body {
+  margin: 0;
+}
+/* Reserve the sticky topbar's height when the browser scrolls something into
+   view (an autofocused search input, a heading anchor, a focused control), so
+   it never lands hidden underneath the bar. */
+html {
+  scroll-padding-top: calc(53px + var(--space-3));
+}
+/* The simple pages (home / search / settings / error) render their content
+   flush under the sticky topbar; give them breathing room so the first element
+   — e.g. the autofocused search input — is never clipped by the bar. */
+main.fg-page {
+  padding-top: var(--space-5);
+}
+
+/* ── Topbar: sticky header bar (no horizontal app-bar core role) ── */
+.topbar {
+  /* Pinned to exactly 53px (border-box: padding+border count inside it)
+     instead of an auto height that only happened to be close to it — every
+     sticky offset below (.breadcrumb/.sidebar/.rightbar/.content--code)
+     assumes this exact number, and a mismatch there is what left a gap
+     between the topbar and the breadcrumb while scrolling. */
+  box-sizing: border-box;
+  height: 53px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-5);
+  border-bottom: var(--border-width-hairline) solid var(--color-border);
+  position: sticky;
+  top: 0;
+  background: var(--color-bg);
+  z-index: var(--z-nav);
+}
+/* Three areas (brand/hamburger, crumb, actions/settings/theme) so the bar
+   can be lined up with the sidebar/content/rightbar columns below it on
+   desktop — see the grid override further down. Below desktop this is a
+   plain flex row, the same shape the topbar always had. */
+.topbar__left,
+.topbar__center,
+.topbar__right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.topbar__left {
+  flex: none;
+}
+.topbar__center {
+  flex: 1;
+}
+.topbar__right {
+  flex: none;
+  margin-left: auto;
+}
+.topbar .home {
+  font-family: var(--type-ui-font);
+  font-size: var(--type-ui-size);
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+.crumb {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--type-body-sm-font);
+  font-size: var(--type-body-sm-size);
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-link {
+  font-family: var(--type-body-sm-font);
+  font-size: var(--type-body-sm-size);
+  color: var(--color-text-muted);
+}
+/* ── Top bar menu ────────────────────────────────────────────────────
+   One group holds everything that navigates away from this page — the
+   project's section tabs and the Settings link. On a wide screen it is
+   not a menu at all: the control is hidden and the panel lays out
+   inline, so the bar reads exactly as it did before it existed. The
+   `auto` margin lives here rather than on `.nav-link` so the whole
+   group, not just Settings, is what gets pushed to the right edge.
+
+   The open state is a checkbox, not a `<details>`: a closed `<details>`
+   has its content hidden by the browser (`::details-content`), which no
+   `display` rule here overrides, so the wide bar came out with no
+   navigation at all. A checkbox leaves the panel an ordinary element
+   that these rules alone decide about. */
+.topbar-menu {
+  margin-left: auto;
+}
+.topbar-menu__toggle,
+.topbar-menu__button {
+  display: none;
+}
+.topbar-menu__panel {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+/* ── Pane bar menu ───────────────────────────────────────────────────
+   Same shape as the bar menu above, applied to the row over a terminal
+   pane: wide, the strip and the creation controls lay out as they always
+   did; narrow, the row is the active pane's tab and one control, with
+   every other pane and the creation controls inside the panel. */
+.pane-menu__toggle,
+.pane-menu__button {
+  display: none;
+}
+/* The standalone copy of the active tab needs a selector that outranks
+   `.pane-strip__tab`'s own `display: flex`, which the terminal page emits
+   in an inline <style> AFTER this file — same specificity, later wins, and
+   the tab rendered twice on a wide screen until this was two classes. */
+.pane-bar > .pane-bar__current {
+  display: none;
+}
+.pane-menu__panel {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+/* The control's text label is for screen readers; sighted users get the
+   glyph beside it. */
+.menu-label,
+.topbar-menu__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+/* Below the narrow breakpoint the summary becomes the only visible
+   control and the panel drops full-width under the bar rather than
+   sliding in from a side: the bar is already the full width, so the
+   panel that belongs to it starts where it ends. `absolute` inside the
+   sticky bar keeps it pinned to the bar while the page scrolls under. */
+@media (max-width: 720px) {
+  .topbar-menu__button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border: var(--border-width-hairline) solid var(--color-border);
+    border-radius: var(--btn-radius);
+    color: var(--color-text);
+    font-size: var(--type-ui-size);
+    cursor: pointer;
+  }
+  .topbar-menu__toggle:focus-visible + .topbar-menu__button,
+  .topbar-menu__toggle:checked + .topbar-menu__button {
+    background: var(--color-surface-hover);
+  }
+  .topbar-menu__panel {
+    display: none;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    z-index: var(--z-nav);
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+    padding: var(--space-2) var(--space-5);
+    border-bottom: var(--border-width-hairline) solid var(--color-border);
+    background: var(--color-surface-raised);
+    box-shadow: 0 4px 12px rgb(0 0 0 / 0.35);
+  }
+  .topbar-menu__toggle:checked ~ .topbar-menu__panel {
+    display: flex;
+  }
+  /* Every row is a full-width touch target, and the active section keeps
+     the underline it carries on the bar — turned into a left rule, which
+     is what reads as "you are here" in a vertical list. */
+  .topbar-menu__panel > .proj-tabs {
+    flex-direction: column;
+    gap: 0;
+  }
+  .topbar-menu__panel .proj-tab,
+  .topbar-menu__panel .nav-link {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 var(--space-2);
+    border-bottom: 0;
+    border-left: 2px solid transparent;
+  }
+  .topbar-menu__panel .proj-tab--active {
+    border-bottom: 0;
+    border-left-color: var(--color-action);
+  }
+  /* One line: the pane being viewed, then the control. Neither may wrap —
+     the whole point of the row is that it costs one line. */
+  .pane-bar {
+    position: relative;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    gap: var(--space-2);
+  }
+  .pane-bar > .pane-bar__current {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+  }
+  /* The tab's own parts shrink rather than push the control off the edge. */
+  .pane-bar__current .term-pane__id,
+  .pane-bar__current .term-pane__meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pane-menu__button {
+    display: flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    height: 44px;
+    border: var(--border-width-hairline) solid var(--color-border);
+    border-radius: var(--btn-radius);
+    color: var(--color-text);
+    font-size: var(--type-ui-size);
+    cursor: pointer;
+  }
+  .pane-menu__toggle:focus-visible + .pane-menu__button,
+  .pane-menu__toggle:checked + .pane-menu__button {
+    background: var(--color-surface-hover);
+  }
+  .pane-menu__panel {
+    display: none;
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 100%;
+    z-index: var(--z-nav);
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-1);
+    margin-top: var(--space-1);
+    padding: var(--space-2);
+    border: var(--border-width-hairline) solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface-raised);
+    box-shadow: 0 4px 12px rgb(0 0 0 / 0.35);
+  }
+  .pane-menu__toggle:checked ~ .pane-menu__panel {
+    display: flex;
+  }
+  /* Inside the panel the strip is a list, and the creation controls sit
+     under it rather than off to one side. */
+  .pane-menu__panel .pane-strip {
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .pane-menu__panel .term-create {
+    justify-content: flex-start;
+  }
+}
+.theme-toggle {
+  margin-left: var(--space-3);
+  width: 32px; /* structural: fixed icon-button footprint */
+  height: 32px;
+  padding: 0;
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--btn-radius);
+  background: none;
+  color: var(--color-text);
+  font-size: var(--type-ui-size);
+  cursor: pointer;
+}
+.theme-toggle:hover {
+  background: var(--color-surface-hover);
+}
+/* Mobile-only hamburger for the file-tree sidebar (shown via the max-width
+   media query below; hidden on wide screens). */
+.sidebar-toggle {
+  display: none;
+  width: 32px; /* structural: fixed icon-button footprint */
+  height: 32px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--btn-radius);
+  background: none;
+  color: var(--color-text);
+  font-size: var(--type-ui-size);
+  cursor: pointer;
+}
+.sidebar-toggle:hover {
+  background: var(--color-surface-hover);
+}
+/* The drawer backdrop only exists on file pages; hidden until the drawer opens
+   on mobile (see the media query). */
+.sidebar-backdrop {
+  display: none;
+}
+
+/* ── Page layout grid: sidebar / content / right rail ───────────── */
+/* Column widths are structural geometry (not on the space scale). */
+.layout {
+  display: flex;
+  align-items: stretch;
+}
+.content {
+  flex: 1;
+  min-width: 0;
+}
+/* ── Home: project cards ─────────────────────────────────────────
+   Cards (not a table) — they wrap gracefully and stay tap-friendly on
+   phones/tablets. Each card is a link to the project with a delete
+   control overlaid top-right that unregisters it. */
+.proj-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--space-4);
+}
+/* D7/D8: the add-project form sits above the list, one field wide rather
+   than the multi-column `.fg-field-row` the settings page uses — a single
+   absolute path is the whole form. `.fg-field`/`.fg-input`/`.fg-btn` are the
+   Atelier core roles (`atelier/components.css`) the settings form already
+   reuses; this rule only sets the row layout around them. Spacing above and
+   below the form comes from `.fg-page`'s own flex `gap`, the same as every
+   other direct child of `<main class="fg-page">` on this page (the register
+   error banner, the list, the unassigned card) — no margin duplicates it. */
+.proj-add {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+.proj-add .fg-field {
+  flex: 1;
+  min-width: 0;
+}
+/* The project list reads as rows, not tiles: every name starts on the same
+   left edge so the eye scans one column instead of eight boxes, and a
+   worktree is indented under the project it branches from with a rule down
+   its left, which is what makes the group visible without a header. */
+.proj-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: var(--border-width-hairline) solid var(--color-border);
+}
+.proj-row {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-3);
+  border-bottom: var(--border-width-hairline) solid var(--color-border);
+}
+.proj-row__link {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) var(--space-7) var(--space-2) 0;
+  text-decoration: none;
+  color: inherit;
+}
+.proj-row__link:hover .proj-row__name {
+  text-decoration: underline;
+}
+.proj-row__name {
+  font-weight: var(--weight-semibold);
+}
+.proj-row__meta {
+  color: var(--color-text-subtle);
+  font-size: var(--type-caption-size);
+}
+.proj-row--branch .proj-row__link {
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--color-border);
+  margin-left: var(--space-2);
+}
+.proj-row--branch .proj-row__name {
+  font-weight: var(--weight-regular);
+  color: var(--color-text-muted);
+}
+.proj-row__delete {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  margin: 0;
+}
+/* Terminal-pane badges (D1/D1a/D2/D3/D5): sit under the row's meta line, a
+   sibling of `.proj-row__link` rather than nested inside it — `flex-wrap`
+   on `.proj-row` above plus `flex-basis: 100%` here pushes this onto its
+   own line under the name/meta anchor. Reuses `.fg-status`'s tone
+   vocabulary rather than a second one — a badge is nothing but a
+   `.fg-status` pill plus the pane's program, at row scale. */
+.proj-row__badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 100%;
+  padding: 0 var(--space-7) var(--space-2) 0;
+}
+.proj-row__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 1px var(--space-2);
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--radius-pill);
+  text-decoration: none;
+  color: inherit;
+}
+.proj-row__badge:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-hover);
+}
+.proj-row__badge-program {
+  color: var(--color-text-muted);
+  font-size: var(--type-caption-size);
+}
+/* project-suggestions S1/S2/S3: the suggestion block sits under the
+   project list, one `.proj-row` per unregistered folder a herdr session is
+   running in. It reuses `.proj-list`/`.proj-row`'s own row layout rather
+   than a second one — a suggestion differs from a registered project's row
+   only in showing a full path (S3) and carrying a register form instead of
+   a delete one. */
+.proj-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.proj-suggestions__title {
+  margin: 0;
+}
+.proj-suggestions__hint {
+  margin: 0;
+}
+.proj-suggestion__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) 0;
+}
+.proj-suggestion__path {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+.proj-suggestion__register {
+  margin: 0;
+  align-self: center;
+}
+.proj-card {
+  position: relative;
+  display: flex;
+}
+.proj-card__link {
+  flex: 1;
+  text-decoration: none;
+  padding-right: var(--space-7); /* reserve the top-right corner for delete */
+}
+.proj-card__link:hover {
+  border-color: var(--color-border-strong);
+}
+.proj-card__delete {
+  position: absolute;
+  top: var(--space-3);
+  right: var(--space-3);
+  margin: 0;
+}
+.proj-card__del {
+  width: 28px; /* structural: fixed icon-button footprint */
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-subtle);
+  font-size: var(--type-body-sm-size);
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+.proj-card__del:hover {
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+  background: var(--color-danger-tint);
+}
+
+.sidebar,
+.rightbar {
+  box-sizing: border-box;
+  overflow-y: auto;
+  /* Sticks below the topbar; 53px matches the topbar's rendered
+     height (structural offset, not a token-scale value). */
+  height: calc(100vh - 53px);
+  position: sticky;
+  top: 53px;
+}
+.sidebar {
+  width: 280px;
+  min-width: 220px;
+  max-width: 380px;
+  padding: var(--space-3);
+  border-right: var(--border-width-hairline) solid var(--color-border);
+  background: var(--color-surface);
+}
+.rightbar {
+  width: 240px;
+  min-width: 200px;
+  flex-shrink: 0;
+  padding: var(--space-5) var(--space-4);
+  border-left: var(--border-width-hairline) solid var(--color-border);
+}
+
+/* ── Code view's main pane: fills the viewport (same height:calc(100vh -
+   53px) the sidebar/rightbar above already use) instead of growing the
+   whole page — the breadcrumb keeps its natural size, and `.codeview`/
+   `.codelist` alone scroll, both horizontally and vertically, like a code
+   editor pane rather than a document. ───────────────────────────────── */
+.content--code {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 53px);
+}
+.content--code > .breadcrumb {
+  flex: none;
+  position: static;
+}
+.content--code > .codeview,
+.content--code > .codelist {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ── Desktop: sync the topbar's 3 areas with the sidebar/content/rightbar
+   column widths above (280px / 240px, mirrored from .sidebar/.rightbar),
+   so the bar's own left/right edges land exactly above the columns below
+   it. Scoped to `.topbar:has(+ .layout)` — only pages that actually render
+   the 3-column `.layout` (file/code pages), never the plain `.fg-page`
+   pages (home/search/settings), which keep the ordinary flex row at every
+   width. Matches the breakpoint above which .rightbar itself is visible
+   (kept in sync with the `max-width: 900px` rule further down). ── */
+@media (min-width: 901px) {
+  .topbar:has(+ .layout) {
+    display: grid;
+    grid-template-columns: 280px 1fr 240px;
+    gap: 0;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .topbar:has(+ .layout) .topbar__left {
+    padding-left: var(--space-5);
+  }
+  .topbar:has(+ .layout) .topbar__right {
+    margin-left: 0;
+    justify-content: flex-end;
+    padding-right: var(--space-5);
+  }
+}
+
+/* ── Sidebar file tree (D2: distinct concept from editorial's
+   in-document .fg-chapters — this is a cross-file, client-zoomed
+   folder tree) ──────────────────────────────────────────────── */
+.fg-sidebar-search {
+  margin-bottom: var(--space-3);
+}
+.chapter {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.chap-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: var(--space-2);
+  font-family: var(--type-caption-font);
+  font-size: var(--type-caption-size);
+}
+.chap-seg {
+  padding: var(--space-0) var(--space-1);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--type-caption-size);
+  cursor: pointer;
+}
+.chap-seg:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+.chap-seg:last-child {
+  color: var(--color-text);
+  font-weight: var(--weight-semibold);
+}
+.chap-sep {
+  color: var(--color-text-subtle);
+}
+/* ── Subfolders disclosure: all sibling folders collapse into ONE bar so the
+   chapter (file) list stays the focus of the navigation. ─────────────── */
+.chap-folders {
+  margin: var(--space-2) 0 var(--space-1);
+}
+.chap-folders__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--nav-item-radius);
+  background: none;
+  color: var(--color-text-muted);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.chap-folders__bar:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+.chap-folders__chev {
+  flex: none;
+  line-height: 1;
+  color: var(--color-text-subtle);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+.chap-folders.is-open .chap-folders__chev {
+  transform: rotate(90deg);
+}
+.chap-folders__label {
+  flex: 1;
+  font-family: var(--type-label-font);
+  font-size: var(--type-label-size);
+  letter-spacing: var(--type-label-tracking);
+  text-transform: var(--type-label-case);
+}
+.chap-folders__count {
+  flex: none;
+  min-width: 20px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-sunken);
+  color: var(--color-text-subtle);
+  font-family: var(--num-font);
+  font-size: var(--type-tag-size);
+  line-height: 18px;
+  text-align: center;
+}
+/* Smooth height reveal via the grid 0fr→1fr trick (needs the inner wrapper). */
+.chap-folders__list {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--motion-open) var(--ease-standard);
+}
+.chap-folders.is-open .chap-folders__list {
+  grid-template-rows: 1fr;
+}
+.chap-folders__inner {
+  min-height: 0;
+  overflow: hidden;
+}
+.chap-subfolder {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  width: 100%;
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-4);
+  border: 0;
+  border-radius: var(--nav-item-radius);
+  background: none;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--type-body-sm-size);
+  text-align: left;
+  cursor: pointer;
+  word-break: break-word;
+}
+.chap-subfolder::before {
+  content: "\1F4C1"; /* folder glyph */
+  flex: none;
+  opacity: 0.7;
+}
+.chap-subfolder:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+/* ── Chapter section label + file list ──────────────────────────────── */
+.chap-sec {
+  margin: var(--space-3) 0 var(--space-1);
+  padding: 0 var(--space-2);
+  font-family: var(--type-label-font);
+  font-size: var(--type-label-size);
+  letter-spacing: var(--type-label-tracking);
+  text-transform: var(--type-label-case);
+  color: var(--color-text-subtle);
+}
+.chap-file {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  text-align: left;
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--nav-item-radius);
+  background: none;
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--type-body-sm-size);
+  cursor: pointer;
+  word-break: break-word;
+}
+/* Sidebar files are <a> links, so the browser's :visited color would tint
+   already-opened files and read like a second "active" state. Keep every file
+   the same color; only the single .active item stands out. */
+.chap-file:visited {
+  color: var(--color-text);
+}
+.chap-file:hover {
+  background: var(--color-surface-hover);
+}
+.chap-file.active {
+  background: transparent;
+  border-left: var(--border-width-strong) solid var(--color-action);
+  padding-left: calc(var(--space-2) - var(--border-width-strong));
+  /* Keep the accent bar a crisp vertical line: the base .chap-file radius
+     would otherwise round the top/bottom of the left border. */
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+/* ── Right panel: table of contents + backlinks ─────────────────── */
+.panel-head {
+  margin: var(--space-4) 0 var(--space-2);
+  font-family: var(--type-label-font);
+  font-size: var(--type-label-size);
+  letter-spacing: var(--type-label-tracking);
+  text-transform: var(--type-label-case);
+  color: var(--color-text-subtle);
+}
+.panel-head:first-child {
+  margin-top: 0;
+}
+.toc,
+.backlinks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.toc li a,
+.backlinks li a {
+  display: block;
+  padding: var(--space-1) 0;
+  border-left: var(--border-width-strong) solid transparent;
+  padding-left: var(--space-2);
+  font-family: var(--type-body-sm-font);
+  font-size: var(--type-body-sm-size);
+  color: var(--color-text-muted);
+}
+.toc li a:hover,
+.backlinks li a:hover {
+  color: var(--color-action);
+}
+.toc li a.active {
+  border-left-color: var(--color-action);
+  color: var(--color-text);
+}
+.toc-l2 {
+  padding-left: var(--space-2);
+}
+.toc-l3 {
+  padding-left: var(--space-4);
+}
+.toc-l4 {
+  padding-left: var(--space-5);
+}
+.backlinks li a {
+  color: var(--color-link);
+}
+
+/* ── Breadcrumb: sticky bar above the article, full content-column width,
+   split into two equal left|right halves (crumbs on the left; the right
+   half carries a code file's type/size, when the page has one) ───── */
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  position: sticky;
+  top: 53px; /* below the sticky topbar; matches its rendered height, same
+                offset .sidebar/.rightbar already stick to */
+  padding: var(--space-3) var(--space-6);
+  background: var(--color-bg);
+  border-bottom: var(--border-width-hairline) solid var(--color-border);
+  font-family: var(--type-body-sm-font);
+  font-size: var(--type-body-sm-size);
+  color: var(--color-text-muted);
+}
+.breadcrumb__left,
+.breadcrumb__right {
+  flex: 1 1 50%;
+  min-width: 0;
+}
+.breadcrumb__left {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.breadcrumb__right {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.breadcrumb__meta-lang {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+}
+/* Docs only (`narrow` in breadcrumb()): match `.fg-reading`'s own width so
+   the bar lines up with the markdown column below it, instead of spanning
+   the full `.content` width Code's bar still uses. */
+.breadcrumb--reading {
+  max-width: var(--reading-col);
+  margin-left: auto;
+  margin-right: auto;
+}
+/* `.fg-reading` (atelier/editorial.css, a shared Atelier core class) has no
+   top margin of its own, so the article otherwise starts flush against the
+   breadcrumb's bottom edge — add the breathing room here, scoped to exactly
+   this adjacency, rather than editing the vendored shared class. */
+.breadcrumb + .fg-reading {
+  margin-top: var(--space-5);
+}
+.breadcrumb .sep {
+  margin: 0 var(--space-0);
+  color: var(--color-text-subtle);
+}
+.copy-md {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  color: var(--color-text-muted);
+  font-family: var(--type-tag-font);
+  font-size: var(--type-tag-size);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+.copy-md:hover {
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-hover);
+}
+.copy-md.is-copied {
+  color: var(--color-action);
+  border-color: var(--color-action);
+}
+.copy-md__icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  display: block;
+}
+
+/* ── Responsive: hide rails on narrow viewports ─────────────────── */
+@media (max-width: 900px) {
+  .rightbar {
+    display: none;
+  }
+}
+@media (max-width: 700px) {
+  .sidebar-toggle {
+    display: inline-flex;
+  }
+  /* Hidden by default on mobile; the hamburger opens it as an overlay drawer. */
+  .sidebar {
+    display: none;
+  }
+  .layout.sidebar-open .sidebar {
+    display: block;
+    position: fixed;
+    top: 53px; /* below the sticky topbar (matches its rendered height) */
+    left: 0;
+    bottom: 0;
+    width: 82vw;
+    max-width: 320px;
+    z-index: var(--z-modal);
+    box-shadow: var(--elevation-lg);
+  }
+  .layout.sidebar-open .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 53px 0 0 0;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: var(--z-popover);
+  }
+  .breadcrumb {
+    padding: var(--space-3) var(--space-4);
+  }
+  /* Save width on phones: icon-only copy button in the top bar. */
+  .copy-md__txt {
+    display: none;
+  }
+  .copy-md {
+    padding: var(--space-1) var(--space-2);
+  }
+}
+
+/* ============================================================
+   Client-built widgets (atelier-css-7)
+
+   app.js builds these two widgets dynamically, so they never
+   appear in views.rs markup and were missed by the css-2 rewrite.
+   Token choices mirror the closest Atelier core roles (.fg-cmdk
+   for the jump palette, .fg-icon-btn / the topbar's .theme-toggle
+   for the mermaid toolbar buttons) so the look stays consistent
+   with the rest of the system even though the class names stay
+   app-owned (renaming them is a markup change, out of scope here).
+   ============================================================ */
+
+/* ── Fuzzy file-jump palette (Cmd/Ctrl+K) ────────────────────── */
+.jump-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--color-scrim);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh; /* structural: keeps the box near the top, not centered */
+  z-index: var(--z-modal);
+}
+.jump-overlay[hidden] {
+  display: none;
+}
+.jump-box {
+  width: min(560px, 92vw); /* structural: dialog footprint */
+  background: var(--color-surface-raised);
+  border: var(--border-width-hairline) solid var(--color-border-strong);
+  border-radius: var(--card-radius);
+  box-shadow: var(--elevation-lg);
+  overflow: hidden;
+}
+.jump-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-bottom: var(--border-width-hairline) solid var(--color-border);
+  background: transparent;
+  color: var(--color-text);
+  font-family: var(--type-ui-font);
+  font-size: var(--type-ui-size);
+  outline: none;
+}
+.jump-input::placeholder {
+  color: var(--color-text-subtle);
+}
+.jump-input:focus-visible {
+  outline: var(--focus-width) solid var(--focus-color);
+  outline-offset: calc(var(--focus-offset) * -1);
+}
+.jump-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-1);
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.jump-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--nav-item-radius);
+  cursor: pointer;
+}
+.jump-item:hover,
+.jump-item.active {
+  background: var(--color-surface-hover);
+}
+.jump-title {
+  color: var(--color-text);
+  font-family: var(--type-ui-font);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.jump-path {
+  color: var(--color-text-muted);
+  font-family: var(--type-caption-font);
+  font-size: var(--type-caption-size);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Mermaid pan/zoom + fullscreen toolbar ───────────────────── */
+/* A diagram is not code: keep mermaid off the editorial signature-dark code
+   panel so it renders on a normal, scheme-appropriate surface. */
+.fg-prose pre.mermaid,
+pre.mermaid.zoomable {
+  background: var(--color-surface);
+  color: var(--color-text);
+  padding: 0; /* a diagram, not code — no inner padding, so centering is exact */
+}
+/* The wrapper is the positioned ancestor for the toolbar (which lives on the
+   wrapper, not inside the mermaid-owned <pre>). */
+.mermaid-wrap {
+  position: relative;
+}
+pre.mermaid.zoomable {
+  overflow: hidden;
+  cursor: grab;
+}
+pre.mermaid.zoomable.grabbing {
+  cursor: grabbing;
+}
+pre.mermaid.zoomable > svg {
+  transform-origin: 0 0;
+  will-change: transform;
+  max-width: none; /* let it scale beyond the container while panning */
+  display: block; /* centering is done via transform (see fit() in app.js) */
+}
+.mermaid-controls {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  display: flex;
+  gap: var(--space-1);
+  /* Always visible — hover-only reveal made the zoom controls undiscoverable
+     (and invisible entirely on touch, which has no hover). Dim at rest,
+     full-strength on hover/focus. */
+  opacity: 0.85;
+  transition: opacity var(--motion-fast) var(--ease-standard);
+  z-index: var(--z-popover);
+}
+pre.mermaid.zoomable:hover .mermaid-controls,
+pre.mermaid.zoomable:focus-within .mermaid-controls {
+  opacity: 1;
+}
+/* Touch has no hover: bigger tap targets. */
+@media (hover: none) {
+  .mermaid-controls button {
+    width: 36px;
+    height: 36px;
+  }
+}
+.mermaid-error {
+  margin: var(--space-2) 0;
+  padding: var(--space-3);
+  border: var(--border-width-hairline) solid var(--color-danger);
+  border-radius: var(--radius-sm);
+  background: var(--color-danger-tint);
+  color: var(--color-danger);
+  font-family: var(--font-mono);
+  font-size: var(--type-body-sm-size);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.mermaid-controls button {
+  width: 28px; /* structural: fixed icon-button footprint */
+  height: 28px;
+  padding: 0;
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--btn-radius);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  font-size: var(--type-ui-size);
+  line-height: 1;
+  cursor: pointer;
+}
+.mermaid-controls button:hover {
+  background: var(--color-surface-hover);
+}
+/* Fullscreen targets the WRAPPER (so the toolbar comes along); the pre fills
+   it and fit() re-centers the diagram in the viewport. */
+.mermaid-wrap:fullscreen {
+  display: flex;
+  background: var(--color-bg);
+}
+.mermaid-wrap:fullscreen > pre.mermaid.zoomable {
+  width: 100%;
+  height: 100%;
+}
+.mermaid-wrap:fullscreen .mermaid-controls {
+  opacity: 1;
+}
+
+/* ── Settings form: grouped fieldset cards, eyebrow legends, spaced fields ── */
+.fg-settings {
+  max-width: 640px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+.fg-settings fieldset {
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.fg-settings legend {
+  padding: 0 var(--space-2);
+  font-family: var(--type-label-font);
+  font-size: var(--type-label-size);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--type-label-tracking);
+  text-transform: var(--type-label-case);
+  color: var(--color-text-subtle);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+/* Short numeric fields sit side by side; full-width fields (host, textarea) span. */
+.fg-settings .fg-field {
+  gap: var(--space-1);
+}
+.fg-field-row {
+  display: flex;
+  gap: var(--space-3);
+}
+.fg-field-row .fg-field {
+  flex: 1;
+  min-width: 0;
+}
+.fg-settings__version {
+  margin-left: var(--space-3);
+  font-weight: var(--weight-regular);
+}
+.fg-settings .fg-check {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-2);
+}
+.fg-settings > button[type="submit"] {
+  align-self: flex-start;
+}
+
+/* =====================================================   ANSI terminal rendering (agent-terminal-12)
+
+   `crates/waggledance-core/src/ansi.rs` translates a pane's ANSI screen
+   snapshot into these classes server-side (never xterm.js — this is a
+   polled snapshot, not a live PTY). The sixteen basic colours below are
+   deliberately aliases of the existing theme tokens (defined per
+   light/dark scheme in `assets/atelier/contract.css`) rather than fixed
+   hex values, so a screen stays readable in both themes automatically —
+   never redefine one of these as a literal colour. The 256-colour
+   palette further down is the opposite: those are literal xterm-standard
+   colours the terminal app itself chose, not theme colours, so they are
+   intentionally hard-coded (an index below 16 is folded onto the basic
+   classes below by `ansi.rs` instead of generating a 257th-317th rule).
+   ============================================================ */
+.ansi-bold { font-weight: var(--weight-bold); }
+.ansi-dim { opacity: 0.65; }
+.ansi-italic { font-style: italic; }
+.ansi-underline { text-decoration: underline; }
+/* Baseline reverse-video swap for a run with no explicit colour of its
+   own. When an explicit `ansi-fg-*`/`ansi-bg-*` class is ALSO present
+   (`ansi.rs` swaps which role — fg vs bg — an explicit colour renders in
+   before emitting classes, see `Style::effective_fg_bg`), that class is
+   declared further below in this file and overrides the matching
+   property here by plain source-order cascade — both are single-class
+   selectors of equal specificity, so no `.ansi-inverse.ansi-fg-*`
+   combinator table is needed. */
+.ansi-inverse { color: var(--color-surface-sunken); background-color: var(--color-text); }
+
+/* The sixteen basic ANSI colours (SGR 30-37/90-97 foreground, 40-47/
+   100-107 background) — each aliases a theme token so it flips with
+   light/dark automatically. Bright variants intentionally reuse their
+   base tone: Atelier has no distinct "bright" scale to draw from, and a
+   fixed brightening (e.g. `color-mix(... white)`) would itself be a
+   value that only reads correctly on one background. */
+.ansi-fg-black { color: var(--color-text-subtle); }
+.ansi-fg-red { color: var(--color-danger); }
+.ansi-fg-green { color: var(--color-success); }
+.ansi-fg-yellow { color: var(--color-warning); }
+.ansi-fg-blue { color: var(--color-link); }
+.ansi-fg-magenta { color: var(--color-brand); }
+.ansi-fg-cyan { color: var(--color-info); }
+.ansi-fg-white { color: var(--color-text); }
+.ansi-fg-bright-black { color: var(--color-text-muted); }
+.ansi-fg-bright-red { color: var(--color-danger); }
+.ansi-fg-bright-green { color: var(--color-success); }
+.ansi-fg-bright-yellow { color: var(--color-warning); }
+.ansi-fg-bright-blue { color: var(--color-link); }
+.ansi-fg-bright-magenta { color: var(--color-brand); }
+.ansi-fg-bright-cyan { color: var(--color-info); }
+.ansi-fg-bright-white { color: var(--color-text); }
+.ansi-bg-black { background-color: var(--color-text-subtle); }
+.ansi-bg-red { background-color: var(--color-danger); }
+.ansi-bg-green { background-color: var(--color-success); }
+.ansi-bg-yellow { background-color: var(--color-warning); }
+.ansi-bg-blue { background-color: var(--color-link); }
+.ansi-bg-magenta { background-color: var(--color-brand); }
+.ansi-bg-cyan { background-color: var(--color-info); }
+.ansi-bg-white { background-color: var(--color-text); }
+.ansi-bg-bright-black { background-color: var(--color-text-muted); }
+.ansi-bg-bright-red { background-color: var(--color-danger); }
+.ansi-bg-bright-green { background-color: var(--color-success); }
+.ansi-bg-bright-yellow { background-color: var(--color-warning); }
+.ansi-bg-bright-blue { background-color: var(--color-link); }
+.ansi-bg-bright-magenta { background-color: var(--color-brand); }
+.ansi-bg-bright-cyan { background-color: var(--color-info); }
+.ansi-bg-bright-white { background-color: var(--color-text); }
+
+/* ── The pane screen is its own dark surface ─────────────────────
+   The theme-token aliases above exist so a screen stays readable
+   whichever scheme the page is in. `.term-screen` opts out of that
+   premise: it paints a fixed dark terminal surface of its own, so the
+   page's scheme no longer decides what is legible inside it — the
+   sixteen colours below do, and they are the literal terminal palette
+   an operator expects to recognise. This is the one place the rule
+   above ("never redefine one of these as a literal colour") is
+   deliberately set aside, and only because the surface underneath is
+   itself fixed. Everywhere else outside `.term-screen`, the aliases
+   still rule.
+   The 256-colour block further down needs no such override — those are
+   already literal xterm colours, chosen against a dark terminal to
+   begin with. */
+.term-screen .ansi-fg-black { color: #3f4451; }
+.term-screen .ansi-fg-red { color: #e05561; }
+.term-screen .ansi-fg-green { color: #8cc265; }
+.term-screen .ansi-fg-yellow { color: #d18f52; }
+.term-screen .ansi-fg-blue { color: #4aa5f0; }
+.term-screen .ansi-fg-magenta { color: #c162de; }
+.term-screen .ansi-fg-cyan { color: #42b3c2; }
+.term-screen .ansi-fg-white { color: #d7dae0; }
+.term-screen .ansi-fg-bright-black { color: #4f5666; }
+.term-screen .ansi-fg-bright-red { color: #ff616e; }
+.term-screen .ansi-fg-bright-green { color: #a5e075; }
+.term-screen .ansi-fg-bright-yellow { color: #f0a45d; }
+.term-screen .ansi-fg-bright-blue { color: #4dc4ff; }
+.term-screen .ansi-fg-bright-magenta { color: #de73ff; }
+.term-screen .ansi-fg-bright-cyan { color: #4cd1e0; }
+.term-screen .ansi-fg-bright-white { color: #e6e6e6; }
+.term-screen .ansi-bg-black { background-color: #3f4451; }
+.term-screen .ansi-bg-red { background-color: #e05561; }
+.term-screen .ansi-bg-green { background-color: #8cc265; }
+.term-screen .ansi-bg-yellow { background-color: #d18f52; }
+.term-screen .ansi-bg-blue { background-color: #4aa5f0; }
+.term-screen .ansi-bg-magenta { background-color: #c162de; }
+.term-screen .ansi-bg-cyan { background-color: #42b3c2; }
+.term-screen .ansi-bg-white { background-color: #d7dae0; }
+.term-screen .ansi-bg-bright-black { background-color: #4f5666; }
+.term-screen .ansi-bg-bright-red { background-color: #ff616e; }
+.term-screen .ansi-bg-bright-green { background-color: #a5e075; }
+.term-screen .ansi-bg-bright-yellow { background-color: #f0a45d; }
+.term-screen .ansi-bg-bright-blue { background-color: #4dc4ff; }
+.term-screen .ansi-bg-bright-magenta { background-color: #de73ff; }
+.term-screen .ansi-bg-bright-cyan { background-color: #4cd1e0; }
+.term-screen .ansi-bg-bright-white { background-color: #e6e6e6; }
+/* Reverse video against the screen's own surface, not the page's. */
+.term-screen .ansi-inverse { color: #1c1f26; background-color: #d7dae0; }
+
+/* terminal-down-signal-1: a poll that fails without herdr actually being
+   down (a thrown fetch, a proxy's own 502, an unparseable body) used to
+   overwrite the pane with "herdr is not running" — indistinguishable from
+   the real thing and often wrong. Now that failure leaves the pane's last
+   good screen untouched and only gets this small corner badge instead, so
+   a mid-poll blip reads as "still catching up", never as another herdr-down
+   banner. `position: relative` is scoped to the stale state itself so it
+   never touches `.term-screen`'s own layout otherwise. */
+.term-screen--stale { position: relative; }
+.term-screen--stale::after {
+  content: "reconnecting…";
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-sm);
+  background: rgb(0 0 0 / 0.55);
+  color: #d7dae0;
+  font-size: var(--type-caption-size);
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+/* xterm 256-colour palette (indices 16-231: the 6x6x6 colour cube;
+   232-255: the grayscale ramp). Indices 0-15 are never generated here —
+   `ansi.rs` maps a 256-mode index below 16 onto the theme-aware classes
+   above instead. */
+.ansi-fg-256-16 { color: #000000; } .ansi-bg-256-16 { background-color: #000000; }
+.ansi-fg-256-17 { color: #00005f; } .ansi-bg-256-17 { background-color: #00005f; }
+.ansi-fg-256-18 { color: #000087; } .ansi-bg-256-18 { background-color: #000087; }
+.ansi-fg-256-19 { color: #0000af; } .ansi-bg-256-19 { background-color: #0000af; }
+.ansi-fg-256-20 { color: #0000d7; } .ansi-bg-256-20 { background-color: #0000d7; }
+.ansi-fg-256-21 { color: #0000ff; } .ansi-bg-256-21 { background-color: #0000ff; }
+.ansi-fg-256-22 { color: #005f00; } .ansi-bg-256-22 { background-color: #005f00; }
+.ansi-fg-256-23 { color: #005f5f; } .ansi-bg-256-23 { background-color: #005f5f; }
+.ansi-fg-256-24 { color: #005f87; } .ansi-bg-256-24 { background-color: #005f87; }
+.ansi-fg-256-25 { color: #005faf; } .ansi-bg-256-25 { background-color: #005faf; }
+.ansi-fg-256-26 { color: #005fd7; } .ansi-bg-256-26 { background-color: #005fd7; }
+.ansi-fg-256-27 { color: #005fff; } .ansi-bg-256-27 { background-color: #005fff; }
+.ansi-fg-256-28 { color: #008700; } .ansi-bg-256-28 { background-color: #008700; }
+.ansi-fg-256-29 { color: #00875f; } .ansi-bg-256-29 { background-color: #00875f; }
+.ansi-fg-256-30 { color: #008787; } .ansi-bg-256-30 { background-color: #008787; }
+.ansi-fg-256-31 { color: #0087af; } .ansi-bg-256-31 { background-color: #0087af; }
+.ansi-fg-256-32 { color: #0087d7; } .ansi-bg-256-32 { background-color: #0087d7; }
+.ansi-fg-256-33 { color: #0087ff; } .ansi-bg-256-33 { background-color: #0087ff; }
+.ansi-fg-256-34 { color: #00af00; } .ansi-bg-256-34 { background-color: #00af00; }
+.ansi-fg-256-35 { color: #00af5f; } .ansi-bg-256-35 { background-color: #00af5f; }
+.ansi-fg-256-36 { color: #00af87; } .ansi-bg-256-36 { background-color: #00af87; }
+.ansi-fg-256-37 { color: #00afaf; } .ansi-bg-256-37 { background-color: #00afaf; }
+.ansi-fg-256-38 { color: #00afd7; } .ansi-bg-256-38 { background-color: #00afd7; }
+.ansi-fg-256-39 { color: #00afff; } .ansi-bg-256-39 { background-color: #00afff; }
+.ansi-fg-256-40 { color: #00d700; } .ansi-bg-256-40 { background-color: #00d700; }
+.ansi-fg-256-41 { color: #00d75f; } .ansi-bg-256-41 { background-color: #00d75f; }
+.ansi-fg-256-42 { color: #00d787; } .ansi-bg-256-42 { background-color: #00d787; }
+.ansi-fg-256-43 { color: #00d7af; } .ansi-bg-256-43 { background-color: #00d7af; }
+.ansi-fg-256-44 { color: #00d7d7; } .ansi-bg-256-44 { background-color: #00d7d7; }
+.ansi-fg-256-45 { color: #00d7ff; } .ansi-bg-256-45 { background-color: #00d7ff; }
+.ansi-fg-256-46 { color: #00ff00; } .ansi-bg-256-46 { background-color: #00ff00; }
+.ansi-fg-256-47 { color: #00ff5f; } .ansi-bg-256-47 { background-color: #00ff5f; }
+.ansi-fg-256-48 { color: #00ff87; } .ansi-bg-256-48 { background-color: #00ff87; }
+.ansi-fg-256-49 { color: #00ffaf; } .ansi-bg-256-49 { background-color: #00ffaf; }
+.ansi-fg-256-50 { color: #00ffd7; } .ansi-bg-256-50 { background-color: #00ffd7; }
+.ansi-fg-256-51 { color: #00ffff; } .ansi-bg-256-51 { background-color: #00ffff; }
+.ansi-fg-256-52 { color: #5f0000; } .ansi-bg-256-52 { background-color: #5f0000; }
+.ansi-fg-256-53 { color: #5f005f; } .ansi-bg-256-53 { background-color: #5f005f; }
+.ansi-fg-256-54 { color: #5f0087; } .ansi-bg-256-54 { background-color: #5f0087; }
+.ansi-fg-256-55 { color: #5f00af; } .ansi-bg-256-55 { background-color: #5f00af; }
+.ansi-fg-256-56 { color: #5f00d7; } .ansi-bg-256-56 { background-color: #5f00d7; }
+.ansi-fg-256-57 { color: #5f00ff; } .ansi-bg-256-57 { background-color: #5f00ff; }
+.ansi-fg-256-58 { color: #5f5f00; } .ansi-bg-256-58 { background-color: #5f5f00; }
+.ansi-fg-256-59 { color: #5f5f5f; } .ansi-bg-256-59 { background-color: #5f5f5f; }
+.ansi-fg-256-60 { color: #5f5f87; } .ansi-bg-256-60 { background-color: #5f5f87; }
+.ansi-fg-256-61 { color: #5f5faf; } .ansi-bg-256-61 { background-color: #5f5faf; }
+.ansi-fg-256-62 { color: #5f5fd7; } .ansi-bg-256-62 { background-color: #5f5fd7; }
+.ansi-fg-256-63 { color: #5f5fff; } .ansi-bg-256-63 { background-color: #5f5fff; }
+.ansi-fg-256-64 { color: #5f8700; } .ansi-bg-256-64 { background-color: #5f8700; }
+.ansi-fg-256-65 { color: #5f875f; } .ansi-bg-256-65 { background-color: #5f875f; }
+.ansi-fg-256-66 { color: #5f8787; } .ansi-bg-256-66 { background-color: #5f8787; }
+.ansi-fg-256-67 { color: #5f87af; } .ansi-bg-256-67 { background-color: #5f87af; }
+.ansi-fg-256-68 { color: #5f87d7; } .ansi-bg-256-68 { background-color: #5f87d7; }
+.ansi-fg-256-69 { color: #5f87ff; } .ansi-bg-256-69 { background-color: #5f87ff; }
+.ansi-fg-256-70 { color: #5faf00; } .ansi-bg-256-70 { background-color: #5faf00; }
+.ansi-fg-256-71 { color: #5faf5f; } .ansi-bg-256-71 { background-color: #5faf5f; }
+.ansi-fg-256-72 { color: #5faf87; } .ansi-bg-256-72 { background-color: #5faf87; }
+.ansi-fg-256-73 { color: #5fafaf; } .ansi-bg-256-73 { background-color: #5fafaf; }
+.ansi-fg-256-74 { color: #5fafd7; } .ansi-bg-256-74 { background-color: #5fafd7; }
+.ansi-fg-256-75 { color: #5fafff; } .ansi-bg-256-75 { background-color: #5fafff; }
+.ansi-fg-256-76 { color: #5fd700; } .ansi-bg-256-76 { background-color: #5fd700; }
+.ansi-fg-256-77 { color: #5fd75f; } .ansi-bg-256-77 { background-color: #5fd75f; }
+.ansi-fg-256-78 { color: #5fd787; } .ansi-bg-256-78 { background-color: #5fd787; }
+.ansi-fg-256-79 { color: #5fd7af; } .ansi-bg-256-79 { background-color: #5fd7af; }
+.ansi-fg-256-80 { color: #5fd7d7; } .ansi-bg-256-80 { background-color: #5fd7d7; }
+.ansi-fg-256-81 { color: #5fd7ff; } .ansi-bg-256-81 { background-color: #5fd7ff; }
+.ansi-fg-256-82 { color: #5fff00; } .ansi-bg-256-82 { background-color: #5fff00; }
+.ansi-fg-256-83 { color: #5fff5f; } .ansi-bg-256-83 { background-color: #5fff5f; }
+.ansi-fg-256-84 { color: #5fff87; } .ansi-bg-256-84 { background-color: #5fff87; }
+.ansi-fg-256-85 { color: #5fffaf; } .ansi-bg-256-85 { background-color: #5fffaf; }
+.ansi-fg-256-86 { color: #5fffd7; } .ansi-bg-256-86 { background-color: #5fffd7; }
+.ansi-fg-256-87 { color: #5fffff; } .ansi-bg-256-87 { background-color: #5fffff; }
+.ansi-fg-256-88 { color: #870000; } .ansi-bg-256-88 { background-color: #870000; }
+.ansi-fg-256-89 { color: #87005f; } .ansi-bg-256-89 { background-color: #87005f; }
+.ansi-fg-256-90 { color: #870087; } .ansi-bg-256-90 { background-color: #870087; }
+.ansi-fg-256-91 { color: #8700af; } .ansi-bg-256-91 { background-color: #8700af; }
+.ansi-fg-256-92 { color: #8700d7; } .ansi-bg-256-92 { background-color: #8700d7; }
+.ansi-fg-256-93 { color: #8700ff; } .ansi-bg-256-93 { background-color: #8700ff; }
+.ansi-fg-256-94 { color: #875f00; } .ansi-bg-256-94 { background-color: #875f00; }
+.ansi-fg-256-95 { color: #875f5f; } .ansi-bg-256-95 { background-color: #875f5f; }
+.ansi-fg-256-96 { color: #875f87; } .ansi-bg-256-96 { background-color: #875f87; }
+.ansi-fg-256-97 { color: #875faf; } .ansi-bg-256-97 { background-color: #875faf; }
+.ansi-fg-256-98 { color: #875fd7; } .ansi-bg-256-98 { background-color: #875fd7; }
+.ansi-fg-256-99 { color: #875fff; } .ansi-bg-256-99 { background-color: #875fff; }
+.ansi-fg-256-100 { color: #878700; } .ansi-bg-256-100 { background-color: #878700; }
+.ansi-fg-256-101 { color: #87875f; } .ansi-bg-256-101 { background-color: #87875f; }
+.ansi-fg-256-102 { color: #878787; } .ansi-bg-256-102 { background-color: #878787; }
+.ansi-fg-256-103 { color: #8787af; } .ansi-bg-256-103 { background-color: #8787af; }
+.ansi-fg-256-104 { color: #8787d7; } .ansi-bg-256-104 { background-color: #8787d7; }
+.ansi-fg-256-105 { color: #8787ff; } .ansi-bg-256-105 { background-color: #8787ff; }
+.ansi-fg-256-106 { color: #87af00; } .ansi-bg-256-106 { background-color: #87af00; }
+.ansi-fg-256-107 { color: #87af5f; } .ansi-bg-256-107 { background-color: #87af5f; }
+.ansi-fg-256-108 { color: #87af87; } .ansi-bg-256-108 { background-color: #87af87; }
+.ansi-fg-256-109 { color: #87afaf; } .ansi-bg-256-109 { background-color: #87afaf; }
+.ansi-fg-256-110 { color: #87afd7; } .ansi-bg-256-110 { background-color: #87afd7; }
+.ansi-fg-256-111 { color: #87afff; } .ansi-bg-256-111 { background-color: #87afff; }
+.ansi-fg-256-112 { color: #87d700; } .ansi-bg-256-112 { background-color: #87d700; }
+.ansi-fg-256-113 { color: #87d75f; } .ansi-bg-256-113 { background-color: #87d75f; }
+.ansi-fg-256-114 { color: #87d787; } .ansi-bg-256-114 { background-color: #87d787; }
+.ansi-fg-256-115 { color: #87d7af; } .ansi-bg-256-115 { background-color: #87d7af; }
+.ansi-fg-256-116 { color: #87d7d7; } .ansi-bg-256-116 { background-color: #87d7d7; }
+.ansi-fg-256-117 { color: #87d7ff; } .ansi-bg-256-117 { background-color: #87d7ff; }
+.ansi-fg-256-118 { color: #87ff00; } .ansi-bg-256-118 { background-color: #87ff00; }
+.ansi-fg-256-119 { color: #87ff5f; } .ansi-bg-256-119 { background-color: #87ff5f; }
+.ansi-fg-256-120 { color: #87ff87; } .ansi-bg-256-120 { background-color: #87ff87; }
+.ansi-fg-256-121 { color: #87ffaf; } .ansi-bg-256-121 { background-color: #87ffaf; }
+.ansi-fg-256-122 { color: #87ffd7; } .ansi-bg-256-122 { background-color: #87ffd7; }
+.ansi-fg-256-123 { color: #87ffff; } .ansi-bg-256-123 { background-color: #87ffff; }
+.ansi-fg-256-124 { color: #af0000; } .ansi-bg-256-124 { background-color: #af0000; }
+.ansi-fg-256-125 { color: #af005f; } .ansi-bg-256-125 { background-color: #af005f; }
+.ansi-fg-256-126 { color: #af0087; } .ansi-bg-256-126 { background-color: #af0087; }
+.ansi-fg-256-127 { color: #af00af; } .ansi-bg-256-127 { background-color: #af00af; }
+.ansi-fg-256-128 { color: #af00d7; } .ansi-bg-256-128 { background-color: #af00d7; }
+.ansi-fg-256-129 { color: #af00ff; } .ansi-bg-256-129 { background-color: #af00ff; }
+.ansi-fg-256-130 { color: #af5f00; } .ansi-bg-256-130 { background-color: #af5f00; }
+.ansi-fg-256-131 { color: #af5f5f; } .ansi-bg-256-131 { background-color: #af5f5f; }
+.ansi-fg-256-132 { color: #af5f87; } .ansi-bg-256-132 { background-color: #af5f87; }
+.ansi-fg-256-133 { color: #af5faf; } .ansi-bg-256-133 { background-color: #af5faf; }
+.ansi-fg-256-134 { color: #af5fd7; } .ansi-bg-256-134 { background-color: #af5fd7; }
+.ansi-fg-256-135 { color: #af5fff; } .ansi-bg-256-135 { background-color: #af5fff; }
+.ansi-fg-256-136 { color: #af8700; } .ansi-bg-256-136 { background-color: #af8700; }
+.ansi-fg-256-137 { color: #af875f; } .ansi-bg-256-137 { background-color: #af875f; }
+.ansi-fg-256-138 { color: #af8787; } .ansi-bg-256-138 { background-color: #af8787; }
+.ansi-fg-256-139 { color: #af87af; } .ansi-bg-256-139 { background-color: #af87af; }
+.ansi-fg-256-140 { color: #af87d7; } .ansi-bg-256-140 { background-color: #af87d7; }
+.ansi-fg-256-141 { color: #af87ff; } .ansi-bg-256-141 { background-color: #af87ff; }
+.ansi-fg-256-142 { color: #afaf00; } .ansi-bg-256-142 { background-color: #afaf00; }
+.ansi-fg-256-143 { color: #afaf5f; } .ansi-bg-256-143 { background-color: #afaf5f; }
+.ansi-fg-256-144 { color: #afaf87; } .ansi-bg-256-144 { background-color: #afaf87; }
+.ansi-fg-256-145 { color: #afafaf; } .ansi-bg-256-145 { background-color: #afafaf; }
+.ansi-fg-256-146 { color: #afafd7; } .ansi-bg-256-146 { background-color: #afafd7; }
+.ansi-fg-256-147 { color: #afafff; } .ansi-bg-256-147 { background-color: #afafff; }
+.ansi-fg-256-148 { color: #afd700; } .ansi-bg-256-148 { background-color: #afd700; }
+.ansi-fg-256-149 { color: #afd75f; } .ansi-bg-256-149 { background-color: #afd75f; }
+.ansi-fg-256-150 { color: #afd787; } .ansi-bg-256-150 { background-color: #afd787; }
+.ansi-fg-256-151 { color: #afd7af; } .ansi-bg-256-151 { background-color: #afd7af; }
+.ansi-fg-256-152 { color: #afd7d7; } .ansi-bg-256-152 { background-color: #afd7d7; }
+.ansi-fg-256-153 { color: #afd7ff; } .ansi-bg-256-153 { background-color: #afd7ff; }
+.ansi-fg-256-154 { color: #afff00; } .ansi-bg-256-154 { background-color: #afff00; }
+.ansi-fg-256-155 { color: #afff5f; } .ansi-bg-256-155 { background-color: #afff5f; }
+.ansi-fg-256-156 { color: #afff87; } .ansi-bg-256-156 { background-color: #afff87; }
+.ansi-fg-256-157 { color: #afffaf; } .ansi-bg-256-157 { background-color: #afffaf; }
+.ansi-fg-256-158 { color: #afffd7; } .ansi-bg-256-158 { background-color: #afffd7; }
+.ansi-fg-256-159 { color: #afffff; } .ansi-bg-256-159 { background-color: #afffff; }
+.ansi-fg-256-160 { color: #d70000; } .ansi-bg-256-160 { background-color: #d70000; }
+.ansi-fg-256-161 { color: #d7005f; } .ansi-bg-256-161 { background-color: #d7005f; }
+.ansi-fg-256-162 { color: #d70087; } .ansi-bg-256-162 { background-color: #d70087; }
+.ansi-fg-256-163 { color: #d700af; } .ansi-bg-256-163 { background-color: #d700af; }
+.ansi-fg-256-164 { color: #d700d7; } .ansi-bg-256-164 { background-color: #d700d7; }
+.ansi-fg-256-165 { color: #d700ff; } .ansi-bg-256-165 { background-color: #d700ff; }
+.ansi-fg-256-166 { color: #d75f00; } .ansi-bg-256-166 { background-color: #d75f00; }
+.ansi-fg-256-167 { color: #d75f5f; } .ansi-bg-256-167 { background-color: #d75f5f; }
+.ansi-fg-256-168 { color: #d75f87; } .ansi-bg-256-168 { background-color: #d75f87; }
+.ansi-fg-256-169 { color: #d75faf; } .ansi-bg-256-169 { background-color: #d75faf; }
+.ansi-fg-256-170 { color: #d75fd7; } .ansi-bg-256-170 { background-color: #d75fd7; }
+.ansi-fg-256-171 { color: #d75fff; } .ansi-bg-256-171 { background-color: #d75fff; }
+.ansi-fg-256-172 { color: #d78700; } .ansi-bg-256-172 { background-color: #d78700; }
+.ansi-fg-256-173 { color: #d7875f; } .ansi-bg-256-173 { background-color: #d7875f; }
+.ansi-fg-256-174 { color: #d78787; } .ansi-bg-256-174 { background-color: #d78787; }
+.ansi-fg-256-175 { color: #d787af; } .ansi-bg-256-175 { background-color: #d787af; }
+.ansi-fg-256-176 { color: #d787d7; } .ansi-bg-256-176 { background-color: #d787d7; }
+.ansi-fg-256-177 { color: #d787ff; } .ansi-bg-256-177 { background-color: #d787ff; }
+.ansi-fg-256-178 { color: #d7af00; } .ansi-bg-256-178 { background-color: #d7af00; }
+.ansi-fg-256-179 { color: #d7af5f; } .ansi-bg-256-179 { background-color: #d7af5f; }
+.ansi-fg-256-180 { color: #d7af87; } .ansi-bg-256-180 { background-color: #d7af87; }
+.ansi-fg-256-181 { color: #d7afaf; } .ansi-bg-256-181 { background-color: #d7afaf; }
+.ansi-fg-256-182 { color: #d7afd7; } .ansi-bg-256-182 { background-color: #d7afd7; }
+.ansi-fg-256-183 { color: #d7afff; } .ansi-bg-256-183 { background-color: #d7afff; }
+.ansi-fg-256-184 { color: #d7d700; } .ansi-bg-256-184 { background-color: #d7d700; }
+.ansi-fg-256-185 { color: #d7d75f; } .ansi-bg-256-185 { background-color: #d7d75f; }
+.ansi-fg-256-186 { color: #d7d787; } .ansi-bg-256-186 { background-color: #d7d787; }
+.ansi-fg-256-187 { color: #d7d7af; } .ansi-bg-256-187 { background-color: #d7d7af; }
+.ansi-fg-256-188 { color: #d7d7d7; } .ansi-bg-256-188 { background-color: #d7d7d7; }
+.ansi-fg-256-189 { color: #d7d7ff; } .ansi-bg-256-189 { background-color: #d7d7ff; }
+.ansi-fg-256-190 { color: #d7ff00; } .ansi-bg-256-190 { background-color: #d7ff00; }
+.ansi-fg-256-191 { color: #d7ff5f; } .ansi-bg-256-191 { background-color: #d7ff5f; }
+.ansi-fg-256-192 { color: #d7ff87; } .ansi-bg-256-192 { background-color: #d7ff87; }
+.ansi-fg-256-193 { color: #d7ffaf; } .ansi-bg-256-193 { background-color: #d7ffaf; }
+.ansi-fg-256-194 { color: #d7ffd7; } .ansi-bg-256-194 { background-color: #d7ffd7; }
+.ansi-fg-256-195 { color: #d7ffff; } .ansi-bg-256-195 { background-color: #d7ffff; }
+.ansi-fg-256-196 { color: #ff0000; } .ansi-bg-256-196 { background-color: #ff0000; }
+.ansi-fg-256-197 { color: #ff005f; } .ansi-bg-256-197 { background-color: #ff005f; }
+.ansi-fg-256-198 { color: #ff0087; } .ansi-bg-256-198 { background-color: #ff0087; }
+.ansi-fg-256-199 { color: #ff00af; } .ansi-bg-256-199 { background-color: #ff00af; }
+.ansi-fg-256-200 { color: #ff00d7; } .ansi-bg-256-200 { background-color: #ff00d7; }
+.ansi-fg-256-201 { color: #ff00ff; } .ansi-bg-256-201 { background-color: #ff00ff; }
+.ansi-fg-256-202 { color: #ff5f00; } .ansi-bg-256-202 { background-color: #ff5f00; }
+.ansi-fg-256-203 { color: #ff5f5f; } .ansi-bg-256-203 { background-color: #ff5f5f; }
+.ansi-fg-256-204 { color: #ff5f87; } .ansi-bg-256-204 { background-color: #ff5f87; }
+.ansi-fg-256-205 { color: #ff5faf; } .ansi-bg-256-205 { background-color: #ff5faf; }
+.ansi-fg-256-206 { color: #ff5fd7; } .ansi-bg-256-206 { background-color: #ff5fd7; }
+.ansi-fg-256-207 { color: #ff5fff; } .ansi-bg-256-207 { background-color: #ff5fff; }
+.ansi-fg-256-208 { color: #ff8700; } .ansi-bg-256-208 { background-color: #ff8700; }
+.ansi-fg-256-209 { color: #ff875f; } .ansi-bg-256-209 { background-color: #ff875f; }
+.ansi-fg-256-210 { color: #ff8787; } .ansi-bg-256-210 { background-color: #ff8787; }
+.ansi-fg-256-211 { color: #ff87af; } .ansi-bg-256-211 { background-color: #ff87af; }
+.ansi-fg-256-212 { color: #ff87d7; } .ansi-bg-256-212 { background-color: #ff87d7; }
+.ansi-fg-256-213 { color: #ff87ff; } .ansi-bg-256-213 { background-color: #ff87ff; }
+.ansi-fg-256-214 { color: #ffaf00; } .ansi-bg-256-214 { background-color: #ffaf00; }
+.ansi-fg-256-215 { color: #ffaf5f; } .ansi-bg-256-215 { background-color: #ffaf5f; }
+.ansi-fg-256-216 { color: #ffaf87; } .ansi-bg-256-216 { background-color: #ffaf87; }
+.ansi-fg-256-217 { color: #ffafaf; } .ansi-bg-256-217 { background-color: #ffafaf; }
+.ansi-fg-256-218 { color: #ffafd7; } .ansi-bg-256-218 { background-color: #ffafd7; }
+.ansi-fg-256-219 { color: #ffafff; } .ansi-bg-256-219 { background-color: #ffafff; }
+.ansi-fg-256-220 { color: #ffd700; } .ansi-bg-256-220 { background-color: #ffd700; }
+.ansi-fg-256-221 { color: #ffd75f; } .ansi-bg-256-221 { background-color: #ffd75f; }
+.ansi-fg-256-222 { color: #ffd787; } .ansi-bg-256-222 { background-color: #ffd787; }
+.ansi-fg-256-223 { color: #ffd7af; } .ansi-bg-256-223 { background-color: #ffd7af; }
+.ansi-fg-256-224 { color: #ffd7d7; } .ansi-bg-256-224 { background-color: #ffd7d7; }
+.ansi-fg-256-225 { color: #ffd7ff; } .ansi-bg-256-225 { background-color: #ffd7ff; }
+.ansi-fg-256-226 { color: #ffff00; } .ansi-bg-256-226 { background-color: #ffff00; }
+.ansi-fg-256-227 { color: #ffff5f; } .ansi-bg-256-227 { background-color: #ffff5f; }
+.ansi-fg-256-228 { color: #ffff87; } .ansi-bg-256-228 { background-color: #ffff87; }
+.ansi-fg-256-229 { color: #ffffaf; } .ansi-bg-256-229 { background-color: #ffffaf; }
+.ansi-fg-256-230 { color: #ffffd7; } .ansi-bg-256-230 { background-color: #ffffd7; }
+.ansi-fg-256-231 { color: #ffffff; } .ansi-bg-256-231 { background-color: #ffffff; }
+.ansi-fg-256-232 { color: #080808; } .ansi-bg-256-232 { background-color: #080808; }
+.ansi-fg-256-233 { color: #121212; } .ansi-bg-256-233 { background-color: #121212; }
+.ansi-fg-256-234 { color: #1c1c1c; } .ansi-bg-256-234 { background-color: #1c1c1c; }
+.ansi-fg-256-235 { color: #262626; } .ansi-bg-256-235 { background-color: #262626; }
+.ansi-fg-256-236 { color: #303030; } .ansi-bg-256-236 { background-color: #303030; }
+.ansi-fg-256-237 { color: #3a3a3a; } .ansi-bg-256-237 { background-color: #3a3a3a; }
+.ansi-fg-256-238 { color: #444444; } .ansi-bg-256-238 { background-color: #444444; }
+.ansi-fg-256-239 { color: #4e4e4e; } .ansi-bg-256-239 { background-color: #4e4e4e; }
+.ansi-fg-256-240 { color: #585858; } .ansi-bg-256-240 { background-color: #585858; }
+.ansi-fg-256-241 { color: #626262; } .ansi-bg-256-241 { background-color: #626262; }
+.ansi-fg-256-242 { color: #6c6c6c; } .ansi-bg-256-242 { background-color: #6c6c6c; }
+.ansi-fg-256-243 { color: #767676; } .ansi-bg-256-243 { background-color: #767676; }
+.ansi-fg-256-244 { color: #808080; } .ansi-bg-256-244 { background-color: #808080; }
+.ansi-fg-256-245 { color: #8a8a8a; } .ansi-bg-256-245 { background-color: #8a8a8a; }
+.ansi-fg-256-246 { color: #949494; } .ansi-bg-256-246 { background-color: #949494; }
+.ansi-fg-256-247 { color: #9e9e9e; } .ansi-bg-256-247 { background-color: #9e9e9e; }
+.ansi-fg-256-248 { color: #a8a8a8; } .ansi-bg-256-248 { background-color: #a8a8a8; }
+.ansi-fg-256-249 { color: #b2b2b2; } .ansi-bg-256-249 { background-color: #b2b2b2; }
+.ansi-fg-256-250 { color: #bcbcbc; } .ansi-bg-256-250 { background-color: #bcbcbc; }
+.ansi-fg-256-251 { color: #c6c6c6; } .ansi-bg-256-251 { background-color: #c6c6c6; }
+.ansi-fg-256-252 { color: #d0d0d0; } .ansi-bg-256-252 { background-color: #d0d0d0; }
+.ansi-fg-256-253 { color: #dadada; } .ansi-bg-256-253 { background-color: #dadada; }
+.ansi-fg-256-254 { color: #e4e4e4; } .ansi-bg-256-254 { background-color: #e4e4e4; }
+.ansi-fg-256-255 { color: #eeeeee; } .ansi-bg-256-255 { background-color: #eeeeee; }
+
+/* terminal-image-attach (D1/D2): the attach control that rides inside a
+   project pane's `.term-reply` form (`views.rs::pane_cards`, gated off the
+   Unassigned page). Styled to match the existing `.term-reply__send` /
+   `.term-reply__stage` pair those rules already sit beside in
+   `views.rs::PROJECT_TAB_STYLE`. */
+.term-attach { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
+.term-attach__btn {
+  align-self: flex-start;
+  padding: var(--space-1) var(--space-3);
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: var(--type-body-sm-size);
+}
+.term-attach__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.term-attach__chip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: var(--border-width-hairline) solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  font-family: var(--font-mono, monospace);
+  font-size: var(--type-caption-size);
+  max-width: 100%;
+}
+.term-attach__chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 22em;
+}
+.term-attach__chip-remove {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  line-height: 1;
+  font-size: var(--type-ui-size);
+}
+.term-attach__error {
+  margin: 0;
+  padding: var(--space-2);
+  border: var(--border-width-hairline) solid var(--color-danger);
+  border-radius: var(--radius-sm);
+  background: var(--color-danger-tint);
+  color: var(--color-danger);
+  font-size: var(--type-body-sm-size);
+  white-space: pre-wrap;
+  word-break: break-word;
+=======
+/* ── Code viewer section ─────────────────────────────────────────
+   A second section next to Docs: browse the project's real directory
+   tree and read source files. No index behind it (D1), so the sidebar
+   here is plain server-rendered links, not the JSON-payload client
+   zoom `.chapter`/`.chap-file` uses for Docs — those classes are still
+   reused as-is (this block only adds `.chap-dir` for a folder row) so
+   the mobile drawer JS keeps working unmodified. ────────────────── */
+.section-switch {
+  display: flex;
+  gap: var(--space-1);
+  margin-right: var(--space-3);
+}
+.section-switch a {
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  font-family: var(--type-body-sm-font);
+  font-size: var(--type-body-sm-size);
+  color: var(--color-text-muted);
+}
+.section-switch a:hover {
+  background: var(--color-surface-hover);
+}
+.section-switch a[aria-current="page"] {
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-weight: var(--weight-semibold);
+}
+.chap-dir {
+  color: var(--color-text-muted);
+}
+
+/* Highlighted source: same fixed dark "signature" panel `.fg-prose pre`
+   renders code blocks on (build_highlight_css scopes /highlight.css to
+   that one dark theme regardless of page scheme), so the syntect token
+   colors stay correct on this panel in both light and dark page modes.
+   The dark background/color live on `.codeview` itself — the scroll
+   container `.content--code` gives it (`overflow: auto`) — rather than on
+   `.codeview__table`: a background painted on the element that scrolls
+   fills its box edge to edge at all times (it does not travel with the
+   content), so nothing behind it shows through mid-scroll the way it did
+   when only the (shorter, unpadded) table carried the color. No corner
+   rounding either — it now covers the whole pane, not a card floating in
+   it. Padding is top/bottom only: horizontal stays edge-to-edge (Code's
+   whole point is using the full width). */
+.codeview {
+  padding: var(--space-4) 0;
+  background: var(--signature-dark-bg);
+  color: var(--signature-dark-text);
+}
+.codeview__banner {
+  margin: 0 auto var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-warning-tint);
+  color: var(--color-text);
+  font-family: var(--type-body-sm-font);
+  font-size: var(--type-body-sm-size);
+}
+.codeview__binary {
+  max-width: var(--reading-col);
+  margin: var(--space-5) auto;
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  border: var(--border-width-hairline) solid var(--color-border);
+  color: var(--color-text-muted);
+  font-family: var(--type-body-sm-font);
+  font-size: var(--type-body-sm-size);
+}
+.codeview__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: var(--fs-prose-code);
+  line-height: var(--lh-prose-code);
+}
+.codeview__table tr:target {
+  background: rgba(255, 255, 255, 0.08);
+}
+.codeview__num {
+  box-sizing: border-box;
+  width: 1%;
+  min-width: 3em;
+  padding: 0 var(--space-2);
+  text-align: right;
+  vertical-align: top;
+  user-select: none;
+  border-right: var(--border-width-hairline) solid rgba(255, 255, 255, 0.12);
+}
+.codeview__num a {
+  color: inherit;
+  opacity: 0.5;
+}
+.codeview__line {
+  box-sizing: border-box;
+  padding: 0 var(--space-3);
+  white-space: pre;
+  overflow-x: auto;
+}
+.codeview__line code {
+  font: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+}
+
+/* Directory listing main pane (the sidebar shows the same directory in
+   compact form via `.chapter`/`.chap-file`). */
+.codelist {
+  margin: var(--space-3) auto var(--space-6);
+  display: flex;
+  flex-direction: column;
+}
+.codelist__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+}
+.codelist__row:visited {
+  color: var(--color-text);
+}
+.codelist__row:hover {
+  background: var(--color-surface-hover);
+}
+.codelist__row--dir .codelist__name {
+  font-weight: var(--weight-semibold);
+}
+.codelist__name {
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+.codelist__size {
+  flex: none;
+  color: var(--color-text-muted);
+  font-family: var(--type-body-sm-font);
+  font-size: var(--type-body-sm-size);
+}

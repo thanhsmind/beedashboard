@@ -1,0 +1,38 @@
+[package]
+name = "waggledance-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+dirs.workspace = true
+time.workspace = true
+comrak.workspace = true
+syntect.workspace = true
+ammonia.workspace = true
+rusqlite.workspace = true
+ignore.workspace = true
+notify.workspace = true
+notify-debouncer-full.workspace = true
+nucleo-matcher.workspace = true
+libc.workspace = true
+# Fresh randomness for the notify credential's temp-file suffix
+# (`save_notify_credential`, agent-terminal-21) — mirrors
+# `crates/waggledance/src/terminal_auth.rs`'s token-writer, which already depends
+# on this crate at the workspace level. Not an async runtime, so it does not
+# touch the `no_web_framework_dependency_declared` guard below.
+rand.workspace = true
+
+[dev-dependencies]
+# paths_boundary.rs (agent-terminal-2) tests build temp directories; this
+# crate stays async-runtime-free (no tokio/axum/hyper — see
+# `bee::tests::no_web_framework_dependency_declared`).
+tempfile = "3"

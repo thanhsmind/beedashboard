@@ -1271,62 +1271,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
-name = "mdview"
-version = "0.5.2"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "clap",
- "dirs",
- "http-body-util",
- "if-addrs",
- "interprocess",
- "libc",
- "mdview-core",
- "notify",
- "notify-debouncer-full",
- "rand 0.8.7",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "time",
- "tokio",
- "toml",
- "toml_edit",
- "tower",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "mdview-core"
-version = "0.5.2"
-dependencies = [
- "ammonia",
- "anyhow",
- "comrak",
- "dirs",
- "ignore",
- "libc",
- "notify",
- "notify-debouncer-full",
- "nucleo-matcher",
- "rand 0.8.7",
- "rusqlite",
- "serde",
- "serde_json",
- "syntect",
- "tempfile",
- "thiserror 1.0.69",
- "time",
- "toml",
- "tracing",
-]
-
-[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2652,6 +2596,62 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "waggledance"
+version = "0.5.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "clap",
+ "dirs",
+ "http-body-util",
+ "if-addrs",
+ "interprocess",
+ "libc",
+ "notify",
+ "notify-debouncer-full",
+ "rand 0.8.7",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "waggledance-core",
+]
+
+[[package]]
+name = "waggledance-core"
+version = "0.5.2"
+dependencies = [
+ "ammonia",
+ "anyhow",
+ "comrak",
+ "dirs",
+ "ignore",
+ "libc",
+ "notify",
+ "notify-debouncer-full",
+ "nucleo-matcher",
+ "rand 0.8.7",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "syntect",
+ "tempfile",
+ "thiserror 1.0.69",
+ "time",
+ "toml",
+ "tracing",
+]
 
 [[package]]
 name = "walkdir"

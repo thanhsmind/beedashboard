@@ -1,0 +1,65 @@
+[package]
+name = "waggledance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "waggledance"
+path = "src/main.rs"
+
+[dependencies]
+waggledance-core = { path = "../waggledance-core" }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs.workspace = true
+time.workspace = true
+axum.workspace = true
+tokio.workspace = true
+clap.workspace = true
+notify.workspace = true
+notify-debouncer-full.workspace = true
+# Enumerate the machine's network interfaces to list every reachable IP when the
+# daemon binds a wildcard host (0.0.0.0) — display-URL only, never connectivity.
+if-addrs = "0.13"
+
+# herdr client (agent-terminal-2): request/response over a Unix domain
+# socket / Windows named pipe. waggledance-core stays async-runtime-free, so this
+# port lives here where tokio and axum are already dependencies.
+async-trait.workspace = true
+interprocess.workspace = true
+rand.workspace = true
+
+# Telegram notification transport (agent-terminal-17, D1/D7): rustls instead
+# of native TLS keeps the build self-contained (no system OpenSSL). Serde's
+# json feature is already pulled in via serde_json above; requested again
+# here so reqwest's own JSON body helper builds without a second dependency.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# setsid(2) for fully detaching the auto-spawned daemon (Unix only).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# Route-level tests drive `router()` end to end via `tower::ServiceExt::oneshot`
+# instead of asserting against view functions directly (bee-cockpit-2) — the
+# only way to prove a route decision like "not found" that a pure view
+# function never makes. Versions pinned to what axum already resolves in
+# Cargo.lock, so this adds no new dependency graph, only new features on ones
+# already present transitively.
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+# socket.rs's local-io-failure test binds a scratch Unix socket.
+tempfile = "3"
+# pane_scroller.rs's tests fast-forward tokio's clock past its ~50ms x 10
+# stability-wait budget with `#[tokio::test(start_paused = true)]`, so the
+# stability-wait tests run in milliseconds instead of real time.
+tokio = { workspace = true, features = ["test-util"] }

@@ -1,7 +1,7 @@
-# mdview — Hướng dẫn quay video giới thiệu
+# waggledance — Hướng dẫn quay video giới thiệu
 
 Mục tiêu: một clip **15–25 giây**, loop được, cho người xem **cảm nhận nỗi đau
-link gãy** rồi **thấy mdview gỡ nó** — kèm live-reload / search / mermaid.
+link gãy** rồi **thấy waggledance gỡ nó** — kèm live-reload / search / mermaid.
 
 ---
 
@@ -11,7 +11,7 @@ link gãy** rồi **thấy mdview gỡ nó** — kèm live-reload / search / mer
 Mở một file bằng previewer **1-file** (ví dụ `/ck:preview <file>`) — đọc *file đó*
 thì được, nhưng **bấm link sang folder khác là 404**, không đi xuyên cả bộ docs.
 
-**Lời giải:** mdview index **toàn bộ project** và viết lại mọi internal link vào
+**Lời giải:** waggledance index **toàn bộ project** và viết lại mọi internal link vào
 namespace URL của nó → click xuyên thư mục **chạy mượt**, cộng live-reload,
 full-text search, sơ đồ Mermaid zoom được.
 
@@ -45,7 +45,7 @@ full-text search, sơ đồ Mermaid zoom được.
 ## 3. Chuẩn bị (2 phút)
 
 - **Repo demo sạch, nhiều tầng + có cross-link + 1 file Mermaid.** Có thể dùng
-  luôn repo `mdview` (thư mục `docs/` có link chéo, specs, `docs/mermaid-demo.md`),
+  luôn repo `waggledance` (thư mục `docs/` có link chéo, specs, `docs/mermaid-demo.md`),
   hoặc một sample nhỏ. Đừng để lộ path cá nhân trong breadcrumb/sidebar.
 - **Cửa sổ rộng ~1280px**, font terminal to (14–16pt), zoom trình duyệt ~110–125%.
 - **Theme nhất quán** (light hoặc dark, đừng đổi giữa chừng).
@@ -62,18 +62,18 @@ full-text search, sơ đồ Mermaid zoom được.
 |---|---|---|---|
 | 0–4s | Previewer 1-file (vd `/ck:preview docs/architecture.md`) | Bấm một link `../api/README.md` → **404 / trang trắng** | "Mở 1 file thì được…" |
 | 4–6s | Vẫn màn 404 | Zoom nhẹ vào chữ 404 | "…nhưng link chéo thì gãy." |
-| 6–9s | Terminal | Gõ `mdview open docs/architecture.md` → Enter → in ra URL | "Một lệnh." |
-| 9–13s | Trình duyệt mdview mở | Doc render, sidebar Chapters bên trái | "Cả project, có mục lục." |
+| 6–9s | Terminal | Gõ `waggledance open docs/architecture.md` → Enter → in ra URL | "Một lệnh." |
+| 9–13s | Trình duyệt waggledance mở | Doc render, sidebar Chapters bên trái | "Cả project, có mục lục." |
 | 13–17s | Cùng cái link `../api/README.md` | Bấm → **đi mượt, không 404** | "Link xuyên thư mục — không bao giờ 404." |
 | 17–21s | Sửa file trên đĩa (nháy editor, `:w`) | Trang **tự reload** | "Sửa → tự cập nhật." |
 | 21–24s | Lướt nhanh | Flash search + Mermaid zoom → dừng ở logo/tagline | "Search. Sơ đồ zoom được." |
 
 ### Phương án B — "Feature flow" (không cần cảnh 404)
-Bỏ 2 beat đầu; bắt đầu từ `mdview open` → click xuyên link → live reload →
+Bỏ 2 beat đầu; bắt đầu từ `waggledance open` → click xuyên link → live reload →
 search → mermaid. Ngắn gọn ~15s, ít kịch tính hơn nhưng dễ quay.
 
 ### Cắt phụ (nice-to-have, quay riêng)
-- **Agent/MCP:** trong Claude Code, agent viết doc → gọi `mdview_view_file` →
+- **Agent/MCP:** trong Claude Code, agent viết doc → gọi `waggledance_view_file` →
   trả URL → mở ra. Điểm khác biệt lớn nhất với dân dùng AI.
 - **Mobile:** mở trên điện thoại → nút ☰ mở sidebar → pinch zoom Mermaid.
 

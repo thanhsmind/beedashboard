@@ -1,9 +1,9 @@
-# mdview — Usage Guide
+# waggledance — Usage Guide
 
-Practical guide to installing and running mdview on Linux/macOS, including the
+Practical guide to installing and running waggledance on Linux/macOS, including the
 common **SSH-into-a-server** workflow.
 
-- Web mode is the primary way to use mdview (works great over SSH).
+- Web mode is the primary way to use waggledance (works great over SSH).
 - Desktop mode is a native window and needs a graphical display.
 
 ---
@@ -12,17 +12,17 @@ common **SSH-into-a-server** workflow.
 
 ### From a release (recommended, once published)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vantt/mdview/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/thanhsmind/waggledance/main/install.sh | sh
 ```
-The script detects your OS/arch, downloads the `mdview` binary, and puts it on
+The script detects your OS/arch, downloads the `waggledance` binary, and puts it on
 your PATH. Check the latest release at
-<https://github.com/vantt/mdview/releases>.
+<https://github.com/thanhsmind/waggledance/releases>.
 
 ### From source (works anytime; needs Rust)
 ```bash
-cargo install --git https://github.com/vantt/mdview mdview
+cargo install --git https://github.com/thanhsmind/waggledance waggledance
 # or, inside a clone:
-cargo build --release -p mdview     # binary at target/release/mdview
+cargo build --release -p waggledance     # binary at target/release/waggledance
 ```
 The CLI/daemon does **not** need any GUI system libraries.
 
@@ -31,14 +31,14 @@ The CLI/daemon does **not** need any GUI system libraries.
 ## 2. Web mode (recommended)
 
 ```bash
-mdview register /path/to/project     # recursive scan + index
-mdview open README.md                # print a URL — auto-starts the daemon if needed
-mdview status                        # is it running?
+waggledance register /path/to/project     # recursive scan + index
+waggledance open README.md                # print a URL — auto-starts the daemon if needed
+waggledance status                        # is it running?
 ```
 
 The daemon **auto-starts** on the first `open` or MCP call and keeps running in
 its own session (it survives the terminal that launched it). You only need
-`mdview serve` to pre-start it or to bind a custom host/port — see §4.
+`waggledance serve` to pre-start it or to bind a custom host/port — see §4.
 
 Open <http://localhost:7700> in a browser. You get: project list, per-file
 rendering with **cross-folder links that don't 404**, live reload on file
@@ -58,7 +58,7 @@ Alternatively, expose it on the LAN (less secure — everything except the
 agent terminal is unauthenticated, so anyone who can reach the port can read
 every indexed file and each project's path):
 ```bash
-mdview serve --host 0.0.0.0
+waggledance serve --host 0.0.0.0
 # then browse http://<server-ip>:7700 from another machine on the network
 ```
 
@@ -67,8 +67,8 @@ mdview serve --host 0.0.0.0
 ## 3. Agent integration (MCP)
 
 ```bash
-mdview doctor --fix     # register the MCP server for every agent tool present
-mdview doctor           # re-check: PATH, config, daemon, MCP per tool, skill
+waggledance doctor --fix     # register the MCP server for every agent tool present
+waggledance doctor           # re-check: PATH, config, daemon, MCP per tool, skill
 ```
 
 `doctor --fix` sets up the MCP server for **whichever agent tools it detects** on
@@ -77,14 +77,14 @@ your machine — and never touches one you don't have (reported `SKIP`):
 | Tool | Detected by | MCP config it writes (backed up first) |
 |---|---|---|
 | Claude Code | `~/.claude.json` / `~/.claude/` / `claude` on PATH | `~/.claude.json` (`mcpServers`) |
-| Codex | `~/.codex/` / `codex` on PATH | `~/.codex/config.toml` (`[mcp_servers.mdview]`, format-preserving) |
+| Codex | `~/.codex/` / `codex` on PATH | `~/.codex/config.toml` (`[mcp_servers.waggledance]`, format-preserving) |
 | Antigravity | `~/.gemini/config/` / `antigravity` on PATH | `~/.gemini/config/mcp_config.json` (`mcpServers`) |
 
 After that, an agent calls the single tool
-**`mdview_view_file(project_root, relative_path)`** and gets a browser URL back.
+**`waggledance_view_file(project_root, relative_path)`** and gets a browser URL back.
 The project is auto-registered on first use — no separate registration step.
 
-Drop the snippet from [`mdview-agents-template.md`](mdview-agents-template.md)
+Drop the snippet from [`waggledance-agents-template.md`](waggledance-agents-template.md)
 into your project's `AGENTS.md` / `CLAUDE.md` so agents surface a viewable URL
 after writing docs.
 
@@ -93,18 +93,18 @@ after writing docs.
 ## 4. CLI reference
 
 ```bash
-mdview serve [--port 7700] [--host 0.0.0.0]     # optional: pre-start the daemon (auto-starts otherwise)
-mdview register <dir> [--name "My App"]         # index a project
-mdview open <file.md>                           # print the browser URL for a file
-mdview list                                     # list projects
-mdview search "query" [--project <id>]          # full-text search
-mdview refresh [<project-id>]                   # re-scan to reconcile the index
-mdview status                                   # daemon status
-mdview config edit                              # edit ~/.mdview/config.toml in $EDITOR
-mdview unregister <project-id>                  # remove a project (files kept)
-mdview stop                                     # stop the daemon
-mdview restart                                  # restart the daemon (apply config changes)
-mdview doctor [--fix] [--json] [--dry-run]      # diagnose & repair integration
+waggledance serve [--port 7700] [--host 0.0.0.0]     # optional: pre-start the daemon (auto-starts otherwise)
+waggledance register <dir> [--name "My App"]         # index a project
+waggledance open <file.md>                           # print the browser URL for a file
+waggledance list                                     # list projects
+waggledance search "query" [--project <id>]          # full-text search
+waggledance refresh [<project-id>]                   # re-scan to reconcile the index
+waggledance status                                   # daemon status
+waggledance config edit                              # edit ~/.waggledance/config.toml in $EDITOR
+waggledance unregister <project-id>                  # remove a project (files kept)
+waggledance stop                                     # stop the daemon
+waggledance restart                                  # restart the daemon (apply config changes)
+waggledance doctor [--fix] [--json] [--dry-run]      # diagnose & repair integration
 ```
 Most commands accept `--json` for scripting.
 
@@ -114,17 +114,17 @@ Most commands accept `--json` for scripting.
 
 Two ways to change settings — server host/port, theme, indexing (debounce, max
 file size, exclude patterns), and MCP options — both writing the same
-`~/.mdview/config.toml`:
+`~/.waggledance/config.toml`:
 
 - **Web UI:** open <http://localhost:7700/settings> and edit the form.
-- **CLI / editor:** run `mdview config edit`. It opens `~/.mdview/config.toml`
+- **CLI / editor:** run `waggledance config edit`. It opens `~/.waggledance/config.toml`
   in your `$VISUAL`/`$EDITOR` (falling back to `vi`, or `notepad` on Windows),
   pre-filled with the current values. On save it validates the TOML and warns if
-  it's broken (an invalid file is ignored — mdview falls back to defaults until
+  it's broken (an invalid file is ignored — waggledance falls back to defaults until
   you fix it).
 
-Server/indexing changes apply after a daemon restart — `mdview restart` (or
-`mdview stop && mdview serve`).
+Server/indexing changes apply after a daemon restart — `waggledance restart` (or
+`waggledance stop && waggledance serve`).
 
 ---
 
@@ -134,7 +134,7 @@ The desktop shell is a native window onto the same daemon. It requires a
 graphical session — it will **not** run over a bare SSH connection.
 
 ```bash
-cd crates/mdview-desktop
+cd crates/waggledance-desktop
 cargo run                 # on a desktop session
 ```
 
@@ -145,7 +145,7 @@ Over SSH you have two options:
 - Use **web mode** instead (recommended), or
 - Enable X forwarding: `ssh -X user@ubuntu-host` then `cargo run`.
 
-Run over a bare SSH session and mdview prints a helpful message with the web URL
+Run over a bare SSH session and waggledance prints a helpful message with the web URL
 instead of crashing.
 
 Closing the window hides it to the system tray (the daemon keeps serving); quit
@@ -155,9 +155,9 @@ from the tray to stop it.
 
 ## 7. Where things live
 
-- `~/.mdview/registry.db` — project registry + file index (SQLite)
-- `~/.mdview/config.toml` — configuration
-- `~/.mdview/daemon.lock` — the single-daemon coordination file
+- `~/.waggledance/registry.db` — project registry + file index (SQLite)
+- `~/.waggledance/config.toml` — configuration
+- `~/.waggledance/daemon.lock` — the single-daemon coordination file
 
 Only registered project roots are served; requests are path-traversal guarded.
-mdview never writes to your files — it is a read-only viewer.
+waggledance never writes to your files — it is a read-only viewer.

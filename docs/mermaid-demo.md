@@ -1,7 +1,7 @@
 # Mermaid demo
 
 A smoke-test page for diagram rendering + the pan/zoom controls. Open it in
-mdview; each diagram should render and show the `+ − ⟲ ⛶` toolbar (top-right of
+waggledance; each diagram should render and show the `+ − ⟲ ⛶` toolbar (top-right of
 the diagram) — on mobile the toolbar stays visible, pinch to zoom, drag to pan.
 
 ## Flowchart
@@ -22,12 +22,12 @@ graph TD
 ```mermaid
 sequenceDiagram
   participant Agent
-  participant mdview
+  participant waggledance
   participant Browser
-  Agent->>mdview: view_file(project_root, path)
-  mdview->>mdview: register + index + resolve links
-  mdview-->>Agent: clickable URL
+  Agent->>waggledance: view_file(project_root, path)
+  waggledance->>waggledance: register + index + resolve links
+  waggledance-->>Agent: clickable URL
   Agent-->>Browser: open URL
-  Browser->>mdview: GET /p/<id>/<path>
-  mdview-->>Browser: rendered, linked, live-reloading page
+  Browser->>waggledance: GET /p/<id>/<path>
+  waggledance-->>Browser: rendered, linked, live-reloading page
 ```
