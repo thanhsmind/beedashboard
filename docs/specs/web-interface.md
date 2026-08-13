@@ -1,7 +1,7 @@
 ---
 area: web-interface
 updated: 2026-08-13
-sources: [file-nav-ux, ui-polish-settings-sidebar, agent-terminal, terminal-open-access, cross-board, board-drop-live]
+sources: [file-nav-ux, ui-polish-settings-sidebar, agent-terminal, terminal-open-access, cross-board, board-drop-live, upstream-short-link]
 decisions: [12d62831, 99e8df73, 184c77b0]
 coverage: partial
 ---
@@ -18,6 +18,9 @@ content itself.
 - Any page (project list, a rendered file, search results, settings, an error
   page) → shows the shared top bar.
 - Opening `/` (or clicking the brand) → the project list.
+- Opening a file's short address → sends the reader on to that file's own page,
+  which then behaves exactly as if it had been opened by its path. An address
+  naming no known file is reported as not found, never as an empty page.
 - Opening a file's page → shows the chapter sidebar focused on that file's
   folder, a reading breadcrumb above the article, and (when the file has
   headings and/or is linked from elsewhere) a right-hand panel.

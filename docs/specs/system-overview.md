@@ -59,9 +59,17 @@ launcher — CLI, MCP, future desktop — coordinates through `~/.mdview/daemon.
 - **Live reload** — a filesystem watcher (debounced) updates the index on change
   and pushes a reload signal over WebSocket; the browser reloads the page.
 - **Search** — full-text (keyword) across a project or all projects.
+- **Short file links** — every indexed file also answers at a short, opaque
+  address of its own, alongside its full path-shaped URL. The short address is
+  stable for a given file and is what tools hand to a person, so a link stays
+  short enough to paste into a chat, a commit message, or a terminal without
+  wrapping. Both addresses reach the same page; neither replaces the other.
 - **Agent integration (MCP)** — a single tool, `mdview_view_file(project_root,
   relative_path)`, that ensures the project exists, indexes the file, ensures the
-  daemon is up, and returns a viewable URL.
+  daemon is up, and returns a viewable URL. It returns the short address, and
+  names the file's own path beside it in plain text — the short address is
+  opaque, so without the path a transcript full of them says nothing about which
+  file each one was.
 - **CLI** — `serve` (daemon), plus `register / open / list / search / status /
   refresh / unregister / stop`, `doctor`, and `version` (prints the single-source
   app version, same as `--version`).
