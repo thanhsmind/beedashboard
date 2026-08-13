@@ -1,16 +1,16 @@
 #!/usr/bin/env sh
-# mdview installer — downloads a prebuilt binary (or builds from source) and
-# helps you run `mdview doctor` to wire up Claude Code. Safe to re-run.
+# waggledance installer — downloads a prebuilt binary (or builds from source) and
+# helps you run `waggledance doctor` to wire up Claude Code. Safe to re-run.
 #
-#   curl -fsSL https://raw.githubusercontent.com/vantt/mdview/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/thanhsmind/waggledance/main/install.sh | sh
 #
 # Env overrides:
-#   MDVIEW_INSTALL_DIR   target dir (default: first writable of the fallback chain)
-#   MDVIEW_VERSION       release tag (default: latest)
+#   WAGGLEDANCE_INSTALL_DIR   target dir (default: first writable of the fallback chain)
+#   WAGGLEDANCE_VERSION       release tag (default: latest)
 set -eu
 
-REPO="vantt/mdview"
-BIN="mdview"
+REPO="thanhsmind/waggledance"
+BIN="waggledance"
 
 info() { printf '  %s\n' "$*"; }
 err()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -31,17 +31,17 @@ detect_target() {
 }
 
 choose_dir() {
-  if [ -n "${MDVIEW_INSTALL_DIR:-}" ]; then echo "$MDVIEW_INSTALL_DIR"; return; fi
-  for d in "/usr/local/bin" "$HOME/.local/bin" "$HOME/.mdview/bin"; do
+  if [ -n "${WAGGLEDANCE_INSTALL_DIR:-}" ]; then echo "$WAGGLEDANCE_INSTALL_DIR"; return; fi
+  for d in "/usr/local/bin" "$HOME/.local/bin"; do
     if [ -d "$d" ] && [ -w "$d" ]; then echo "$d"; return; fi
     if mkdir -p "$d" 2>/dev/null && [ -w "$d" ]; then echo "$d"; return; fi
   done
-  echo "$HOME/.mdview/bin"
+  echo "$HOME/.local/bin"
 }
 
-echo "Installing mdview…"
+echo "Installing waggledance…"
 TARGET="$(detect_target)"
-VERSION="${MDVIEW_VERSION:-latest}"
+VERSION="${WAGGLEDANCE_VERSION:-latest}"
 DIR="$(choose_dir)"; mkdir -p "$DIR"
 
 if [ "$VERSION" = "latest" ]; then

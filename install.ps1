@@ -1,32 +1,32 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    mdview installer for Windows — downloads a prebuilt binary and helps wire up Claude Code.
+    waggledance installer for Windows — downloads a prebuilt binary and helps wire up Claude Code.
 .DESCRIPTION
-    irm https://raw.githubusercontent.com/vantt/mdview/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/thanhsmind/waggledance/main/install.ps1 | iex
 .NOTES
     Env overrides (set before running):
-      $env:MDVIEW_INSTALL_DIR   target dir (default: $env:USERPROFILE\.mdview\bin)
-      $env:MDVIEW_VERSION       release tag (default: latest)
+      $env:WAGGLEDANCE_INSTALL_DIR   target dir (default: $env:LOCALAPPDATA\Programs\waggledance)
+      $env:WAGGLEDANCE_VERSION       release tag (default: latest)
 #>
 
 $ErrorActionPreference = 'Stop'
 
-$Repo = 'vantt/mdview'
-$Bin = 'mdview'
+$Repo = 'thanhsmind/waggledance'
+$Bin = 'waggledance'
 $Target = 'x86_64-pc-windows-msvc'
 
 function Write-Info($msg) { Write-Host "  $msg" }
 function Write-ErrExit($msg) { Write-Error "error: $msg"; exit 1 }
 
 if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64' -and $env:PROCESSOR_ARCHITEW6432 -ne 'AMD64') {
-    Write-ErrExit "unsupported architecture: $env:PROCESSOR_ARCHITECTURE (only x86_64/AMD64 prebuilt binaries are published; build from source: cargo install --git https://github.com/$Repo mdview)"
+    Write-ErrExit "unsupported architecture: $env:PROCESSOR_ARCHITECTURE (only x86_64/AMD64 prebuilt binaries are published; build from source: cargo install --git https://github.com/$Repo waggledance)"
 }
 
-$InstallDir = if ($env:MDVIEW_INSTALL_DIR) { $env:MDVIEW_INSTALL_DIR } else { Join-Path $env:USERPROFILE '.mdview\bin' }
+$InstallDir = if ($env:WAGGLEDANCE_INSTALL_DIR) { $env:WAGGLEDANCE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\waggledance' }
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
-$Version = if ($env:MDVIEW_VERSION) { $env:MDVIEW_VERSION } else { 'latest' }
+$Version = if ($env:WAGGLEDANCE_VERSION) { $env:WAGGLEDANCE_VERSION } else { 'latest' }
 $AssetName = "$Bin-$Target.exe"
 $Url = if ($Version -eq 'latest') {
     "https://github.com/$Repo/releases/latest/download/$AssetName"
@@ -34,7 +34,7 @@ $Url = if ($Version -eq 'latest') {
     "https://github.com/$Repo/releases/download/$Version/$AssetName"
 }
 
-Write-Host "Installing mdview..."
+Write-Host "Installing waggledance..."
 Write-Info "target: $Target"
 Write-Info "into:   $InstallDir"
 

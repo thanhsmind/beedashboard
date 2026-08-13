@@ -30,12 +30,12 @@ pub struct SpawnHerdr {
     pub session: String,
 }
 
-/// The herdr binary path, from `MDVIEW_HERDR_BINARY` when set, else `herdr`
+/// The herdr binary path, from `WAGGLEDANCE_HERDR_BINARY` when set, else `herdr`
 /// on `PATH`. Named in mdview's own env namespace — herdr-go's
 /// `HERDR_GO_HERDR_BINARY` does not travel with the port (D1 retires
 /// herdr-go as a separate product, so its env-var namespace retires too).
 pub fn herdr_binary_from_env() -> String {
-    herdr_binary_from_env_value(std::env::var("MDVIEW_HERDR_BINARY").ok())
+    herdr_binary_from_env_value(std::env::var("WAGGLEDANCE_HERDR_BINARY").ok())
 }
 
 fn herdr_binary_from_env_value(value: Option<String>) -> String {
