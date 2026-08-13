@@ -6,12 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# work/
+# work/upstream-short-link/
 
-## Sections
+## Concepts
 
-- [agent-terminal/](agent-terminal/index.md) — 1 concept(s)
-- [card-terminals/](card-terminals/index.md) — 1 concept(s)
-- [cross-board/](cross-board/index.md) — 1 concept(s)
-- [gate-stop-superseded/](gate-stop-superseded/index.md) — 1 concept(s)
-- [upstream-short-link/](upstream-short-link/index.md) — 1 concept(s)
+- [upstream-short-link — delivery](delivery.md) — Delivery record for work item upstream-short-link: 1 capped cell(s), 0 recorded deviation(s).
