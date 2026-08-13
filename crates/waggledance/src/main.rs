@@ -36,7 +36,7 @@ fn main() {
 }
 
 /// D7's live-controllable pair: the herdr supervisor and the status
-/// watcher/notifier, reconciled against a [`mdview_core::config::TerminalConfig`]
+/// watcher/notifier, reconciled against a [`waggledance_core::config::TerminalConfig`]
 /// on every switch write (`server::update_terminal_config`) and once at
 /// startup (`server::serve`) — so flipping a switch takes effect
 /// immediately, with **no restart**, and turning one off stops exactly the
@@ -125,9 +125,9 @@ impl TerminalBackground {
     /// with the switch on.
     pub fn reconcile(
         &self,
-        cfg: &mdview_core::config::TerminalConfig,
+        cfg: &waggledance_core::config::TerminalConfig,
         herdr: Arc<dyn herdr::Herdr>,
-        notify_store: Arc<mdview_core::notify_store::NotifyStore>,
+        notify_store: Arc<waggledance_core::notify_store::NotifyStore>,
         telegram: Option<(String, String)>,
     ) {
         self.reconcile_supervisor(cfg.supervisor_enabled, herdr.clone());
@@ -222,7 +222,7 @@ impl TerminalBackground {
         &self,
         enabled: bool,
         control: Arc<dyn herdr::Herdr>,
-        store: Arc<mdview_core::notify_store::NotifyStore>,
+        store: Arc<waggledance_core::notify_store::NotifyStore>,
         telegram: Option<(String, String)>,
     ) {
         self.reconcile_notify_with_interval(
@@ -240,7 +240,7 @@ impl TerminalBackground {
         &self,
         enabled: bool,
         control: Arc<dyn herdr::Herdr>,
-        store: Arc<mdview_core::notify_store::NotifyStore>,
+        store: Arc<waggledance_core::notify_store::NotifyStore>,
         telegram: Option<(String, String)>,
         interval: Duration,
     ) {
@@ -326,8 +326,8 @@ mod terminal_background_tests {
     //! spawn `herdr`) never fires.
     use super::*;
     use crate::herdr::fake::FakeHerdr;
-    use mdview_core::config::TerminalConfig;
-    use mdview_core::notify_store::NotifyStore;
+    use waggledance_core::config::TerminalConfig;
+    use waggledance_core::notify_store::NotifyStore;
 
     fn store() -> Arc<NotifyStore> {
         Arc::new(NotifyStore::open_in_memory().unwrap())

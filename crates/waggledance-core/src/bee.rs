@@ -2,7 +2,7 @@
 //!
 //! Turns `<root>/.bee/` into a typed [`BeeSnapshot`]. This module is
 //! deliberately framework-free (no axum/tokio/hyper) so it stays inside
-//! `mdview-core`, per the crate split documented at the top of `lib.rs`.
+//! `waggledance-core`, per the crate split documented at the top of `lib.rs`.
 //!
 //! Decisions honored here (see `docs/history/bee-cockpit/CONTEXT.md`):
 //! - **D3** — presence is `<root>/.bee/` existing; absence is reported, not
@@ -1842,7 +1842,7 @@ pub fn read_archived_cells(root: &Path, feature: &str) -> Vec<BeeCell> {
 /// `.bee/cells/archive/` (D9) — one entry per archived feature, sorted for
 /// a deterministic read, deduplicated defensively even though a directory
 /// listing cannot itself repeat a name. This is a minimal, read-only
-/// deviation from feature-hub-1's own file list (`crates/mdview-core` is
+/// deviation from feature-hub-1's own file list (`crates/waggledance-core` is
 /// out of scope for that cell except for exactly this kind of helper,
 /// recorded here rather than reinterpreted silently): the feature hub's
 /// Finished group (`bee_feature_hub_section`, `mdview::views`) needs to
@@ -3697,7 +3697,7 @@ mod tests {
         for forbidden in ["axum", "tokio", "hyper"] {
             assert!(
                 !manifest.lines().any(|l| l.trim_start().starts_with(forbidden)),
-                "mdview-core/Cargo.toml must not depend on {forbidden}"
+                "waggledance-core/Cargo.toml must not depend on {forbidden}"
             );
         }
     }
@@ -6838,7 +6838,7 @@ mod tests {
             &root,
             ".bee/reservations.json",
             r#"{"reservations": [
-                {"agent": "healthread", "cell": "bbp-15", "path": "crates/mdview-core/src/bee.rs", "kind": "lease", "session": "s1", "reserved_at": "2026-08-06T17:29:44.227Z", "released_at": null},
+                {"agent": "healthread", "cell": "bbp-15", "path": "crates/waggledance-core/src/bee.rs", "kind": "lease", "session": "s1", "reserved_at": "2026-08-06T17:29:44.227Z", "released_at": null},
                 {"agent": "otheragent", "cell": "bbp-14", "path": "crates/mdview/src/server.rs", "kind": "intent", "session": "s2", "reserved_at": "2026-08-06T10:00:00.000Z", "released_at": "2026-08-06T11:00:00.000Z"}
             ]}"#,
         );
@@ -6848,7 +6848,7 @@ mod tests {
         let first = &snap.reservations[0];
         assert_eq!(first.agent.as_deref(), Some("healthread"));
         assert_eq!(first.cell.as_deref(), Some("bbp-15"));
-        assert_eq!(first.path.as_deref(), Some("crates/mdview-core/src/bee.rs"));
+        assert_eq!(first.path.as_deref(), Some("crates/waggledance-core/src/bee.rs"));
         assert_eq!(first.kind.as_deref(), Some("lease"));
         assert_eq!(first.session.as_deref(), Some("s1"));
         assert_eq!(first.reserved_at.as_deref(), Some("2026-08-06T17:29:44.227Z"));

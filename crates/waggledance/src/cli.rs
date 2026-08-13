@@ -5,13 +5,13 @@
 use crate::runtime;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use mdview_core::indexer;
-use mdview_core::Config;
+use waggledance_core::indexer;
+use waggledance_core::Config;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(
-    name = "mdview",
+    name = "waggledance",
     version,
     about = "Multi-project markdown viewer for AI agent workflows"
 )]
@@ -175,7 +175,7 @@ fn classify_config_edit_outcome(path: &Path, read_result: std::io::Result<String
 }
 
 fn cmd_config_edit() -> Result<()> {
-    let path = mdview_core::config::config_path();
+    let path = waggledance_core::config::config_path();
     // Materialize the file with current (or default) values so the editor opens
     // a fully-populated config, not an empty/absent file.
     Config::load()
@@ -205,7 +205,7 @@ fn cmd_config_edit() -> Result<()> {
 fn cmd_serve(port: Option<u16>, host: Option<String>) -> Result<()> {
     // Apply overrides by persisting to config before the daemon reads it.
     if port.is_some() || host.is_some() {
-        let mut cfg = mdview_core::Config::load();
+        let mut cfg = waggledance_core::Config::load();
         if let Some(p) = port {
             cfg.server.port = p;
         }
@@ -308,7 +308,7 @@ fn format_url_choices(urls: &[String]) -> String {
 
 /// Find the registered project root containing `file`, else the nearest ancestor
 /// with a project marker, else the file's parent directory.
-fn find_project_root(engine: &mdview_core::Engine, file: &Path) -> PathBuf {
+fn find_project_root(engine: &waggledance_core::Engine, file: &Path) -> PathBuf {
     if let Ok(projects) = engine.list_projects() {
         if let Some(p) = projects.iter().find(|p| file.starts_with(&p.root_path)) {
             return p.root_path.clone();

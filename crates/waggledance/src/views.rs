@@ -2,16 +2,16 @@
 //! Theme is CSS-variable driven (no-flash head script); code colors come from
 //! `/highlight.css` (syntect class-based), so themes switch without re-render.
 
-use mdview_core::bee::{
+use waggledance_core::bee::{
     feature_cell_span, list_archived_feature_dirs, BeeApprovedGates, BeeBacklog, BeeBuckets,
     BeeCell, BeeDecisionSummary, BeeFeaturePhase, BeePbi, BeeProjectRollup, BeeReview,
     BeeReviewStatus, BeeSession, BeeShippedFeature, BeeSnapshot, BeeState, BeeWorkspace,
     BeeWorktree,
 };
-use mdview_core::code_source::DirListing;
-use mdview_core::config::Config;
-use mdview_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
-use mdview_core::render::HighlightedSource;
+use waggledance_core::code_source::DirListing;
+use waggledance_core::config::Config;
+use waggledance_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
+use waggledance_core::render::HighlightedSource;
 
 pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
     format!(
@@ -533,7 +533,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    width no readable type size can hold the grid, so the lines wrap instead
    of running off the side. */
 .term-screen--wrapped { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
-/* term-frame-blocks: a table or TUI frame `mdview_core::ansi::to_html` wraps
+/* term-frame-blocks: a table or TUI frame `waggledance_core::ansi::to_html` wraps
    in its own `<div class="term-frame">` keeps its grid on every screen size,
    never the phone-only `pre-wrap` the rest of `.term-screen` takes below —
    a `<div>` inside a `<pre>` still inherits `white-space` from its ancestor
@@ -945,7 +945,7 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str, attach: bool) -> Stri
 ///
 /// agent-terminal-13: not folded into `assets/app.js` — that file is not
 /// among this cell's declared files (`crates/mdview/src/server.rs`,
-/// `crates/mdview/src/views.rs`, `crates/mdview-core/src/config.rs`), so the
+/// `crates/mdview/src/views.rs`, `crates/waggledance-core/src/config.rs`), so the
 /// creation controls' own click wiring lives here instead, the same
 /// deliberate duplication `UNASSIGNED_TERMINAL_SCRIPT` already documents for
 /// the same reason ("a later cell to fold both into one shared script once
@@ -1067,7 +1067,7 @@ const AGENT_SWITCH_DRAWER: &str = r#"<div class="agent-drawer js-menu">
 /// `terminal_page_inner`), never reached here. Distinct wording from
 /// [`terminal_down_page`] so an empty list is never mistaken for herdr being
 /// unreachable, or the reverse. `presets` is the exact configured D8 preset
-/// label list (`mdview_core::config::AgentPreset`'s labels, in
+/// label list (`waggledance_core::config::AgentPreset`'s labels, in
 /// `Config.terminal.agent_presets` order) — this view never sees argv.
 pub fn terminal_page(
     project: &Project,
@@ -1245,7 +1245,7 @@ const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
         el.classList.remove("term-screen--stale");
         if (lastRevision[paneId] === body.revision) return;
         lastRevision[paneId] = body.revision;
-        // `body.text` is safe, pre-escaped HTML from mdview-core's ansi
+        // `body.text` is safe, pre-escaped HTML from waggledance-core's ansi
         // translator (agent-terminal-12) — never the raw pane text — so
         // `innerHTML` here renders ANSI colour/attribute markup rather than
         // showing literal escape characters.
@@ -1417,7 +1417,7 @@ pub fn terminal_down_page(project: &Project) -> String {
 /// — every cell this board's buckets fed it now surfaces on that page's own
 /// Todos tab instead. Every path-shaped value on a
 /// `BeeCell`/`BeeFeaturePhase` already arrives relativized by
-/// `mdview_core::bee::read_snapshot` (no absolute path crosses into
+/// `waggledance_core::bee::read_snapshot` (no absolute path crosses into
 /// `BeeSnapshot`'s public fields), so nothing further is redacted here —
 /// this view only escapes for HTML safety.
 ///
@@ -1425,7 +1425,7 @@ pub fn terminal_down_page(project: &Project) -> String {
 /// lifecycle stepper, the headline KPI tiles, the Ship velocity section, the
 /// Needs attention panel and the Working-on-now card (its own Running now
 /// subsection included) are gone, along with the view functions and CSS
-/// that only ever rendered them — `mdview_core`'s readers for that data
+/// that only ever rendered them — `waggledance_core`'s readers for that data
 /// (velocity, attention, running workers, the D7 bucket counts) are
 /// untouched; the feature detail page and other consumers still read them
 /// from `BeeSnapshot`, this page just stops rendering them. `{top}` — now
@@ -1439,7 +1439,7 @@ pub fn terminal_down_page(project: &Project) -> String {
 /// worktrees, workspaces) and the Process health panel
 /// (`bee_process_health_panel`: file-lock contention, model tier mix, gate
 /// bypass, `read_errors`) are gone, along with the view functions and CSS
-/// that only ever rendered them. `mdview_core`'s readers for that data
+/// that only ever rendered them. `waggledance_core`'s readers for that data
 /// (sessions, worktrees, workspaces, reservations, tier mix, config) are
 /// untouched — the feature detail page and other consumers still read them
 /// from `BeeSnapshot`; this page just stops rendering them. `{panels}` now
@@ -1728,7 +1728,7 @@ fn bee_board_top(project: &Project) -> String {
 /// clock, taken at render time — the board is rendered fresh from disk on
 /// every request (D4), never cached, so "when the data was read" and "now"
 /// are the same instant. Formatted the same plain way `ymd_utc`
-/// (`mdview_core::bee`) builds a date, just with the time appended.
+/// (`waggledance_core::bee`) builds a date, just with the time appended.
 fn bee_board_asof() -> String {
     let now = time::OffsetDateTime::now_utc();
     format!(
@@ -1938,7 +1938,7 @@ fn bee_live_strip_section(snapshot: &BeeSnapshot) -> String {
 ///
 /// How fresh a bound session's heartbeat must be for its feature to count
 /// as **working now** (`waiting-means-stopped-1`) — deliberately far
-/// tighter than `mdview-core`'s own [`SESSION_LIVE_MINUTES`] (30.0), which
+/// tighter than `waggledance-core`'s own [`SESSION_LIVE_MINUTES`] (30.0), which
 /// stays exactly as it is and keeps driving `BeeSession.live` and the Live
 /// strip: a terminal left open for twenty minutes still earns its strip
 /// row. The two windows answer different questions. `SESSION_LIVE_MINUTES`
@@ -1965,7 +1965,7 @@ const WORKING_MINUTES: f64 = 5.0;
 /// time behind nested `<details>` ([`bee_hub_finished_rows`]) rather than
 /// growing without bound as more features close. Every path-shaped value a
 /// `BeeCell`/`BeeFeaturePhase` carries already arrives relativized by
-/// `mdview_core::bee::read_snapshot` (D9), so nothing further is redacted
+/// `waggledance_core::bee::read_snapshot` (D9), so nothing further is redacted
 /// here -- this view only escapes for HTML safety.
 ///
 /// cross-board-2 splits what used to be one function into two seams: this
@@ -2004,13 +2004,13 @@ struct BeeHubCardData {
     last_activity: Option<String>,
     worktree: (String, &'static str),
     reason: Option<String>,
-    docs: Option<mdview_core::bee::BeeFeatureDocs>,
+    docs: Option<waggledance_core::bee::BeeFeatureDocs>,
 }
 
 /// [`bee_hub_finished_row`]'s render inputs for one Finished row.
 struct BeeHubFinishedData {
     feature: String,
-    docs: Option<mdview_core::bee::BeeFeatureDocs>,
+    docs: Option<waggledance_core::bee::BeeFeatureDocs>,
 }
 
 /// The feature hub's own column rules (this function's former home, see
@@ -2520,7 +2520,7 @@ fn bee_hub_card(
     last_activity: Option<&str>,
     worktree: &(String, &'static str),
     reason: Option<&str>,
-    docs: Option<&mdview_core::bee::BeeFeatureDocs>,
+    docs: Option<&waggledance_core::bee::BeeFeatureDocs>,
     project_label: Option<&str>,
     panes: &[TerminalPaneView],
 ) -> String {
@@ -2608,7 +2608,7 @@ fn bee_hub_card(
 fn bee_hub_finished_row(
     project_id: &str,
     feature: &str,
-    docs: Option<&mdview_core::bee::BeeFeatureDocs>,
+    docs: Option<&waggledance_core::bee::BeeFeatureDocs>,
     project_label: Option<&str>,
     shipped_at: Option<&str>,
 ) -> String {
@@ -2744,7 +2744,7 @@ fn bee_hub_latest_activity<'a>(cells: impl Iterator<Item = &'a BeeCell>) -> Opti
 /// or excludes for). Built over
 /// `snapshot.shipped` (D10: every non-dropped cell capped) rather than a
 /// cell-status bucket, so it is inherently D8-safe and already uncapped —
-/// `compute_shipped_features` (`mdview_core::bee`) applies no
+/// `compute_shipped_features` (`waggledance_core::bee`) applies no
 /// `RECENT_DETAIL_CAP`, so no finished feature is ever silently dropped.
 /// Grouped one compact line per feature — name, cell count and, when the
 /// feature shipped with a timed cycle (D10/D11), its time to finish, reused
@@ -2813,13 +2813,13 @@ fn bee_finished_section(project_id: &str, shipped: &[BeeShippedFeature]) -> Stri
 /// Backlog & review panel (bee-cockpit-6, board-trim), rendered below the
 /// board's Finished list on the same page (D4/D1). Pure formatting over
 /// `BeeSnapshot` — every field already arrived relativized/redacted from
-/// `mdview_core::bee::read_snapshot`, so this view only formats what it is
+/// `waggledance_core::bee::read_snapshot`, so this view only formats what it is
 /// handed, never recomputes any of that logic. This wrapper used to carry
 /// two more cards, the Sessions panel (bbp-16/D2: sessions, worktrees,
 /// workspaces) and Process health (bbp-16/D5: file-lock contention, model
 /// tier mix, gate bypass, `read_errors`) — board-trim (D1) drops both,
 /// along with the view functions and CSS that only ever rendered them.
-/// `mdview_core`'s readers for that dropped data are untouched; only this
+/// `waggledance_core`'s readers for that dropped data are untouched; only this
 /// page's rendering of them is gone.
 fn bee_panels_section(snapshot: &BeeSnapshot) -> String {
     format!(
@@ -2863,7 +2863,7 @@ fn bee_panels_section(snapshot: &BeeSnapshot) -> String {
 /// state rather than a hidden section or a bare `0`.
 /// How many PBI cards the backlog panel shows before it falls back to a
 /// "Showing X of Y" note (bbp-14) — the same cap discipline
-/// `mdview_core::bee`'s own `RECENT_DETAIL_CAP` already applies to findings,
+/// `waggledance_core::bee`'s own `RECENT_DETAIL_CAP` already applies to findings,
 /// mirrored here at the view layer since `BeeBacklog::pbis` itself is
 /// uncapped (every distinct PBI, so the status counts stay exact).
 const BACKLOG_PBI_DISPLAY_CAP: usize = 20;
@@ -2959,7 +2959,7 @@ fn bee_backlog_panel(backlog: &BeeBacklog, review: &BeeReview) -> String {
 
 /// The review queue's body (bbp-14, D6, D7): unreviewed / in review /
 /// settled counts, joined from `.bee/review-candidates.jsonl` against
-/// `.bee/reviews/*.json` by `mdview_core::bee`'s own review join, with the
+/// `.bee/reviews/*.json` by `waggledance_core::bee`'s own review join, with the
 /// open-P1 count called out first as the sharpest number on the panel.
 /// Independent review is presented as something the owner invokes, never as
 /// a stage the board implies is already running — every sentence here is
@@ -3055,12 +3055,12 @@ fn bee_fmt_trace_time(iso: &str) -> String {
 }
 
 /// One `.bee/cells/<id>.json` cell in full — everything the board's trimmed
-/// `mdview_core::bee::BeeCell` deliberately leaves out (`action`, `verify`,
+/// `waggledance_core::bee::BeeCell` deliberately leaves out (`action`, `verify`,
 /// `read_first`, `decisions`, `must_haves.truths`, and the rest of `trace`
 /// beyond `worker`/`claimed_at`/`capped_at`). Built by
 /// `server.rs::cell_full_from_json` straight from the raw cell JSON, with
 /// every path-shaped field already relativized against the project root
-/// before it reaches here (same contract as `mdview_core::bee::BeeCell`) —
+/// before it reaches here (same contract as `waggledance_core::bee::BeeCell`) —
 /// this view only escapes for HTML safety, it never redacts.
 pub struct BeeCellFull {
     pub id: String,
@@ -3272,7 +3272,7 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
 /// rather than "Main", see that function's own doc comment).
 /// `decisions` is already filtered to this feature's own `scope` by the
 /// caller (`snapshot.decisions.recent`, itself bounded — see
-/// `mdview_core::bee::BeeDecisions`). `panes` (feature-titles D2) is this
+/// `waggledance_core::bee::BeeDecisions`). `panes` (feature-titles D2) is this
 /// project's own D2-containment-boundary-filtered terminal pane list
 /// (`server.rs::project_panes`, the same list `terminal_page` renders) —
 /// the Terminal tab links each one straight to its own live page
@@ -3281,7 +3281,7 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
 /// reads, for the Activity tab's gate stamps. `docs` (feature-titles,
 /// extended by hub-fallbacks) is this feature's own docs reader result,
 /// title and description already run through their own fallback chain
-/// (`mdview_core::bee::BeeFeatureDocs`'s own doc comment): present with a
+/// (`waggledance_core::bee::BeeFeatureDocs`'s own doc comment): present with a
 /// title, the header's own name becomes that title with the slug demoted
 /// to a subtitle beneath it, plus the description as one clamped line, and
 /// a docs row linking every markdown file the feature's docs dir holds
@@ -3301,7 +3301,7 @@ pub fn bee_feature_page(
     decisions: &[BeeDecisionSummary],
     panes: &[TerminalPaneView],
     gates: Option<&BeeApprovedGates>,
-    docs: Option<&mdview_core::bee::BeeFeatureDocs>,
+    docs: Option<&waggledance_core::bee::BeeFeatureDocs>,
 ) -> String {
     let status_banner = match shipped {
         Some(f) => {
@@ -3403,7 +3403,7 @@ pub fn bee_feature_page(
 }
 
 /// D2's detail header docs row (feature-titles, extended by hub-fallbacks):
-/// links every markdown file [`mdview_core::bee::BeeFeatureDocs::docs`]
+/// links every markdown file [`waggledance_core::bee::BeeFeatureDocs::docs`]
 /// lists (already sorted `CONTEXT.md`/`plan.md` first), each through this
 /// viewer's own document route (`/p/<id>/docs/history/<feature>/…`, the
 /// same project-relative shape [`file_page`]'s own links already use) —
@@ -3411,7 +3411,7 @@ pub fn bee_feature_page(
 /// `docs` list is empty: a feature with no markdown file under its docs
 /// dir at all has nothing to link, whether or not it has a title or
 /// description from another fallback tier.
-fn bee_feature_docs_row(project_id: &str, feature: &str, docs: Option<&mdview_core::bee::BeeFeatureDocs>) -> String {
+fn bee_feature_docs_row(project_id: &str, feature: &str, docs: Option<&waggledance_core::bee::BeeFeatureDocs>) -> String {
     let Some(docs) = docs else {
         return String::new();
     };
@@ -3444,7 +3444,7 @@ fn bee_feature_docs_row(project_id: &str, feature: &str, docs: Option<&mdview_co
 fn bee_feature_chip_row(
     lane_label: Option<&str>,
     worktree: &(String, &'static str),
-    duration: Option<&mdview_core::bee::BeeCycleSpan>,
+    duration: Option<&waggledance_core::bee::BeeCycleSpan>,
     done: usize,
     total: usize,
 ) -> String {
@@ -4655,7 +4655,7 @@ pub const APP_JS: &str = include_str!("../assets/app.js");
 /// carrying the content's own hash cannot: change the file and the URL is a
 /// different URL, which no cache has an entry for.
 fn asset_fingerprint(content: &str) -> String {
-    format!("{:x}", mdview_core::ansi::revision_of(content))
+    format!("{:x}", waggledance_core::ansi::revision_of(content))
 }
 
 /// `/static/app.css?v=…` — the stylesheet URL with its fingerprint.
@@ -5263,7 +5263,7 @@ mod tests {
             );
         }
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);
@@ -5324,7 +5324,7 @@ mod tests {
             &format!(r#"{{"id": "live", "last_heartbeat": "{now}", "lane": "session-bound-feat"}}"#),
         );
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);
@@ -5373,7 +5373,7 @@ mod tests {
         let grant_id = sibling.file_name().unwrap().to_string_lossy().to_string();
         write(&root, ".bee/runtime/worktree-grants.json", &format!(r#"{{"{grant_id}": true}}"#));
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);
@@ -5459,7 +5459,7 @@ mod tests {
             &format!(r#"{{"id": "live", "last_heartbeat": "{hb}", "lane": "working-feat"}}"#),
         );
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);
@@ -5547,7 +5547,7 @@ mod tests {
             &format!(r#"{{"id": "default", "last_heartbeat": "{hb}", "workspace_id": "main"}}"#),
         );
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);
@@ -5596,7 +5596,7 @@ mod tests {
             &format!(r#"{{"id": "default", "last_heartbeat": "{hb}", "workspace_id": "main"}}"#),
         );
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);
@@ -5642,7 +5642,7 @@ mod tests {
             &format!(r#"{{"id": "live", "last_heartbeat": "{hb}", "lane": "stale-working-feat"}}"#),
         );
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);
@@ -5700,7 +5700,7 @@ mod tests {
             r#"{"written_at": "2026-08-10T09:00:00Z", "next_action": "Nothing pending from me.", "kind": "pause"}"#,
         );
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);
@@ -5745,7 +5745,7 @@ mod tests {
         let grant_id = sibling.file_name().unwrap().to_string_lossy().to_string();
         write(&root, ".bee/runtime/worktree-grants.json", &format!(r#"{{"{grant_id}": true}}"#));
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);
@@ -5800,7 +5800,7 @@ mod tests {
             r#"{"id": "ws-1", "type": "worktree", "root": "sibling-dir", "branch": "wt/strip-feat", "attached_sessions": []}"#,
         );
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let html = bee_live_strip_section(&snapshot);
 
         assert!(html.contains("strip-feat"), "the row must name the session's own lane: {html}");
@@ -5848,7 +5848,7 @@ mod tests {
             &format!(r#"{{"id": "no-ws", "last_heartbeat": "{hb}", "lane": "other-feat"}}"#),
         );
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let html = bee_live_strip_section(&snapshot);
 
         assert!(
@@ -5892,7 +5892,7 @@ mod tests {
         );
         write(&root, ".bee/runtime/worktree-grants.json", &format!(r#"{{"{grant_id}": true}}"#));
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let html = bee_live_strip_section(&snapshot);
 
         assert!(html.contains("wt/wt-strip-feat"), "the row must name the worktree's own branch: {html}");
@@ -5919,7 +5919,7 @@ mod tests {
         };
         write(".bee/runtime/worktree-grants.json", &format!(r#"{{"{dangling_id}": true}}"#));
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let html = bee_live_strip_section(&snapshot);
 
         assert!(
@@ -5939,7 +5939,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".bee")).unwrap();
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let html = bee_live_strip_section(&snapshot);
 
         assert!(
@@ -5974,7 +5974,7 @@ mod tests {
             }"#,
         );
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);
@@ -6044,7 +6044,7 @@ mod tests {
             &format!(r#"{{"id": "live", "last_heartbeat": "{now}", "lane": "closed-session-feat"}}"#),
         );
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);
@@ -6156,7 +6156,7 @@ mod tests {
     /// row has no room for both.
     #[test]
     fn bee_hub_finished_row_prefers_the_context_title_over_the_slug() {
-        let docs = mdview_core::bee::BeeFeatureDocs {
+        let docs = waggledance_core::bee::BeeFeatureDocs {
             title: Some("Human Title".to_string()),
             description: None,
             docs: vec![],
@@ -6217,7 +6217,7 @@ mod tests {
     // --- cross-board-2: bee_cross_project_features_section ---
 
     /// One archived cell fixture for `bee_cross_project_features_section`'s
-    /// own tests, mirroring `mdview_core::bee`'s own `feature_cell_json`
+    /// own tests, mirroring `waggledance_core::bee`'s own `feature_cell_json`
     /// test helper (not reusable across crates) so an archived feature can
     /// carry, or deliberately lack, a D10 ship time.
     fn cross_board_archived_cell_json(id: &str, feature: &str, capped_at: Option<&str>) -> String {
@@ -6329,7 +6329,7 @@ mod tests {
         project_c.name = "Project C".into();
         project_c.root_path = root_c.clone();
 
-        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone(), root_c.clone()]);
+        let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone(), root_c.clone()]);
         let pairs: Vec<(&Project, &BeeProjectRollup)> =
             vec![(&project_a, &rollups[0]), (&project_b, &rollups[1]), (&project_c, &rollups[2])];
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
@@ -6416,7 +6416,7 @@ mod tests {
         project_b.name = "Project B".into();
         project_b.root_path = root_b.clone();
 
-        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
+        let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
         let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
@@ -6483,7 +6483,7 @@ mod tests {
         project_b.id = "proj-b".into();
         project_b.root_path = root_b.clone();
 
-        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
+        let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
         let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
@@ -6536,7 +6536,7 @@ mod tests {
         project_b.name = "Project B".into();
         project_b.root_path = root_b.clone();
 
-        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
+        let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
         let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
@@ -6591,7 +6591,7 @@ mod tests {
         project_b.id = "proj-b".into();
         project_b.root_path = root_b.clone();
 
-        let rollups = mdview_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
+        let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
         let with_empty: Vec<(&Project, &BeeProjectRollup)> =
             vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
         let without_empty: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_b, &rollups[1])];
@@ -6722,7 +6722,7 @@ mod tests {
             .unwrap();
         }
 
-        let snapshot = mdview_core::bee::read_snapshot(&root);
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot);

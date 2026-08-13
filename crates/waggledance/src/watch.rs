@@ -3,7 +3,7 @@
 //! (PRD FR-08/FR-09/FR-09b).
 
 use anyhow::Result;
-use mdview_core::Engine;
+use waggledance_core::Engine;
 use notify::{RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use std::path::Path;

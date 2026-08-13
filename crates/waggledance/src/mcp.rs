@@ -4,8 +4,8 @@
 
 use crate::runtime;
 use anyhow::Result;
-use mdview_core::config::registry_db_path;
-use mdview_core::{Config, Engine, SqliteStore};
+use waggledance_core::config::registry_db_path;
+use waggledance_core::{Config, Engine, SqliteStore};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::Path;

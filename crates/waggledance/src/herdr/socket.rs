@@ -32,7 +32,7 @@ pub fn default_socket_path() -> Result<PathBuf> {
 /// Resolve herdr's own per-user config directory. On Windows this needs the
 /// roaming AppData root — herdr-go got that from its own
 /// `crate::config::native_roaming_app_data()`, an edge this port must not
-/// reach for (mdview-core has no equivalent, and must not gain one just to
+/// reach for (waggledance-core has no equivalent, and must not gain one just to
 /// serve this client). The Windows resolution is instead injected as a
 /// parameter into [`herdr_config_dir_with`], the same seam
 /// `default_socket_path_from_config_dir`/`resolve_socket_path_from_config_dir`
@@ -53,7 +53,7 @@ fn herdr_config_dir() -> Result<PathBuf> {
 
 /// Pure: `herdr_config_dir`'s Windows branch, with the roaming AppData root
 /// injected rather than looked up — testable with a fake root, and the only
-/// thing that ever needs mdview-core to know what "roaming AppData" means.
+/// thing that ever needs waggledance-core to know what "roaming AppData" means.
 #[cfg(windows)]
 fn herdr_config_dir_with(
     roaming_app_data: impl FnOnce() -> std::io::Result<PathBuf>,

@@ -2,7 +2,7 @@
 //! TUI), talking `herdr.sock`'s JSON request/response API (DISCOVERY 2026-07-18).
 //!
 //! Ported from herdr-go (`docs/history/agent-terminal/CONTEXT.md` D1) into
-//! the `mdview` binary crate, not `mdview-core`: `mdview-core` is enforced
+//! the `mdview` binary crate, not `waggledance-core`: `waggledance-core` is enforced
 //! async-runtime-free (`bee::tests::no_web_framework_dependency_declared`
 //! asserts no `tokio`/`axum`/`hyper` in its `Cargo.toml`), and this client
 //! needs `tokio` for the socket I/O. `mdview` already depends on both tokio

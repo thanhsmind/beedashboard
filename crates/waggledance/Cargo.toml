@@ -1,5 +1,5 @@
 [package]
-name = "mdview"
+name = "waggledance"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,11 +7,11 @@ authors.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "mdview"
+name = "waggledance"
 path = "src/main.rs"
 
 [dependencies]
-mdview-core = { path = "../mdview-core" }
+waggledance-core = { path = "../waggledance-core" }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -32,7 +32,7 @@ notify-debouncer-full.workspace = true
 if-addrs = "0.13"
 
 # herdr client (agent-terminal-2): request/response over a Unix domain
-# socket / Windows named pipe. mdview-core stays async-runtime-free, so this
+# socket / Windows named pipe. waggledance-core stays async-runtime-free, so this
 # port lives here where tokio and axum are already dependencies.
 async-trait.workspace = true
 interprocess.workspace = true

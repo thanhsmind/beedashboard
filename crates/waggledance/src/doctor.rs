@@ -2,7 +2,7 @@
 
 use crate::runtime;
 use anyhow::Result;
-use mdview_core::config::{self, Config};
+use waggledance_core::config::{self, Config};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -151,7 +151,7 @@ fn check_daemon() -> Check {
             // Ask the live process, not the lock file: upgrading the binary
             // leaves an already-serving daemon untouched, and it is that
             // in-memory process which lacks the newer routes.
-            let reported = mdview_core::daemon::daemon_version(&info.host, info.port);
+            let reported = waggledance_core::daemon::daemon_version(&info.host, info.port);
             let (status, detail) = daemon_version_verdict(&running, reported.as_deref(), expected);
             Check {
                 name: "daemon".into(),
@@ -210,7 +210,7 @@ fn check_index_schema() -> Check {
             detail: format!("no database yet at {}", path.display()),
         };
     }
-    match mdview_core::SqliteStore::open(&path) {
+    match waggledance_core::SqliteStore::open(&path) {
         Ok(store) => match store.schema_report() {
             Ok((version, 0)) => Check {
                 name: "index schema".into(),

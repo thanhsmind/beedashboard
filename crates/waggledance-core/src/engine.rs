@@ -323,7 +323,7 @@ pub enum CodeView {
 
 /// Extensions asset_path serves. Mirrors the 9 tokens
 /// `crates/mdview/src/server.rs::content_type()` already recognizes;
-/// mdview-core cannot import across the crate boundary, so keep this list in
+/// waggledance-core cannot import across the crate boundary, so keep this list in
 /// sync if content_type() ever changes.
 const ALLOWED_ASSET_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "gif", "svg", "webp", "ico", "bmp", "pdf",

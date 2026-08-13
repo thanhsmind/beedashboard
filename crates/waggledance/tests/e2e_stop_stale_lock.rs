@@ -2,7 +2,7 @@
 //! `daemon.lock` (dls-1). Reported symptom: a lock naming a pid that had
 //! already exited and a port nothing listens on made `stop` hang instead of
 //! returning promptly. Root cause found by reproduction, not guessed:
-//! `health_check`'s `TcpStream::connect` (`crates/mdview-core/src/daemon.rs`)
+//! `health_check`'s `TcpStream::connect` (`crates/waggledance-core/src/daemon.rs`)
 //! had no connect timeout — on a network that silently drops packets to a
 //! dead port instead of answering with an immediate RST, that connect call
 //! blocked indefinitely. The pid-kill step itself was never the slow part.
@@ -12,7 +12,7 @@
 //! stale lock's pid can be recycled by an unrelated live process, and
 //! killing by pid alone would have signaled that process.
 
-use mdview_core::daemon::{health_check, DaemonInfo};
+use waggledance_core::daemon::{health_check, DaemonInfo};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -183,7 +183,7 @@ fn run_with_timeout(bin: &str, args: &[&str], home: &Path, timeout: Duration) ->
 /// after it.
 #[test]
 fn stop_returns_promptly_against_a_stale_lock_and_clears_it() {
-    let bin = env!("CARGO_BIN_EXE_mdview");
+    let bin = env!("CARGO_BIN_EXE_waggledance");
     let home = scratch_home("stale");
     let pid = dead_pid();
     let port = cold_dead_port(0);
@@ -219,7 +219,7 @@ fn stop_returns_promptly_against_a_stale_lock_and_clears_it() {
 /// and returns immediately.
 #[test]
 fn stop_with_no_lock_reports_no_daemon_running() {
-    let bin = env!("CARGO_BIN_EXE_mdview");
+    let bin = env!("CARGO_BIN_EXE_waggledance");
     let home = scratch_home("no-lock");
 
     let output = run_with_timeout(bin, &["stop"], &home, Duration::from_secs(5))
@@ -239,7 +239,7 @@ fn stop_with_no_lock_reports_no_daemon_running() {
 #[cfg(unix)]
 #[test]
 fn stop_does_not_kill_an_unrelated_live_process_named_by_a_stale_lock() {
-    let bin = env!("CARGO_BIN_EXE_mdview");
+    let bin = env!("CARGO_BIN_EXE_waggledance");
     let home = scratch_home("unrelated-pid");
 
     let unrelated = Command::new("sleep")
@@ -279,7 +279,7 @@ fn stop_does_not_kill_an_unrelated_live_process_named_by_a_stale_lock() {
 /// cleared.
 #[test]
 fn stop_still_stops_a_genuinely_live_daemon() {
-    let bin = env!("CARGO_BIN_EXE_mdview");
+    let bin = env!("CARGO_BIN_EXE_waggledance");
     let home = scratch_home("live");
 
     let child = Command::new(bin)
@@ -325,7 +325,7 @@ fn stop_still_stops_a_genuinely_live_daemon() {
 /// host:port still names a genuinely live daemon.
 #[test]
 fn stop_keeps_the_lock_when_kill_fails_but_the_daemon_still_answers() {
-    let bin = env!("CARGO_BIN_EXE_mdview");
+    let bin = env!("CARGO_BIN_EXE_waggledance");
     let home = scratch_home("orphaned-guard");
 
     let child = Command::new(bin)

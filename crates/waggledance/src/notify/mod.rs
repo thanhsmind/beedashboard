@@ -4,7 +4,7 @@
 //! never the only path, so a future channel drops in unchanged.
 //!
 //! Delivery is **at-least-once**: the obligation is enqueued in the
-//! [`NotifyStore`](mdview_core::notify_store::NotifyStore) first and marked
+//! [`NotifyStore`](waggledance_core::notify_store::NotifyStore) first and marked
 //! delivered only after a successful send, so a crash between the two
 //! resends rather than loses it.
 //!
@@ -18,7 +18,7 @@ pub mod telegram;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mdview_core::notify_store::NotifyStore;
+use waggledance_core::notify_store::NotifyStore;
 
 use crate::herdr::AgentStatus;
 use crate::watcher::StatusChange;
@@ -58,7 +58,7 @@ pub fn is_notifiable(status: AgentStatus) -> bool {
 }
 
 /// Bridges the watcher to a channel with durable, at-least-once delivery.
-/// The store is plain, synchronous rusqlite (`mdview-core` stays
+/// The store is plain, synchronous rusqlite (`waggledance-core` stays
 /// async-runtime-free) held behind its own internal mutex, so calls here
 /// block only as long as a single SQLite statement takes — the same shape
 /// every other adapter this crate already uses.

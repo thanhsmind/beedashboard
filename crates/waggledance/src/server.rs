@@ -15,9 +15,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use mdview_core::indexer::now_rfc3339;
-use mdview_core::render::theme_css;
-use mdview_core::Engine;
+use waggledance_core::indexer::now_rfc3339;
+use waggledance_core::render::theme_css;
+use waggledance_core::Engine;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -30,7 +30,7 @@ pub struct AppState {
     pub engine: Arc<Engine>,
     pub reload_tx: broadcast::Sender<String>,
     pub highlight_css: Arc<String>,
-    /// Overrides `mdview_core::config::data_dir()` for the settings routes
+    /// Overrides `waggledance_core::config::data_dir()` for the settings routes
     /// (`/settings`, `/api/config`) so a route-level test can point config I/O
     /// at a temp dir instead of the developer's real `~/.mdview`. `None` in
     /// production — those routes then resolve exactly where they always did.
@@ -41,7 +41,7 @@ pub struct AppState {
     /// type. Every terminal route reaches herdr only through this handle,
     /// never by constructing its own client.
     pub herdr: Arc<dyn Herdr>,
-    /// Overrides `mdview_core::transcript`'s default Claude Code projects
+    /// Overrides `waggledance_core::transcript`'s default Claude Code projects
     /// root (`terminal_transcript`) so a route-level test can point
     /// transcript I/O at a scratch dir instead of the developer's real
     /// `~/.claude/projects` — the same seam `config_data_dir` gives the
@@ -68,7 +68,7 @@ pub struct AppState {
     /// the real `~/.mdview/notify.sqlite` — and handed to
     /// `terminal_background` on every reconcile rather than reopened per
     /// toggle.
-    pub notify_store: Arc<mdview_core::notify_store::NotifyStore>,
+    pub notify_store: Arc<waggledance_core::notify_store::NotifyStore>,
     /// scroll-keep-position: the `/screen` routes' own per-pane remembered
     /// scroll depth (`herdr::pane_scroller::PaneScroller`'s stateless
     /// escape-injection mechanism given a durable home) — guarded the same
@@ -218,17 +218,17 @@ impl PaneScrollTracker {
 /// "degrade rather than fail" seam this feature already has (D6's herdr-down
 /// state, the boundary's fail-closed empty pane list).
 fn open_notify_store(
-    cfg: &mdview_core::config::TerminalConfig,
+    cfg: &waggledance_core::config::TerminalConfig,
     override_dir: Option<&std::path::Path>,
-) -> mdview_core::notify_store::NotifyStore {
+) -> waggledance_core::notify_store::NotifyStore {
     if !cfg.notify_enabled {
-        return mdview_core::notify_store::NotifyStore::open_in_memory()
+        return waggledance_core::notify_store::NotifyStore::open_in_memory()
             .expect("in-memory sqlite always opens");
     }
-    let notify_store_path = mdview_core::config::notify_store_path_override(override_dir);
-    mdview_core::notify_store::NotifyStore::open(&notify_store_path).unwrap_or_else(|e| {
+    let notify_store_path = waggledance_core::config::notify_store_path_override(override_dir);
+    waggledance_core::notify_store::NotifyStore::open(&notify_store_path).unwrap_or_else(|e| {
         tracing::warn!("notify outbox open failed ({e}); using an in-memory outbox");
-        mdview_core::notify_store::NotifyStore::open_in_memory()
+        waggledance_core::notify_store::NotifyStore::open_in_memory()
             .expect("in-memory sqlite always opens")
     })
 }
@@ -632,7 +632,7 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                     let panes = snapshot
                         .as_ref()
                         .map(|snap| {
-                            mdview_core::paths_boundary::Boundary::new(vec![p.root_path.clone()])
+                            waggledance_core::paths_boundary::Boundary::new(vec![p.root_path.clone()])
                                 .map(|boundary| project_panes(snap, &boundary))
                                 .unwrap_or_default()
                         })
@@ -663,7 +663,7 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
             // sections. Cloned out of `with_counts` rather than filtered
             // from `projects` directly: `projects` was already consumed
             // building `with_counts` above.
-            let bee_projects: Vec<mdview_core::domain::Project> = with_counts
+            let bee_projects: Vec<waggledance_core::domain::Project> = with_counts
                 .iter()
                 .map(|(p, _, _)| p.clone())
                 .filter(is_bee_project)
@@ -693,7 +693,7 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                     .iter()
                     .map(|(p, r)| (p.id.clone(), project_feature_panes(snapshot.as_ref(), p, r)))
                     .collect();
-                let pairs: Vec<(&mdview_core::domain::Project, &mdview_core::bee::BeeProjectRollup)> =
+                let pairs: Vec<(&waggledance_core::domain::Project, &waggledance_core::bee::BeeProjectRollup)> =
                     rollups.iter().map(|(p, r)| (p, r)).collect();
                 views::bee_cross_project_features_section(&pairs, &feature_panes)
             };
@@ -710,8 +710,8 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
     }
 }
 
-/// cross-board-3: `mdview_core::bee::read_rollup` is strictly synchronous
-/// filesystem work — `mdview-core` deliberately forbids tokio/axum/hyper
+/// cross-board-3: `waggledance_core::bee::read_rollup` is strictly synchronous
+/// filesystem work — `waggledance-core` deliberately forbids tokio/axum/hyper
 /// (`bee.rs:3604`), so running it directly on `index_page`'s async task the
 /// way `bee_board` still does today for one project (`read_snapshot` at
 /// `server.rs:1268`) would put every qualifying project's `.bee/` walk on
@@ -729,14 +729,14 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
 /// reaches the page via `read_errors`; only a wholesale panic/refusal of the
 /// task itself is dropped here).
 async fn cross_project_rollup(
-    projects: Vec<mdview_core::domain::Project>,
-) -> Vec<(mdview_core::domain::Project, mdview_core::bee::BeeProjectRollup)> {
+    projects: Vec<waggledance_core::domain::Project>,
+) -> Vec<(waggledance_core::domain::Project, waggledance_core::bee::BeeProjectRollup)> {
     let handles: Vec<_> = projects
         .into_iter()
         .map(|project| {
             let root = project.root_path.clone();
             let handle = tokio::task::spawn_blocking(move || {
-                mdview_core::bee::read_rollup(&[root]).into_iter().next()
+                waggledance_core::bee::read_rollup(&[root]).into_iter().next()
             });
             (project, handle)
         })
@@ -829,7 +829,7 @@ async fn api_config(State(st): State<AppState>) -> impl IntoResponse {
     // update_config use, rather than the engine's startup-cached config, so
     // all three agree with each other and a route test never touches the
     // real ~/.mdview.
-    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+    let cfg = waggledance_core::Config::load_from(&waggledance_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ));
     Json(json!(cfg))
@@ -850,7 +850,7 @@ struct SavedFlag {
 async fn settings_page_handler(State(st): State<AppState>, Query(flag): Query<SavedFlag>) -> Response {
     // Read fresh from disk so the form reflects the last save (the running daemon
     // still uses its startup config until restarted — noted in the UI).
-    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+    let cfg = waggledance_core::Config::load_from(&waggledance_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ));
     let notify_credential_view = current_notify_credential_view(&st);
@@ -871,8 +871,8 @@ async fn settings_page_handler(State(st): State<AppState>, Query(flag): Query<Sa
 /// terminal token, removed with `terminal_auth`, toa-3, D1).
 fn current_notify_credential_view(st: &AppState) -> views::NotifyCredentialView {
     let cred_path =
-        mdview_core::config::notify_credential_path_override(st.config_data_dir.as_deref());
-    match mdview_core::config::masked_notify_credential(&cred_path) {
+        waggledance_core::config::notify_credential_path_override(st.config_data_dir.as_deref());
+    match waggledance_core::config::masked_notify_credential(&cred_path) {
         Some(masked) => views::NotifyCredentialView::Masked(masked),
         None => views::NotifyCredentialView::NotConfigured,
     }
@@ -938,8 +938,8 @@ struct TerminalConfigJson {
 /// gate on every herdr pane on the host that lives outside a registered
 /// project, so an ambiguous or partial write must never be read as "on".
 async fn update_terminal_config(State(st): State<AppState>, Json(form): Json<TerminalConfigJson>) -> Response {
-    let config_path = mdview_core::config::config_path_override(st.config_data_dir.as_deref());
-    let mut cfg = mdview_core::Config::load_from(&config_path);
+    let config_path = waggledance_core::config::config_path_override(st.config_data_dir.as_deref());
+    let mut cfg = waggledance_core::Config::load_from(&config_path);
     cfg.terminal.enabled = form.enabled;
     cfg.terminal.supervisor_enabled = form.supervisor_enabled;
     cfg.terminal.notify_enabled = form.notify_enabled;
@@ -955,7 +955,7 @@ async fn update_terminal_config(State(st): State<AppState>, Json(form): Json<Ter
     // Per this cell's own rule (mirroring P1): the credential is never a
     // `Config` field, so it is written to its own owner-only file, not into
     // `cfg` — a blank submission leaves whatever is already on disk alone.
-    let cred_path = mdview_core::config::notify_credential_path_override(st.config_data_dir.as_deref());
+    let cred_path = waggledance_core::config::notify_credential_path_override(st.config_data_dir.as_deref());
     // agent-terminal-24: the write can fail (permissions, a full disk, a
     // vanished parent dir — `save_notify_credential` already logs the path,
     // never the secret, at `warn` on error). Previously this result was
@@ -970,7 +970,7 @@ async fn update_terminal_config(State(st): State<AppState>, Json(form): Json<Ter
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        if mdview_core::config::save_notify_credential(&cred_path, secret).is_err() {
+        if waggledance_core::config::save_notify_credential(&cred_path, secret).is_err() {
             notify_credential_save_failed = true;
         }
     }
@@ -1017,8 +1017,8 @@ struct SettingsForm {
 
 async fn update_config(State(st): State<AppState>, Form(form): Form<SettingsForm>) -> Response {
     let config_path =
-        mdview_core::config::config_path_override(st.config_data_dir.as_deref());
-    let mut cfg = mdview_core::Config::load_from(&config_path);
+        waggledance_core::config::config_path_override(st.config_data_dir.as_deref());
+    let mut cfg = waggledance_core::Config::load_from(&config_path);
     if let Some(p) = form.port {
         if p >= 1 {
             cfg.server.port = p;
@@ -1239,8 +1239,8 @@ fn validate_register_path(engine: &Engine, raw: &str) -> Result<PathBuf, &'stati
     // under `~/.ssh`, `~/.aws` and `~/.gnupg`. `is_denied_root` closes the
     // other direction; both run so neither guard's own coverage regresses
     // silently if the other is ever removed.
-    if mdview_core::paths_boundary::Boundary::new(vec![canonical.clone()]).is_err()
-        || mdview_core::paths_boundary::is_denied_root(&canonical)
+    if waggledance_core::paths_boundary::Boundary::new(vec![canonical.clone()]).is_err()
+        || waggledance_core::paths_boundary::is_denied_root(&canonical)
     {
         return Err("denied");
     }
@@ -1262,15 +1262,15 @@ fn validate_register_path(engine: &Engine, raw: &str) -> Result<PathBuf, &'stati
     // codes: folding them into one `"too_large"` would let a route-level
     // test meant to prove the *file* cap pass instead via a slow walk
     // crossing the *time* budget, without ever proving the cap it claims to.
-    match mdview_core::indexer::bounded_scan_markdown_files(
+    match waggledance_core::indexer::bounded_scan_markdown_files(
         &canonical,
         &engine.config.indexing.exclude_patterns,
         REGISTER_MAX_MARKDOWN_FILES,
         REGISTER_SCAN_BUDGET,
     ) {
-        mdview_core::indexer::ScanBudget::Ok(_) => Ok(canonical),
-        mdview_core::indexer::ScanBudget::TooManyFiles => Err("too_large"),
-        mdview_core::indexer::ScanBudget::TooSlow => Err("too_slow"),
+        waggledance_core::indexer::ScanBudget::Ok(_) => Ok(canonical),
+        waggledance_core::indexer::ScanBudget::TooManyFiles => Err("too_large"),
+        waggledance_core::indexer::ScanBudget::TooSlow => Err("too_slow"),
     }
 }
 
@@ -1361,7 +1361,7 @@ async fn project_home(State(st): State<AppState>, Path(id): Path<String>) -> Res
 
 /// D3's presence rule: a project shows the bee surface iff its `root_path`
 /// contains a `.bee/` directory.
-fn is_bee_project(project: &mdview_core::domain::Project) -> bool {
+fn is_bee_project(project: &waggledance_core::domain::Project) -> bool {
     project.root_path.join(".bee").is_dir()
 }
 
@@ -1372,7 +1372,7 @@ async fn bee_board(State(st): State<AppState>, Path(id): Path<String>) -> Respon
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
     };
-    let snapshot = mdview_core::bee::read_snapshot(&project.root_path);
+    let snapshot = waggledance_core::bee::read_snapshot(&project.root_path);
     if !snapshot.present {
         return not_found("this project has no .bee/ store");
     }
@@ -1456,7 +1456,7 @@ async fn terminal_page_inner(
             // A boundary that fails to construct (e.g. a project registered
             // on top of the hard-deny list) can never accept any pane —
             // fail closed to zero panes, not a crash and not a laxer check.
-            let panes = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+            let panes = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
                 .map(|boundary| project_panes(&snapshot, &boundary))
                 .unwrap_or_default();
             let selected = match requested_pane_id {
@@ -1511,7 +1511,7 @@ async fn transcript_page_inner(
     };
     match st.herdr.snapshot().await {
         Ok(snapshot) => {
-            let panes = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+            let panes = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
                 .map(|boundary| project_panes(&snapshot, &boundary))
                 .unwrap_or_default();
             let selected = match requested_pane_id {
@@ -1547,7 +1547,7 @@ async fn transcript_page_for_pane(
 /// the labels-only view `terminal_page` renders, since the page never needs
 /// argv at all.
 fn configured_preset_labels(st: &AppState) -> Vec<String> {
-    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+    let cfg = waggledance_core::Config::load_from(&waggledance_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ));
     cfg.terminal
@@ -1571,7 +1571,7 @@ fn configured_preset_labels(st: &AppState) -> Vec<String> {
 /// `server.hostname` the settings page writes. `None` leaves a doc link
 /// same-origin, which is what the terminal page itself is served from.
 fn configured_hostname(st: &AppState) -> Option<String> {
-    mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+    waggledance_core::Config::load_from(&waggledance_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ))
     .server
@@ -1579,7 +1579,7 @@ fn configured_hostname(st: &AppState) -> Option<String> {
 }
 
 fn terminal_family_enabled(st: &AppState) -> bool {
-    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+    let cfg = waggledance_core::Config::load_from(&waggledance_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ));
     cfg.terminal.enabled
@@ -1599,7 +1599,7 @@ fn terminal_family_enabled(st: &AppState) -> bool {
 /// `#[derive(Default)]`), so a config that has never mentioned this key
 /// reads as off, not merely the shipped default file.
 fn unassigned_group_enabled(st: &AppState) -> bool {
-    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+    let cfg = waggledance_core::Config::load_from(&waggledance_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ));
     cfg.terminal.unassigned_enabled
@@ -1640,11 +1640,11 @@ fn terminal_disabled_json_404() -> Response {
 /// null channel inside `TerminalBackground::reconcile` — so a configuration
 /// missing either half never attempts a delivery, whatever the switch says.
 fn telegram_credentials(
-    cfg: &mdview_core::config::TerminalConfig,
+    cfg: &waggledance_core::config::TerminalConfig,
     config_data_dir: Option<&std::path::Path>,
 ) -> Option<(String, String)> {
-    let cred_path = mdview_core::config::notify_credential_path_override(config_data_dir);
-    let token = mdview_core::config::load_notify_credential(&cred_path)?;
+    let cred_path = waggledance_core::config::notify_credential_path_override(config_data_dir);
+    let token = waggledance_core::config::load_notify_credential(&cred_path)?;
     let chat_id = cfg.notify_chat_id.clone()?;
     if token.trim().is_empty() || chat_id.trim().is_empty() {
         return None;
@@ -1911,7 +1911,7 @@ async fn scroll_aware_read(
 /// screen, polled by the client in `assets/app.js`. Modeled on herdr-go's
 /// `ScreenBody { text, revision }` (`herdr-go/src/web/screen.rs`), but the
 /// `text` field now carries safe, escaped HTML rather than raw text
-/// (agent-terminal-12): `mdview_core::ansi::to_html` translates herdr's raw
+/// (agent-terminal-12): `waggledance_core::ansi::to_html` translates herdr's raw
 /// ANSI screen into `<span class="ansi-…">` markup server-side — text is
 /// HTML-escaped before any markup wraps it, and any escape sequence the
 /// translator does not model (cursor movement, OSC titles, …) is dropped
@@ -1920,7 +1920,7 @@ async fn scroll_aware_read(
 /// own input is echoed back, not when the agent under it produces new
 /// output on its own, which froze the client's poller on any pane whose
 /// agent was still actively writing. `revision` is now
-/// `mdview_core::ansi::revision_of(&read.text)`, a stateless hash of the
+/// `waggledance_core::ansi::revision_of(&read.text)`, a stateless hash of the
 /// raw screen text, so it changes exactly when the text does; the client
 /// still compares it to skip a redundant repaint.
 ///
@@ -1946,7 +1946,7 @@ async fn terminal_screen(
         Ok(s) => s,
         Err(_) => return herdr_down_response(),
     };
-    let in_project = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+    let in_project = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
         .map(|boundary| project_panes(&snapshot, &boundary))
         .unwrap_or_default()
         .iter()
@@ -1957,14 +1957,14 @@ async fn terminal_screen(
     let read = scroll_aware_read(&st, &pane_id, query.history.as_deref()).await;
     match read {
         Ok(read) => {
-            let revision = mdview_core::ansi::revision_of(&read.text);
+            let revision = waggledance_core::ansi::revision_of(&read.text);
             // An agent names its own documents constantly; every one of them
             // is a page this same server renders, so the names become links
             // to it. Applied over the translated HTML, never the raw screen —
             // the translation is what made the text safe to embed.
-            let html = mdview_core::doc_links::linkify_docs(
-                &mdview_core::ansi::to_html(&read.text),
-                &mdview_core::doc_links::link_base(&id, configured_hostname(&st).as_deref()),
+            let html = waggledance_core::doc_links::linkify_docs(
+                &waggledance_core::ansi::to_html(&read.text),
+                &waggledance_core::doc_links::link_base(&id, configured_hostname(&st).as_deref()),
             );
             Json(json!({ "text": html, "revision": revision })).into_response()
         }
@@ -2011,7 +2011,7 @@ async fn project_and_verify_pane_in_boundary(
     st: &AppState,
     id: &str,
     pane_id: &str,
-) -> std::result::Result<mdview_core::domain::Project, Response> {
+) -> std::result::Result<waggledance_core::domain::Project, Response> {
     let Ok(Some(project)) = st.engine.get_project(id) else {
         return Err(not_found("project not found"));
     };
@@ -2019,7 +2019,7 @@ async fn project_and_verify_pane_in_boundary(
         Ok(s) => s,
         Err(_) => return Err(herdr_down_response()),
     };
-    let in_project = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+    let in_project = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
         .map(|boundary| project_panes(&snapshot, &boundary))
         .unwrap_or_default()
         .iter()
@@ -2049,7 +2049,7 @@ async fn project_pane_cwd_in_boundary(
         Ok(s) => s,
         Err(_) => return Err(herdr_down_response()),
     };
-    let panes = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+    let panes = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
         .map(|boundary| project_panes(&snapshot, &boundary))
         .unwrap_or_default();
     panes
@@ -2064,7 +2064,7 @@ struct TranscriptQuery {
     /// The opaque cursor `terminal_transcript` last handed back, held
     /// client-side only (nothing about the transcript is persisted
     /// server-side). Absent on the first poll for a pane, which backfills
-    /// the tail the same way `mdview_core::transcript::read_activity`'s
+    /// the tail the same way `waggledance_core::transcript::read_activity`'s
     /// `None` case does.
     cursor: Option<String>,
 }
@@ -2078,7 +2078,7 @@ struct TranscriptQuery {
 /// resolved cwd itself (a request looking at project A must never read an
 /// agent's transcript in project B).
 ///
-/// `mdview_core::transcript`'s `parse_cursor` (agent-terminal-15) carries
+/// `waggledance_core::transcript`'s `parse_cursor` (agent-terminal-15) carries
 /// its own guard against a cursor escaping the per-cwd project directory —
 /// that is a second line, not a substitute for the D2 check above.
 ///
@@ -2089,7 +2089,7 @@ struct TranscriptQuery {
 /// routes over `~/.mdview`; `None` in production resolves exactly where
 /// Claude Code itself writes.
 ///
-/// Each returned line is routed through `mdview_core::ansi::to_html`, the
+/// Each returned line is routed through `waggledance_core::ansi::to_html`, the
 /// same translator `terminal_screen` uses. `transcript.rs`'s own `clip()`
 /// already strips any raw ANSI from a rendered record before it ever
 /// reaches this handler, so today this call only HTML-escapes — but it
@@ -2116,27 +2116,27 @@ async fn terminal_transcript(
         Err(refusal) => return refusal,
     };
     let result = match st.transcript_root.as_deref() {
-        Some(root) => mdview_core::transcript::read_activity_at(root, &cwd, q.cursor.as_deref()),
-        None => mdview_core::transcript::read_activity(&cwd, q.cursor.as_deref()),
+        Some(root) => waggledance_core::transcript::read_activity_at(root, &cwd, q.cursor.as_deref()),
+        None => waggledance_core::transcript::read_activity(&cwd, q.cursor.as_deref()),
     };
     match result {
         Ok(chunk) => {
             let lines: Vec<String> = chunk
                 .lines
                 .iter()
-                .map(|l| mdview_core::ansi::to_html(l))
+                .map(|l| waggledance_core::ansi::to_html(l))
                 .collect();
             Json(json!({ "available": true, "lines": lines, "cursor": chunk.cursor })).into_response()
         }
-        Err(mdview_core::transcript::TranscriptError::NotAvailable) => {
+        Err(waggledance_core::transcript::TranscriptError::NotAvailable) => {
             Json(json!({ "available": false })).into_response()
         }
-        Err(mdview_core::transcript::TranscriptError::BadCursor) => (
+        Err(waggledance_core::transcript::TranscriptError::BadCursor) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "bad activity cursor" })),
         )
             .into_response(),
-        Err(mdview_core::transcript::TranscriptError::Io(_)) => transcript_read_failed_response(),
+        Err(waggledance_core::transcript::TranscriptError::Io(_)) => transcript_read_failed_response(),
     }
 }
 
@@ -2476,7 +2476,7 @@ struct CreatePaneBody {}
 
 /// `POST /p/:id/_terminal/create/agent` body. The agent is named by an
 /// operator-configured preset **label**, never by `argv` directly (D8/P4):
-/// the argv is operator-authored config (`mdview_core::config::AgentPreset`)
+/// the argv is operator-authored config (`waggledance_core::config::AgentPreset`)
 /// the label keys into, and the request cannot influence it — no
 /// `argv`/`env`/`cwd` field is declared here at all, so serde has nowhere to
 /// put one even if a client sends it.
@@ -2498,7 +2498,7 @@ struct CreateAgentBody {
 /// without first resolving a concrete `cwd` here.
 fn project_creation_destination(
     snapshot: &herdr::Snapshot,
-    boundary: &mdview_core::paths_boundary::Boundary,
+    boundary: &waggledance_core::paths_boundary::Boundary,
 ) -> Option<(String, String)> {
     snapshot.workspaces.iter().find_map(|w| {
         let anchor = snapshot.anchor_cwd_for_workspace(&w.workspace_id)?;
@@ -2589,7 +2589,7 @@ async fn terminal_create_pane(
         Ok(s) => s,
         Err(_) => return herdr_down_response(),
     };
-    let Ok(boundary) = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+    let Ok(boundary) = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
     else {
         return destination_unresolved_response(&project.id);
     };
@@ -2609,7 +2609,7 @@ async fn terminal_create_pane(
 /// `POST /p/:id/_terminal/create/agent` (D8/P4) — start an agent in this
 /// project, named by an operator-configured preset **label**, never by
 /// `argv` directly: the argv is operator-authored config
-/// (`mdview_core::config::AgentPreset`) the label keys into, and no
+/// (`waggledance_core::config::AgentPreset`) the label keys into, and no
 /// `argv`/`env`/`cwd` field is deserialized from the request at all — there
 /// is no field present to receive any of the three (see `CreateAgentBody`).
 /// An unknown label is refused with `400` before herdr is ever called.
@@ -2630,7 +2630,7 @@ async fn terminal_create_agent(
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
     };
-    let cfg = mdview_core::Config::load_from(&mdview_core::config::config_path_override(
+    let cfg = waggledance_core::Config::load_from(&waggledance_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ));
     let Some(preset) = cfg.terminal.agent_presets.iter().find(|p| p.label == body.preset) else {
@@ -2641,7 +2641,7 @@ async fn terminal_create_agent(
         Ok(s) => s,
         Err(_) => return herdr_down_response(),
     };
-    let Ok(boundary) = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+    let Ok(boundary) = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
     else {
         return destination_unresolved_response(&project.id);
     };
@@ -2672,7 +2672,7 @@ async fn terminal_create_agent(
 /// or the boundary refuses it, the boundary is tried again against
 /// `foreground_cwd`. `cwd` wins whenever both would validate: the path this
 /// function returns is not display-only — `project_pane_cwd_in_boundary`
-/// hands it to `read_activity`, and `mdview_core::transcript` uses it as the
+/// hands it to `read_activity`, and `waggledance_core::transcript` uses it as the
 /// transcript directory selector, so preferring the live-but-volatile
 /// `foreground_cwd` would silently re-key an existing pane's transcript away
 /// from the directory it actually launched in. `foreground_cwd` is
@@ -2686,7 +2686,7 @@ async fn terminal_create_agent(
 /// ambiguity) for both directories alike.
 fn project_panes(
     snapshot: &herdr::Snapshot,
-    boundary: &mdview_core::paths_boundary::Boundary,
+    boundary: &waggledance_core::paths_boundary::Boundary,
 ) -> Vec<views::TerminalPaneView> {
     snapshot
         .panes
@@ -2753,8 +2753,8 @@ fn project_panes(
 /// this page.
 fn project_feature_panes(
     snapshot: Option<&herdr::Snapshot>,
-    project: &mdview_core::domain::Project,
-    rollup: &mdview_core::bee::BeeProjectRollup,
+    project: &waggledance_core::domain::Project,
+    rollup: &waggledance_core::bee::BeeProjectRollup,
 ) -> std::collections::HashMap<String, Vec<views::TerminalPaneView>> {
     let mut out: std::collections::HashMap<String, Vec<views::TerminalPaneView>> =
         std::collections::HashMap::new();
@@ -2771,13 +2771,13 @@ fn project_feature_panes(
         let Some(sibling) = project.root_path.parent().map(|p| p.join(&w.id)) else {
             continue;
         };
-        let Ok(boundary) = mdview_core::paths_boundary::Boundary::new(vec![sibling]) else {
+        let Ok(boundary) = waggledance_core::paths_boundary::Boundary::new(vec![sibling]) else {
             continue;
         };
         out.insert(feature.to_string(), project_panes(snap, &boundary));
     }
 
-    let Ok(project_boundary) = mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()]) else {
+    let Ok(project_boundary) = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()]) else {
         return out;
     };
     let main_panes = project_panes(snap, &project_boundary);
@@ -2834,11 +2834,11 @@ fn project_feature_panes(
 /// membership, never to canonicalize an unassigned pane's path.
 fn unassigned_panes(
     snapshot: &herdr::Snapshot,
-    projects: &[mdview_core::domain::Project],
+    projects: &[waggledance_core::domain::Project],
 ) -> Vec<views::TerminalPaneView> {
     let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
     for p in projects {
-        match mdview_core::paths_boundary::Boundary::new(vec![p.root_path.clone()]) {
+        match waggledance_core::paths_boundary::Boundary::new(vec![p.root_path.clone()]) {
             Ok(boundary) => {
                 assigned.extend(project_panes(snapshot, &boundary).into_iter().map(|pane| pane.pane_id));
             }
@@ -2915,14 +2915,14 @@ struct AgentPaneRow {
 /// project's panes into it.
 fn agent_pane_rows(
     snapshot: &herdr::Snapshot,
-    projects: &[mdview_core::domain::Project],
+    projects: &[waggledance_core::domain::Project],
 ) -> Vec<AgentPaneRow> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut rows = Vec::new();
 
     for project in projects {
         let Ok(boundary) =
-            mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+            waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
         else {
             continue;
         };
@@ -3029,7 +3029,7 @@ fn agent_pane_rows(
 /// its path resolves to.
 fn suggested_projects(
     snapshot: &herdr::Snapshot,
-    projects: &[mdview_core::domain::Project],
+    projects: &[waggledance_core::domain::Project],
 ) -> Vec<views::ProjectSuggestion> {
     // Never re-derive the assigned set by hand: `unassigned_panes` already
     // is the fail-closed complement this list aggregates over (D6: agents
@@ -3070,7 +3070,7 @@ fn suggested_projects(
         // missed it (project-suggestions-2).
         if projects
             .iter()
-            .any(|p| mdview_core::paths_boundary::is_contained_in_root(cwd_path, &p.root_path))
+            .any(|p| waggledance_core::paths_boundary::is_contained_in_root(cwd_path, &p.root_path))
         {
             continue;
         }
@@ -3169,8 +3169,8 @@ async fn unassigned_terminal_screen(
     let read = scroll_aware_read(&st, &pane_id, query.history.as_deref()).await;
     match read {
         Ok(read) => {
-            let revision = mdview_core::ansi::revision_of(&read.text);
-            Json(json!({ "text": mdview_core::ansi::to_html(&read.text), "revision": revision }))
+            let revision = waggledance_core::ansi::revision_of(&read.text);
+            Json(json!({ "text": waggledance_core::ansi::to_html(&read.text), "revision": revision }))
                 .into_response()
         }
         Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
@@ -3253,15 +3253,15 @@ async fn bee_feature_detail(
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
     };
-    let snapshot = mdview_core::bee::read_snapshot(&project.root_path);
+    let snapshot = waggledance_core::bee::read_snapshot(&project.root_path);
     if !snapshot.present {
         return not_found("this project has no .bee/ store");
     }
 
-    let by_feature = |cells: &[mdview_core::bee::BeeCell]| -> Vec<mdview_core::bee::BeeCell> {
+    let by_feature = |cells: &[waggledance_core::bee::BeeCell]| -> Vec<waggledance_core::bee::BeeCell> {
         cells.iter().filter(|c| c.feature == feature).cloned().collect()
     };
-    let mut buckets = mdview_core::bee::BeeBuckets {
+    let mut buckets = waggledance_core::bee::BeeBuckets {
         doing: by_feature(&snapshot.buckets.doing),
         waiting: by_feature(&snapshot.buckets.waiting),
         stuck: by_feature(&snapshot.buckets.stuck),
@@ -3278,7 +3278,7 @@ async fn bee_feature_detail(
     // over the live-only buckets — an archived cell that happens to carry
     // a stale "open"/"claimed" status (legacy data, not an active claim)
     // must never keep the header from reading Closed.
-    let archived_cells = mdview_core::bee::read_archived_cells(&project.root_path, &feature);
+    let archived_cells = waggledance_core::bee::read_archived_cells(&project.root_path, &feature);
     let has_archived = !archived_cells.is_empty();
     let is_closed = has_archived && buckets.doing.is_empty() && buckets.waiting.is_empty() && shipped.is_none();
 
@@ -3331,7 +3331,7 @@ async fn bee_feature_detail(
                 .then(|| snapshot.state.as_ref().and_then(|s| s.route.as_ref()).and_then(|r| r.lane.clone()))
                 .flatten()
         });
-    let gates: Option<&mdview_core::bee::BeeApprovedGates> = lane_record
+    let gates: Option<&waggledance_core::bee::BeeApprovedGates> = lane_record
         .and_then(|l| l.approved_gates.as_ref())
         .or_else(|| {
             is_active_feature.then(|| snapshot.state.as_ref().and_then(|s| s.approved_gates.as_ref())).flatten()
@@ -3340,7 +3340,7 @@ async fn bee_feature_detail(
     // Activity's timeline: `.bee/decisions.jsonl`'s own recent-decide window
     // (`snapshot.decisions.recent`, already bounded by `read_snapshot`),
     // narrowed to this feature's own `scope` — no new file read.
-    let decisions: Vec<mdview_core::bee::BeeDecisionSummary> = snapshot
+    let decisions: Vec<waggledance_core::bee::BeeDecisionSummary> = snapshot
         .decisions
         .recent
         .iter()
@@ -3356,7 +3356,7 @@ async fn bee_feature_detail(
     // and never a laxer check than the terminal family's own routes apply.
     let panes: Vec<views::TerminalPaneView> = if terminal_family_enabled(&st) {
         match st.herdr.snapshot().await {
-            Ok(herdr_snapshot) => mdview_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+            Ok(herdr_snapshot) => waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
                 .map(|boundary| project_panes(&herdr_snapshot, &boundary))
                 .unwrap_or_default(),
             Err(_) => Vec::new(),
@@ -3384,7 +3384,7 @@ async fn bee_feature_detail(
 
 /// Render `s` relative to `root` when it names a path under `root`; reduce
 /// to its bare filename when it is absolute but falls outside `root`. A
-/// local twin of `mdview_core::bee`'s private `relativize` — that module is
+/// local twin of `waggledance_core::bee`'s private `relativize` — that module is
 /// out of scope for this cell, and the detail routes read the raw cell JSON
 /// directly (to reach fields the trimmed `BeeCell` doesn't carry), so they
 /// need their own copy of the same no-absolute-path contract.
@@ -3477,7 +3477,7 @@ fn find_archived_cell_full(root: &std::path::Path, cell_id: &str) -> Option<view
 
 /// Parse one raw `.bee/cells/<id>.json` object into a [`views::BeeCellFull`],
 /// relativizing every path-shaped value it carries (files, read_first,
-/// trace.worker, trace.results) the same way `mdview_core::bee::parse_cell`
+/// trace.worker, trace.results) the same way `waggledance_core::bee::parse_cell`
 /// does for the trimmed board `BeeCell`.
 fn cell_full_from_json(v: &serde_json::Value, root: &std::path::Path) -> views::BeeCellFull {
     use serde_json::Value;
@@ -3584,8 +3584,8 @@ fn cell_full_from_json(v: &serde_json::Value, root: &std::path::Path) -> views::
 /// project's README is the landing page when it has one, and the choice never
 /// looks random.
 fn pick_entry_file(
-    files: &[mdview_core::domain::IndexedFile],
-) -> Option<&mdview_core::domain::IndexedFile> {
+    files: &[waggledance_core::domain::IndexedFile],
+) -> Option<&waggledance_core::domain::IndexedFile> {
     fn rank(rel: &str) -> u8 {
         match rel
             .rsplit('/')
@@ -3734,10 +3734,10 @@ async fn code_response(st: &AppState, id: &str, path: &str) -> Response {
         return not_found("file not found");
     };
     match st.engine.code_path(id, path) {
-        Ok(mdview_core::engine::CodeView::Dir(listing)) => {
+        Ok(waggledance_core::engine::CodeView::Dir(listing)) => {
             Html(views::code_dir_page(&project, &listing)).into_response()
         }
-        Ok(mdview_core::engine::CodeView::File {
+        Ok(waggledance_core::engine::CodeView::File {
             highlighted,
             truncated,
             size,
@@ -3755,7 +3755,7 @@ async fn code_response(st: &AppState, id: &str, path: &str) -> Response {
             ))
             .into_response()
         }
-        Ok(mdview_core::engine::CodeView::Binary { size }) => {
+        Ok(waggledance_core::engine::CodeView::Binary { size }) => {
             let sidebar = code_sidebar_listing(st, id, path);
             Html(views::code_page(
                 &project,
@@ -3776,14 +3776,14 @@ fn code_sidebar_listing(
     st: &AppState,
     id: &str,
     file_path: &str,
-) -> mdview_core::code_source::DirListing {
+) -> waggledance_core::code_source::DirListing {
     let parent = match file_path.rfind('/') {
         Some(i) => &file_path[..i],
         None => "",
     };
     match st.engine.code_path(id, parent) {
-        Ok(mdview_core::engine::CodeView::Dir(listing)) => listing,
-        _ => mdview_core::code_source::DirListing {
+        Ok(waggledance_core::engine::CodeView::Dir(listing)) => listing,
+        _ => waggledance_core::code_source::DirListing {
             rel_path: parent.to_string(),
             entries: Vec::new(),
         },
@@ -4033,8 +4033,8 @@ mod asset_response_tests {
         );
     }
 
-    fn f(rel: &str) -> mdview_core::domain::IndexedFile {
-        mdview_core::domain::IndexedFile {
+    fn f(rel: &str) -> waggledance_core::domain::IndexedFile {
+        waggledance_core::domain::IndexedFile {
             project_id: "p".into(),
             abs_path: std::path::PathBuf::from(rel),
             rel_path: rel.into(),
@@ -4133,8 +4133,8 @@ mod bee_route_tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use mdview_core::domain::Project;
-    use mdview_core::{Config, SqliteStore};
+    use waggledance_core::domain::Project;
+    use waggledance_core::{Config, SqliteStore};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
     use tower::ServiceExt;
@@ -4216,7 +4216,7 @@ mod bee_route_tests {
             // In-memory outbox — no route test ever touches a real sqlite
             // file for this.
             notify_store: Arc::new(
-                mdview_core::notify_store::NotifyStore::open_in_memory().unwrap(),
+                waggledance_core::notify_store::NotifyStore::open_in_memory().unwrap(),
             ),
             // A fresh tracker per state — no route test shares a remembered
             // scroll depth across states.
@@ -4530,7 +4530,7 @@ mod bee_route_tests {
     }
 
     /// (regression, feature-hub-3 F3) Independent review found this
-    /// guarantee missing at the server level — only `mdview-core`'s own
+    /// guarantee missing at the server level — only `waggledance-core`'s own
     /// attention-item test covered it. A `"planned-next"` handoff is a
     /// clean stop, never a pause (AGENTS.md's own "kind" distinction:
     /// the previous cell already capped, the next cell's claim already
@@ -5297,7 +5297,7 @@ mod bee_route_tests {
     /// panel states PBI statuses. board-drop-findings-1 removed the panel's
     /// findings block, so the severity counts this test also used to assert
     /// are gone from the page — the fixture keeps its two finding rows to
-    /// prove they now render NOWHERE, while `mdview-core`'s own reader tests
+    /// prove they now render NOWHERE, while `waggledance-core`'s own reader tests
     /// keep proving the rows are still parsed and counted.
     #[tokio::test]
     async fn backlog_panel_states_pbi_statuses() {
@@ -5727,7 +5727,7 @@ mod bee_route_tests {
     // page that ever rendered a session's own id or derived content — the
     // security assertion that used to live here (no `transcript_path` or
     // absolute workspace root in the body) has nothing left to exercise, so
-    // it retires with the panel. `mdview_core::bee`'s own
+    // it retires with the panel. `waggledance_core::bee`'s own
     // `no_transcript_path_and_no_absolute_workspace_root_survive_into_snapshot`
     // proves the same guarantee at the data layer and stays green.
 
@@ -6988,7 +6988,7 @@ mod bee_route_tests {
     /// it and scrub it without ever writing back to it. board-declutter
     /// retired the board's own attention panel, which used to be this
     /// test's proof the reader actually ran (rather than short-circuiting)
-    /// — `mdview_core::bee::compute_attention_items` still surfaces a pause
+    /// — `waggledance_core::bee::compute_attention_items` still surfaces a pause
     /// handoff and stays covered by its own unit tests there; this test now
     /// only proves the read-only invariant over a populated fixture.
     #[tokio::test]
@@ -7034,7 +7034,7 @@ mod bee_route_tests {
     /// `.bee/config.local.json` at all. board-trim retired the board's own
     /// Process health panel, which used to be this test's proof the
     /// `gate_bypass` reader actually ran (rather than short-circuiting) —
-    /// `mdview_core::bee::read_config`/`normalize_gate_bypass` stay covered
+    /// `waggledance_core::bee::read_config`/`normalize_gate_bypass` stay covered
     /// by their own unit tests there; this test now only proves the
     /// read-only invariant over a populated fixture.
     #[tokio::test]
@@ -7194,7 +7194,7 @@ mod bee_route_tests {
     /// it: the reader must open the file and parse its array without ever
     /// writing back to it. board-trim retired the board's own Process
     /// health panel, which used to render `reservations` and prove the
-    /// unreleased lock surfaced — `mdview_core::bee`'s own reservations
+    /// unreleased lock surfaced — `waggledance_core::bee`'s own reservations
     /// reader stays covered by its own unit tests there; this test now only
     /// proves the read-only invariant over a populated fixture.
     #[tokio::test]
@@ -7543,7 +7543,7 @@ mod bee_route_tests {
     }
 
     // ── feature-titles: human titles + descriptions from CONTEXT.md, docs
-    // links on the feature detail page — see `mdview_core::bee::read_feature_docs`
+    // links on the feature detail page — see `waggledance_core::bee::read_feature_docs`
     // and its own doc comment. ──────
 
     /// A feature whose `docs/history/<feature>/CONTEXT.md` exists renders
@@ -7791,7 +7791,7 @@ mod bee_route_tests {
     /// An absolute path embedded in a `CONTEXT.md` boundary paragraph must
     /// never survive into the hub card or the detail header verbatim — the
     /// same scrub every other free-text field in the snapshot already gets
-    /// (`mdview_core::bee::scrub_paths`), proven here against the reader
+    /// (`waggledance_core::bee::scrub_paths`), proven here against the reader
     /// this cell adds. Named against the fixture's own root and
     /// `std::env::temp_dir()`, per
     /// `docs/history/learnings/20260805-toothless-security-assertions.md`,
@@ -7871,7 +7871,7 @@ mod bee_route_tests {
     // no longer renders a live worker's cell link, its discrepancy note, or
     // a flagged-unknown-cell note anywhere — the tests that pinned that
     // row-level markup retire with it. `snapshot.running_workers` itself
-    // (`mdview_core::bee`) is untouched — feature-titles retired its last
+    // (`waggledance_core::bee`) is untouched — feature-titles retired its last
     // reader, the feature detail page's own Sub-agents tab, replacing it
     // with a Terminal tab that reads live terminal panes instead (D2); what
     // survives below proves the D7 buckets stay unaffected by worker
@@ -7888,7 +7888,7 @@ mod bee_route_tests {
 
     /// (happy) The presence of a worker naming a still-open cell must never
     /// move that cell out of the D7 bucket the store itself computed for
-    /// it: `compute_d7_buckets` (`mdview_core::bee`) never takes
+    /// it: `compute_d7_buckets` (`waggledance_core::bee`) never takes
     /// `running_workers` as an input, so the open cell stays counted as
     /// live on `state.feature`'s own feature-hub card ("demo", the only
     /// feature this fixture declares), and its own progress must keep
@@ -7935,7 +7935,7 @@ mod bee_route_tests {
     // coverage only because the (also now-retired) Sessions panel happened
     // to render this fixture's session id too. board-trim (D1) removes that
     // panel — nothing on this page renders session-derived content anymore,
-    // so the assertion has nothing left to exercise. `mdview_core::bee`'s
+    // so the assertion has nothing left to exercise. `waggledance_core::bee`'s
     // own `no_transcript_path_and_no_absolute_workspace_root_survive_into_snapshot`
     // proves the same no-leak guarantee at the data layer and stays green.
 
@@ -7977,7 +7977,7 @@ mod bee_route_tests {
     // dangling grant's unresolved marking, the no-grants quiet line, and
     // the no-absolute-path security check) are retired with it — every one
     // of those facts is already proven at the data layer by
-    // `mdview_core::bee`'s own worktree unit tests
+    // `waggledance_core::bee`'s own worktree unit tests
     // (`each_granted_worktree_renders_own_feature_phase_branch`,
     // `live_worktree_sorts_ahead_of_quiet_one_with_relative_heartbeat_age`,
     // `worktree_directory_missing_is_reported_unresolved_not_dropped`,
@@ -7990,7 +7990,7 @@ mod bee_route_tests {
     // rendering worktree rows. ---
 
     /// Sibling worktree directories sit beside `fresh_root`'s temp parent —
-    /// the exact shape `mdview_core::bee::resolve_worktree` expects: `<temp
+    /// the exact shape `waggledance_core::bee::resolve_worktree` expects: `<temp
     /// dir>/<id>/.bee/...`.
     fn worktree_sibling_root(id: &str) -> PathBuf {
         std::env::temp_dir().join(id)
@@ -8012,7 +8012,7 @@ mod bee_route_tests {
     /// this project's own feature-hub counts NOR its shipped set — the
     /// regression that motivated this test, re-expressed against
     /// feature-hub fh-1's markup: `compute_d7_buckets`/
-    /// `compute_feature_cell_counts` (`mdview_core::bee`) only ever see
+    /// `compute_feature_cell_counts` (`waggledance_core::bee`) only ever see
     /// this project's own `.bee/cells/*.json`, so a worktree's own capped
     /// cell can never move this project's own "demo" card, and its cell id
     /// never appears on this board at all — this test asserts only that its
@@ -8133,7 +8133,7 @@ mod bee_route_tests {
         cfg.server.port = 47201;
         cfg.save_to(&dir.join("config.toml")).unwrap();
 
-        let real_config_path = mdview_core::config::config_path();
+        let real_config_path = waggledance_core::config::config_path();
         let real_before = std::fs::read(&real_config_path).ok();
 
         let mut st = build_state();
@@ -8169,7 +8169,7 @@ mod bee_route_tests {
     async fn update_config_writes_only_to_the_injected_data_dir() {
         let dir = fresh_root("settings-override-write");
 
-        let real_config_path = mdview_core::config::config_path();
+        let real_config_path = waggledance_core::config::config_path();
         let real_before = std::fs::read(&real_config_path).ok();
 
         let mut st = build_state();
@@ -8449,7 +8449,7 @@ mod bee_route_tests {
         let dir = fresh_root("terminal-config-empty-cred");
         let st = build_state_with_dir(&dir);
         let app = router(st.clone());
-        let cred_path = mdview_core::config::notify_credential_path_override(Some(&dir));
+        let cred_path = waggledance_core::config::notify_credential_path_override(Some(&dir));
 
         let first = app
             .clone()
@@ -8467,7 +8467,7 @@ mod bee_route_tests {
             .unwrap();
         assert!(first.status().is_redirection());
         assert_eq!(
-            mdview_core::config::load_notify_credential(&cred_path).as_deref(),
+            waggledance_core::config::load_notify_credential(&cred_path).as_deref(),
             Some("keep-me")
         );
 
@@ -8486,7 +8486,7 @@ mod bee_route_tests {
             .unwrap();
         assert!(second.status().is_redirection());
         assert_eq!(
-            mdview_core::config::load_notify_credential(&cred_path).as_deref(),
+            waggledance_core::config::load_notify_credential(&cred_path).as_deref(),
             Some("keep-me"),
             "an empty credential field must leave the stored credential alone, not clear it"
         );
@@ -8614,9 +8614,9 @@ mod bee_route_tests {
     #[test]
     fn notify_store_opens_lazily_only_once_the_notify_switch_is_on() {
         let dir = fresh_root("notify-store-lazy-open");
-        let path = mdview_core::config::notify_store_path_override(Some(&dir));
+        let path = waggledance_core::config::notify_store_path_override(Some(&dir));
 
-        let off = mdview_core::config::TerminalConfig::default();
+        let off = waggledance_core::config::TerminalConfig::default();
         assert!(!off.notify_enabled, "the switch must default to off");
         let _store = open_notify_store(&off, Some(&dir));
         assert!(
@@ -8625,7 +8625,7 @@ mod bee_route_tests {
             path.display()
         );
 
-        let on = mdview_core::config::TerminalConfig {
+        let on = waggledance_core::config::TerminalConfig {
             notify_enabled: true,
             ..Default::default()
         };
@@ -8648,7 +8648,7 @@ mod bee_route_tests {
         let dir = fresh_root("terminal-notify-open");
         let st = build_state_with_dir(&dir);
         let app = router(st);
-        let cred_path = mdview_core::config::notify_credential_path_override(Some(&dir));
+        let cred_path = waggledance_core::config::notify_credential_path_override(Some(&dir));
 
         let resp = app
             .oneshot(
@@ -8676,7 +8676,7 @@ mod bee_route_tests {
         let saved = Config::load_from(&dir.join("config.toml"));
         assert_eq!(saved.terminal.notify_chat_id.as_deref(), Some("12345"));
         assert_eq!(
-            mdview_core::config::load_notify_credential(&cred_path).as_deref(),
+            waggledance_core::config::load_notify_credential(&cred_path).as_deref(),
             Some("secret-bot-token")
         );
 
@@ -8711,9 +8711,9 @@ mod bee_route_tests {
             saved.terminal.notify_chat_id, None,
             "POST /api/config set the notification destination"
         );
-        let cred_path = mdview_core::config::notify_credential_path_override(Some(&dir));
+        let cred_path = waggledance_core::config::notify_credential_path_override(Some(&dir));
         assert_eq!(
-            mdview_core::config::load_notify_credential(&cred_path),
+            waggledance_core::config::load_notify_credential(&cred_path),
             None,
             "POST /api/config wrote a Telegram credential file"
         );
@@ -8797,7 +8797,7 @@ mod bee_route_tests {
     /// `?saved=1`, so a user whose credential could not be written was told
     /// it had been. Forces the real failure `config::tests::
     /// a_save_that_cannot_write_reports_the_failure` proves at the config
-    /// layer (`crates/mdview-core/src/config.rs`) — no write permission on
+    /// layer (`crates/waggledance-core/src/config.rs`) — no write permission on
     /// the credential directory — through the actual gated route, and checks
     /// every must-have this cell names: the redirect never claims success,
     /// the credential itself never appears in the redirect target, the page
@@ -8812,7 +8812,7 @@ mod bee_route_tests {
         let st = build_state_with_dir(&dir);
         let app = router(st.clone());
 
-        let cred_path = mdview_core::config::notify_credential_path_override(Some(&dir));
+        let cred_path = waggledance_core::config::notify_credential_path_override(Some(&dir));
         let cred_dir = cred_path.parent().unwrap();
         std::fs::create_dir_all(cred_dir).unwrap();
         // No write permission on the credential's own directory: the same
@@ -8852,7 +8852,7 @@ mod bee_route_tests {
         );
 
         assert_eq!(
-            mdview_core::config::load_notify_credential(&cred_path),
+            waggledance_core::config::load_notify_credential(&cred_path),
             None,
             "a failed save must never leave a partial credential readable"
         );
@@ -9905,7 +9905,7 @@ mod bee_route_tests {
     /// agent-terminal-6, truth: "The rendered screen shows the text herdr
     /// returned, with a UTF-8 screen containing wide CJK and emoji intact" —
     /// proven on the JSON the client polls. Since agent-terminal-12, `text`
-    /// carries `mdview_core::ansi::to_html`'s output rather than the raw
+    /// carries `waggledance_core::ansi::to_html`'s output rather than the raw
     /// string; this screen carries no ANSI codes and no HTML metacharacters,
     /// so translation is the identity here — `ansi.rs`'s own tests cover the
     /// colour/attribute/escaping cases. Also pins the response shape against
@@ -9937,12 +9937,12 @@ mod bee_route_tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["text"], serde_json::json!(screen_text), "{body}");
         // Since the screen-revision fix, `revision` is a stateless hash of
-        // the raw screen text (`mdview_core::ansi::revision_of`), not
+        // the raw screen text (`waggledance_core::ansi::revision_of`), not
         // herdr's own field — see `terminal_screen_reports_a_changed_revision_when_the_screen_changes`
         // below for the defect this replaced.
         assert_eq!(
             json["revision"],
-            serde_json::json!(mdview_core::ansi::revision_of(screen_text)),
+            serde_json::json!(waggledance_core::ansi::revision_of(screen_text)),
             "{body}"
         );
 
@@ -9985,8 +9985,8 @@ mod bee_route_tests {
         let text = json["text"].as_str().unwrap();
         assert_eq!(
             text,
-            mdview_core::ansi::to_html(raw),
-            "the screen endpoint must return mdview-core's ansi translation verbatim: {text}"
+            waggledance_core::ansi::to_html(raw),
+            "the screen endpoint must return waggledance-core's ansi translation verbatim: {text}"
         );
         assert!(text.contains("ansi-fg-red"), "no colour markup: {text}");
         assert!(!text.contains("<script>"), "raw script tag leaked: {text}");
@@ -10029,7 +10029,7 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["text"], serde_json::json!(mdview_core::ansi::to_html(text)), "{body}");
+        assert_eq!(json["text"], serde_json::json!(waggledance_core::ansi::to_html(text)), "{body}");
         assert!(
             fake.sent_text_log(&started.pane_id).await.is_empty(),
             "an absent history param must never route through PaneScroller"
@@ -10166,7 +10166,7 @@ mod bee_route_tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             json["text"],
-            serde_json::json!(mdview_core::ansi::to_html(live_bottom)),
+            serde_json::json!(waggledance_core::ansi::to_html(live_bottom)),
             "{body}"
         );
         assert_eq!(
@@ -10414,7 +10414,7 @@ mod bee_route_tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             json["text"],
-            serde_json::json!(mdview_core::ansi::to_html(live_bottom)),
+            serde_json::json!(waggledance_core::ansi::to_html(live_bottom)),
             "{body}"
         );
         assert_eq!(
@@ -10487,7 +10487,7 @@ mod bee_route_tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
             json["text"],
-            serde_json::json!(mdview_core::ansi::to_html(live_bottom)),
+            serde_json::json!(waggledance_core::ansi::to_html(live_bottom)),
             "{body}"
         );
         assert_eq!(
@@ -10940,13 +10940,13 @@ mod bee_route_tests {
     /// `"s1"`); the caller passes complete `{"type": ...}\n`-shaped lines in
     /// `body`.
     fn write_transcript(transcript_root: &Path, cwd: &str, session: &str, body: &str) {
-        let dir = transcript_root.join(mdview_core::transcript::encode_project_dir(cwd));
+        let dir = transcript_root.join(waggledance_core::transcript::encode_project_dir(cwd));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(format!("{session}.jsonl")), body).unwrap();
     }
 
     /// A pane's cwd as `terminal_transcript` itself resolves it: the same
-    /// `std::fs::canonicalize` call `mdview_core::paths_boundary::Boundary::
+    /// `std::fs::canonicalize` call `waggledance_core::paths_boundary::Boundary::
     /// validate_existing` makes — so a fixture built from this value always
     /// lands in the directory the route under test actually reads, even in
     /// an environment where `std::env::temp_dir()` itself is a symlink.
@@ -11141,7 +11141,7 @@ mod bee_route_tests {
         let cursor1 = open_json["cursor"].as_str().unwrap().to_string();
 
         // Append a second record after the cursor was minted.
-        let claude_dir = transcript_root.join(mdview_core::transcript::encode_project_dir(&cwd));
+        let claude_dir = transcript_root.join(waggledance_core::transcript::encode_project_dir(&cwd));
         let mut f = std::fs::OpenOptions::new()
             .append(true)
             .open(claude_dir.join("s1.jsonl"))
@@ -11204,7 +11204,7 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&transcript_root).ok();
     }
 
-    /// A malformed `cursor` (rejected by `mdview_core::transcript`'s own
+    /// A malformed `cursor` (rejected by `waggledance_core::transcript`'s own
     /// `parse_cursor` guard, agent-terminal-15) is answered `400`, not a
     /// crash and not silently treated as "no cursor" — this is the second
     /// line the cell's action names, never a substitute for the D2 boundary
@@ -12597,7 +12597,7 @@ mod bee_route_tests {
 
     /// agent-terminal-9, truth: "Text sent to a pane never reaches mdview's
     /// logs" — a grep-based proof over this file's own source (the shape
-    /// `crates/mdview-core/src/bee.rs`'s `no_web_framework_dependency_declared`
+    /// `crates/waggledance-core/src/bee.rs`'s `no_web_framework_dependency_declared`
     /// already uses for a source-level guarantee `cargo test` alone can't
     /// otherwise express): no `tracing::*` call anywhere in this file may
     /// reference a typed reply's or key press's body fields. Catches a
@@ -15029,7 +15029,7 @@ mod bee_route_tests {
     /// (plan.md's own reasoning for why this is proven structurally, not by
     /// racing a clock), so this reads `cross_project_rollup`'s own source
     /// and proves `read_rollup` is called from inside a `spawn_blocking`
-    /// closure, mirroring `mdview_core::bee`'s
+    /// closure, mirroring `waggledance_core::bee`'s
     /// `no_web_framework_dependency_declared` self-inspection test.
     #[test]
     fn cross_project_rollup_calls_read_rollup_inside_spawn_blocking() {
@@ -15413,7 +15413,7 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["text"], serde_json::json!(mdview_core::ansi::to_html(text)), "{body}");
+        assert_eq!(json["text"], serde_json::json!(waggledance_core::ansi::to_html(text)), "{body}");
         assert!(
             fake.sent_text_log(&stray.pane_id).await.is_empty(),
             "an absent history param must never route through PaneScroller"
@@ -15579,9 +15579,9 @@ mod bee_route_tests {
     /// cell found to be unreliable in this workspace (evidence: a dropped
     /// table is visible to a *fresh* connection immediately but not to the
     /// engine's own long-lived one, most likely because `crates/mdview`'s
-    /// dev-only `rusqlite` and `mdview-core`'s `rusqlite` link two separate
+    /// dev-only `rusqlite` and `waggledance-core`'s `rusqlite` link two separate
     /// copies of the bundled SQLite that don't share WAL/locking state --
-    /// `mdview-core` has no public seam to inject a failing store, so a
+    /// `waggledance-core` has no public seam to inject a failing store, so a
     /// dependable registry-Err test is out of this cell's file scope).
     #[tokio::test]
     async fn unassigned_group_fails_closed_when_a_projects_boundary_is_unconstructable() {
@@ -16234,7 +16234,7 @@ mod bee_route_tests {
     /// already there (mirrors `enable_terminal`'s load-mutate-save shape).
     fn configure_preset(dir: &Path, label: &str, argv: &[&str]) {
         let mut cfg = Config::load_from(&dir.join("config.toml"));
-        cfg.terminal.agent_presets.push(mdview_core::config::AgentPreset {
+        cfg.terminal.agent_presets.push(waggledance_core::config::AgentPreset {
             label: label.to_string(),
             argv: argv.iter().map(|s| s.to_string()).collect(),
         });
@@ -18616,7 +18616,7 @@ mod bee_route_tests {
         st.herdr = fake;
         let outer_project = register(&st, &outer, "dedupe-outer");
         // Registered after the outer project, so `list_projects`'s own
-        // `last_seen_at DESC` order (`mdview-core/src/repository.rs`) hands
+        // `last_seen_at DESC` order (`waggledance-core/src/repository.rs`) hands
         // this one back first.
         let inner_project = register(&st, &inner, "dedupe-inner");
         let app = router(st);

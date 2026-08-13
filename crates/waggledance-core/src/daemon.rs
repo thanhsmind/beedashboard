@@ -73,7 +73,7 @@ pub fn running_daemon() -> Option<DaemonInfo> {
 
 /// True if `host` is a wildcard bind address (`0.0.0.0` / `::` / `[::]`).
 /// Duplicated from `mdview`'s `runtime.rs::is_wildcard` rather than shared:
-/// `mdview-core` cannot depend on the binary crate (wrong dependency
+/// `waggledance-core` cannot depend on the binary crate (wrong dependency
 /// direction), and this is a 2-line pure predicate with no drift risk.
 fn is_wildcard(host: &str) -> bool {
     matches!(host, "0.0.0.0" | "::" | "[::]")

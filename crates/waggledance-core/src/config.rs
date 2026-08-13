@@ -240,7 +240,7 @@ pub fn notify_credential_path_override(override_dir: Option<&Path>) -> PathBuf {
 /// (unix `0600`), then `rename`d over the target — so the target path is
 /// always either the previous complete file or the new one, never a partial
 /// write, and a failed write never touches it at all. Lives in
-/// `mdview-core` rather than the `mdview` binary crate because both the
+/// `waggledance-core` rather than the `mdview` binary crate because both the
 /// settings route (`crates/mdview/src/server.rs`) and the notify reconciler
 /// (`crates/mdview/src/main.rs`) must reach it.
 ///

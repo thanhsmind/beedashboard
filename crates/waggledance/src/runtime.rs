@@ -1,13 +1,13 @@
 //! Shared runtime helpers: build the engine, and spawn/await the daemon.
-//! Lock + health live in `mdview_core::daemon` (shared with the desktop shell).
+//! Lock + health live in `waggledance_core::daemon` (shared with the desktop shell).
 
 use anyhow::Result;
-use mdview_core::config::{self, Config};
-use mdview_core::daemon;
-use mdview_core::{Engine, SqliteStore};
+use waggledance_core::config::{self, Config};
+use waggledance_core::daemon;
+use waggledance_core::{Engine, SqliteStore};
 use std::time::Duration;
 
-pub use mdview_core::daemon::{read_lock, remove_lock, running_daemon, write_lock, DaemonInfo};
+pub use waggledance_core::daemon::{read_lock, remove_lock, running_daemon, write_lock, DaemonInfo};
 
 /// Open the shared registry DB + config and build an Engine.
 pub fn build_engine() -> Result<Engine> {
@@ -220,10 +220,10 @@ fn build_display_urls(
 /// and the daemon outlives whatever process spawned it. Without the detach the
 /// daemon shares its spawner's session/process-group and dies with it (SIGHUP
 /// when the terminal/session closes, or a process-group-directed SIGTERM).
-/// The detach logic itself lives in `mdview_core::process` (shared with the
+/// The detach logic itself lives in `waggledance_core::process` (shared with the
 /// desktop shell's own spawn path) — re-exported here so existing call sites
 /// and the existing unit test keep working unchanged.
-pub(crate) use mdview_core::process::apply_detach;
+pub(crate) use waggledance_core::process::apply_detach;
 
 pub fn spawn_daemon_detached() -> Result<()> {
     let exe = std::env::current_exe()?;
@@ -242,7 +242,7 @@ mod tests {
     use super::{
         acquire_spawn_gate_at, bind_fallback, build_display_urls, is_wildcard, DaemonInfo, Gate,
     };
-    use mdview_core::config::Config;
+    use waggledance_core::config::Config;
     use std::time::Duration;
 
     fn gate_tmp(label: &str) -> std::path::PathBuf {

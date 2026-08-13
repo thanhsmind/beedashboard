@@ -59,9 +59,9 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release -p mdview --target ${{ matrix.target }}
+            cross build --release -p waggledance --target ${{ matrix.target }}
           else
-            cargo build --release -p mdview --target ${{ matrix.target }}
+            cargo build --release -p waggledance --target ${{ matrix.target }}
           fi
 
       - name: Package

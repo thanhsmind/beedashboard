@@ -3,7 +3,7 @@
 //! field or logged (P1, extended by agent-terminal-21): the caller
 //! (`crates/mdview/src/server.rs::telegram_credentials`) resolves it from
 //! its own owner-only file beside the config
-//! (`mdview_core::config::save_notify_credential`/`load_notify_credential`),
+//! (`waggledance_core::config::save_notify_credential`/`load_notify_credential`),
 //! not the environment, and hands it to [`TelegramNotifier::new`] already
 //! resolved. The destination chat id is plain config. `reqwest` is built
 //! against `rustls` (not native TLS) so the release build stays

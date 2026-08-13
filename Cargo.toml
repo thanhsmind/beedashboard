@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mdview-core", "crates/mdview"]
+members = ["crates/waggledance-core", "crates/waggledance"]
 # Desktop shell (Tauri) is excluded from the default workspace build because it
 # requires system libraries (webkit2gtk/gtk3 on Linux) not present everywhere.
 # Build it explicitly from its own directory — see crates/mdview-desktop/README.md.
@@ -11,7 +11,7 @@ version = "0.5.2"
 edition = "2021"
 license = "MIT"
 authors = ["Van Tran"]
-repository = "https://github.com/vantt/mdview"
+repository = "https://github.com/thanhsmind/waggledance"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

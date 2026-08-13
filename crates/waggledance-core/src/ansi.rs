@@ -1,5 +1,5 @@
 //! ANSI SGR (Select Graphic Rendition) escape sequences translated to safe,
-//! escaped HTML — mdview-core's server-side stand-in for a client-side
+//! escaped HTML — waggledance-core's server-side stand-in for a client-side
 //! terminal emulator (agent-terminal-12).
 //!
 //! NAMED DEVIATION from `approach.md`, which planned to vendor xterm.js as a

@@ -4,7 +4,7 @@
 //! Telegram poll offset and pending/delivered notification rows. It never
 //! stores terminal output, transcript content or any credential.
 //!
-//! Plain rusqlite, no async: `mdview-core` stays async-runtime-free
+//! Plain rusqlite, no async: `waggledance-core` stays async-runtime-free
 //! (`bee::tests::no_web_framework_dependency_declared` asserts no
 //! `tokio`/`axum`/`hyper` in this crate's `Cargo.toml`), so every call here
 //! is a synchronous SQLite statement — the async watcher/notifier that live

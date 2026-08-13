@@ -5,7 +5,7 @@
 //! `bound-port-truth-1`'s own unit tests separately cover D2's stale-lock
 //! fallback, which this test does not hit.
 
-use mdview_core::daemon::{health_check, DaemonInfo};
+use waggledance_core::daemon::{health_check, DaemonInfo};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -90,7 +90,7 @@ fn port_of(url: &str) -> u16 {
 
 #[test]
 fn cmd_open_json_url_port_matches_real_daemon_bound_port() {
-    let bin = env!("CARGO_BIN_EXE_mdview");
+    let bin = env!("CARGO_BIN_EXE_waggledance");
     let home = scratch_home("open");
 
     let doc_dir = home.join("docs");
@@ -154,7 +154,7 @@ fn cmd_open_json_url_port_matches_real_daemon_bound_port() {
 /// Raw `GET {path}` against a real daemon, reading the full response until
 /// the connection closes (the daemon is asked to `Connection: close`).
 /// Returns (status code, body). No HTTP client dependency needed for one
-/// route per test file — mirrors `mdview_core::daemon`'s own raw-socket
+/// route per test file — mirrors `waggledance_core::daemon`'s own raw-socket
 /// health check.
 fn http_get(host: &str, port: u16, path: &str) -> (u16, String) {
     let mut stream =
@@ -206,7 +206,7 @@ fn open_project(bin: &str, home: &Path, readme: &Path) -> String {
 
 #[test]
 fn code_section_lists_dirs_highlights_files_and_denies_sensitive_paths() {
-    let bin = env!("CARGO_BIN_EXE_mdview");
+    let bin = env!("CARGO_BIN_EXE_waggledance");
     let home = scratch_home("code");
     let root = home.join("proj");
 
@@ -340,7 +340,7 @@ fn code_section_lists_dirs_highlights_files_and_denies_sensitive_paths() {
 /// language and size.
 #[test]
 fn code_view_sidebar_splits_folders_files_and_breadcrumb_shows_type_and_size() {
-    let bin = env!("CARGO_BIN_EXE_mdview");
+    let bin = env!("CARGO_BIN_EXE_waggledance");
     let home = scratch_home("code-sidebar");
     let root = home.join("proj");
 
