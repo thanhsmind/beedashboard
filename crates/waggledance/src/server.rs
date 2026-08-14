@@ -2973,6 +2973,7 @@ fn terminals_menu_panes(
             entries.push(views::TerminalsMenuPane {
                 base: format!("/p/{}/_terminal/{}", project.id, pane.pane_id),
                 project_label: project.name.clone(),
+                is_project_pane: true,
                 view: pane.clone(),
             });
         }
@@ -2984,6 +2985,7 @@ fn terminals_menu_panes(
         entries.push(views::TerminalsMenuPane {
             base: format!("/_terminal/unassigned/{}", pane.pane_id),
             project_label: "Unassigned".to_string(),
+            is_project_pane: false,
             view: pane,
         });
     }
@@ -15445,6 +15447,142 @@ mod bee_route_tests {
                 unassigned_agent.pane_id
             )),
             "an unassigned pane's screen must carry the Unassigned route as its base: {unassigned_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D6: the selected pane's own reply form and key buttons render for
+    /// both a project pane and an unassigned one, each carrying the same
+    /// `data-term-base` the screen frame already proved above — so
+    /// `assets/app.js`'s input/keys wiring posts under the right pane's own
+    /// existing route rather than a project id this page never has.
+    #[tokio::test]
+    async fn terminals_tab_renders_reply_bar_and_keys_carrying_the_right_base_path() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminals-tab-reply-bar");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminals-tab-reply-bar-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let project_agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let unassigned_agent = fake
+            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let project_base = format!("/p/{}/_terminal/{}", project.id, project_agent.pane_id);
+        let project_body = body_string(
+            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+        )
+        .await;
+        assert!(
+            project_body.contains(&format!(
+                r#"<form class="term-reply" data-pane-id="{}" data-term-base="{}">"#,
+                project_agent.pane_id, project_base
+            )),
+            "a project pane's reply form must post under its own existing route: {project_body}"
+        );
+        assert!(
+            project_body.contains(&format!(
+                r#"<div class="term-keys term-keys--move" data-pane-id="{}" data-term-base="{}""#,
+                project_agent.pane_id, project_base
+            )),
+            "a project pane's move keys must carry the same base: {project_body}"
+        );
+        assert!(
+            project_body.contains(r#"data-key="enter">Enter</button>"#)
+                && project_body.contains(r#"data-key="ctrl+c">Ctrl+C</button>"#),
+            "the reply keys (Enter, Ctrl+C, ...) must render for the selected pane: {project_body}"
+        );
+
+        let unassigned_base = format!("/_terminal/unassigned/{}", unassigned_agent.pane_id);
+        let unassigned_body = body_string(
+            get(app, &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+        )
+        .await;
+        assert!(
+            unassigned_body.contains(&format!(
+                r#"<form class="term-reply" data-pane-id="{}" data-term-base="{}">"#,
+                unassigned_agent.pane_id, unassigned_base
+            )),
+            "an unassigned pane's reply form must post under the Unassigned route: {unassigned_body}"
+        );
+        assert!(
+            unassigned_body.contains(&format!(
+                r#"<div class="term-keys term-keys--move" data-pane-id="{}" data-term-base="{}""#,
+                unassigned_agent.pane_id, unassigned_base
+            )),
+            "an unassigned pane's move keys must carry the Unassigned base: {unassigned_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D6 + plan finding 7: the attach control rides the Terminals tab's
+    /// reply form for a project pane, exactly as it already does on that
+    /// project's own terminal page, but never for an unassigned pane — it
+    /// has no `/attach` route to upload against.
+    #[tokio::test]
+    async fn terminals_tab_attach_control_only_for_project_pane() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminals-tab-attach");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminals-tab-attach-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let project_agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let unassigned_agent = fake
+            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let project_body = body_string(
+            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+        )
+        .await;
+        assert!(
+            project_body.contains(&format!(r#"class="term-attach" data-pane-id="{}""#, project_agent.pane_id)),
+            "a project pane's reply form must carry the attach control: {project_body}"
+        );
+
+        let unassigned_body = body_string(
+            get(app, &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+        )
+        .await;
+        assert!(
+            !unassigned_body.contains("term-attach"),
+            "an unassigned pane must render no attach control: {unassigned_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();

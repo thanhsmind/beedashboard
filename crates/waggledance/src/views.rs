@@ -979,14 +979,24 @@ pub struct TerminalsMenuPane {
     /// own D4 tie-break key alongside `view.pane_id` (`server.rs`'s own
     /// sort, never re-sorted here).
     pub project_label: String,
+    /// homepage-terminals-2 (D6): `true` for a pane resolved through a
+    /// registered project's own `project_panes`, `false` for one from
+    /// `unassigned_panes` — set by `server.rs::terminals_menu_panes` at the
+    /// same point it already knows which loop built the entry, never
+    /// re-derived from `base`'s own string shape here. Gates
+    /// [`screen_frame`]'s attach control the same way [`pane_cards`]'s own
+    /// `attach` parameter gates [`terminal_page`] vs
+    /// [`unassigned_terminal_page`] (plan finding 7): only a project pane
+    /// has a `/attach` route to upload against.
+    pub is_project_pane: bool,
 }
 
-/// homepage-terminals D1/D2: the Terminals tab's own body — a switch menu
+/// homepage-terminals D1/D2/D6: the Terminals tab's own body — a switch menu
 /// (D5's real links, `/?tab=terminals&pane=<pane_id>`) above the selected
-/// pane's live screen, reusing `.term-screen` markup and [`PROJECT_TAB_STYLE`]
-/// the same way [`terminal_page`] already injects both. Read-only for now:
-/// D6's typing controls (reply box, key buttons, image attach) are
-/// homepage-terminals-2's own cell — this renders none of them.
+/// pane's live screen and its own reply form, key buttons and (project
+/// panes only) attach control, reusing `.term-screen`/`.term-reply`/
+/// `.term-keys` markup and [`PROJECT_TAB_STYLE`] the same way
+/// [`terminal_page`] already injects both.
 ///
 /// `panes` already carries D4's own order (blocked, then working, then the
 /// rest, stable within a group by `(project, pane_id)`) — `server.rs`'s
@@ -1066,22 +1076,26 @@ fn terminals_tab(panes: &[TerminalsMenuPane], selected_pane: Option<&str>, herdr
     )
 }
 
-/// homepage-terminals: the selected pane's live screen viewport alone —
-/// [`pane_cards`]'s `.term-screen-wrap`/`.term-screen` markup, minus the
-/// reply form, key buttons and attach control `pane_cards` also renders
-/// (those are homepage-terminals-2's own cell; D6 is not this cell's to
-/// implement). `data-term-base` is what lets `assets/app.js`'s existing
-/// poller build this pane's `/screen` URL without a `data-project-id` on
-/// this page — see plan "Technical design" 2 and the poller's own doc.
+/// homepage-terminals D6: the selected pane's live screen viewport plus
+/// [`pane_controls`]'s reply form, key buttons and (project panes only)
+/// attach control — [`pane_cards`]'s exact card shape, minus the
+/// `.term-scroll` history controls (out of this feature's D2 scope; the tab
+/// shows one live screen, not a scrollback browser). `data-term-base` is
+/// what lets `assets/app.js`'s existing screen poller *and* its
+/// input/keys/attach wiring build this pane's URLs without a
+/// `data-project-id` on this page — see plan "Technical design" 2 and each
+/// function's own doc.
 fn screen_frame(pane: &TerminalsMenuPane) -> String {
     format!(
         r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
   <div class="term-screen-wrap">
     <pre class="term-screen" data-pane-id="{pane_id}" data-term-base="{base}" aria-live="polite">Loading screen…</pre>
   </div>
+  {controls}
 </div>"#,
         pane_id = esc(&pane.view.pane_id),
         base = esc(&pane.base),
+        controls = pane_controls(&pane.view.pane_id, &pane.view.name, pane.is_project_pane, Some(&pane.base)),
     )
 }
 
@@ -1129,21 +1143,6 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str, attach: bool) -> Stri
     }
     let mut out = String::new();
     for p in panes {
-        let attach_block = if attach {
-            format!(
-                r#"
-    <div class="term-attach" data-pane-id="{pane_id}">
-      <input type="file" class="term-attach__input" data-pane-id="{pane_id}" accept="image/*" multiple aria-label="Attach images to send to {name}" hidden>
-      <button type="button" class="term-attach__btn" data-pane-id="{pane_id}">Attach images</button>
-      <ul class="term-attach__chips" data-pane-id="{pane_id}"></ul>
-      <p class="term-attach__error" data-pane-id="{pane_id}" role="alert" hidden></p>
-    </div>"#,
-                pane_id = esc(&p.pane_id),
-                name = esc(&p.name),
-            )
-        } else {
-            String::new()
-        };
         out.push_str(&format!(
             r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
   <div class="term-screen-wrap">
@@ -1156,34 +1155,75 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str, attach: bool) -> Stri
       </div>
     </div>
   </div>
-  <div class="term-controls">
-    <div class="term-keys term-keys--move" data-pane-id="{pane_id}" aria-label="Move around {name}'s screen">
+  {controls}
+</div>"#,
+            pane_id = esc(&p.pane_id),
+            name = esc(&p.name),
+            controls = pane_controls(&p.pane_id, &p.name, attach, None),
+        ));
+    }
+    out
+}
+
+/// homepage-terminals-2 (D6): the reply form, key buttons and (`attach`
+/// only) attach control — exactly [`pane_cards`]'s own `.term-controls`/
+/// `.term-reply` markup, factored out so [`screen_frame`] posts through the
+/// very same `assets/app.js` selectors (`.term-reply[data-pane-id]`,
+/// `.term-keys[data-pane-id]`) instead of a second copy of this widget set.
+///
+/// `base`, when `Some`, renders `data-term-base` on each control the same
+/// way [`screen_frame`]'s own `.term-screen` already does — `assets/app.js`'s
+/// input/keys/attach wiring reads it per-element exactly like the screen
+/// poller reads it on `.term-screen`, and falls back to the project page's
+/// `data-project-id`-built path when it is absent. [`pane_cards`]'s two
+/// callers ([`terminal_page`], [`unassigned_terminal_page`]) both pass
+/// `None`: their controls already resolve through that project-scoped
+/// fallback and must render byte-identical markup to before this cell.
+fn pane_controls(pane_id: &str, name: &str, attach: bool, base: Option<&str>) -> String {
+    let base_attr = base.map(|b| format!(r#" data-term-base="{}""#, esc(b))).unwrap_or_default();
+    let attach_block = if attach {
+        format!(
+            r#"
+    <div class="term-attach" data-pane-id="{pane_id}"{base_attr}>
+      <input type="file" class="term-attach__input" data-pane-id="{pane_id}" accept="image/*" multiple aria-label="Attach images to send to {name}" hidden>
+      <button type="button" class="term-attach__btn" data-pane-id="{pane_id}">Attach images</button>
+      <ul class="term-attach__chips" data-pane-id="{pane_id}"></ul>
+      <p class="term-attach__error" data-pane-id="{pane_id}" role="alert" hidden></p>
+    </div>"#,
+            pane_id = esc(pane_id),
+            name = esc(name),
+            base_attr = base_attr,
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"<div class="term-controls">
+    <div class="term-keys term-keys--move" data-pane-id="{pane_id}"{base_attr} aria-label="Move around {name}'s screen">
       <button type="button" data-key="up">↑</button>
       <button type="button" data-key="down">↓</button>
       <button type="button" data-key="left">←</button>
       <button type="button" data-key="right">→</button>
     </div>
-    <div class="term-keys" data-pane-id="{pane_id}" aria-label="Send a key to {name}">
+    <div class="term-keys" data-pane-id="{pane_id}"{base_attr} aria-label="Send a key to {name}">
       <button type="button" data-key="enter">Enter</button>
       <button type="button" data-key="escape">Esc</button>
       <button type="button" data-key="tab">Tab</button>
       <button type="button" data-key="ctrl+c">Ctrl+C</button>
     </div>
   </div>
-  <form class="term-reply" data-pane-id="{pane_id}">
+  <form class="term-reply" data-pane-id="{pane_id}"{base_attr}>
     <textarea class="term-reply__text" rows="3" placeholder="Type a reply… (Ctrl+Enter to send)" aria-label="Reply to {name}" autocomplete="off"></textarea>{attach_block}
     <div class="term-reply__actions">
       <button type="button" class="term-reply__stage">Stage</button>
       <button type="submit" class="term-reply__send">Send</button>
     </div>
-  </form>
-</div>"#,
-            pane_id = esc(&p.pane_id),
-            name = esc(&p.name),
-            attach_block = attach_block,
-        ));
-    }
-    out
+  </form>"#,
+        pane_id = esc(pane_id),
+        name = esc(name),
+        attach_block = attach_block,
+        base_attr = base_attr,
+    )
 }
 
 /// Inline wiring for [`terminal_create_controls`]'s "New shell"/preset

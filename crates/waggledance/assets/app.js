@@ -1408,7 +1408,7 @@
   // mechanism.
   //
   // terminal-image-attach (D1/D2): the same form also owns the attach
-  // control, when the page rendered one (`views.rs::pane_cards` gates the
+  // control, when the page rendered one (`views.rs::pane_controls` gates the
   // markup to project pages only, per plan finding 7 — the Unassigned page
   // has no `.term-attach` box for this loop to find, so all of the wiring
   // below is a no-op there). Picker, drag-drop on the form, and paste in the
@@ -1419,22 +1419,40 @@
   // the prompt text and every remaining chip's path and clears the chips
   // once that send lands; "Stage" keeps sending the textarea alone, and
   // neither keybinding changes shape.
+  //
+  // homepage-terminals: same `data-term-base`-wins-outright branch the
+  // screen poller above already carries (`views.rs::pane_controls`'s doc) —
+  // each `.term-reply`/`.term-keys`/`.term-attach` element's own base, read
+  // once per element below and threaded through every call site instead of
+  // one closure-captured `projectId`, since the home page's Terminals tab
+  // has panes from more than one project (or none, D3) on the same page.
+  // `main.fg-page[data-project-id]` is still read for the project and
+  // Unassigned pages' own fallback path; the home page renders no such
+  // attribute, so `projectId` is `null` there and every element on it must
+  // carry its own `data-term-base` or post nowhere.
   (function () {
     var main = document.querySelector("main.fg-page[data-project-id]");
-    if (!main) return;
-    var projectId = main.getAttribute("data-project-id");
-    if (!projectId) return;
+    var projectId = main ? main.getAttribute("data-project-id") : null;
+    var forms = document.querySelectorAll(".term-reply[data-pane-id]");
+    var keyGroups = document.querySelectorAll(".term-keys[data-pane-id]");
+    if (!forms.length && !keyGroups.length) return;
 
-    function inputUrl(paneId) {
-      return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/input";
+    function inputUrl(paneId, base) {
+      return base
+        ? base + "/input"
+        : "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/input";
     }
 
-    function keysUrl(paneId) {
-      return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/keys";
+    function keysUrl(paneId, base) {
+      return base
+        ? base + "/keys"
+        : "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/keys";
     }
 
-    function attachUrl(paneId) {
-      return "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/attach";
+    function attachUrl(paneId, base) {
+      return base
+        ? base + "/attach"
+        : "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/attach";
     }
 
     function postJson(url, body) {
@@ -1446,9 +1464,9 @@
       });
     }
 
-    function sendReply(paneId, text, submit, input) {
+    function sendReply(paneId, text, submit, input, base) {
       if (!text) return;
-      postJson(inputUrl(paneId), { text: text, submit: submit })
+      postJson(inputUrl(paneId, base), { text: text, submit: submit })
         .then(function (res) {
           if (res.ok && input) input.value = "";
         })
@@ -1512,9 +1530,9 @@
     // One raw-body upload per file (D1) — the endpoint this cell wires
     // against takes one file per request, `Content-Type` carrying the
     // file's own MIME type.
-    function upload(paneId, file, chipList, errorEl) {
+    function upload(paneId, file, chipList, errorEl, base) {
       clearAttachError(errorEl);
-      return fetch(attachUrl(paneId), {
+      return fetch(attachUrl(paneId, base), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": file.type || "application/octet-stream" },
@@ -1545,13 +1563,13 @@
     // ever leave the browser.
     var ATTACH_MAX_BYTES = 10 * 1024 * 1024;
 
-    function uploadFiles(paneId, files, chipList, errorEl) {
+    function uploadFiles(paneId, files, chipList, errorEl, base) {
       Array.prototype.slice.call(files || []).forEach(function (file) {
         if (file.size > ATTACH_MAX_BYTES) {
           showAttachError(errorEl, "upload exceeds the 10 MB limit");
           return;
         }
-        upload(paneId, file, chipList, errorEl);
+        upload(paneId, file, chipList, errorEl, base);
       });
     }
 
@@ -1576,10 +1594,10 @@
       return promptText || paths;
     }
 
-    function sendComposed(paneId, promptText, input, chipList) {
+    function sendComposed(paneId, promptText, input, chipList, base) {
       var text = composeMessage(paneId, promptText);
       if (!text) return;
-      postJson(inputUrl(paneId), { text: text, submit: true })
+      postJson(inputUrl(paneId, base), { text: text, submit: true })
         .then(function (res) {
           if (res.ok) {
             if (input) input.value = "";
@@ -1589,8 +1607,9 @@
         .catch(function () {});
     }
 
-    Array.prototype.slice.call(document.querySelectorAll(".term-reply[data-pane-id]")).forEach(function (form) {
+    Array.prototype.slice.call(forms).forEach(function (form) {
       var paneId = form.getAttribute("data-pane-id");
+      var base = form.getAttribute("data-term-base");
       var input = form.querySelector(".term-reply__text");
       var stageBtn = form.querySelector(".term-reply__stage");
       var attachBox = form.querySelector(".term-attach[data-pane-id]");
@@ -1601,7 +1620,7 @@
 
       form.addEventListener("submit", function (ev) {
         ev.preventDefault();
-        sendComposed(paneId, input.value, input, chipList);
+        sendComposed(paneId, input.value, input, chipList, base);
       });
 
       // The reply box is a textarea, so Enter belongs to the text — it opens
@@ -1611,7 +1630,7 @@
         input.addEventListener("keydown", function (ev) {
           if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
             ev.preventDefault();
-            sendComposed(paneId, input.value, input, chipList);
+            sendComposed(paneId, input.value, input, chipList, base);
           }
         });
 
@@ -1629,14 +1648,14 @@
           });
           if (files.length) {
             ev.preventDefault();
-            uploadFiles(paneId, files, chipList, errorEl);
+            uploadFiles(paneId, files, chipList, errorEl, base);
           }
         });
       }
 
       if (stageBtn) {
         stageBtn.addEventListener("click", function () {
-          sendReply(paneId, input.value, false, input);
+          sendReply(paneId, input.value, false, input, base);
         });
       }
 
@@ -1646,7 +1665,7 @@
             fileInput.click();
           });
           fileInput.addEventListener("change", function () {
-            uploadFiles(paneId, fileInput.files, chipList, errorEl);
+            uploadFiles(paneId, fileInput.files, chipList, errorEl, base);
             fileInput.value = "";
           });
         }
@@ -1661,19 +1680,20 @@
           var files = ev.dataTransfer && ev.dataTransfer.files;
           if (files && files.length) {
             ev.preventDefault();
-            uploadFiles(paneId, files, chipList, errorEl);
+            uploadFiles(paneId, files, chipList, errorEl, base);
           }
         });
       }
     });
 
-    Array.prototype.slice.call(document.querySelectorAll(".term-keys[data-pane-id]")).forEach(function (group) {
+    Array.prototype.slice.call(keyGroups).forEach(function (group) {
       var paneId = group.getAttribute("data-pane-id");
+      var base = group.getAttribute("data-term-base");
       Array.prototype.slice.call(group.querySelectorAll("button[data-key]")).forEach(function (btn) {
         btn.addEventListener("click", function () {
           var key = btn.getAttribute("data-key");
           if (!key) return;
-          postJson(keysUrl(paneId), { keys: [key] }).catch(function () {});
+          postJson(keysUrl(paneId, base), { keys: [key] }).catch(function () {});
         });
       });
     });
