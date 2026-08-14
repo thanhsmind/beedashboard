@@ -1657,6 +1657,30 @@ html[data-scheme="dark"] .bee-hub-theme {{
    enough to overflow a single line on its own (an unbroken URL, a long
    identifier). */
 .bee-hub__slug {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
+/* project-color-identity: the cross-project board's own per-project accent
+   -- a local custom property set by whichever `bee-hub__shell--pN`/
+   `bee-hub__row-project--pN` modifier the project's own hash landed on
+   ([`bee_hub_project_color_index`]), read by the project-name subtitle and
+   the Finished row's project span, and by the shell's own left border
+   (overriding only `.fg-card`'s existing left edge -- see `.fg-card--rule`
+   for the same pattern -- so this never introduces a border where none
+   already existed, keeping the min-width: 0 chain documented above intact).
+   `.bee-hub__project` carries no colour of its own; a per-project board
+   card never gets a `--pN` modifier at all, so it never gets a border or a
+   colour here. */
+.bee-hub__project {{ margin: 0; font-size: var(--type-caption-size); }}
+.bee-hub__shell--p1 {{ --project-accent: var(--color-accent-alt-1); }}
+.bee-hub__shell--p2 {{ --project-accent: var(--color-accent-alt-2); }}
+.bee-hub__shell--p3 {{ --project-accent: var(--color-accent-alt-3); }}
+.bee-hub__shell--p4 {{ --project-accent: var(--color-accent-alt-4); }}
+.bee-hub__shell--p5 {{ --project-accent: var(--color-accent-alt-5); }}
+.bee-hub__row-project--p1 {{ --project-accent: var(--color-accent-alt-1); }}
+.bee-hub__row-project--p2 {{ --project-accent: var(--color-accent-alt-2); }}
+.bee-hub__row-project--p3 {{ --project-accent: var(--color-accent-alt-3); }}
+.bee-hub__row-project--p4 {{ --project-accent: var(--color-accent-alt-4); }}
+.bee-hub__row-project--p5 {{ --project-accent: var(--color-accent-alt-5); }}
+.bee-hub__shell[class*="bee-hub__shell--p"] {{ border-left: var(--border-width-strong) solid var(--project-accent); }}
+.bee-hub__project, .bee-hub__row-project {{ color: var(--project-accent); }}
 .bee-hub__desc {{ margin: 0; font-size: var(--type-body-sm-size); color: var(--color-text-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }}
 /* feature-titles: the detail header's own title/slug/description stack,
    and the docs row beneath the chip row linking every markdown file the
@@ -2513,6 +2537,24 @@ fn bee_hub_group(label: &str, key: &str, count: usize, cards_html: &str, empty_l
     )
 }
 
+/// project-color-identity: a project id's own fixed accent index, 1..=5 --
+/// the same id always yields the same index, across cards, across the
+/// Finished rows, across process restarts. Deliberately an explicit FNV-1a
+/// hash (offset basis `0xcbf29ce484222325`, prime `0x100000001b3`) rather
+/// than `std::collections::hash_map::DefaultHasher`/`RandomState`: both are
+/// seeded per process, so the same project would shift colour between
+/// renders, defeating the whole point of a fixed per-project identity.
+fn bee_hub_project_color_index(project_id: &str) -> u8 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in project_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    (hash % 5) as u8 + 1
+}
+
 /// A group key's own status chip tone and label — the card's D1 "status
 /// icon", rendered as the same `fg-chip` pattern every other status chip on
 /// this board already uses rather than a bespoke icon set.
@@ -2541,9 +2583,15 @@ fn bee_hub_group_label(key: &str) -> (&'static str, &'static str) {
 /// slug demoted to a small muted subtitle beneath it, plus the boundary
 /// description as one clamped line; `None`, or a title-less record, falls
 /// back to the slug alone, exactly as before this feature. `project_label`
-/// is cross-board D5's project name, rendered as one more chip in the
-/// existing chip row when `Some`; `None` (every per-project board call)
-/// renders no such chip, byte-identical to before cross-board-2.
+/// is cross-board D5's project name; project-color-identity moved it from
+/// a chip in the chip row to the subtitle line under the card title in its
+/// own `bee-hub__project` class, replacing the slug there (a title-less
+/// card with a project label still gains that subtitle, so the project
+/// name is never dropped) -- and gives the card's shell a
+/// `bee-hub__shell--pN` modifier from [`bee_hub_project_color_index`] so
+/// cards of the same project share one fixed accent colour. `None` (every
+/// per-project board call) renders no subtitle swap, no chip and no
+/// modifier class, byte-identical to before this feature.
 ///
 /// `panes` (card-terminals-1) is the terminal panes running in this
 /// feature's own checkout -- the worktree-vs-main-checkout join is already
@@ -2584,13 +2632,29 @@ fn bee_hub_card(
 ) -> String {
     let (group_label, group_tone) = bee_hub_group_label(group_key);
     let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
-    let name_html = match title {
-        Some(t) => format!(
+    // project-color-identity: `project_label: Some` swaps the slug subtitle
+    // for the project name -- and, unlike the slug (which only ever shows
+    // beside a human title), still shows it under a title-less card too, so
+    // the project name is never dropped. `project_label: None` (every
+    // per-project board call) keeps the slug-only behavior byte-identical
+    // to before this feature.
+    let name_html = match (title, project_label) {
+        (Some(t), Some(label)) => format!(
+            r#"<div class="fg-card__title">{title}</div><div class="bee-hub__project">{label}</div>"#,
+            title = esc(t),
+            label = esc(label),
+        ),
+        (Some(t), None) => format!(
             r#"<div class="fg-card__title">{title}</div><div class="bee-hub__slug">{feature}</div>"#,
             title = esc(t),
             feature = esc(feature),
         ),
-        None => format!(r#"<div class="fg-card__title">{feature}</div>"#, feature = esc(feature)),
+        (None, Some(label)) => format!(
+            r#"<div class="fg-card__title">{feature}</div><div class="bee-hub__project">{label}</div>"#,
+            feature = esc(feature),
+            label = esc(label),
+        ),
+        (None, None) => format!(r#"<div class="fg-card__title">{feature}</div>"#, feature = esc(feature)),
     };
     let desc_html = match docs.and_then(|d| d.description.as_deref()).filter(|d| !d.is_empty()) {
         Some(d) => format!(r#"<p class="bee-hub__desc">{}</p>"#, esc(d)),
@@ -2623,9 +2687,15 @@ fn bee_hub_card(
         _ => String::new(),
     };
     let (wt_label, wt_tone) = worktree;
-    let project_chip_html = match project_label {
-        Some(label) => format!(r#"<span class="fg-chip fg-chip--neutral">{}</span>"#, esc(label)),
-        None => String::new(),
+    // project-color-identity: the project chip is gone -- the project name
+    // now lives in the subtitle above -- and the shell gains a
+    // `bee-hub__shell--pN` modifier from the project's own fixed colour
+    // index, so every card of the same project shares one accent. No
+    // `project_label` means no modifier at all, keeping a per-project
+    // board card's shell exactly `fg-card bee-hub__shell`.
+    let shell_class = match project_label {
+        Some(_) => format!("fg-card bee-hub__shell bee-hub__shell--p{}", bee_hub_project_color_index(project_id)),
+        None => "fg-card bee-hub__shell".to_string(),
     };
     // card-terminals-1: a sibling of the card's own `<a>`, never nested
     // inside it (see this function's doc comment) -- empty when `panes` is
@@ -2636,12 +2706,12 @@ fn bee_hub_card(
     let terminal_badges_html =
         terminal_badges_nav(project_id, panes, "Terminals in this checkout", "bee-hub__badges");
     format!(
-        r#"<div class="fg-card bee-hub__shell"><a class="bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}<div class="bee-hub__chips">{project_chip_html}<span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{desc_html}{progress_html}{reason_html}{activity_html}</a>{terminal_badges_html}</div>"#,
+        r#"<div class="{shell_class}"><a class="bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}<div class="bee-hub__chips"><span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{desc_html}{progress_html}{reason_html}{activity_html}</a>{terminal_badges_html}</div>"#,
+        shell_class = shell_class,
         group_key = group_key,
         pid = esc(project_id),
         feature_href = esc(feature),
         name_html = name_html,
-        project_chip_html = project_chip_html,
         group_tone = group_tone,
         group_label = group_label,
         wt_tone = wt_tone,
@@ -2665,7 +2735,11 @@ fn bee_hub_card(
 /// (cross-board D5) and `shipped_at` (cross-board D10, already relative-
 /// formatted through [`bee_fmt_trace_time`]) both default to `None` for
 /// every per-project board call, which renders byte-identical to before
-/// cross-board-2; the cross-project board passes both.
+/// cross-board-2; the cross-project board passes both. project-color-
+/// identity: `project_label: Some` also carries a `bee-hub__row-project--pN`
+/// modifier from [`bee_hub_project_color_index`], the same index the
+/// matching card's shell gets for this project, so a project reads in one
+/// fixed colour everywhere it appears.
 fn bee_hub_finished_row(
     project_id: &str,
     feature: &str,
@@ -2676,7 +2750,11 @@ fn bee_hub_finished_row(
     let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
     let name = title.unwrap_or(feature);
     let project_html = match project_label {
-        Some(label) => format!(r#"<span class="bee-hub__row-project">{}</span> "#, esc(label)),
+        Some(label) => format!(
+            r#"<span class="bee-hub__row-project bee-hub__row-project--p{idx}">{label}</span> "#,
+            idx = bee_hub_project_color_index(project_id),
+            label = esc(label),
+        ),
         None => String::new(),
     };
     let time_html = match shipped_at {
@@ -6818,6 +6896,164 @@ mod tests {
         assert!(
             card_html.ends_with("</a></div>"),
             "with no badges, the shell must close right after the card's own </a>: {card_html}"
+        );
+    }
+
+    // --- project-color-identity ---
+
+    /// The same project id always yields the same index -- across repeated
+    /// calls in one test, and matching a hand-computed FNV-1a constant for a
+    /// known id, so a future change to the hash cannot silently drift.
+    #[test]
+    fn bee_hub_project_color_index_is_stable_for_a_known_id() {
+        let first = bee_hub_project_color_index("proj-a");
+        let second = bee_hub_project_color_index("proj-a");
+        assert_eq!(first, second, "the same project id must yield the same index every call");
+        assert!((1..=5).contains(&first), "the index must land in 1..=5: {first}");
+
+        // Hand-computed FNV-1a over b"proj-a" with offset basis
+        // 0xcbf29ce484222325 and prime 0x100000001b3, reduced mod 5 + 1.
+        const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+        const FNV_PRIME: u64 = 0x100000001b3;
+        let mut hash = FNV_OFFSET_BASIS;
+        for byte in b"proj-a" {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        let expected = (hash % 5) as u8 + 1;
+        assert_eq!(first, expected, "the index must match the explicit FNV-1a computation for a known id");
+    }
+
+    /// Two different ids that must not collide -- proving the index is
+    /// actually derived from the id's own bytes, not a constant.
+    #[test]
+    fn bee_hub_project_color_index_differs_for_different_ids() {
+        let a = bee_hub_project_color_index("proj-alpha");
+        let b = bee_hub_project_color_index("proj-beta");
+        assert_ne!(a, b, "two distinct project ids must not collide onto the same index: {a} vs {b}");
+    }
+
+    /// A card rendered with a project label carries the project name in the
+    /// subtitle (not the slug), carries no project chip, and its shell
+    /// carries a `bee-hub__shell--pN` modifier matching the project's own
+    /// colour index.
+    #[test]
+    fn bee_hub_card_with_project_label_shows_project_subtitle_no_chip_and_shell_modifier() {
+        let worktree = ("Main".to_string(), "neutral");
+        let card_html = bee_hub_card(
+            "proj-a",
+            "feat-a",
+            "waiting",
+            1,
+            2,
+            None,
+            &worktree,
+            None,
+            None,
+            Some("Project A"),
+            &[],
+        );
+        assert!(
+            card_html.contains(r#"<div class="bee-hub__project">Project A</div>"#),
+            "the project name must render in the subtitle: {card_html}"
+        );
+        assert!(!card_html.contains("bee-hub__slug"), "the slug subtitle must not also render: {card_html}");
+        assert!(
+            !card_html.contains(r#"<span class="fg-chip fg-chip--neutral">Project A</span>"#),
+            "the project chip must be gone from the chip row: {card_html}"
+        );
+        let idx = bee_hub_project_color_index("proj-a");
+        assert!(
+            card_html.contains(&format!("bee-hub__shell--p{idx}")),
+            "the shell must carry the project's own colour modifier: {card_html}"
+        );
+    }
+
+    /// A title-less card with a project label must still gain the project
+    /// subtitle -- the project name is never dropped just because the
+    /// feature itself has no CONTEXT.md title.
+    #[test]
+    fn bee_hub_card_with_project_label_and_no_title_still_shows_project_subtitle() {
+        let worktree = ("Main".to_string(), "neutral");
+        let card_html = bee_hub_card(
+            "proj-a",
+            "feat-a",
+            "waiting",
+            1,
+            2,
+            None,
+            &worktree,
+            None,
+            None,
+            Some("Project A"),
+            &[],
+        );
+        assert!(
+            card_html.contains(r#"<div class="fg-card__title">feat-a</div><div class="bee-hub__project">Project A</div>"#),
+            "a title-less card with a project label must still carry the project subtitle: {card_html}"
+        );
+    }
+
+    /// A card rendered with no project label is byte-identical to its
+    /// pre-change output: slug subtitle, no modifier class, no colour.
+    #[test]
+    fn bee_hub_card_with_no_project_label_is_unchanged() {
+        let worktree = ("Main".to_string(), "neutral");
+        let docs = waggledance_core::bee::BeeFeatureDocs {
+            title: Some("Human Title".to_string()),
+            description: None,
+            docs: vec![],
+        };
+        let card_html =
+            bee_hub_card("proj-a", "feat-a", "waiting", 1, 2, None, &worktree, None, Some(&docs), None, &[]);
+        assert_eq!(
+            card_html,
+            r#"<div class="fg-card bee-hub__shell"><a class="bee-hub__card" data-hub-group="waiting" href="/p/proj-a/_bee/feature/feat-a"><div class="fg-card__title">Human Title</div><div class="bee-hub__slug">feat-a</div><div class="bee-hub__chips"><span class="fg-chip fg-chip--warning">Waiting on you</span><span class="fg-chip fg-chip--neutral">Main</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></a></div>"#,
+            "a card with no project label must render byte-identical to before this feature: {card_html}"
+        );
+        assert!(!card_html.contains("bee-hub__shell--p"), "no project label must mean no colour modifier: {card_html}");
+    }
+
+    /// The Finished row for the same project carries the matching
+    /// `bee-hub__row-project--pN` modifier on its project span.
+    #[test]
+    fn bee_hub_finished_row_with_project_label_carries_matching_color_modifier() {
+        let row = bee_hub_finished_row("proj-a", "shipped-feat", None, Some("Project A"), None);
+        let idx = bee_hub_project_color_index("proj-a");
+        assert!(
+            row.contains(&format!(
+                r#"<span class="bee-hub__row-project bee-hub__row-project--p{idx}">Project A</span>"#
+            )),
+            "the Finished row's project span must carry the matching colour modifier: {row}"
+        );
+    }
+
+    /// The style block carries the five shell accent rules, the five
+    /// Finished-row accent rules, and the border rule.
+    #[test]
+    fn bee_hub_style_carries_the_five_accent_rules_and_the_border_rule() {
+        let css = bee_hub_style();
+        for n in 1..=5 {
+            assert!(
+                css.contains(&format!(
+                    ".bee-hub__shell--p{n} {{ --project-accent: var(--color-accent-alt-{n}); }}"
+                )),
+                "missing shell accent rule for p{n}: {css}"
+            );
+            assert!(
+                css.contains(&format!(
+                    ".bee-hub__row-project--p{n} {{ --project-accent: var(--color-accent-alt-{n}); }}"
+                )),
+                "missing Finished-row accent rule for p{n}: {css}"
+            );
+        }
+        assert!(
+            css.contains(r#".bee-hub__shell[class*="bee-hub__shell--p"] { border-left: var(--border-width-strong) solid var(--project-accent); }"#),
+            "missing the shell's own left border rule: {css}"
+        );
+        assert!(
+            css.contains(r#".bee-hub__project, .bee-hub__row-project { color: var(--project-accent); }"#),
+            "missing the subtitle/Finished-span colour rule: {css}"
         );
     }
 
