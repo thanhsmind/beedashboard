@@ -856,11 +856,18 @@
   // turn this poller into a request storm against a socket that is already
   // struggling to answer.
   (function () {
+    // homepage-terminals: the home page's own Terminals tab has no single
+    // `data-project-id` to bootstrap from — its panes can belong to any
+    // project or to none (D3) — so `main` (and therefore `projectId`) is
+    // allowed to be absent here; each `.term-screen` instead carries its
+    // own `data-term-base` (`views.rs::screen_frame`), read per-element in
+    // `pollOne` below. The project and Unassigned pages are untouched:
+    // neither renders `data-term-base`, so both keep resolving through
+    // `projectId` exactly as before.
     var main = document.querySelector("main.fg-page[data-project-id]");
-    if (!main) return;
-    var projectId = main.getAttribute("data-project-id");
+    var projectId = main ? main.getAttribute("data-project-id") : null;
     var screens = Array.prototype.slice.call(document.querySelectorAll(".term-screen[data-pane-id]"));
-    if (!projectId || !screens.length) return;
+    if (!screens.length) return;
 
     var POLL_MS = 1500;
     var HERDR_DOWN_TEXT = "herdr is not running";
@@ -878,8 +885,18 @@
     // the one whose button was clicked most recently.
     var paneHistoryDepth = {}; // pane id -> 0 = live; last absolute depth requested
 
-    function screenUrl(paneId, historyDepth) {
-      var url = "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/screen";
+    // homepage-terminals: `base`, when given, is a `.term-screen` element's
+    // own `data-term-base` (already the pane's full route prefix, pane id
+    // included — `views.rs::screen_frame`'s doc) and wins outright; omitted
+    // (every call this feature did not touch — the scroll-history buttons
+    // and the pagehide/visibilitychange restore further down, none of
+    // which run on the home page since it renders no `.term-scroll`),
+    // `screenUrl` falls back to the project page's own `projectId`-built
+    // path exactly as before.
+    function screenUrl(paneId, historyDepth, base) {
+      var url = base
+        ? base + "/screen"
+        : "/p/" + encodeURIComponent(projectId) + "/_terminal/" + encodeURIComponent(paneId) + "/screen";
       // scroll-keep-position: `historyDepth` is now the pane's absolute
       // requested depth, and 0 is a real, meaningful value (an explicit
       // "restore to live" request) -- so this checks presence (`!= null`),
@@ -1003,7 +1020,8 @@
     function pollOne(el) {
       var paneId = el.getAttribute("data-pane-id");
       if (viewingHistory[paneId]) return; // the operator is reading history; leave it alone
-      fetch(screenUrl(paneId), { credentials: "same-origin" })
+      var base = el.getAttribute("data-term-base");
+      fetch(screenUrl(paneId, null, base), { credentials: "same-origin" })
         .then(function (res) {
           // A 502 is the one status `herdr_down_response()` (server.rs) ever
           // sends, and only when herdr itself is unreachable — but the body

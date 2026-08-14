@@ -141,6 +141,12 @@ pub enum HomeTab {
     #[default]
     Kanban,
     Projects,
+    /// homepage-terminals D1/D8: the third tab, opening one live agent
+    /// terminal. Always offered on the strip regardless of herdr's own
+    /// state — [`home_tab_strip`] never gates this variant's anchor on
+    /// anything; [`terminals_tab`] is what tells the herdr-off and
+    /// no-agent empty causes apart once this tab is actually selected.
+    Terminals,
 }
 
 /// homepage-tabs: the tab strip above the selected section, reusing the
@@ -161,9 +167,12 @@ fn home_tab_strip(selected: HomeTab) -> String {
         )
     };
     format!(
-        r#"<nav class="fg-tabs" aria-label="Home sections">{kanban}{projects}</nav>"#,
+        r#"<nav class="fg-tabs" aria-label="Home sections">{kanban}{projects}{terminals}</nav>"#,
         kanban = tab_link(HomeTab::Kanban, "/?tab=kanban", "Kanban"),
         projects = tab_link(HomeTab::Projects, "/?tab=projects", "Projects"),
+        // homepage-terminals D8: no gate here — the anchor renders
+        // whatever herdr's own state is; only the tab's own body reads it.
+        terminals = tab_link(HomeTab::Terminals, "/?tab=terminals", "Terminals"),
     )
 }
 
@@ -196,6 +205,18 @@ pub fn home_page(
     register_error: Option<&str>,
     cross_features_html: &str,
     tab: HomeTab,
+    // homepage-terminals: `server.rs::index_page` builds this inventory —
+    // `project_panes` over every registered project plus `unassigned_panes`,
+    // D3-filtered and D4-ordered — since only that module holds the herdr
+    // snapshot and the D2 containment boundaries this join needs.
+    terminals_panes: &[TerminalsMenuPane],
+    terminals_selected_pane: Option<&str>,
+    // D8: `false` means herdr itself is off or unreachable (`index_page`'s
+    // own `snapshot: None` fail-open, the same one `badges_enabled`/every
+    // other pane list on this page already share) — `true` with an empty
+    // `terminals_panes` means herdr answered but no agent is running
+    // anywhere. The two read as different messages in `terminals_tab`.
+    terminals_herdr_ok: bool,
 ) -> String {
     if cross_features_html.is_empty() {
         return project_list_page(projects, unassigned_visible, suggestions, register_error);
@@ -220,6 +241,10 @@ pub fn home_page(
         HomeTab::Projects => (
             "Projects",
             project_list_main(projects, unassigned_visible, suggestions, register_error),
+        ),
+        HomeTab::Terminals => (
+            "Terminals",
+            terminals_tab(terminals_panes, terminals_selected_pane, terminals_herdr_ok),
         ),
     };
     let body = format!(
@@ -931,6 +956,133 @@ pub struct TerminalPaneView {
     pub cwd: String,
     pub workspace: String,
     pub tab: String,
+}
+
+/// homepage-terminals: one agent-backed pane the homepage's Terminals tab
+/// can switch to — a [`TerminalPaneView`] plus the two things only the
+/// caller (`server.rs::index_page`, which alone resolves project membership
+/// and the D2 boundaries `project_panes`/`unassigned_panes` need) can know.
+#[derive(Clone)]
+pub struct TerminalsMenuPane {
+    pub view: TerminalPaneView,
+    /// The base path this pane's *existing* routes already live under — no
+    /// new route, no new guard (plan "Technical design" 1-2):
+    /// `/p/<project-id>/_terminal/<pane_id>` for a project pane,
+    /// `/_terminal/unassigned/<pane_id>` for one outside every registered
+    /// project. `{base}/screen` is exactly the endpoint `assets/app.js`'s
+    /// existing poller already knows how to call — see its own
+    /// `data-term-base` branch.
+    pub base: String,
+    /// The project this pane belongs to, or "Unassigned" — labels the menu
+    /// row so a pane reads as identifiable across projects, not just by its
+    /// own (otherwise meaningless to a reader) pane id. Also this entry's
+    /// own D4 tie-break key alongside `view.pane_id` (`server.rs`'s own
+    /// sort, never re-sorted here).
+    pub project_label: String,
+}
+
+/// homepage-terminals D1/D2: the Terminals tab's own body — a switch menu
+/// (D5's real links, `/?tab=terminals&pane=<pane_id>`) above the selected
+/// pane's live screen, reusing `.term-screen` markup and [`PROJECT_TAB_STYLE`]
+/// the same way [`terminal_page`] already injects both. Read-only for now:
+/// D6's typing controls (reply box, key buttons, image attach) are
+/// homepage-terminals-2's own cell — this renders none of them.
+///
+/// `panes` already carries D4's own order (blocked, then working, then the
+/// rest, stable within a group by `(project, pane_id)`) — `server.rs`'s
+/// job, never re-sorted here. `herdr_ok` is D8's own distinction between
+/// the two empty causes when `panes` is empty: `false` reads "herdr is not
+/// running" (off or unreachable, indistinguishable to this page — the same
+/// fail-open shape every other pane list on the home page already
+/// shares), `true` with an empty list reads "no agent is running" (herdr
+/// answered; genuinely nothing to show).
+fn terminals_tab(panes: &[TerminalsMenuPane], selected_pane: Option<&str>, herdr_ok: bool) -> String {
+    if panes.is_empty() {
+        let msg = if herdr_ok {
+            "No agents are running right now."
+        } else {
+            "herdr is not running."
+        };
+        return format!(
+            r#"{tab_style}
+<main class="fg-page fg-page--tight">
+  <p class="fg-empty">{msg}</p>
+</main>"#,
+            tab_style = PROJECT_TAB_STYLE,
+            msg = esc(msg),
+        );
+    }
+
+    // D7: an explicit `?pane` naming nothing in `panes` leaves the
+    // selection empty rather than silently falling back to another pane —
+    // `effective` stays `None`, and the menu loop below marks no entry
+    // active because no `pane_id` in `panes` can equal a `None`. An absent
+    // `?pane` takes D4's own first entry (`panes` is non-empty here).
+    let effective: Option<&TerminalsMenuPane> = match selected_pane {
+        Some(pid) => panes.iter().find(|p| p.view.pane_id == pid),
+        None => Some(&panes[0]),
+    };
+    let effective_id = effective.map(|p| p.view.pane_id.as_str());
+
+    let mut menu = String::from(r#"<nav class="pane-strip" aria-label="Terminals">"#);
+    for p in panes {
+        let active = effective_id == Some(p.view.pane_id.as_str());
+        let cls = if active {
+            "pane-strip__tab pane-strip__tab--active"
+        } else {
+            "pane-strip__tab"
+        };
+        let title_suffix = if p.view.title.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", esc(&p.view.title))
+        };
+        menu.push_str(&format!(
+            r#"<a class="{cls}" href="/?tab=terminals&pane={pane_id}"><span class="term-pane__id">{project}</span> {status_pill}<span class="term-pane__meta">{program}{title}</span></a>"#,
+            cls = cls,
+            pane_id = esc(&p.view.pane_id),
+            project = esc(&p.project_label),
+            status_pill = status_pill(&p.view.status),
+            program = esc(&p.view.kind),
+            title = title_suffix,
+        ));
+    }
+    menu.push_str("</nav>");
+
+    let body = match effective {
+        Some(pane) => screen_frame(pane),
+        None => r#"<p class="fg-empty">This terminal is gone.</p>"#.to_string(),
+    };
+
+    format!(
+        r#"{tab_style}
+<main class="fg-page fg-page--tight">
+  {menu}
+  {body}
+</main>"#,
+        tab_style = PROJECT_TAB_STYLE,
+        menu = menu,
+        body = body,
+    )
+}
+
+/// homepage-terminals: the selected pane's live screen viewport alone —
+/// [`pane_cards`]'s `.term-screen-wrap`/`.term-screen` markup, minus the
+/// reply form, key buttons and attach control `pane_cards` also renders
+/// (those are homepage-terminals-2's own cell; D6 is not this cell's to
+/// implement). `data-term-base` is what lets `assets/app.js`'s existing
+/// poller build this pane's `/screen` URL without a `data-project-id` on
+/// this page — see plan "Technical design" 2 and the poller's own doc.
+fn screen_frame(pane: &TerminalsMenuPane) -> String {
+    format!(
+        r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
+  <div class="term-screen-wrap">
+    <pre class="term-screen" data-pane-id="{pane_id}" data-term-base="{base}" aria-live="polite">Loading screen…</pre>
+  </div>
+</div>"#,
+        pane_id = esc(&pane.view.pane_id),
+        base = esc(&pane.base),
+    )
 }
 
 /// D3's status pill: maps a [`TerminalPaneView::status`] value onto

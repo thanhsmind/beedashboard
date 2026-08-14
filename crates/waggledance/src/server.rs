@@ -541,13 +541,22 @@ struct RegisterFlag {
     /// D10's fixed error code from a refused `register_project` redirect —
     /// never the submitted path (see `views::register_error_message`).
     register_error: Option<String>,
-    /// homepage-tabs: which of the two home page sections `/` renders.
-    /// Parsed the same defensive way as `register_error` below — a
-    /// repeated key never 400s the whole request, it just keeps walking —
-    /// and any value that is not exactly `"kanban"` or `"projects"` when
-    /// the walk finishes resolves to `HomeTab::Kanban` (its `Default`),
-    /// same as an absent or empty query string does.
+    /// homepage-tabs (homepage-terminals: now three): which home page
+    /// section `/` renders. Parsed the same defensive way as
+    /// `register_error` below — a repeated key never 400s the whole
+    /// request, it just keeps walking — and any value that is not exactly
+    /// `"kanban"`, `"projects"` or `"terminals"` when the walk finishes
+    /// resolves to `HomeTab::Kanban` (its `Default`), same as an absent or
+    /// empty query string does.
     tab: views::HomeTab,
+    /// homepage-terminals D5: the pane selected on the Terminals tab —
+    /// `/?tab=terminals&pane=<pane_id>`. Parsed defensively like `tab`
+    /// above (last repeated value wins); an absent or empty value is
+    /// `None`, which `index_page` reads as "take D4's own first entry".
+    /// Never validated here — an unknown pane id is D7's own "this
+    /// terminal is gone" case, resolved once `index_page` has the actual
+    /// pane inventory to check it against, not at parse time.
+    pane: Option<String>,
 }
 
 // `#[derive(Deserialize)]`'s generated struct visitor refuses a repeated
@@ -580,24 +589,34 @@ impl<'de> serde::Deserialize<'de> for RegisterFlag {
             {
                 let mut register_error = None;
                 let mut tab = views::HomeTab::default();
+                let mut pane = None;
                 while let Some((key, value)) = map.next_entry::<String, String>()? {
                     match key.as_str() {
                         "register_error" => register_error = Some(value),
                         // homepage-tabs: last value for a repeated key wins,
                         // exactly like `register_error` above; any value
-                        // besides these two exact strings resolves to the
+                        // besides these three exact strings resolves to the
                         // `Default` (Kanban) rather than erroring.
                         "tab" => {
                             tab = match value.as_str() {
                                 "kanban" => views::HomeTab::Kanban,
                                 "projects" => views::HomeTab::Projects,
+                                "terminals" => views::HomeTab::Terminals,
                                 _ => views::HomeTab::default(),
                             }
                         }
+                        // homepage-terminals D5: last value wins, same as
+                        // every other key above; an empty string is kept as
+                        // `Some(String::new())` rather than folded to
+                        // `None` — `terminals_menu_panes`'s caller never
+                        // sees an empty pane id in its own inventory, so
+                        // this can only ever resolve to D7's not-found case,
+                        // never accidentally to the D4 default.
+                        "pane" => pane = Some(value),
                         _ => {}
                     }
                 }
-                Ok(RegisterFlag { register_error, tab })
+                Ok(RegisterFlag { register_error, tab, pane })
             }
         }
 
@@ -683,6 +702,19 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
             // sections. Cloned out of `with_counts` rather than filtered
             // from `projects` directly: `projects` was already consumed
             // building `with_counts` above.
+            // homepage-terminals: the full registered list, cloned the same
+            // way `bee_projects` below clones its own filtered copy —
+            // `unassigned_panes`'s own D5 partition is over EVERY
+            // registered project, not only the `.bee/`-holding ones
+            // `bee_projects` narrows to for the Kanban tab.
+            let all_projects: Vec<waggledance_core::domain::Project> =
+                with_counts.iter().map(|(p, _, _)| p.clone()).collect();
+            let terminals_panes = terminals_menu_panes(snapshot.as_ref(), &with_counts, &all_projects);
+            // D8: `snapshot: None` (the family switch off, or herdr timed
+            // out/errored) is indistinguishable at this page, same as every
+            // other pane list here — `terminals_tab` reads that as "herdr
+            // is not running" rather than "no agent running".
+            let terminals_herdr_ok = snapshot.is_some();
             let bee_projects: Vec<waggledance_core::domain::Project> = with_counts
                 .iter()
                 .map(|(p, _, _)| p.clone())
@@ -724,6 +756,9 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                 flag.register_error.as_deref(),
                 &cross_features_html,
                 flag.tab,
+                &terminals_panes,
+                flag.pane.as_deref(),
+                terminals_herdr_ok,
             ))
             .into_response()
         }
@@ -2899,6 +2934,78 @@ fn unassigned_panes(
             }
         })
         .collect()
+}
+
+/// homepage-terminals D3/D4: the Terminals tab's own pane inventory — every
+/// agent-backed pane (`kind != "shell"`) across every registered project
+/// plus every unassigned agent-backed pane, D4-ordered (blocked, then
+/// working, then the rest, stable within a group by
+/// `(project_label, pane_id)`). Reuses `with_counts`'s own per-project
+/// [`project_panes`] result rather than recomputing it — that list was
+/// already built from the same herdr snapshot for the badges above, so
+/// there is no second herdr round trip here, only the join and the sort.
+/// `snapshot: None` (herdr off or unreachable, D8) returns an empty vec
+/// with no further work — `index_page`'s own `terminals_herdr_ok` is what
+/// tells the caller this emptiness means "herdr is not running" rather
+/// than "no agent running".
+///
+/// Deliberately gated on `terminal_family_enabled` alone (via `snapshot`
+/// already being `None` when that switch is off), never also on
+/// `unassigned_group_enabled` — the same D3 narrowing [`agent_pane_rows`]'s
+/// own doc comment already applies to `GET /api/agents`: this tab is a
+/// read surface over the whole snapshot, not the Unassigned group's own
+/// page, and this feature's own D3 says the switch menu includes a pane
+/// outside every registered project unconditionally.
+fn terminals_menu_panes(
+    snapshot: Option<&herdr::Snapshot>,
+    with_counts: &[(waggledance_core::domain::Project, usize, Vec<views::TerminalPaneView>)],
+    projects: &[waggledance_core::domain::Project],
+) -> Vec<views::TerminalsMenuPane> {
+    let Some(snap) = snapshot else {
+        return Vec::new();
+    };
+    let mut entries: Vec<views::TerminalsMenuPane> = Vec::new();
+    for (project, _, panes) in with_counts {
+        for pane in panes {
+            if pane.kind == "shell" {
+                continue;
+            }
+            entries.push(views::TerminalsMenuPane {
+                base: format!("/p/{}/_terminal/{}", project.id, pane.pane_id),
+                project_label: project.name.clone(),
+                view: pane.clone(),
+            });
+        }
+    }
+    // `unassigned_panes` already iterates `snapshot.agents` alone (never
+    // `snapshot.panes`), so a shell pane can never reach this loop at all —
+    // no separate filter needed here, unlike the project loop above.
+    for pane in unassigned_panes(snap, projects) {
+        entries.push(views::TerminalsMenuPane {
+            base: format!("/_terminal/unassigned/{}", pane.pane_id),
+            project_label: "Unassigned".to_string(),
+            view: pane,
+        });
+    }
+    entries.sort_by_key(|e| {
+        (
+            terminals_status_rank(&e.view.status),
+            e.project_label.clone(),
+            e.view.pane_id.clone(),
+        )
+    });
+    entries
+}
+
+/// D4's own three-way rank: blocked first, then working, then everything
+/// else (`done`/`idle`/`unknown` — a shell pane never reaches this
+/// function, [`terminals_menu_panes`] drops it before ranking).
+fn terminals_status_rank(status: &str) -> u8 {
+    match status {
+        "blocked" => 0,
+        "working" => 1,
+        _ => 2,
+    }
 }
 
 /// `GET /api/agents` row (agent-switch-drawer): one agent-backed pane,
@@ -10805,7 +10912,7 @@ mod bee_route_tests {
         let js = views::APP_JS;
 
         let screen_url_start = js
-            .find("function screenUrl(paneId, historyDepth) {")
+            .find("function screenUrl(paneId, historyDepth, base) {")
             .expect("screenUrl must exist");
         let screen_url_end = js[screen_url_start..]
             .find("\n    }")
@@ -14715,6 +14822,10 @@ mod bee_route_tests {
     /// tabs, so `/` (default Kanban) carries only Features and `/?tab=projects`
     /// carries only the project list — this proves both sections still
     /// render, on their own tab, rather than in one combined response.
+    ///
+    /// homepage-terminals: the strip now carries a third tab — proven here
+    /// too, so a reader of this test sees the Kanban/Projects mutual
+    /// exclusion is unaffected by Terminals joining the strip.
     #[tokio::test]
     async fn home_page_renders_cross_project_features_on_kanban_and_projects_on_its_own_tab() {
         let dir = fresh_root("home-cross-several");
@@ -14749,7 +14860,7 @@ mod bee_route_tests {
             "the home page must emit no Live section at all: {body}"
         );
 
-        let projects_body = body_string(get(app, "/?tab=projects").await).await;
+        let projects_body = body_string(get(app.clone(), "/?tab=projects").await).await;
         assert!(
             projects_body.contains("<ul class=\"proj-list\">"),
             "the Projects tab must render the project list: {projects_body}"
@@ -14759,14 +14870,24 @@ mod bee_route_tests {
             "the Projects tab must not also render the Features section: {projects_body}"
         );
 
+        // homepage-terminals: the third tab renders neither of the other
+        // two sections — its own body is a switch menu plus a screen, not
+        // Features and not the project list.
+        let terminals_body = body_string(get(app, "/?tab=terminals").await).await;
+        assert!(
+            !terminals_body.contains(r#"data-feature-hub="cross-project""#)
+                && !terminals_body.contains("<ul class=\"proj-list\">"),
+            "the Terminals tab must render neither the Features section nor the project list: {terminals_body}"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
     /// homepage-tabs: the tab strip itself — exactly one `fg-tab--on` and
     /// one `aria-current="page"`, both on the tab actually selected, and
-    /// both real anchors to `/?tab=kanban` / `/?tab=projects` so the page
-    /// works with JavaScript off and survives the homepage's own
-    /// `location.reload()`.
+    /// real anchors to `/?tab=kanban` / `/?tab=projects` / `/?tab=terminals`
+    /// (homepage-terminals) so the page works with JavaScript off and
+    /// survives the homepage's own `location.reload()`.
     #[tokio::test]
     async fn home_page_tab_strip_marks_exactly_one_tab_selected() {
         let dir = fresh_root("home-tab-strip");
@@ -14800,8 +14921,14 @@ mod bee_route_tests {
             kanban_body.contains(r#"<a class="fg-tab" href="/?tab=projects">Projects</a>"#),
             "Projects must be the plain, unselected tab: {kanban_body}"
         );
+        // homepage-terminals D1/D8: the third tab is always on the strip,
+        // plain and unselected here, whatever herdr's own state is.
+        assert!(
+            kanban_body.contains(r#"<a class="fg-tab" href="/?tab=terminals">Terminals</a>"#),
+            "Terminals must always be offered, plain and unselected on Kanban: {kanban_body}"
+        );
 
-        let projects_body = body_string(get(app, "/?tab=projects").await).await;
+        let projects_body = body_string(get(app.clone(), "/?tab=projects").await).await;
         assert_eq!(
             projects_body.matches("fg-tab--on").count(),
             1,
@@ -14815,12 +14942,35 @@ mod bee_route_tests {
             projects_body.contains(r#"<a class="fg-tab" href="/?tab=kanban">Kanban</a>"#),
             "Kanban must be the plain, unselected tab: {projects_body}"
         );
+        assert!(
+            projects_body.contains(r#"<a class="fg-tab" href="/?tab=terminals">Terminals</a>"#),
+            "Terminals must always be offered, plain and unselected on Projects: {projects_body}"
+        );
+
+        // homepage-terminals: Terminals itself, selected — the strip still
+        // marks exactly one of the now-three tabs current.
+        let terminals_body = body_string(get(app, "/?tab=terminals").await).await;
+        assert_eq!(
+            terminals_body.matches("fg-tab--on").count(),
+            1,
+            "exactly one tab must be marked selected on the Terminals tab too: {terminals_body}"
+        );
+        assert!(
+            terminals_body
+                .contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=terminals" aria-current="page">Terminals</a>"#),
+            "Terminals must be the selected tab when asked for: {terminals_body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     /// homepage-tabs: an unknown, empty, or repeated `tab` value all resolve
     /// to Kanban rather than erroring or leaving the query unresolved.
+    ///
+    /// homepage-terminals: `"terminals"` is a THIRD recognized value now,
+    /// not one of the unknowns this loop still exercises — proven
+    /// separately below so this loop's own claim ("everything else falls
+    /// back to Kanban") stays accurate.
     #[tokio::test]
     async fn home_page_unrecognized_tab_value_resolves_to_kanban() {
         let dir = fresh_root("home-tab-unknown");
@@ -14841,6 +14991,13 @@ mod bee_route_tests {
             );
         }
 
+        let terminals_body = body_string(get(app, "/?tab=terminals").await).await;
+        assert!(
+            terminals_body
+                .contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=terminals" aria-current="page">Terminals</a>"#),
+            "\"terminals\" itself must resolve to the Terminals tab, not fall back to Kanban: {terminals_body}"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -14848,6 +15005,11 @@ mod bee_route_tests {
     /// — where the banner lives — even when `tab=kanban` is explicitly
     /// asked for, so a user who just submitted the add-project form always
     /// sees why it failed.
+    ///
+    /// homepage-terminals: proven a second time with `tab=terminals`, since
+    /// D8 means the Terminals tab is otherwise always reachable — this
+    /// shows `register_error` still overrides it, and that Terminals stays
+    /// on the strip (plain, unselected) even while forced off.
     #[tokio::test]
     async fn home_page_register_error_forces_the_projects_tab_over_an_explicit_kanban_request() {
         let dir = fresh_root("home-tab-register-error");
@@ -14856,8 +15018,9 @@ mod bee_route_tests {
         std::fs::create_dir_all(&root).unwrap();
         write_bee_project_fixture(&root, "feat-a");
         register(&st, &root, "Project A");
+        let app = router(st);
 
-        let resp = get(router(st), "/?tab=kanban&register_error=denied").await;
+        let resp = get(app.clone(), "/?tab=kanban&register_error=denied").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
@@ -14872,6 +15035,18 @@ mod bee_route_tests {
             body.contains("fg-banner--danger"),
             "the register_error banner must be visible on the forced Projects tab: {body}"
         );
+        assert!(
+            body.contains(r#"<a class="fg-tab" href="/?tab=terminals">Terminals</a>"#),
+            "Terminals must stay on the strip, plain, even while register_error forces Projects: {body}"
+        );
+
+        let terminals_forced_body =
+            body_string(get(app, "/?tab=terminals&register_error=denied").await).await;
+        assert!(
+            terminals_forced_body
+                .contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=projects" aria-current="page">Projects</a>"#),
+            "a register_error must force the Projects tab even when tab=terminals was asked for: {terminals_forced_body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -14879,6 +15054,13 @@ mod bee_route_tests {
     /// homepage-tabs edge (a): with no qualifying project at all, `/` still
     /// renders exactly `project_list_page`'s own output — no tab strip, no
     /// `bee-hub-theme`, whatever `tab` was asked for.
+    ///
+    /// homepage-terminals: this axis (whether the strip itself renders at
+    /// all) is orthogonal to D8 (whether Terminals shows up ON the strip
+    /// once it does render) — D8 talks about herdr's own state, never about
+    /// `.bee/` project qualification, so this earlier, unrelated rule is
+    /// left exactly as it was; proven again with `tab=terminals` below so a
+    /// reader sees that holds for the third tab's own request too.
     #[tokio::test]
     async fn home_page_with_no_qualifying_project_renders_no_tab_strip() {
         let dir = fresh_root("home-tab-none-qualify");
@@ -14886,8 +15068,9 @@ mod bee_route_tests {
         let root = dir.join("no-bee-project");
         std::fs::create_dir_all(&root).unwrap();
         register(&st, &root, "no-bee-project");
+        let app = router(st);
 
-        let resp = get(router(st), "/?tab=projects").await;
+        let resp = get(app.clone(), "/?tab=projects").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
@@ -14899,6 +15082,14 @@ mod bee_route_tests {
             "no qualifying project means no Kanban theme either: {body}"
         );
         assert!(body.contains("<ul class=\"proj-list\">") || body.contains("fg-empty"), "the plain project list must still render: {body}");
+
+        let terminals_resp = get(app, "/?tab=terminals").await;
+        assert_eq!(terminals_resp.status(), StatusCode::OK);
+        let terminals_body = body_string(terminals_resp).await;
+        assert!(
+            !terminals_body.contains("fg-tabs"),
+            "no qualifying project means no tab strip at all, even asking for Terminals: {terminals_body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -14983,6 +15174,281 @@ mod bee_route_tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- homepage-terminals: the Terminals tab's own inventory, ordering,
+    // selection and empty states ---
+
+    /// D3: the switch menu drops a bare shell pane (`kind == "shell"`) but
+    /// keeps an agent-backed one, including one outside every registered
+    /// project (D3's own "kể cả pane nằm ngoài mọi project đã đăng ký").
+    #[tokio::test]
+    async fn terminals_tab_filters_shell_panes_and_includes_unassigned_agent_panes() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminals-tab-shell-filter");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminals-tab-shell-filter-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let shell = fake.tab_create("w1", Some(&root.to_string_lossy())).await.unwrap();
+        let project_agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let unassigned_agent = fake
+            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let body = body_string(get(app, "/?tab=terminals").await).await;
+        assert!(
+            body.contains(&format!("pane={}", project_agent.pane_id)),
+            "the project's own agent-backed pane must appear in the switch menu: {body}"
+        );
+        assert!(
+            body.contains(&format!("pane={}", unassigned_agent.pane_id)),
+            "an agent-backed pane outside every registered project must still appear: {body}"
+        );
+        assert!(
+            !body.contains(&format!("pane={}", shell.pane_id)),
+            "a bare shell pane must never appear in the switch menu: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D4: blocked before working before the rest (done/idle/unknown),
+    /// proven by creating the three panes in the opposite order so a
+    /// passing test cannot be an accident of insertion order.
+    #[tokio::test]
+    async fn terminals_tab_orders_blocked_before_working_before_the_rest() {
+        use crate::herdr::fake::FakeHerdr;
+        use crate::herdr::wire::AgentStatus;
+
+        let dir = fresh_root("terminals-tab-order");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminals-tab-order-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let rest = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&rest.pane_id, AgentStatus::Done).await.unwrap();
+        let working = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&working.pane_id, AgentStatus::Working).await.unwrap();
+        let blocked = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["aider".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&blocked.pane_id, AgentStatus::Blocked).await.unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let body = body_string(get(app, "/?tab=terminals").await).await;
+        let pos = |pane_id: &str| {
+            body.find(&format!("pane={pane_id}"))
+                .unwrap_or_else(|| panic!("{pane_id} must appear in the menu: {body}"))
+        };
+        let blocked_pos = pos(&blocked.pane_id);
+        let working_pos = pos(&working.pane_id);
+        let rest_pos = pos(&rest.pane_id);
+        assert!(
+            blocked_pos < working_pos,
+            "blocked must come before working: {body}"
+        );
+        assert!(
+            working_pos < rest_pos,
+            "working must come before the rest: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D7: `?pane` naming a pane that is no longer present renders a plain
+    /// not-found line, keeps the full menu, and marks no entry selected —
+    /// never silently falling back to another pane.
+    #[tokio::test]
+    async fn terminals_tab_pane_not_found_renders_gone_message_with_full_menu_and_no_selection() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminals-tab-not-found");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminals-tab-not-found-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let body = body_string(get(app, "/?tab=terminals&pane=does-not-exist").await).await;
+        assert!(
+            body.contains("This terminal is gone."),
+            "a vanished pane must render a plain not-found line: {body}"
+        );
+        assert!(
+            body.contains(&format!("pane={}", agent.pane_id)),
+            "the full menu must still list the real, present pane: {body}"
+        );
+        // The anchor's own class attribute, never `PROJECT_TAB_STYLE`'s CSS
+        // rule for the same class name (`.pane-strip__tab--active { ... }`,
+        // always present in the injected `<style>` block regardless of
+        // selection) — the space before the class name is what tells the
+        // two apart.
+        assert_eq!(
+            body.matches(" pane-strip__tab--active").count(),
+            0,
+            "no menu entry may be marked selected once ?pane names nothing present: {body}"
+        );
+        assert!(
+            !body.contains("class=\"term-screen\""),
+            "no screen frame renders once the named pane is gone: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D8: the tab always renders, but an empty body reads differently for
+    /// its two causes — herdr itself off/unreachable vs herdr answering
+    /// with genuinely zero eligible agents.
+    #[tokio::test]
+    async fn terminals_tab_distinguishes_herdr_off_from_no_agents_running() {
+        use crate::herdr::fake::FakeHerdr;
+
+        // Cause 1: the terminal family switch is off (`enable_terminal` is
+        // deliberately never called) — `index_page` never even takes a
+        // snapshot, so this and "herdr unreachable" read identically here.
+        let dir_off = fresh_root("terminals-tab-herdr-off");
+        let st_off = build_state_with_dir(&dir_off);
+        let root_off = dir_off.join("proj-a");
+        std::fs::create_dir_all(&root_off).unwrap();
+        write_bee_project_fixture(&root_off, "feat-a");
+        register(&st_off, &root_off, "proj-a");
+        let body_off = body_string(get(router(st_off), "/?tab=terminals").await).await;
+        assert!(
+            body_off.contains("herdr is not running."),
+            "the family switch being off must read as herdr not running: {body_off}"
+        );
+        assert!(
+            body_off.contains(r#"<nav class="fg-tabs" aria-label="Home sections">"#),
+            "the tab strip must still render while herdr is off: {body_off}"
+        );
+        std::fs::remove_dir_all(&dir_off).ok();
+
+        // Cause 2: herdr is up and reachable, but genuinely has zero panes
+        // at all — `FakeHerdr::empty()` proves this without any of the
+        // seeded default fixture's own panes in the way.
+        let dir_empty = fresh_root("terminals-tab-no-agents");
+        enable_terminal(&dir_empty);
+        let root_empty = dir_empty.join("proj-a");
+        std::fs::create_dir_all(&root_empty).unwrap();
+        write_bee_project_fixture(&root_empty, "feat-a");
+        let mut st_empty = build_state_with_dir(&dir_empty);
+        st_empty.herdr = std::sync::Arc::new(FakeHerdr::empty());
+        register(&st_empty, &root_empty, "proj-a");
+        let body_empty = body_string(get(router(st_empty), "/?tab=terminals").await).await;
+        assert!(
+            body_empty.contains("No agents are running right now."),
+            "a reachable herdr with nothing running must read as no agents, not herdr down: {body_empty}"
+        );
+        assert!(
+            body_empty.contains(r#"<nav class="fg-tabs" aria-label="Home sections">"#),
+            "the tab strip must still render with zero agents: {body_empty}"
+        );
+
+        std::fs::remove_dir_all(&dir_empty).ok();
+    }
+
+    /// The screen element's `data-term-base` is the project route for a
+    /// project pane and the Unassigned route for a pane outside every
+    /// registered project — no new route, no new guard, `{base}/screen` is
+    /// exactly the existing endpoint each family already answers.
+    #[tokio::test]
+    async fn terminals_tab_screen_carries_the_right_base_path_for_project_and_unassigned_panes() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminals-tab-base-path");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminals-tab-base-path-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let project_agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let unassigned_agent = fake
+            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let project_body = body_string(
+            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+        )
+        .await;
+        assert!(
+            project_body.contains(&format!(
+                r#"data-term-base="/p/{}/_terminal/{}""#,
+                project.id, project_agent.pane_id
+            )),
+            "a project pane's screen must carry the project route as its base: {project_body}"
+        );
+
+        let unassigned_body = body_string(
+            get(app, &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+        )
+        .await;
+        assert!(
+            unassigned_body.contains(&format!(
+                r#"data-term-base="/_terminal/unassigned/{}""#,
+                unassigned_agent.pane_id
+            )),
+            "an unassigned pane's screen must carry the Unassigned route as its base: {unassigned_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
     }
 
     // --- card-terminals-1: cross-project feature cards badge their own checkout's panes ---
