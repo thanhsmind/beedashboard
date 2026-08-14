@@ -7656,9 +7656,16 @@ mod bee_route_tests {
         assert_eq!(hub_resp.status(), StatusCode::OK);
         let hub_body = body_string(hub_resp).await;
         assert!(hub_body.contains("no-docs-feature"), "hub card must still show the slug: {hub_body}");
+        // project-color-identity-4: the subtitle survives on a title-less
+        // card to carry the worktree state, but holds nothing else — the
+        // slug is already the title and must not be printed a second time.
         assert!(
-            !hub_body.contains(r#"class="bee-hub__slug""#),
-            "a title-less card must never render a redundant slug subtitle: {hub_body}"
+            hub_body.contains(r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">Main</span></div>"#),
+            "a title-less card must name its worktree state in the subtitle: {hub_body}"
+        );
+        assert!(
+            !hub_body.contains(r#"class="bee-hub__slug">no-docs-feature"#),
+            "a title-less card must never repeat its slug as a subtitle: {hub_body}"
         );
 
         let detail_resp = get(app, &format!("/p/{}/_bee/feature/no-docs-feature", project.id)).await;

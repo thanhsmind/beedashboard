@@ -2705,12 +2705,12 @@ fn bee_cross_project_board_project_colors<'a>(
 /// before this feature for the colour — but project-color-identity-3
 /// still swaps the plain slug subtitle for `<slug> / <worktree>`, in the
 /// same `bee-hub__slug` class and reusing the `Some` arm's exact
-/// worktree-half span, whenever that subtitle renders at all (beside a
-/// human title, per feature-titles/hub-fallbacks — a title-less card's
-/// own title is already the slug, so it still gains no redundant subtitle
-/// and so no worktree half either), since a per-project board still needs
-/// to say which of its own features has an open worktree even without a
-/// project name to hang it off of.
+/// worktree-half span, since a per-project board still needs to say which
+/// of its own features has an open worktree even without a project name to
+/// hang it off of. A title-less card there (whose own title is already the
+/// slug, so feature-titles/hub-fallbacks forbids repeating it below) keeps
+/// the subtitle for the worktree state alone, with no slug half and so no
+/// separator — project-color-identity-4.
 ///
 /// `panes` (card-terminals-1) is the terminal panes running in this
 /// feature's own checkout -- the worktree-vs-main-checkout join is already
@@ -2765,9 +2765,12 @@ fn bee_hub_card(
     // state after the same ` / ` separator, reusing the `Some` arm's exact
     // worktree-half span -- a per-project board still needs to say which
     // of its features has an open worktree even though it never shows a
-    // project name to hang that information off. A title-less card on
-    // that board renders no subtitle at all, same as before this feature,
-    // so it names no worktree state either.
+    // project name to hang that information off.
+    // project-color-identity-4: a title-less card on that board renders
+    // the worktree state on its own, with no slug half and so no
+    // separator -- the slug is already the card's title, and hub-fallbacks
+    // forbids a second copy of it, but that is no reason for the card to
+    // go without the one thing the subtitle now carries.
     let subtitle_html = match project_label {
         Some(label) => format!(
             r#"<div class="bee-hub__project">{label}<span class="bee-hub__project-worktree"> / {worktree}</span></div>"#,
@@ -2780,7 +2783,10 @@ fn bee_hub_card(
                 feature = esc(feature),
                 worktree = esc(worktree_label),
             ),
-            None => String::new(),
+            None => format!(
+                r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">{worktree}</span></div>"#,
+                worktree = esc(worktree_label),
+            ),
         },
     };
     let name_html = match title {
@@ -7300,21 +7306,30 @@ mod tests {
         assert!(!card_html.contains("bee-hub__project\""), "the project subtitle class must not render here: {card_html}");
     }
 
-    /// (hub-fallbacks) A title-less card with no project label still
-    /// renders no subtitle at all, and so no worktree half either -- its
+    /// (hub-fallbacks, project-color-identity-4) A title-less card with no
+    /// project label keeps its subtitle for the worktree state alone: its
     /// own title is already the slug, so a second copy beneath it would be
-    /// a redundant subtitle, exactly as before this feature.
+    /// a redundant subtitle -- but the worktree state is the one thing the
+    /// card cannot say anywhere else, so it renders with no slug half and
+    /// so no separator.
     #[test]
-    fn bee_hub_card_with_no_project_label_and_no_title_still_shows_no_subtitle() {
+    fn bee_hub_card_with_no_project_label_and_no_title_names_its_worktree_alone() {
         let card_html =
             bee_hub_card("proj-a", "feat-a", "waiting", 1, 2, None, "merged", None, None, None, None, &[]);
         assert!(
-            !card_html.contains(r#"class="bee-hub__slug""#),
-            "a title-less card must never render a redundant slug subtitle: {card_html}"
+            card_html.contains(
+                r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">merged</span></div>"#
+            ),
+            "a title-less card must name its worktree state with no slug half: {card_html}"
+        );
+        assert_eq!(
+            card_html.matches("feat-a<").count(),
+            1,
+            "the slug is already the title, so it must not be printed a second time: {card_html}"
         );
         assert!(
-            !card_html.contains("bee-hub__project-worktree"),
-            "with no subtitle to hold it, a title-less card must name no worktree state either: {card_html}"
+            !card_html.contains(" / "),
+            "with no slug half there is nothing to separate from: {card_html}"
         );
     }
 
