@@ -11,8 +11,10 @@ never a generation timestamp or any other wall-clock value.
 ## Sections
 
 - [agent-terminal/](agent-terminal/index.md) — 1 concept(s)
+- [card-badge-inside/](card-badge-inside/index.md) — 1 concept(s)
 - [card-terminals/](card-terminals/index.md) — 1 concept(s)
 - [cross-board/](cross-board/index.md) — 1 concept(s)
 - [gate-stop-superseded/](gate-stop-superseded/index.md) — 1 concept(s)
+- [no-input-zoom/](no-input-zoom/index.md) — 1 concept(s)
 - [upstream-short-link/](upstream-short-link/index.md) — 1 concept(s)
 - [waggledance-rename/](waggledance-rename/index.md) — 1 concept(s)
