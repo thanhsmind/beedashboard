@@ -15,6 +15,7 @@ never a generation timestamp or any other wall-clock value.
 - [card-terminals/](card-terminals/index.md) — 1 concept(s)
 - [cross-board/](cross-board/index.md) — 1 concept(s)
 - [gate-stop-superseded/](gate-stop-superseded/index.md) — 1 concept(s)
+- [homepage-tabs/](homepage-tabs/index.md) — 1 concept(s)
 - [no-input-zoom/](no-input-zoom/index.md) — 1 concept(s)
 - [project-color-identity/](project-color-identity/index.md) — 1 concept(s)
 - [upstream-short-link/](upstream-short-link/index.md) — 1 concept(s)
