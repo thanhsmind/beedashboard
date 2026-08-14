@@ -386,7 +386,7 @@ fn register_error_message(code: &str) -> Option<&'static str> {
 /// before this feature (D6) — not an empty `<nav>` that would say the same
 /// thing twice.
 fn project_badges(project_id: &str, panes: &[TerminalPaneView]) -> String {
-    terminal_badges_nav(project_id, panes, "Terminal panes")
+    terminal_badges_nav(project_id, panes, "Terminal panes", "")
 }
 
 /// The badge markup itself, factored out of [`project_badges`]
@@ -400,12 +400,22 @@ fn project_badges(project_id: &str, panes: &[TerminalPaneView]) -> String {
 /// shared with every other Main feature of that project, so a label
 /// claiming otherwise would be false for every one of them). An empty
 /// `panes` renders no container at all, for either caller.
-fn terminal_badges_nav(project_id: &str, panes: &[TerminalPaneView], aria_label: &str) -> String {
+fn terminal_badges_nav(
+    project_id: &str,
+    panes: &[TerminalPaneView],
+    aria_label: &str,
+    extra_class: &str,
+) -> String {
     if panes.is_empty() {
         return String::new();
     }
     let pid = esc(project_id);
-    let mut out = format!(r#"<nav class="proj-row__badges" aria-label="{}">"#, esc(aria_label));
+    let class = if extra_class.is_empty() {
+        "proj-row__badges".to_string()
+    } else {
+        format!("proj-row__badges {extra_class}")
+    };
+    let mut out = format!(r#"<nav class="{class}" aria-label="{}">"#, esc(aria_label));
     for p in panes {
         out.push_str(&format!(
             r#"<a class="proj-row__badge" href="/p/{pid}/_terminal/pane/{pane_id}">{status_pill}<span class="proj-row__badge-program">{program}</span></a>"#,
@@ -1597,14 +1607,25 @@ html[data-scheme="dark"] .bee-hub-theme {{
    to its content's min-content width — normally harmless, but a clamped
    `.bee-hub__desc` below is `white-space: nowrap` at its own min-content
    size, and without `min-width: 0` breaking that default at every level
-   of this chain (group, cards, card), a long description would still
-   force its own column wider than its `minmax(260px, 1fr)` track and push
-   the whole page into horizontal scroll on a phone — the same chain
-   `.term-panes` and its siblings already pin above for the same reason. */
+   of this chain (group, cards, shell, card), a long description would
+   still force its own column wider than its `minmax(260px, 1fr)` track
+   and push the whole page into horizontal scroll on a phone — the same
+   chain `.term-panes` and its siblings already pin above for the same
+   reason. */
 .bee-hub__group {{ display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }}
 .bee-hub__cards {{ display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }}
+/* card-badge-inside: the shell carries `.fg-card`'s box paint (border,
+   background, radius, padding) so the card's own `<a>` and its terminal
+   badge `<nav>` both land inside one painted box instead of the badges
+   sitting as a bare row underneath it — see `bee_hub_card`'s doc comment. */
+.bee-hub__shell {{ display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }}
 .bee-hub__card {{ display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }}
 .bee-hub__chips {{ display: flex; flex-wrap: wrap; gap: var(--space-1); }}
+/* card-badge-inside: cancels the shared badge-nav class's own full-width
+   flex-basis and right/bottom padding (app.css) for this context,
+   replacing them with a hairline top rule that separates the badges from
+   the card's content inside the shared shell. */
+.bee-hub__badges {{ border-top: var(--border-width-hairline) solid var(--color-border); padding: var(--space-2) 0 0 0; flex: 0 0 auto; }}
 .bee-hub__progress-label {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
 .bee-hub__reason {{ font-style: italic; }}
 /* hub-finished-compact: the Finished group's own dense row — name only,
@@ -2530,14 +2551,24 @@ fn bee_hub_group_label(key: &str) -> (&'static str, &'static str) {
 /// function only renders them, as a sibling `<nav>` after the card's own
 /// `<a>` rather than nested inside it (an anchor inside an anchor is
 /// invalid HTML, the same reason `project_badges` sits beside
-/// `proj-row__link` rather than inside it). Reuses
-/// [`terminal_badges_nav`]'s exact markup, carrying the accessible label
-/// "Terminals in this checkout" rather than anything naming the feature:
-/// for a Main feature the panes are shared with every other Main feature of
-/// that project, so the label must not claim otherwise. Empty `panes`
-/// renders no container at all -- the per-project board's own call
-/// (`bee_render_hub_section`) always passes an empty slice, so this stays
-/// byte-identical to before cross-board-2 there.
+/// `proj-row__link` rather than inside it). card-badge-inside wraps that
+/// anchor/nav pair in a `<div class="fg-card bee-hub__shell">`, moving the
+/// box paint (`.fg-card`'s border, background, radius, padding) off the
+/// anchor and onto the shell, so the badges land inside the card's own
+/// painted box at its foot instead of on a bare row underneath it -- the
+/// anchor itself keeps only `bee-hub__card`, since the anchor-in-anchor
+/// rule above still forbids folding the nav's own links into the card
+/// link. The nav carries an extra `bee-hub__badges` class in this context
+/// (a hairline top rule replacing the project-row's own bottom/right
+/// padding), reusing [`terminal_badges_nav`]'s exact per-badge markup and
+/// the accessible label "Terminals in this checkout" rather than anything
+/// naming the feature: for a Main feature the panes are shared with every
+/// other Main feature of that project, so the label must not claim
+/// otherwise. Empty `panes` renders no `<nav>` at all -- the shell still
+/// wraps the bare anchor, so the card looks exactly as it did before this
+/// feature -- and the per-project board's own call
+/// (`bee_render_hub_section`) always passes an empty slice, so this path
+/// renders every time there too.
 fn bee_hub_card(
     project_id: &str,
     feature: &str,
@@ -2599,10 +2630,13 @@ fn bee_hub_card(
     // card-terminals-1: a sibling of the card's own `<a>`, never nested
     // inside it (see this function's doc comment) -- empty when `panes` is
     // empty, so a feature with no pane in its own checkout renders no
-    // container at all.
-    let terminal_badges_html = terminal_badges_nav(project_id, panes, "Terminals in this checkout");
+    // `<nav>` at all. card-badge-inside: the extra `bee-hub__badges` class
+    // draws the hairline rule that separates the badges from the card's
+    // own content while both sit inside the shared `bee-hub__shell` box.
+    let terminal_badges_html =
+        terminal_badges_nav(project_id, panes, "Terminals in this checkout", "bee-hub__badges");
     format!(
-        r#"<a class="fg-card bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}<div class="bee-hub__chips">{project_chip_html}<span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{desc_html}{progress_html}{reason_html}{activity_html}</a>{terminal_badges_html}"#,
+        r#"<div class="fg-card bee-hub__shell"><a class="bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}<div class="bee-hub__chips">{project_chip_html}<span class="fg-chip fg-chip--{group_tone}">{group_label}</span><span class="fg-chip fg-chip--{wt_tone}">{wt_label}</span></div>{desc_html}{progress_html}{reason_html}{activity_html}</a>{terminal_badges_html}</div>"#,
         group_key = group_key,
         pid = esc(project_id),
         feature_href = esc(feature),
@@ -6681,6 +6715,11 @@ mod tests {
     /// card's panes belong to the checkout, never to the feature itself).
     /// The badges are a sibling of the card's own `<a>`, never nested
     /// inside it -- an anchor inside an anchor is invalid HTML.
+    /// card-badge-inside: both the anchor and the nav now sit inside a
+    /// shared `<div class="fg-card bee-hub__shell">`, which carries the
+    /// box paint the anchor used to carry alone, so the badges land inside
+    /// the card's own box at its foot rather than as a bare row beneath
+    /// it.
     #[test]
     fn bee_hub_card_emits_terminal_badges_matching_project_badges_markup_shape() {
         let panes = vec![TerminalPaneView {
@@ -6698,14 +6737,36 @@ mod tests {
             "proj-a", "feat-a", "waiting", 1, 2, None, &worktree, None, None, None, &panes,
         );
         // project_badges' own markup, with only its aria-label swapped for
-        // the checkout-naming one this card must carry -- proving the rest
-        // of the shape (container class, anchor class, status pill, program
-        // span, href) is exactly project_badges' own, unchanged.
-        let expected_badges =
-            project_badges("proj-a", &panes).replace("Terminal panes", "Terminals in this checkout");
+        // the checkout-naming one this card must carry and its own
+        // `bee-hub__badges` class layered onto the shared container class
+        // -- proving the rest of the shape (anchor class, status pill,
+        // program span, href) is exactly project_badges' own, unchanged.
+        let expected_badges = project_badges("proj-a", &panes)
+            .replace("Terminal panes", "Terminals in this checkout")
+            .replacen(
+                r#"class="proj-row__badges""#,
+                r#"class="proj-row__badges bee-hub__badges""#,
+                1,
+            );
         assert!(
-            card_html.ends_with(&expected_badges),
-            "the card must append project_badges' own markup shape (aria-label aside) as a trailing sibling: {card_html}"
+            card_html.contains(&expected_badges),
+            "the card must embed project_badges' own markup shape (aria-label and bee-hub__badges class aside): {card_html}"
+        );
+        assert!(
+            card_html.ends_with(&format!("{expected_badges}</div>")),
+            "the badge nav must close immediately before the shared shell's own closing </div>: {card_html}"
+        );
+        assert!(
+            card_html.starts_with(r#"<div class="fg-card bee-hub__shell">"#),
+            "the card anchor and its badge nav must share one fg-card bee-hub__shell wrapper: {card_html}"
+        );
+        assert!(
+            card_html.contains(r#"<a class="bee-hub__card""#),
+            "the anchor itself must no longer carry fg-card -- the shell paints the box now: {card_html}"
+        );
+        assert!(
+            !card_html.contains(r#"class="fg-card bee-hub__card""#),
+            "fg-card must move off the anchor onto the shell, never stay on both: {card_html}"
         );
         assert!(
             card_html.contains(r#"aria-label="Terminals in this checkout""#),
@@ -6721,7 +6782,7 @@ mod tests {
         );
         let card_a_end = card_html.find("</a>").expect("the card's own anchor must close");
         let badge_nav_start = card_html
-            .find(r#"<nav class="proj-row__badges""#)
+            .find(r#"<nav class="proj-row__badges"#)
             .expect("badges must render");
         assert!(
             badge_nav_start > card_a_end,
@@ -6731,8 +6792,11 @@ mod tests {
 
     /// (card-terminals-1) An empty `panes` slice -- the switch off, herdr
     /// unreachable, or genuinely no pane in this feature's checkout --
-    /// renders no badge container at all, byte-identical to `bee_hub_card`
-    /// before this feature.
+    /// renders no badge container at all. card-badge-inside: the card is
+    /// still wrapped in its `fg-card bee-hub__shell` div (the shell now
+    /// carries the box paint the anchor used to carry alone), but with no
+    /// trailing `<nav>` the card looks exactly as it did before this
+    /// feature -- no empty container is left behind.
     #[test]
     fn bee_hub_card_with_no_panes_renders_no_badge_container() {
         let worktree = ("Main".to_string(), "neutral");
@@ -6742,6 +6806,18 @@ mod tests {
         assert!(
             !card_html.contains("proj-row__badges"),
             "an empty pane list must render no badge container: {card_html}"
+        );
+        assert!(
+            !card_html.contains("bee-hub__badges"),
+            "an empty pane list must render no badge nav, including its extra class: {card_html}"
+        );
+        assert!(
+            card_html.starts_with(r#"<div class="fg-card bee-hub__shell">"#),
+            "the shell must still wrap the bare card anchor: {card_html}"
+        );
+        assert!(
+            card_html.ends_with("</a></div>"),
+            "with no badges, the shell must close right after the card's own </a>: {card_html}"
         );
     }
 

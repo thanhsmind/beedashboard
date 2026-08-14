@@ -4539,7 +4539,7 @@ mod bee_route_tests {
         assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"1\""), "{body}");
         assert_eq!(
             body.matches(&format!(
-                "class=\"fg-card bee-hub__card\" data-hub-group=\"waiting\" href=\"/p/{}/_bee/feature/handoff-feat\"",
+                "class=\"bee-hub__card\" data-hub-group=\"waiting\" href=\"/p/{}/_bee/feature/handoff-feat\"",
                 project.id
             ))
             .count(),
@@ -16877,6 +16877,7 @@ mod bee_route_tests {
         for min_width_rule in [
             ".bee-hub__group {",
             ".bee-hub__cards {",
+            ".bee-hub__shell {",
             ".bee-hub__card {",
         ] {
             let start = style
