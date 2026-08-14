@@ -24,5 +24,6 @@ never a generation timestamp or any other wall-clock value.
 - [no-input-zoom/](no-input-zoom/index.md) — 1 concept(s)
 - [project-color-identity/](project-color-identity/index.md) — 1 concept(s)
 - [terminals-pane-select/](terminals-pane-select/index.md) — 1 concept(s)
+- [upstream-code-viewer/](upstream-code-viewer/index.md) — 1 concept(s)
 - [upstream-short-link/](upstream-short-link/index.md) — 1 concept(s)
 - [waggledance-rename/](waggledance-rename/index.md) — 1 concept(s)
