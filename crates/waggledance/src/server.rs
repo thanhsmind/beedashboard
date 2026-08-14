@@ -4482,32 +4482,43 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (happy, feature-hub fh-1, D1) A fixture with one feature per group
-    /// renders each in its own group, never a duplicate: a feature with a
-    /// live open cell sitting on an unapproved (non-review) gate renders
-    /// once under Waiting on you, carrying its own reason line; a feature
-    /// with a live claimed cell and every gate approved renders under In
-    /// Progress; a finished feature with a leftover
-    /// `.bee/runtime/workspaces/<id>.json` record naming its own
-    /// `wt/finished-feat` branch (feature-hub-3 F5: real evidence a grant
-    /// once existed for it, even though `bee worktree merge`'s own cleanup
-    /// already dropped the grant itself) renders under Finished. Its own
-    /// "1/1 cell done" count and "Merged" worktree chip no longer render at
-    /// all (hub-finished-compact: a Finished row is a dense name-only
-    /// line) — both rules are now proven directly by `views.rs`'s own
-    /// `bee_hub_archived_counts_excludes_dropped_from_both_counts` and
+    /// (happy, feature-hub fh-1, kanban-columns D1/D2/D4/D10/D11/D12) A
+    /// fixture with one feature per column renders each in its own group,
+    /// never a duplicate: a feature whose cells are all still `open` and
+    /// unclaimed, with no other liveness signal, renders under Todo
+    /// (kanban-columns D10's own narrowing: an open cell alone is no longer
+    /// live work); a feature with a live claimed cell sitting on an
+    /// unapproved (non-review) gate renders under In Progress carrying its
+    /// own `Waiting on you — ` line; a feature with a live claimed cell and
+    /// every gate approved renders under In Progress with no such line; a
+    /// feature carrying an unresolved review candidate, with no live work
+    /// of its own, renders under Review; a feature whose lane `phase` is
+    /// exactly `"compounding"`, with no live work, renders under Compound;
+    /// a finished feature with a leftover `.bee/runtime/workspaces/<id>.json`
+    /// record naming its own `wt/finished-feat` branch (feature-hub-3 F5:
+    /// real evidence a grant once existed for it, even though `bee worktree
+    /// merge`'s own cleanup already dropped the grant itself) renders under
+    /// Finished. Its own "1/1 cell done" count and "Merged" worktree chip no
+    /// longer render at all (hub-finished-compact: a Finished row is a
+    /// dense name-only line) — both rules are now proven directly by
+    /// `views.rs`'s own `bee_hub_archived_counts_excludes_dropped_from_both_counts`
+    /// and
     /// `bee_hub_worktree_chip_reads_merged_only_when_finished_and_a_grant_history_exists`
-    /// unit tests. Replaces
-    /// `agent_board_happy_path_places_cells_in_columns_with_badges`, which
-    /// asserted the now-retired Kanban markup.
+    /// unit tests.
     #[tokio::test]
     async fn feature_hub_happy_path_places_each_feature_in_its_own_group() {
         let root = fresh_root("hub-happy");
         write(
             &root,
-            ".bee/lanes/waiting-feat.json",
+            ".bee/lanes/todo-feat.json",
+            &lane_json("todo-feat", "swarming", "standard", "keep going", None, None),
+        );
+        write(&root, ".bee/cells/a.json", &feature_cell_json("wf-1", "todo-feat", "open", None, None));
+        write(
+            &root,
+            ".bee/lanes/gated-feat.json",
             &lane_json(
-                "waiting-feat",
+                "gated-feat",
                 "swarming",
                 "standard",
                 "keep going",
@@ -4515,7 +4526,7 @@ mod bee_route_tests {
                 None,
             ),
         );
-        write(&root, ".bee/cells/a.json", &feature_cell_json("wf-1", "waiting-feat", "open", None, None));
+        write(&root, ".bee/cells/c.json", &feature_cell_json("gf-1", "gated-feat", "claimed", None, None));
         write(
             &root,
             ".bee/lanes/progress-feat.json",
@@ -4529,6 +4540,21 @@ mod bee_route_tests {
             ),
         );
         write(&root, ".bee/cells/b.json", &feature_cell_json("pf-1", "progress-feat", "claimed", None, None));
+        write(
+            &root,
+            ".bee/lanes/review-feat.json",
+            &lane_json("review-feat", "swarming", "standard", "keep going", None, None),
+        );
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            "{\"id\":\"rc-1\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"review-feat\",\"head\":\"h1\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-rc\"]}\n",
+        );
+        write(
+            &root,
+            ".bee/lanes/compound-feat.json",
+            &lane_json("compound-feat", "compounding", "standard", "none", None, None),
+        );
         write(
             &root,
             ".bee/lanes/finished-feat.json",
@@ -4557,25 +4583,44 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"1\""), "{body}");
-        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""), "{body}");
+        assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"1\""), "{body}");
+        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"2\""), "{body}");
+        assert!(body.contains("data-hub-group=\"review\" data-hub-count=\"1\""), "{body}");
+        assert!(body.contains("data-hub-group=\"compound\" data-hub-count=\"1\""), "{body}");
         assert!(body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""), "{body}");
 
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/waiting-feat\"", project.id)),
-            "the waiting feature must link to its own detail page: {body}"
+            body.contains(&format!(
+                "data-hub-group=\"todo\" href=\"/p/{}/_bee/feature/todo-feat\"",
+                project.id
+            )),
+            "the open-cells, unclaimed feature must link to its own detail page under Todo: {body}"
         );
         assert!(
-            body.contains("Shape gate awaiting your decision"),
-            "the waiting card must name its own current-stop gate: {body}"
+            body.contains("Waiting on you — Shape gate awaiting your decision"),
+            "the gated card must carry its own current-stop gate behind the Waiting on you label: {body}"
         );
         assert!(body.contains("progress-feat"), "{body}");
+        assert!(
+            body.contains(&format!(
+                "data-hub-group=\"review\" href=\"/p/{}/_bee/feature/review-feat\"",
+                project.id
+            )),
+            "the feature with an unresolved review candidate must link to its own detail page under Review: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "data-hub-group=\"compound\" href=\"/p/{}/_bee/feature/compound-feat\"",
+                project.id
+            )),
+            "the compounding-phase feature must link to its own detail page under Compound: {body}"
+        );
         assert!(body.contains("finished-feat"), "{body}");
 
         assert_eq!(
             body.matches("0/1 cell done").count(),
             2,
-            "both the waiting and in-progress cards must show one open cell not yet done: {body}"
+            "both In Progress cards (gated-feat, progress-feat) must show one open cell not yet done: {body}"
         );
 
         assert!(
@@ -4590,21 +4635,22 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (edge, feature-hub fh-1, D4) The permanent fix for the six ghost
-    /// gate cards D4 names: a lane sitting on an unapproved, non-review
-    /// gate with ZERO live cells left (routine once a feature's work is
-    /// done and its cells archived, but its lane record was never stamped
-    /// terminal) must never render a Waiting on you entry — the retired
-    /// Review column rendered exactly this shape as "gate awaiting your
-    /// decision" regardless of live work. It also has no live cells, so it
-    /// cannot land in In Progress, and its phase is `"compounding"`, not
+    /// (edge, feature-hub fh-1/D4, carried forward by kanban-columns) The
+    /// permanent fix for the six ghost gate cards D4 names: a lane sitting
+    /// on an unapproved, non-review gate with ZERO live cells left
+    /// (routine once a feature's work is done and its cells archived, but
+    /// its lane record was never stamped terminal) must never render a
+    /// fabricated "gate awaiting your decision" card — the pre-fh-1 board
+    /// rendered exactly this shape regardless of live work. It has no live
+    /// cells, so it cannot land in In Progress and so can never carry a
+    /// Waiting on you line; its phase is `"compounding"`, not
     /// `"compounding-complete"`, and it has no `.bee/cells/archive/`
-    /// directory of its own, so it cannot land in Finished either: it
-    /// renders in none of the three groups until an orchestrator-run
-    /// cleanup stamps its phase or archives its cells, out of this cell's
-    /// own scope (CONTEXT.md).
+    /// directory of its own, so it cannot land in Finished either. Per
+    /// kanban-columns D4, a lane `phase` of exactly `"compounding"` now
+    /// legitimately places it under Compound instead of nowhere — an
+    /// honest placement, never the fabricated ghost card D4 forbids.
     #[tokio::test]
-    async fn feature_hub_stale_lane_with_no_live_cells_emits_no_waiting_entry() {
+    async fn feature_hub_stale_lane_with_no_live_cells_lands_in_compound_never_a_ghost_gate_card() {
         let root = fresh_root("hub-ghost");
         write(
             &root,
@@ -4627,23 +4673,28 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"0\""), "{body}");
+        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""), "{body}");
         assert!(
-            !body.contains("stale-feat"),
-            "a stale lane with zero live cells must render no entry anywhere on the hub: {body}"
+            body.contains("data-hub-group=\"compound\" href=\"/p/") && body.contains("stale-feat"),
+            "a stale lane with zero live cells honestly places under Compound, per its own phase: {body}"
+        );
+        assert!(
+            !body.contains("Waiting on you") && !body.contains("gate awaiting your decision"),
+            "a zero-live-cell lane must never carry a fabricated Waiting on you line, the D4 ghost-card shape this rule forbids: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (happy, feature-hub fh-1, D4) The globally active feature while
+    /// (happy, feature-hub fh-1, D4, folded into In Progress by
+    /// kanban-columns D1/D5/D7/D8) The globally active feature while
     /// `.bee/HANDOFF.json` reads as a genuine pause renders exactly once
-    /// under Waiting on you, even with every one of its own gates already
-    /// approved — the handoff note carries no feature name of its own
-    /// (`compute_attention_items`'s own doc comment), so it is folded onto
-    /// `state.feature`.
+    /// under In Progress, carrying its own `Waiting on you — ` line, even
+    /// with every one of its own gates already approved — the handoff note
+    /// carries no feature name of its own (`compute_attention_items`'s own
+    /// doc comment), so it is folded onto `state.feature`.
     #[tokio::test]
-    async fn feature_hub_paused_handoff_renders_active_feature_once_under_waiting() {
+    async fn feature_hub_paused_handoff_gives_the_active_feature_its_waiting_on_you_line_once() {
         let root = fresh_root("hub-handoff");
         write(
             &root,
@@ -4665,19 +4716,19 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"1\""), "{body}");
+        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""), "{body}");
         assert_eq!(
             body.matches(&format!(
-                "class=\"bee-hub__card\" data-hub-group=\"waiting\" href=\"/p/{}/_bee/feature/handoff-feat\"",
+                "class=\"bee-hub__card\" data-hub-group=\"in-progress\" href=\"/p/{}/_bee/feature/handoff-feat\"",
                 project.id
             ))
             .count(),
             1,
-            "the paused active feature must render exactly one Waiting card, never twice: {body}"
+            "the paused active feature must render exactly one In Progress card, never twice: {body}"
         );
         assert!(
-            body.contains("Work is parked, waiting on your decision"),
-            "its own card must carry the paused-handoff reason: {body}"
+            body.contains("Waiting on you — Work is parked, waiting on your decision"),
+            "its own card must carry the paused-handoff Waiting on you line: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -4690,10 +4741,11 @@ mod bee_route_tests {
     /// the previous cell already capped, the next cell's claim already
     /// owned) — `bee_feature_hub_section`'s own `handoff_is_pause` rule
     /// must read it as such, so the globally active feature with every one
-    /// of its own gates already approved renders no Waiting on you entry
-    /// at all.
+    /// of its own gates already approved still renders under In Progress
+    /// (it is, after all, the active feature) but carries no Waiting on you
+    /// line at all.
     #[tokio::test]
-    async fn feature_hub_planned_next_handoff_renders_no_waiting_entry() {
+    async fn feature_hub_planned_next_handoff_carries_no_waiting_on_you_line() {
         let root = fresh_root("hub-handoff-planned-next");
         write(
             &root,
@@ -4715,13 +4767,16 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"0\""), "{body}");
         assert!(
-            !body.contains(&format!(
-                "data-hub-group=\"waiting\" href=\"/p/{}/_bee/feature/planned-next-feat\"",
+            body.contains(&format!(
+                "data-hub-group=\"in-progress\" href=\"/p/{}/_bee/feature/planned-next-feat\"",
                 project.id
             )),
-            "a planned-next handoff is a clean stop, never a pause, and must render no Waiting card for its feature: {body}"
+            "the active feature still renders under In Progress: {body}"
+        );
+        assert!(
+            !body.contains("Waiting on you"),
+            "a planned-next handoff is a clean stop, never a pause, and must carry no Waiting on you line: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -4814,8 +4869,10 @@ mod bee_route_tests {
             body.contains(&format!("href=\"/p/{}/_bee/feature/wound-down-feat\"", project.id)),
             "an archived feature whose lane phase never reached compounding-complete must still render under Finished: {body}"
         );
-        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"0\""), "{body}");
+        assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"0\""), "{body}");
         assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""), "{body}");
+        assert!(body.contains("data-hub-group=\"review\" data-hub-count=\"0\""), "{body}");
+        assert!(body.contains("data-hub-group=\"compound\" data-hub-count=\"0\""), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4920,20 +4977,20 @@ mod bee_route_tests {
             body.contains(&format!("href=\"/p/{}/_bee/feature/wt-live-feat\"", project.id)),
             "the worktree-bound zero-cell feature must render under In Progress: {body}"
         );
-        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"0\""), "{body}");
+        assert!(!body.contains("Waiting on you"), "with every gate approved, neither card carries a Waiting on you line: {body}");
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&sibling).ok();
     }
 
-    /// (edge, feature-hub fh-1) An entirely empty store — no cells, no
-    /// lanes, no archive — still renders all three groups, each stating
-    /// its own honest, distinct empty line (bee-board-pm D5's "sections
-    /// never disappear" rule) rather than a shared line that could not say
-    /// which group came up empty. No absolute filesystem path leaks into
-    /// the body (D9).
+    /// (edge, feature-hub fh-1, grown to five columns by kanban-columns D1)
+    /// An entirely empty store — no cells, no lanes, no archive — still
+    /// renders all five groups, each stating its own honest, distinct empty
+    /// line (bee-board-pm D5's "sections never disappear" rule) rather than
+    /// a shared line that could not say which group came up empty. No
+    /// absolute filesystem path leaks into the body (D9).
     #[tokio::test]
-    async fn feature_hub_empty_store_renders_three_honest_empty_groups() {
+    async fn feature_hub_empty_store_renders_five_honest_empty_groups() {
         let root = fresh_root("hub-empty");
         std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
 
@@ -4943,18 +5000,24 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        for key in ["waiting", "in-progress", "finished"] {
+        for key in ["todo", "in-progress", "review", "compound", "finished"] {
             assert!(
                 body.contains(&format!("data-hub-group=\"{key}\" data-hub-count=\"0\"")),
                 "group {key} must always render, honestly empty: {body}"
             );
         }
-        assert!(body.contains("Nothing waiting on you."), "{body}");
+        assert!(body.contains("Nothing in Todo."), "{body}");
         assert!(body.contains("Nothing in progress."), "{body}");
+        assert!(body.contains("Nothing in Review."), "{body}");
+        assert!(body.contains("Nothing in Compound."), "{body}");
         assert!(body.contains("Nothing finished yet."), "{body}");
         assert!(
             !body.contains(root.to_string_lossy().as_ref()),
             "no absolute filesystem path may leak into the board body: {body}"
+        );
+        assert!(
+            !body.contains(r#"data-hub-group="waiting""#),
+            "the retired Waiting on you column must render no group of that key anywhere: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -4966,9 +5029,9 @@ mod bee_route_tests {
     /// views.rs) — the review gate is user-invoked on its own schedule,
     /// never a blocking one. A feature with live work and every OTHER gate
     /// approved, only `review` still outstanding, must render no Waiting
-    /// on you entry at all, landing in In Progress instead.
+    /// on you line at all, its card plain In Progress.
     #[tokio::test]
-    async fn feature_hub_review_only_gate_with_live_cells_emits_no_waiting_entry() {
+    async fn feature_hub_review_only_gate_with_live_cells_carries_no_waiting_on_you_line() {
         let root = fresh_root("hub-review-only-gate");
         write(
             &root,
@@ -4990,21 +5053,25 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"0\""), "{body}");
         assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""), "{body}");
         assert!(
             body.contains(&format!("href=\"/p/{}/_bee/feature/review-only-feat\"", project.id)),
             "a feature with only the review gate outstanding must still render, under In Progress: {body}"
         );
+        assert!(
+            !body.contains("Waiting on you"),
+            "the independent-review gate alone must never put a Waiting on you line on the card: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (edge, feature-hub fh-1, D4) A feature with a live claimed cell AND
-    /// an unapproved non-review gate renders under Waiting on you only —
-    /// "waiting wins over in-progress" — never counted in both.
+    /// (edge, feature-hub fh-1/D4, folded into In Progress by kanban-columns
+    /// D1/D5/D7) A feature with a live claimed cell AND an unapproved
+    /// non-review gate renders under In Progress once, carrying its own
+    /// Waiting on you line — never a separate column, never counted twice.
     #[tokio::test]
-    async fn feature_hub_waiting_wins_over_in_progress_for_the_same_feature() {
+    async fn feature_hub_gate_stopped_live_feature_carries_its_waiting_on_you_line_once() {
         let root = fresh_root("hub-priority");
         write(
             &root,
@@ -5026,9 +5093,13 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"1\""), "{body}");
-        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""), "{body}");
-        assert!(body.contains("Execute gate awaiting your decision"), "{body}");
+        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""), "{body}");
+        assert_eq!(
+            body.matches("data-hub-group=\"in-progress\" href=\"").count(),
+            1,
+            "the feature must render exactly one In Progress card, never counted in a second group: {body}"
+        );
+        assert!(body.contains("Waiting on you — Execute gate awaiting your decision"), "{body}");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -8175,9 +8246,12 @@ mod bee_route_tests {
     /// feature-hub fh-1's markup: `compute_d7_buckets`/
     /// `compute_feature_cell_counts` (`waggledance_core::bee`) only ever see
     /// this project's own `.bee/cells/*.json`, so a worktree's own capped
-    /// cell can never move this project's own "demo" card, and its cell id
+    /// cell can never move this project's own "demo" row, and its cell id
     /// never appears on this board at all — this test asserts only that its
-    /// cell never merges into this project's own counts.
+    /// cell never merges into this project's own counts. `demo` itself
+    /// carries only a single `open` cell and no other liveness signal, so
+    /// per kanban-columns D10 it renders under Todo, as a dense row with no
+    /// progress reading of its own (D12) — not under In Progress.
     #[tokio::test]
     async fn worktree_cell_files_do_not_change_buckets_or_shipped_set() {
         let root = fresh_root("wt-no-cell-merge");
@@ -8204,10 +8278,13 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"waiting\" data-hub-count=\"1\""), "{body}");
         assert!(
-            body.contains("0/1 cell done"),
-            "a worktree's own capped cell must never count toward this project's own \"demo\" progress: {body}"
+            body.contains(&format!("data-hub-group=\"todo\" href=\"/p/{}/_bee/feature/demo\"", project.id)),
+            "demo's own single open cell, with no other liveness signal, must land under Todo: {body}"
+        );
+        assert!(
+            !body.contains("cell done") && !body.contains("cells done"),
+            "a Todo row carries no progress reading, so a worktree's own capped cell has nothing to leak into: {body}"
         );
         assert!(body.contains("data-finished-features=\"0\""), "{body}");
         assert!(
@@ -17754,13 +17831,16 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (responsive, retired) feature-hub fh-1 retires the five-wide Kanban
-    /// column row this test's own `.bee-agent-board__cols` selector named —
-    /// the new grouped list is only ever three groups (`.bee-hub__groups`),
-    /// already named in the narrow-screen collapse list above, so no
-    /// container on this board needs its own `overflow-x: auto` scroll
-    /// escape hatch any more. This test pins that absence rather than
-    /// asserting a rule that no longer exists.
+    /// (responsive, retired) feature-hub fh-1 retired the original five-wide
+    /// cell-centric Kanban column row this test's own
+    /// `.bee-agent-board__cols` selector named; kanban-columns later grew
+    /// the feature-centric grouped list it replaced that with back to five
+    /// columns of its own (`.bee-hub__groups`, explicit tracks rather than
+    /// `.bee-agent-board__cols`'s own `overflow-x` escape hatch), already
+    /// named in the narrow-screen collapse list above, so no container on
+    /// this board needs its own `overflow-x: auto` scroll escape hatch any
+    /// more. This test pins that absence rather than asserting a rule that
+    /// no longer exists.
     #[tokio::test]
     async fn board_no_longer_declares_a_wide_scrolling_container() {
         let root = fresh_root("responsive-overflow");

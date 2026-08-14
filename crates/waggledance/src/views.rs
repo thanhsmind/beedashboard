@@ -1692,11 +1692,12 @@ pub fn terminal_down_page(project: &Project) -> String {
 /// ab-1/ab-2 — now retired) with a FEATURE-centric grouped list
 /// ([`bee_feature_hub_section`]): a manager asks which feature needs them,
 /// which is moving, which is done, not which cell an agent holds. Every
-/// feature this snapshot can place renders in exactly one of three groups —
-/// Waiting on you, In Progress, Finished — see that function's own doc
-/// comment for the full membership rule and the D4 ghost-card fix it
-/// carries. A feature that has fully shipped (D10, `snapshot.shipped`)
-/// still gets its own line in `bee_finished_section` too, unrelated to and
+/// feature this snapshot can place renders in exactly one of five groups, in
+/// this left-to-right order — Todo, In Progress, Review, Compound, Finished
+/// (kanban-columns D1) — see that function's own doc comment for the full
+/// membership rule, the D10 narrowing that keeps Todo reachable, and the D4
+/// ghost-card fix it carries. A feature that has fully shipped (D10,
+/// `snapshot.shipped`) still gets its own line in `bee_finished_section` too, unrelated to and
 /// unmoved by this change — a distinct, uncapped feature-level list this
 /// board has always kept separate from whatever this cell's own Finished
 /// group shows. `bee_lanes_panel` stays retired (bbp-11); the feature
@@ -1877,13 +1878,20 @@ html[data-scheme="dark"] .bee-hub-theme {{
 .bee-strip__label {{ font-weight: var(--weight-strong); color: var(--color-text); }}
 .bee-strip__meta {{ color: var(--color-text-muted); }}
 .bee-strip__row--unresolved .bee-strip__meta {{ color: var(--color-danger); }}
-.bee-hub__groups {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: var(--space-4); }}
+/* kanban-columns D1/D12: five explicit tracks in the board's own left-to-
+   right column order (Todo, In Progress, Review, Compound, Finished) rather
+   than `repeat(auto-fit, minmax(260px, 1fr))` — that auto-fit sizing was
+   tuned for three equal columns and wraps badly once four of the five are
+   dense row lists needing far less width than the one that still renders
+   cards. In Progress keeps the wider, card-shaped track; the four row
+   columns share a narrower one. */
+.bee-hub__groups {{ display: grid; grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.6fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr); gap: var(--space-4); }}
 /* hub-fallbacks: a grid/flex item's own default `min-width: auto` sizes it
    to its content's min-content width — normally harmless, but a clamped
    `.bee-hub__desc` below is `white-space: nowrap` at its own min-content
    size, and without `min-width: 0` breaking that default at every level
    of this chain (group, cards, shell, card), a long description would
-   still force its own column wider than its `minmax(260px, 1fr)` track
+   still force its own column wider than its own `minmax(...)` track
    and push the whole page into horizontal scroll on a phone — the same
    chain `.term-panes` and its siblings already pin above for the same
    reason. */
@@ -1907,11 +1915,13 @@ html[data-scheme="dark"] .bee-hub-theme {{
 .bee-hub__badges {{ border-top: var(--border-width-hairline) solid var(--color-border); padding: var(--space-2) 0 0 0; flex: 0 0 auto; }}
 .bee-hub__progress-label {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
 .bee-hub__reason {{ font-style: italic; }}
-/* hub-finished-compact: the Finished group's own dense row — name only,
+/* hub-finished-compact, kanban-columns D12: the shared dense-row shape now
+   rendered by all four of Todo, Review, Compound and Finished — name only,
    linking straight to the detail page — mirroring `.bee-done-line`'s
-   one-line idiom rather than the full `.bee-hub__card` shape the other
-   two groups keep; plus the nested-details toggle
-   ([`bee_hub_finished_rows`]) that pages it ten rows at a time. */
+   one-line idiom rather than the full `.bee-hub__card` shape only In
+   Progress still keeps; plus the nested-details toggle
+   ([`bee_hub_finished_rows`]) that pages each of the four ten rows at a
+   time. */
 .bee-hub__row {{ display: block; color: var(--color-text); font-size: var(--type-body-sm-size); text-decoration: none; padding: var(--space-1) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); overflow-wrap: anywhere; }}
 .bee-hub__row:hover {{ color: var(--color-action); }}
 /* cross-board D5/D10: the cross-project board's own project label and ship
@@ -2230,81 +2240,99 @@ fn bee_live_strip_section(snapshot: &BeeSnapshot) -> String {
     )
 }
 
-/// D1's feature-centric grouped list (fh-1), replacing the retired
-/// cell-centric Kanban board (`bee_agent_board_section`, agent-board
-/// ab-1/ab-2 — every card it rendered, and the five-column shape itself,
-/// is gone). The card unit is now the FEATURE, not the cell: every feature
-/// this snapshot can place (`phase_board`'s lanes ∪ active-feature union,
-/// plus any feature whose cells have moved entirely to
-/// `.bee/cells/archive/` with no lane of its own) renders in exactly one
-/// of three groups — Waiting on you, In Progress, Finished — never two,
-/// never a duplicate. Group membership is checked in that fixed priority
-/// order (D4's "waiting wins over in-progress; finished only when no live
-/// cells"):
+/// D1's feature-centric grouped list (fh-1; grown to five columns by
+/// kanban-columns), replacing the retired cell-centric Kanban board
+/// (`bee_agent_board_section`, agent-board ab-1/ab-2 — every card it
+/// rendered, and that five-column shape itself, is gone). The card unit is
+/// now the FEATURE, not the cell: every feature this snapshot can place
+/// (`phase_board`'s lanes ∪ active-feature union, plus any feature whose
+/// cells have moved entirely to `.bee/cells/archive/` with no lane of its
+/// own) renders in exactly one of five groups, left to right — **Todo, In
+/// Progress, Review, Compound, Finished** (kanban-columns D1) — never two,
+/// never a duplicate. The former "Waiting on you" column is gone entirely
+/// (D1); a feature that used to land there now lands in **In Progress**,
+/// carrying one card line reading `Waiting on you — ` followed by the same
+/// reason text this board has always computed (D5, D7, D8). Group
+/// membership is checked in this fixed priority order (D11):
 ///
-/// A feature counts as **live work** (`has_live_work`, board-liveness-2)
-/// when ANY of: it has `doing`/`waiting`/`stuck` cells; it is
-/// `state.feature`, the globally active one, even with none yet; a live
-/// session (`BeeSession.live`, `SESSION_LIVE_MINUTES`) carries a `lane`
-/// naming this feature; or a granted worktree in `snapshot.worktrees`
-/// names this feature as its own active one. A session heartbeat or a
-/// worktree grant is a real signal between units of work — every cell
-/// capped, nothing `doing` — that the pre-liveness cell-only count missed
-/// entirely, reporting "Waiting 0 / In Progress 0" while two sessions were
-/// actively on the repo. Deliberately not phase-based: a lane parked at
-/// `swarming`/`exploring` with no session, no grant and no live cell is
-/// exactly the D4 ghost shape this rule must never resurrect.
+/// 1. **In Progress** — has live work (below) and is not finished-and-idle.
+/// 2. **Finished** — no live *cells* left, and either a terminal phase or an
+///    archived-cells directory. Checked before Review so a closed feature
+///    stays closed even carrying an unresolved review candidate.
+/// 3. **Review** — `snapshot.review.candidates` holds a candidate naming
+///    this feature whose `status` is not `Settled` (`Unreviewed` or
+///    `InReview`).
+/// 4. **Compound** — the lane's own `phase` is exactly `"compounding"`.
+/// 5. **Todo** — cells exist, are all `open` (`waiting > 0`), and none is
+///    `claimed` (`doing == 0`).
 ///
-/// - **Waiting on you**: a feature with live work whose current-stop gate
-///   ([`bee_gate_current_stop`], reused from the retired Review column:
-///   the independent-review gate itself never counts, since that gate is
-///   user-invoked on its own schedule, never a blocking stop) is still
-///   unapproved, OR the active feature while `.bee/HANDOFF.json` reads as
-///   a genuine pause (never a `"planned-next"` clean stop) — the note
-///   carries no feature name of its own (`compute_attention_items`'s own
-///   doc comment says so), so it is folded onto whichever feature
-///   `state.json` currently names active. Either pull is gated on
-///   `working_now` (`waiting-means-stopped-1`): a live session
-///   (`BeeSession.live`, `SESSION_LIVE_MINUTES`) bound to this feature's
-///   lane whose own `heartbeat_age_minutes` is inside [`WORKING_MINUTES`]
-///   — tighter than `SESSION_LIVE_MINUTES` on purpose (see that constant's
-///   own doc). An agent still actively on the feature right now — mid
-///   interview, gate not yet asked for — is In Progress, never Waiting; a
-///   granted worktree never counts toward `working_now` on its own, since
-///   a grant is not a heartbeat and a parked worktree with a gate owed is
-///   exactly the case Waiting exists for. Either pull also yields to
-///   Finished when the feature has no live cells left: a closed feature
-///   owes no decision, and `state.feature`/a bound session/a granted
-///   worktree can all keep naming it long after its last cell was
-///   archived.
-/// - **In Progress**: everything left with live work not already claimed
-///   by Waiting, and not yielding to Finished.
-/// - **Finished**: everything left with no live *cells* left (a bound
-///   session or a granted worktree naming a closed feature's lane never
-///   drags it back out — board-finished-wins-1) AND either a lane `phase`
-///   of exactly `"compounding-complete"` (bee's own terminal phase —
-///   `"terminal"` is a string bee never writes) OR a
-///   `.bee/cells/archive/<feature>/` directory of its own
-///   (`list_archived_feature_dirs`, checked once up front and reused as a
-///   set — no extra store read per feature), including every feature that
-///   directory names but never had a lane or active-feature placement at
-///   all. Both sourced from `read_archived_cells` for their own
-///   done/total counts and last activity, since a finished feature's live
-///   `cell_counts` are typically zero (its cells already moved to
-///   archive). A feature that fits neither rule (a pre-build, zero-cell
-///   lane with no live session and no worktree grant, e.g. still
-///   `exploring`) renders nowhere on this list — the pre-redesign board
-///   never showed it either, since it never held a cell of its own.
+/// A feature matching none of the five still renders nowhere, exactly as
+/// before this feature.
 ///
-/// This is also D4's ghost-card fix: the retired Review column rendered a
-/// card for ANY phase_board feature sitting on an unapproved gate,
-/// regardless of whether it had any live cells left — six merged, fully
-/// archived lanes kept showing "gate awaiting your decision" for that
-/// reason. Gating Waiting on live work closes that permanently; a stale
-/// lane with zero live cells now renders in Finished once its own `phase`
-/// reaches `"compounding-complete"` or its cells land in the archive
-/// directory (an orchestrator-run cleanup, out of this cell's scope), and
-/// nowhere until then — never a ghost.
+/// A feature counts as **live work** (`has_live_work`, board-liveness-2,
+/// narrowed by kanban-columns D10) when ANY of: it has a `doing` or `stuck`
+/// cell; it is `state.feature`, the globally active one, even with none
+/// yet; a live session (`BeeSession.live`, `SESSION_LIVE_MINUTES`) carries
+/// a `lane` naming this feature; or a granted worktree in
+/// `snapshot.worktrees` names this feature as its own active one. D10
+/// deliberately stops counting an `open` (`waiting`) cell on its own as
+/// live: today's rule counted it, which made Todo's "open cells, none
+/// claimed" branch dead code — every feature it should catch was pulled
+/// into In Progress first. A session heartbeat or a worktree grant is a
+/// real signal between units of work — every cell capped, nothing `doing`
+/// — that a cell-only count would miss entirely, reporting an empty In
+/// Progress column while two sessions were still actively on the repo.
+/// Deliberately not phase-based: a lane parked at `swarming`/`exploring`
+/// with no session, no grant and no live cell is exactly the D4 ghost
+/// shape this rule must never resurrect. `finished_and_idle`, by contrast,
+/// keeps counting all three cell kinds (`doing`/`waiting`/`stuck`) — D10
+/// narrows only what counts as live *work for placement*, not what counts
+/// as a live *cell* still open against a closed feature, so today's
+/// Finished behaviour is preserved exactly.
+///
+/// - **In Progress** membership: any feature with live work that is not
+///   finished-and-idle. Within that branch, the card additionally carries
+///   a `Waiting on you — ` line (D5, D7, D8) when its current-stop gate
+///   ([`bee_gate_current_stop`]: the independent-review gate itself never
+///   counts, since that gate is user-invoked on its own schedule, never a
+///   blocking stop) is still unapproved, OR it is the active feature while
+///   `.bee/HANDOFF.json` reads as a genuine pause (never a `"planned-next"`
+///   clean stop) — the note carries no feature name of its own
+///   (`compute_attention_items`'s own doc comment says so), so it is
+///   folded onto whichever feature `state.json` currently names active.
+///   Either pull is suppressed while `working_now` (`waiting-means-stopped-1`):
+///   a live session (`BeeSession.live`, `SESSION_LIVE_MINUTES`) bound to
+///   this feature's lane whose own `heartbeat_age_minutes` is inside
+///   [`WORKING_MINUTES`] — tighter than `SESSION_LIVE_MINUTES` on purpose
+///   (see that constant's own doc). An agent still actively on the feature
+///   right now — mid interview, gate not yet asked for — carries no
+///   `Waiting on you` line; a granted worktree never counts toward
+///   `working_now` on its own, since a grant is not a heartbeat and a
+///   parked worktree with a gate owed is exactly the case this line exists
+///   for.
+/// - **Finished** membership: no live *cells* left (a bound session or a
+///   granted worktree naming a closed feature's lane never drags it back
+///   out — board-finished-wins-1) AND either a lane `phase` of exactly
+///   `"compounding-complete"` (bee's own terminal phase — `"terminal"` is
+///   a string bee never writes) OR a `.bee/cells/archive/<feature>/`
+///   directory of its own (`list_archived_feature_dirs`, checked once up
+///   front and reused as a set — no extra store read per feature),
+///   including every feature that directory names but never had a lane or
+///   active-feature placement at all. Both sourced from
+///   `read_archived_cells` for their own done/total counts and last
+///   activity, since a finished feature's live `cell_counts` are typically
+///   zero (its cells already moved to archive).
+///
+/// This is also D4's ghost-card fix, carried forward: the pre-fh-1 board
+/// rendered a card for ANY phase_board feature sitting on an unapproved
+/// gate, regardless of whether it had any live cells left — six merged,
+/// fully archived lanes kept showing "gate awaiting your decision" for
+/// that reason. Gating the `Waiting on you` line on live work closes that
+/// permanently: a stale lane with zero live cells now renders in Compound
+/// (its `phase` still reads `"compounding"`) or Finished once its own
+/// `phase` reaches `"compounding-complete"` or its cells land in the
+/// archive directory (an orchestrator-run cleanup, out of this cell's
+/// scope), never with a fabricated decision owed.
 ///
 /// How fresh a bound session's heartbeat must be for its feature to count
 /// as **working now** (`waiting-means-stopped-1`) — deliberately far
@@ -2324,27 +2352,29 @@ fn bee_live_strip_section(snapshot: &BeeSnapshot) -> String {
 /// goes fully stale at thirty.
 const WORKING_MINUTES: f64 = 5.0;
 
-/// Every Waiting or In Progress card ([`bee_hub_card`]) names its feature,
-/// links to its own detail page, its own done/total cell progress and its
-/// own last-activity age ([`bee_fmt_trace_time`]) -- project-color-identity
+/// The one In Progress card ([`bee_hub_card`]) names its feature, links to
+/// its own detail page, its own done/total cell progress and its own
+/// last-activity age ([`bee_fmt_trace_time`]) -- project-color-identity
 /// (D2/D3) drops this card's own group and worktree-state chips entirely:
 /// the kanban column heading already names the group, and a cross-project
 /// card's own worktree state now reads on the project line instead (see
 /// [`bee_hub_card`]'s own doc comment). hub-finished-compact strips all of
-/// that from the Finished group: a
-/// closed feature owes no decision and no progress reading, so each of its
-/// entries is one dense row carrying only its name
-/// ([`bee_hub_finished_row`]), and the column itself pages ten rows at a
-/// time behind nested `<details>` ([`bee_hub_finished_rows`]) rather than
-/// growing without bound as more features close. Every path-shaped value a
-/// `BeeCell`/`BeeFeaturePhase` carries already arrives relativized by
-/// `waggledance_core::bee::read_snapshot` (D9), so nothing further is redacted
-/// here -- this view only escapes for HTML safety.
+/// that from the other four columns (kanban-columns D12 grows this from
+/// Finished alone to Todo, Review, Compound and Finished): none of the four
+/// owes a decision or a progress reading, so each of their entries is one
+/// dense row carrying only its name ([`bee_hub_finished_row`], now
+/// parameterized by its own group key and href rather than hardcoding
+/// Finished's), and each of the four columns pages ten rows at a time
+/// behind nested `<details>` ([`bee_hub_finished_rows`]) rather than
+/// growing without bound as more features accumulate. Every path-shaped
+/// value a `BeeCell`/`BeeFeaturePhase` carries already arrives relativized
+/// by `waggledance_core::bee::read_snapshot` (D9), so nothing further is
+/// redacted here -- this view only escapes for HTML safety.
 ///
 /// cross-board-2 splits what used to be one function into two seams: this
 /// one reads `project`'s own archive off disk (D2 keeps that read exactly
 /// where it always lived) and hands the result to [`bee_classify_features`],
-/// which decides -- as plain data, no HTML -- which of the three columns
+/// which decides -- as plain data, no HTML -- which of the five columns
 /// each feature belongs in; [`bee_render_hub_section`] then turns that data
 /// back into this exact section, unchanged. The cross-project board
 /// (`bee_cross_project_features_section`) reuses only the classification
@@ -2359,21 +2389,32 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
     bee_render_hub_section(project, &placements)
 }
 
-/// One feature already sorted into one of the feature hub's three columns
-/// by [`bee_classify_features`] -- the render inputs [`bee_hub_card`] or
-/// [`bee_hub_finished_row`] need, captured once so the merge step
-/// (`bee_cross_project_features_section`) never re-touches `BeeSnapshot`.
+/// One feature already sorted into one of the feature hub's five columns
+/// (kanban-columns D1) by [`bee_classify_features`] -- the render inputs
+/// [`bee_hub_card`] or [`bee_hub_finished_row`] need, captured once so the
+/// merge step (`bee_cross_project_features_section`) never re-touches
+/// `BeeSnapshot`. The former `Waiting` variant is gone (D1); the feature it
+/// used to carry now lands in `InProgress` with `BeeHubCardData::reason`
+/// set to its `Waiting on you — ` line (D5, D7, D8). `Review`, `Compound`
+/// and `Todo` share `BeeHubFinishedData` with `Finished` since all four
+/// render through the same dense row (D12) and need nothing beyond a
+/// feature name and its docs.
 enum BeeHubPlacement {
-    Waiting(BeeHubCardData),
     InProgress(BeeHubCardData),
     Finished(BeeHubFinishedData),
+    Review(BeeHubFinishedData),
+    Compound(BeeHubFinishedData),
+    Todo(BeeHubFinishedData),
 }
 
-/// [`bee_hub_card`]'s render inputs for one Waiting or In Progress card.
+/// [`bee_hub_card`]'s render inputs for one In Progress card.
 /// `worktree_label` (project-color-identity) is [`bee_hub_worktree_label`]'s
 /// plain-text worktree state, not the retired chip's `(label, tone)` pair —
 /// only ever read by the caller when it also has a `project_label` to pair
-/// it with.
+/// it with. `reason` (kanban-columns D7/D8) carries the retired Waiting
+/// column's own line, `Waiting on you — ` plus its existing reason text,
+/// when this feature is stopped on a gate or a paused handoff; `None` for
+/// every other In Progress card.
 struct BeeHubCardData {
     feature: String,
     done: usize,
@@ -2384,7 +2425,10 @@ struct BeeHubCardData {
     docs: Option<waggledance_core::bee::BeeFeatureDocs>,
 }
 
-/// [`bee_hub_finished_row`]'s render inputs for one Finished row.
+/// [`bee_hub_finished_row`]'s render inputs for one Todo, Review, Compound
+/// or Finished row (kanban-columns D12) -- every one of the four needs only
+/// a feature name and its docs, so they share this one struct rather than
+/// each growing its own copy.
 struct BeeHubFinishedData {
     feature: String,
     docs: Option<waggledance_core::bee::BeeFeatureDocs>,
@@ -2400,7 +2444,9 @@ struct BeeHubFinishedData {
 /// caller takes it from cross-board-1's `read_rollup` instead, performing
 /// no filesystem read of its own. Iteration order matches the section this
 /// used to render directly: `snapshot.phase_board` sorted by feature name,
-/// then every archived feature not already placed, sorted by name.
+/// then every archived feature not already placed, sorted by name. Tested
+/// in D11's fixed order: In Progress, then Finished, then Review, then
+/// Compound, then Todo.
 fn bee_classify_features(
     snapshot: &BeeSnapshot,
     archived_features: &std::collections::HashSet<String>,
@@ -2420,6 +2466,11 @@ fn bee_classify_features(
 
     for f in features {
         placed.insert(f.feature.as_str());
+        // `live` keeps counting all three cell kinds (`doing`/`waiting`/
+        // `stuck`) -- it feeds only `finished_and_idle` below, which must
+        // keep reading today's exact Finished behaviour (D10's own
+        // rationale: the narrowing is for placement's live-work test, never
+        // for what still counts as a live *cell* against a closed feature).
         let live = f.cell_counts.doing + f.cell_counts.waiting + f.cell_counts.stuck;
         let is_active = active_feature == Some(f.feature.as_str());
         let session_bound = snapshot
@@ -2430,7 +2481,13 @@ fn bee_classify_features(
             .worktrees
             .iter()
             .any(|w| w.feature.as_deref() == Some(f.feature.as_str()));
-        let has_live_work = live > 0 || is_active || session_bound || worktree_bound;
+        // (kanban-columns D10) An `open` cell alone is no longer live work
+        // for placement -- only `doing` (claimed) or `stuck` cells count,
+        // plus the three existing pulls. Counting `waiting` here (as the
+        // pre-kanban-columns rule did) would swallow every feature Todo is
+        // meant to hold into In Progress first, making D2's branch dead
+        // code.
+        let has_live_work = f.cell_counts.doing + f.cell_counts.stuck > 0 || is_active || session_bound || worktree_bound;
         // (waiting-means-stopped-1) A grant is not a heartbeat: only a
         // session's own recency counts toward "working right now", never a
         // granted worktree on its own.
@@ -2462,25 +2519,21 @@ fn bee_classify_features(
             || archived_features.contains(f.feature.as_str());
         let finished_and_idle = is_finished && live == 0;
 
-        if !finished_and_idle && !working_now && ((has_live_work && gate_stop.is_some()) || waiting_via_handoff) {
-            let reason = match gate_stop {
-                Some((_, label)) => format!("{label} gate awaiting your decision"),
-                None => "Work is parked, waiting on your decision".to_string(),
+        // (kanban-columns D11) Placement is tested in this fixed order: In
+        // Progress, Finished, Review, Compound, Todo.
+        if !finished_and_idle && has_live_work {
+            // In Progress absorbs the retired Waiting column (D5, D7): a
+            // gate stop or a paused handoff no longer moves the feature to
+            // a separate column, it only adds the `Waiting on you — ` line
+            // to this same card.
+            let reason = if !working_now && (gate_stop.is_some() || waiting_via_handoff) {
+                Some(match gate_stop {
+                    Some((_, label)) => format!("Waiting on you — {label} gate awaiting your decision"),
+                    None => "Waiting on you — Work is parked, waiting on your decision".to_string(),
+                })
+            } else {
+                None
             };
-            let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
-            let worktree_label =
-                bee_hub_worktree_label(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
-            let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
-            placements.push(BeeHubPlacement::Waiting(BeeHubCardData {
-                feature: f.feature.clone(),
-                done: f.cell_counts.done,
-                total: f.cell_counts.total,
-                last_activity,
-                worktree_label,
-                reason: Some(reason),
-                docs,
-            }));
-        } else if !finished_and_idle && has_live_work {
             let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
             let worktree_label =
                 bee_hub_worktree_label(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
@@ -2491,17 +2544,35 @@ fn bee_classify_features(
                 total: f.cell_counts.total,
                 last_activity,
                 worktree_label,
-                reason: None,
+                reason,
                 docs,
             }));
         } else if is_finished {
             let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
             placements.push(BeeHubPlacement::Finished(BeeHubFinishedData { feature: f.feature.clone(), docs }));
+        } else if snapshot
+            .review
+            .candidates
+            .iter()
+            .any(|c| c.feature == f.feature && c.status != BeeReviewStatus::Settled)
+        {
+            let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
+            placements.push(BeeHubPlacement::Review(BeeHubFinishedData { feature: f.feature.clone(), docs }));
+        } else if f.phase.as_deref() == Some("compounding") {
+            let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
+            placements.push(BeeHubPlacement::Compound(BeeHubFinishedData { feature: f.feature.clone(), docs }));
+        } else if f.cell_counts.waiting > 0 && f.cell_counts.doing == 0 {
+            // (D2) Cells exist, are all still `open`, and none is
+            // `claimed` -- the Todo condition D10's narrowing exists to
+            // keep reachable.
+            let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
+            placements.push(BeeHubPlacement::Todo(BeeHubFinishedData { feature: f.feature.clone(), docs }));
         }
-        // else: no live work, no gate/handoff pull, and neither
-        // `compounding-complete` nor archived — a pre-build lane (still
-        // `exploring`, no cells yet). Renders nowhere, matching the
-        // pre-redesign board's own cell-only precedent.
+        // else: no live work, not finished, no unresolved candidate, not
+        // compounding, and either no cells at all or some already claimed
+        // without going live (impossible today, but not this rule's job to
+        // assume) — renders nowhere, matching the pre-redesign board's own
+        // precedent for a feature with nothing yet to show.
     }
 
     let mut archive_only: Vec<&String> =
@@ -2527,32 +2598,19 @@ fn bee_classify_features(
 /// giving it terminal badges is deliberately out of scope for that cell --
 /// this keeps its output byte-identical.
 fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> String {
-    let mut waiting_cards = String::new();
+    let mut todo_rows: Vec<String> = Vec::new();
     let mut in_progress_cards = String::new();
+    let mut review_rows: Vec<String> = Vec::new();
+    let mut compound_rows: Vec<String> = Vec::new();
     let mut finished_rows: Vec<String> = Vec::new();
-    let mut waiting_count = 0usize;
+    let mut todo_count = 0usize;
     let mut in_progress_count = 0usize;
+    let mut review_count = 0usize;
+    let mut compound_count = 0usize;
     let mut finished_count = 0usize;
 
     for placement in placements {
         match placement {
-            BeeHubPlacement::Waiting(data) => {
-                waiting_count += 1;
-                waiting_cards.push_str(&bee_hub_card(
-                    &project.id,
-                    &data.feature,
-                    "waiting",
-                    data.done,
-                    data.total,
-                    data.last_activity.as_deref(),
-                    &data.worktree_label,
-                    data.reason.as_deref(),
-                    data.docs.as_ref(),
-                    None,
-                    None,
-                    &[],
-                ));
-            }
             BeeHubPlacement::InProgress(data) => {
                 in_progress_count += 1;
                 in_progress_cards.push_str(&bee_hub_card(
@@ -2573,7 +2631,44 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> 
             BeeHubPlacement::Finished(data) => {
                 finished_count += 1;
                 finished_rows.push(bee_hub_finished_row(
-                    &project.id,
+                    "finished",
+                    &bee_hub_feature_href(&project.id, &data.feature),
+                    &data.feature,
+                    data.docs.as_ref(),
+                    None,
+                    None,
+                    None,
+                ));
+            }
+            BeeHubPlacement::Review(data) => {
+                review_count += 1;
+                review_rows.push(bee_hub_finished_row(
+                    "review",
+                    &bee_hub_feature_href(&project.id, &data.feature),
+                    &data.feature,
+                    data.docs.as_ref(),
+                    None,
+                    None,
+                    None,
+                ));
+            }
+            BeeHubPlacement::Compound(data) => {
+                compound_count += 1;
+                compound_rows.push(bee_hub_finished_row(
+                    "compound",
+                    &bee_hub_feature_href(&project.id, &data.feature),
+                    &data.feature,
+                    data.docs.as_ref(),
+                    None,
+                    None,
+                    None,
+                ));
+            }
+            BeeHubPlacement::Todo(data) => {
+                todo_count += 1;
+                todo_rows.push(bee_hub_finished_row(
+                    "todo",
+                    &bee_hub_feature_href(&project.id, &data.feature),
                     &data.feature,
                     data.docs.as_ref(),
                     None,
@@ -2583,24 +2678,23 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> 
             }
         }
     }
+    let todo_cards = bee_hub_finished_rows(&todo_rows);
+    let review_cards = bee_hub_finished_rows(&review_rows);
+    let compound_cards = bee_hub_finished_rows(&compound_rows);
     let finished_cards = bee_hub_finished_rows(&finished_rows);
 
     format!(
         r#"<section class="fg-card bee-hub" data-feature-hub="1">
   <h3 class="bee-panel__head">Features</h3>
   <div class="bee-hub__groups">
-    {waiting_group}
+    {todo_group}
     {in_progress_group}
+    {review_group}
+    {compound_group}
     {finished_group}
   </div>
 </section>"#,
-        waiting_group = bee_hub_group(
-            "Waiting on you",
-            "waiting",
-            waiting_count,
-            &waiting_cards,
-            "Nothing waiting on you."
-        ),
+        todo_group = bee_hub_group("Todo", "todo", todo_count, &todo_cards, "Nothing in Todo."),
         in_progress_group = bee_hub_group(
             "In Progress",
             "in-progress",
@@ -2608,6 +2702,9 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> 
             &in_progress_cards,
             "Nothing in progress."
         ),
+        review_group = bee_hub_group("Review", "review", review_count, &review_cards, "Nothing in Review."),
+        compound_group =
+            bee_hub_group("Compound", "compound", compound_count, &compound_cards, "Nothing in Compound."),
         finished_group = bee_hub_group(
             "Finished",
             "finished",
@@ -2619,23 +2716,27 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> 
 }
 
 /// The cross-project board's Features section
-/// (`docs/history/cross-board/CONTEXT.md` D1/D3/D4/D5/D7/D10): runs
-/// [`bee_classify_features`] once per `(project, rollup)` pair -- the exact
-/// column rules the per-project board applies to itself -- then merges the
-/// results into three flat, multi-project columns instead of one block per
-/// project (D4), labels every card and Finished row with its own project's
-/// name (D5), and orders and caps the merged Finished sequence per D10/D7:
-/// every feature with a ship time first, most recently shipped first, each
-/// row showing that time; then every feature without one, alphabetically by
-/// feature name across all projects -- concatenating each project's
-/// already-sorted list would not be globally sorted, so the merge sorts
-/// again. The column counts beside each heading are the sum across
-/// projects. Archived-feature names and D10 ship times come from
-/// `rollup.archived_features` (cross-board-1's `read_rollup`) -- this
-/// function performs no filesystem read of its own. An empty `rollups`
-/// still renders the same three empty columns [`bee_hub_group`] always
-/// shows for a column with nothing in it; whether to call this at all when
-/// nothing qualifies (D9) is the caller's decision.
+/// (`docs/history/cross-board/CONTEXT.md` D1/D3/D4/D5/D7/D10, grown to five
+/// columns by kanban-columns D1/D9): runs [`bee_classify_features`] once
+/// per `(project, rollup)` pair -- the exact column rules the per-project
+/// board applies to itself, D9's single shared classification rule -- then
+/// merges the results into five flat, multi-project columns instead of one
+/// block per project (D4), labels every card and every dense row with its
+/// own project's name (D5), and orders and caps the merged Finished
+/// sequence per D10/D7: every feature with a ship time first, most recently
+/// shipped first, each row showing that time; then every feature without
+/// one, alphabetically by feature name across all projects -- concatenating
+/// each project's already-sorted list would not be globally sorted, so the
+/// merge sorts again. Todo, Review and Compound carry no ship time of their
+/// own, so their rows merge in the same per-project, alphabetical-within-
+/// project order [`bee_classify_features`] already produces, exactly as
+/// In Progress's cards always have. The column counts beside each heading
+/// are the sum across projects. Archived-feature names and D10 ship times
+/// come from `rollup.archived_features` (cross-board-1's `read_rollup`) --
+/// this function performs no filesystem read of its own. An empty
+/// `rollups` still renders the same five empty columns [`bee_hub_group`]
+/// always shows for a column with nothing in it; whether to call this at
+/// all when nothing qualifies (D9) is the caller's decision.
 ///
 /// `feature_panes` (card-terminals-1) is the already-resolved join
 /// (`server.rs::project_feature_panes`): for each project id, a map from
@@ -2657,10 +2758,14 @@ pub fn bee_cross_project_features_section(
     rollups: &[(&Project, &BeeProjectRollup)],
     feature_panes: &std::collections::HashMap<String, std::collections::HashMap<String, Vec<TerminalPaneView>>>,
 ) -> String {
-    let mut waiting_cards = String::new();
+    let mut todo_rows: Vec<String> = Vec::new();
     let mut in_progress_cards = String::new();
-    let mut waiting_count = 0usize;
+    let mut review_rows: Vec<String> = Vec::new();
+    let mut compound_rows: Vec<String> = Vec::new();
+    let mut todo_count = 0usize;
     let mut in_progress_count = 0usize;
+    let mut review_count = 0usize;
+    let mut compound_count = 0usize;
     let no_panes: Vec<TerminalPaneView> = Vec::new();
 
     // Classify every project's placements once; reused below both to build
@@ -2701,26 +2806,6 @@ pub fn bee_cross_project_features_section(
 
         for placement in placements {
             match placement {
-                BeeHubPlacement::Waiting(data) => {
-                    waiting_count += 1;
-                    let panes = project_panes
-                        .and_then(|m| m.get(data.feature.as_str()))
-                        .unwrap_or(&no_panes);
-                    waiting_cards.push_str(&bee_hub_card(
-                        &project.id,
-                        &data.feature,
-                        "waiting",
-                        data.done,
-                        data.total,
-                        data.last_activity.as_deref(),
-                        &data.worktree_label,
-                        data.reason.as_deref(),
-                        data.docs.as_ref(),
-                        Some(&project.name),
-                        project_color,
-                        panes,
-                    ));
-                }
                 BeeHubPlacement::InProgress(data) => {
                     in_progress_count += 1;
                     let panes = project_panes
@@ -2745,7 +2830,8 @@ pub fn bee_cross_project_features_section(
                     let shipped_at_str = shipped_by_feature.get(data.feature.as_str()).copied().flatten();
                     let parsed = shipped_at_str.and_then(|s| time::OffsetDateTime::parse(s, &rfc3339).ok());
                     let html = bee_hub_finished_row(
-                        &project.id,
+                        "finished",
+                        &bee_hub_feature_href(&project.id, &data.feature),
                         &data.feature,
                         data.docs.as_ref(),
                         Some(&project.name),
@@ -2753,6 +2839,42 @@ pub fn bee_cross_project_features_section(
                         parsed.and(shipped_at_str),
                     );
                     finished.push(FinishedEntry { shipped_at: parsed, feature: data.feature.clone(), html });
+                }
+                BeeHubPlacement::Review(data) => {
+                    review_count += 1;
+                    review_rows.push(bee_hub_finished_row(
+                        "review",
+                        &bee_hub_feature_href(&project.id, &data.feature),
+                        &data.feature,
+                        data.docs.as_ref(),
+                        Some(&project.name),
+                        project_color,
+                        None,
+                    ));
+                }
+                BeeHubPlacement::Compound(data) => {
+                    compound_count += 1;
+                    compound_rows.push(bee_hub_finished_row(
+                        "compound",
+                        &bee_hub_feature_href(&project.id, &data.feature),
+                        &data.feature,
+                        data.docs.as_ref(),
+                        Some(&project.name),
+                        project_color,
+                        None,
+                    ));
+                }
+                BeeHubPlacement::Todo(data) => {
+                    todo_count += 1;
+                    todo_rows.push(bee_hub_finished_row(
+                        "todo",
+                        &bee_hub_feature_href(&project.id, &data.feature),
+                        &data.feature,
+                        data.docs.as_ref(),
+                        Some(&project.name),
+                        project_color,
+                        None,
+                    ));
                 }
             }
         }
@@ -2768,24 +2890,23 @@ pub fn bee_cross_project_features_section(
     });
     let finished_count = finished.len();
     let finished_rows: Vec<String> = finished.into_iter().map(|e| e.html).collect();
+    let todo_cards = bee_hub_finished_rows(&todo_rows);
+    let review_cards = bee_hub_finished_rows(&review_rows);
+    let compound_cards = bee_hub_finished_rows(&compound_rows);
     let finished_cards = bee_hub_finished_rows(&finished_rows);
 
     format!(
         r#"<section class="fg-card bee-hub" data-feature-hub="cross-project">
   <h3 class="bee-panel__head">Features</h3>
   <div class="bee-hub__groups">
-    {waiting_group}
+    {todo_group}
     {in_progress_group}
+    {review_group}
+    {compound_group}
     {finished_group}
   </div>
 </section>"#,
-        waiting_group = bee_hub_group(
-            "Waiting on you",
-            "waiting",
-            waiting_count,
-            &waiting_cards,
-            "Nothing waiting on you."
-        ),
+        todo_group = bee_hub_group("Todo", "todo", todo_count, &todo_cards, "Nothing in Todo."),
         in_progress_group = bee_hub_group(
             "In Progress",
             "in-progress",
@@ -2793,6 +2914,9 @@ pub fn bee_cross_project_features_section(
             &in_progress_cards,
             "Nothing in progress."
         ),
+        review_group = bee_hub_group("Review", "review", review_count, &review_cards, "Nothing in Review."),
+        compound_group =
+            bee_hub_group("Compound", "compound", compound_count, &compound_cards, "Nothing in Compound."),
         finished_group = bee_hub_group(
             "Finished",
             "finished",
@@ -2919,10 +3043,12 @@ fn bee_cross_project_board_project_colors<'a>(
         .collect()
 }
 
-/// One Waiting or In Progress feature card (D1) — hub-finished-compact
-/// retires the Finished group's own use of this helper in favor of
-/// [`bee_hub_finished_row`]'s dense line, so `group_key` in practice now
-/// only ever arrives as `"waiting"` or `"in-progress"`. Name + link to its
+/// The one In Progress feature card (D1) — hub-finished-compact retired the
+/// Finished group's own use of this helper in favor of
+/// [`bee_hub_finished_row`]'s dense line, and kanban-columns D1/D12 folded
+/// the former Waiting column into In Progress and moved Todo/Review/Compound
+/// onto that same dense row, so `group_key` in practice now only ever
+/// arrives as `"in-progress"`. Name + link to its
 /// own detail page, its own done/total cell progress (a `bee-progress`
 /// bar, or no markup at all when `total == 0` — hub-finished-compact drops
 /// the old "No cells recorded." filler paragraph) and its own last-activity
@@ -3117,26 +3243,45 @@ fn bee_hub_card(
     )
 }
 
-/// One Finished row (hub-finished-compact): just the feature's own name —
-/// its CONTEXT title when [`docs`] carries one, else its slug — linking to
-/// its own detail page exactly like [`bee_hub_card`], and still carrying
-/// `data-hub-group="finished"` so the group's own filtering/testing hooks
-/// keep working. Deliberately none of `bee_hub_card`'s description,
-/// progress bar, worktree chip, group chip or last-activity line: a closed
-/// feature owes no decision and no progress reading, so the board only
-/// needs to name it — its detail page is one click away. `project_label`
-/// (cross-board D5) and `shipped_at` (cross-board D10, already relative-
-/// formatted through [`bee_fmt_trace_time`]) both default to `None` for
-/// every per-project board call, which renders byte-identical to before
-/// cross-board-2; the cross-project board passes both. project-color-
-/// identity: `project_label: Some` also carries a `bee-hub__row-project--pN`
-/// modifier from `project_color` (the project's own slot from
+/// A feature's own detail-page href (`/p/:id/_bee/feature/:feature`) — the
+/// one place every caller of [`bee_hub_finished_row`] below builds it, so
+/// the four dense columns (kanban-columns D12) all link the same way
+/// [`bee_hub_card`] already does.
+fn bee_hub_feature_href(project_id: &str, feature: &str) -> String {
+    format!("/p/{pid}/_bee/feature/{feature_href}", pid = esc(project_id), feature_href = esc(feature))
+}
+
+/// One dense row (hub-finished-compact; kanban-columns D12 grows this from
+/// Finished's own row to the shared row for Todo, Review, Compound and
+/// Finished alike): just the feature's own name — its CONTEXT title when
+/// [`docs`] carries one, else its slug — linking to `href`, and carrying
+/// `data-hub-group="{group_key}"` so each group's own filtering/testing
+/// hooks keep working. `group_key` and `href` are both parameters
+/// (kanban-columns) rather than hardcoded to Finished's own `"finished"`
+/// key and feature-detail link, so the four columns share this one
+/// renderer instead of each growing its own copy; every existing Finished
+/// call site keeps passing `"finished"` and this same feature-detail href,
+/// so its own markup renders byte-identical to before this feature.
+/// Deliberately none of `bee_hub_card`'s description, progress bar,
+/// worktree chip, group chip or last-activity line: none of these four
+/// columns' features owes a decision or a progress reading, so the board
+/// only needs to name each one — its detail page is one click away.
+/// `project_label` (cross-board D5) and `shipped_at` (cross-board D10,
+/// already relative-formatted through [`bee_fmt_trace_time`], and only
+/// ever `Some` for a Finished row) both default to `None` for every
+/// per-project board call, which renders byte-identical to before
+/// cross-board-2; the cross-project board passes a project label for all
+/// four columns but a ship time only for Finished. project-color-identity:
+/// `project_label: Some` also carries a `bee-hub__row-project--pN` modifier
+/// from `project_color` (the project's own slot from
 /// [`bee_cross_project_board_project_colors`], built once by the caller and
 /// threaded down exactly as [`bee_hub_card`] receives it, never hashed
 /// separately here), so a project reads in one fixed colour everywhere it
 /// appears.
+#[allow(clippy::too_many_arguments)]
 fn bee_hub_finished_row(
-    project_id: &str,
+    group_key: &str,
+    href: &str,
     feature: &str,
     docs: Option<&waggledance_core::bee::BeeFeatureDocs>,
     project_label: Option<&str>,
@@ -3161,9 +3306,9 @@ fn bee_hub_finished_row(
         None => String::new(),
     };
     format!(
-        r#"<a class="bee-hub__row" data-hub-group="finished" href="/p/{pid}/_bee/feature/{feature_href}">{project_html}{name}{time_html}</a>"#,
-        pid = esc(project_id),
-        feature_href = esc(feature),
+        r#"<a class="bee-hub__row" data-hub-group="{group_key}" href="{href}">{project_html}{name}{time_html}</a>"#,
+        group_key = group_key,
+        href = href,
         project_html = project_html,
         name = esc(name),
         time_html = time_html,
@@ -5813,15 +5958,17 @@ mod tests {
     /// anywhere in the product now that the Finished column shows no
     /// counts at all)
     /// A feature that has already closed — every cell archived, `phase` at
-    /// bee's own terminal `"compounding-complete"` — kept rendering under
-    /// Waiting on you, because `state.json` still names it active and
+    /// bee's own terminal `"compounding-complete"` — used to keep rendering
+    /// under Waiting on you, because `state.json` still names it active and
     /// `.bee/HANDOFF.json` still reads as a pause, and that pull was
     /// evaluated before the Finished branch. The card then showed
-    /// "No cells recorded.", since the Waiting branch counts live cells
-    /// only and a closed feature has none. Finished now wins whenever no
-    /// live cell is left: the card lands under Finished — as a dense row,
-    /// carrying no done/total count of its own at all
-    /// (hub-finished-compact).
+    /// "No cells recorded.", since the pull counted live cells only and a
+    /// closed feature has none. Finished now wins whenever no live cell is
+    /// left (kanban-columns D11: In Progress is tested first, but
+    /// `finished_and_idle` excludes it) — the card lands under Finished —
+    /// as a dense row, carrying no done/total count of its own at all
+    /// (hub-finished-compact), and no `Waiting on you` line either, since
+    /// that line only ever decorates an In Progress card.
     #[test]
     fn hub_sends_a_closed_feature_to_finished_even_while_a_pause_handoff_names_it() {
         let root = std::env::temp_dir().join(format!("waggledance-views-hub-closed-{}", std::process::id()));
@@ -5876,20 +6023,20 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="waiting" data-hub-count="0""#),
-            "a closed feature owes no decision, so Waiting on you must be empty: {html}"
+            html.contains(r#"data-hub-group="in-progress" data-hub-count="0""#),
+            "a closed feature owes no decision, so In Progress must be empty: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/closed-feat""#),
-            "the closed feature must render no Waiting card at all: {html}"
+            !html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/closed-feat""#),
+            "the closed feature must render no In Progress card, and so no Waiting on you line: {html}"
         );
         assert!(
             html.contains(r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/closed-feat""#),
             "the closed feature belongs under Finished: {html}"
         );
         assert!(
-            !html.contains("cells done") && !html.contains("No cells recorded."),
-            "hub-finished-compact: a Finished row carries no progress count of its own, done or empty: {html}"
+            !html.contains("cells done") && !html.contains("No cells recorded.") && !html.contains("Waiting on you"),
+            "hub-finished-compact: a Finished row carries no progress count and no Waiting on you line of its own: {html}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -5941,8 +6088,8 @@ mod tests {
             "a zero-cell feature with a live session bound to its lane must render under In Progress: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/session-bound-feat""#),
-            "with every gate approved, the session-bound feature must not land under Waiting: {html}"
+            !html.contains("Waiting on you"),
+            "with every gate approved, the session-bound feature's card must carry no Waiting on you line: {html}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -6076,8 +6223,8 @@ mod tests {
             "a feature whose session beat a minute ago must render under In Progress even with a gate unapproved: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/working-feat""#),
-            "an agent actively working the feature must never see it under Waiting on you: {html}"
+            !html.contains("Waiting on you"),
+            "an agent actively working the feature must never see a Waiting on you line on its card: {html}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -6164,12 +6311,23 @@ mod tests {
             "a lane-less session beating a minute ago works the ACTIVE feature: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/active-feat""#),
-            "the active feature must not sit in Waiting while its own agent is mid-interview: {html}"
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/other-feat""#),
+            "the other gate-stopped feature with a live cell must also render under In Progress: {html}"
+        );
+        let active_pos = html
+            .find(r#"href="/p/proj-1/_bee/feature/active-feat""#)
+            .expect("active-feat's own card must render");
+        let other_pos = html
+            .find(r#"href="/p/proj-1/_bee/feature/other-feat""#)
+            .expect("other-feat's own card must render");
+        let active_card = &html[active_pos..other_pos.max(active_pos)];
+        assert!(
+            !active_card.contains("Waiting on you"),
+            "the active feature must carry no Waiting on you line while its own agent is mid-interview: {active_card}"
         );
         assert!(
-            html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/other-feat""#),
-            "a lane-less session must not suppress some OTHER feature's own waiting pull: {html}"
+            html[other_pos..].contains("Waiting on you"),
+            "a lane-less session must not suppress some OTHER feature's own Waiting on you line: {html}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -6179,7 +6337,7 @@ mod tests {
     /// twenty minutes cold: past `WORKING_MINUTES`, so the active feature's
     /// unapproved gate is owed the owner a decision again.
     #[test]
-    fn hub_sends_the_active_feature_to_waiting_once_its_lane_less_session_goes_cold() {
+    fn hub_gives_the_active_feature_its_waiting_on_you_line_once_its_lane_less_session_goes_cold() {
         let root = std::env::temp_dir().join(format!("waggledance-views-hub-working-default-cold-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
@@ -6209,8 +6367,12 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/active-feat""#),
-            "twenty minutes cold is not working: the gate owes a decision again: {html}"
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/active-feat""#),
+            "the feature still has live work (it is the active feature), so it stays under In Progress: {html}"
+        );
+        assert!(
+            html.contains("Waiting on you — Explore gate awaiting your decision"),
+            "twenty minutes cold is not working: its card must carry the Waiting on you line again: {html}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -6219,11 +6381,12 @@ mod tests {
     /// (waiting-means-stopped-1) The same gate-stopped lane, but the bound
     /// session's heartbeat has gone stale enough (20 minutes, past
     /// `WORKING_MINUTES` but still inside `SESSION_LIVE_MINUTES`) that
-    /// nobody is working it right now: the card falls back to Waiting on
-    /// you, while the session itself — still live per the 30-minute
-    /// window — keeps its own row on the Live strip.
+    /// nobody is working it right now: the card — still In Progress, since
+    /// it still has live work — regains its Waiting on you line, while the
+    /// session itself — still live per the 30-minute window — keeps its own
+    /// row on the Live strip.
     #[test]
-    fn hub_sends_a_gate_stopped_feature_to_waiting_once_its_session_goes_stale_enough() {
+    fn hub_gives_a_gate_stopped_feature_its_waiting_on_you_line_once_its_session_goes_stale_enough() {
         let root = std::env::temp_dir().join(format!("waggledance-views-hub-working-stale-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
@@ -6256,12 +6419,12 @@ mod tests {
         let strip_html = bee_live_strip_section(&snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/stale-working-feat""#),
-            "a session gone stale past WORKING_MINUTES must let the gate pull the card back to Waiting: {html}"
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/stale-working-feat""#),
+            "the feature still has live work, so it stays under In Progress: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/stale-working-feat""#),
-            "a stale-past-WORKING_MINUTES session must not keep the card in In Progress: {html}"
+            html.contains("Waiting on you — Shape gate awaiting your decision"),
+            "a session gone stale past WORKING_MINUTES must let the gate pull the Waiting on you line back onto the card: {html}"
         );
         assert!(
             strip_html.contains("stale-working-feat"),
@@ -6272,11 +6435,11 @@ mod tests {
     }
 
     /// (waiting-means-stopped-1) A pause handoff naming the active feature,
-    /// with nobody's session bound to its lane at all, must still pull the
-    /// card into Waiting on you — the `working_now` gate only ever
-    /// suppresses the pull when an agent really is on it.
+    /// with nobody's session bound to its lane at all, must still put the
+    /// Waiting on you line on its In Progress card — the `working_now` gate
+    /// only ever suppresses the pull when an agent really is on it.
     #[test]
-    fn hub_sends_a_pause_handoff_feature_to_waiting_when_nobody_is_working_it() {
+    fn hub_gives_a_pause_handoff_feature_its_waiting_on_you_line_when_nobody_is_working_it() {
         let root = std::env::temp_dir().join(format!("waggledance-views-hub-handoff-idle-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
@@ -6313,19 +6476,23 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/handoff-idle-feat""#),
-            "a genuine pause handoff naming a feature nobody is working must still render under Waiting on you: {html}"
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/handoff-idle-feat""#),
+            "the active feature keeps live work and stays under In Progress: {html}"
+        );
+        assert!(
+            html.contains("Waiting on you — Work is parked, waiting on your decision"),
+            "a genuine pause handoff naming a feature nobody is working must still carry the Waiting on you line: {html}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
     /// (waiting-means-stopped-1) A granted worktree alone — no session, no
-    /// heartbeat — must never suppress the waiting pull: a grant is not a
-    /// heartbeat, and a parked worktree with a gate owed is exactly the
-    /// case Waiting exists for.
+    /// heartbeat — must never suppress the Waiting on you line: a grant is
+    /// not a heartbeat, and a parked worktree with a gate owed is exactly
+    /// the case that line exists for.
     #[test]
-    fn hub_worktree_grant_alone_does_not_suppress_the_waiting_pull() {
+    fn hub_worktree_grant_alone_does_not_suppress_the_waiting_on_you_line() {
         let root = std::env::temp_dir().join(format!("waggledance-views-hub-wt-no-working-{}", std::process::id()));
         let sibling =
             std::env::temp_dir().join(format!("waggledance-views-hub-wt-no-working-sibling-{}", std::process::id()));
@@ -6358,12 +6525,12 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#),
-            "a granted worktree with no session bound must not suppress the waiting pull: {html}"
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#),
+            "the granted worktree's own liveness pull keeps the card under In Progress: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#),
-            "the worktree grant alone must not count as working now: {html}"
+            html.contains("Waiting on you — Shape gate awaiting your decision"),
+            "a granted worktree with no session bound must not suppress the Waiting on you line: {html}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -6661,12 +6828,213 @@ mod tests {
             "a closed feature must stay under Finished even with a bound live session: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="waiting" href="/p/proj-1/_bee/feature/closed-session-feat""#),
+            !html.contains("Waiting on you"),
             "a closed feature owes no decision even while a session is bound to its lane: {html}"
         );
         assert!(
             !html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/closed-session-feat""#),
             "a bound live session must never drag a finished feature back into In Progress: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (kanban-columns D11) Placement is tested In Progress, then Finished,
+    /// then Review, then Compound, then Todo — Finished before Review is
+    /// D11's own deliberate call, so a closed feature stays closed even
+    /// while it still carries an unresolved review candidate.
+    #[test]
+    fn hub_keeps_a_closed_feature_in_finished_even_with_an_unresolved_review_candidate() {
+        let root =
+            std::env::temp_dir().join(format!("waggledance-views-hub-finished-over-review-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/closed-reviewed-feat.json",
+            r#"{
+                "feature": "closed-reviewed-feat",
+                "phase": "compounding-complete",
+                "mode": "standard",
+                "next_action": "none"
+            }"#,
+        );
+        write(
+            ".bee/review-candidates.jsonl",
+            "{\"id\":\"rc-1\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"closed-reviewed-feat\",\"head\":\"h1\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-x\"]}\n",
+        );
+
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/closed-reviewed-feat""#),
+            "a closed feature must stay under Finished even carrying an unresolved review candidate: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="review" href="/p/proj-1/_bee/feature/closed-reviewed-feat""#),
+            "the same feature must never also render under Review: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (kanban-columns D5) In Progress wins every tie: a feature with live
+    /// work stays in In Progress even when it also carries an unresolved
+    /// review candidate; it only reaches Review once it has no live cells
+    /// left and the candidate is still unresolved.
+    #[test]
+    fn hub_places_live_work_in_progress_over_an_unresolved_review_candidate() {
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-live-over-review-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/live-reviewed-feat.json",
+            r#"{
+                "feature": "live-reviewed-feat",
+                "phase": "swarming",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
+            }"#,
+        );
+        write(".bee/cells/a.json", &format!(
+            r#"{{
+                "id": "lr-1",
+                "feature": "live-reviewed-feat",
+                "lane": "tiny",
+                "title": "Cell lr-1",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {{}},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "claimed",
+                "tier": "generation",
+                "trace": {{"worker": "w1", "claimed_at": "2026-08-10T08:00:00Z", "capped_at": null}}
+            }}"#
+        ));
+        write(
+            ".bee/review-candidates.jsonl",
+            "{\"id\":\"rc-2\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"live-reviewed-feat\",\"head\":\"h1\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-y\"]}\n",
+        );
+
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/live-reviewed-feat""#),
+            "live work must keep the feature under In Progress despite the unresolved candidate: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="review" href="/p/proj-1/_bee/feature/live-reviewed-feat""#),
+            "the same feature must never also render under Review while it still has live work: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (kanban-columns D11) Review is tested before Compound: a feature
+    /// with no live work, carrying both an unresolved review candidate and
+    /// a `"compounding"` phase, lands in Review.
+    #[test]
+    fn hub_places_an_unresolved_candidate_in_review_over_a_compounding_phase() {
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-review-over-compound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/both-signal-feat.json",
+            r#"{
+                "feature": "both-signal-feat",
+                "phase": "compounding",
+                "mode": "standard",
+                "next_action": "none"
+            }"#,
+        );
+        write(
+            ".bee/review-candidates.jsonl",
+            "{\"id\":\"rc-3\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"both-signal-feat\",\"head\":\"h1\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-z\"]}\n",
+        );
+
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            html.contains(r#"data-hub-group="review" href="/p/proj-1/_bee/feature/both-signal-feat""#),
+            "a feature carrying both signals must stop at Review, its earlier branch: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="compound" href="/p/proj-1/_bee/feature/both-signal-feat""#),
+            "the same feature must never also render under Compound: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (kanban-columns D4) A `Settled` review candidate (every session
+    /// naming one of its cells decided `approved` or `blocked`) must never
+    /// pull a feature into Review.
+    #[test]
+    fn hub_a_settled_review_candidate_does_not_pull_a_feature_into_review() {
+        let root = std::env::temp_dir().join(format!("waggledance-views-hub-settled-review-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/settled-feat.json",
+            r#"{
+                "feature": "settled-feat",
+                "phase": "swarming",
+                "mode": "standard",
+                "next_action": "none"
+            }"#,
+        );
+        write(
+            ".bee/review-candidates.jsonl",
+            "{\"id\":\"rc-4\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"settled-feat\",\"head\":\"h1\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-w\"]}\n",
+        );
+        write(
+            ".bee/reviews/r1.json",
+            r#"{"id":"r1","included":[{"type":"cell","id":"cell-w"}],"findings":[],"decision":{"status":"approved"}}"#,
+        );
+
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot);
+
+        assert!(
+            !html.contains(r#"data-hub-group="review" href="/p/proj-1/_bee/feature/settled-feat""#),
+            "a Settled candidate must never pull its feature into Review: {html}"
+        );
+        assert!(
+            !html.contains("settled-feat"),
+            "with no live work, no unresolved candidate, no compounding phase and no open cell, the feature renders nowhere: {html}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -6745,7 +7113,15 @@ mod tests {
     /// none of `bee_hub_card`'s chip, progress bar or activity markup.
     #[test]
     fn bee_hub_finished_row_renders_only_a_name_and_link() {
-        let row = bee_hub_finished_row("proj-1", "shipped-feat", None, None, None, None);
+        let row = bee_hub_finished_row(
+            "finished",
+            "/p/proj-1/_bee/feature/shipped-feat",
+            "shipped-feat",
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(
             row,
             r#"<a class="bee-hub__row" data-hub-group="finished" href="/p/proj-1/_bee/feature/shipped-feat">shipped-feat</a>"#
@@ -6756,11 +7132,33 @@ mod tests {
         );
     }
 
-    /// (hub-finished-compact, feature-titles parity) A Finished row prefers
+    /// (kanban-columns D12) The dense row's group key and href are both
+    /// caller-supplied parameters rather than hardcoded to Finished's own
+    /// `"finished"` key and feature-detail link — the exact change that lets
+    /// Todo, Review and Compound share this one renderer instead of each
+    /// growing a copy.
+    #[test]
+    fn bee_hub_finished_row_carries_the_callers_own_group_key_and_href() {
+        let row = bee_hub_finished_row(
+            "todo",
+            "/p/proj-1/_bee/feature/todo-feat",
+            "todo-feat",
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            row,
+            r#"<a class="bee-hub__row" data-hub-group="todo" href="/p/proj-1/_bee/feature/todo-feat">todo-feat</a>"#
+        );
+    }
+
+    /// (hub-finished-compact, feature-titles parity) A dense row prefers
     /// the feature's own CONTEXT title over its slug, exactly as
-    /// `bee_hub_card` already does for the other two groups — and drops the
-    /// slug entirely rather than demoting it to a subtitle, since a dense
-    /// row has no room for both.
+    /// `bee_hub_card` already does for the one In Progress group — and drops
+    /// the slug entirely rather than demoting it to a subtitle, since a
+    /// dense row has no room for both.
     #[test]
     fn bee_hub_finished_row_prefers_the_context_title_over_the_slug() {
         let docs = waggledance_core::bee::BeeFeatureDocs {
@@ -6768,7 +7166,15 @@ mod tests {
             description: None,
             docs: vec![],
         };
-        let row = bee_hub_finished_row("proj-1", "slug-feat", Some(&docs), None, None, None);
+        let row = bee_hub_finished_row(
+            "finished",
+            "/p/proj-1/_bee/feature/slug-feat",
+            "slug-feat",
+            Some(&docs),
+            None,
+            None,
+            None,
+        );
         assert!(row.contains(">Human Title</a>"), "{row}");
         assert!(!row.contains(">slug-feat<"), "the slug must not also render once a title exists: {row}");
     }
@@ -6853,8 +7259,9 @@ mod tests {
     }
 
     /// (cross-board D3/D4/D5) Three projects, each contributing one feature
-    /// in a different one of the three states: the same shape
-    /// `hub_sends_a_gate_stopped_feature_to_waiting_once_its_session_goes_stale_enough`
+    /// in a different one of the states the per-project board itself proves:
+    /// the same shape
+    /// `hub_gives_a_gate_stopped_feature_its_waiting_on_you_line_once_its_session_goes_stale_enough`
     /// and its siblings already prove one project at a time. Each feature
     /// must land in the same column its own project's board would place it
     /// in, and must carry that project's own name.
@@ -6873,7 +7280,8 @@ mod tests {
         };
 
         // Project A: a gate-stopped feature, its session stale past
-        // WORKING_MINUTES but still live -> Waiting on you.
+        // WORKING_MINUTES but still live -> In Progress, carrying its
+        // Waiting on you line.
         write(
             &root_a,
             ".bee/lanes/waiting-feat.json",
@@ -6942,10 +7350,14 @@ mod tests {
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="waiting" href="/p/proj-a/_bee/feature/waiting-feat""#),
-            "waiting-feat must land under Waiting, same as its own project's board would: {html}"
+            html.contains(r#"data-hub-group="in-progress" href="/p/proj-a/_bee/feature/waiting-feat""#),
+            "waiting-feat must land under In Progress, same as its own project's board would: {html}"
         );
-        assert!(html.contains("Project A"), "the waiting card must carry its own project's name: {html}");
+        assert!(
+            html.contains("Waiting on you — Shape gate awaiting your decision"),
+            "waiting-feat's card must still carry its own Waiting on you line: {html}"
+        );
+        assert!(html.contains("Project A"), "the card must carry its own project's name: {html}");
         assert!(
             html.contains(r#"data-hub-group="in-progress" href="/p/proj-b/_bee/feature/progress-feat""#),
             "progress-feat must land under In Progress: {html}"
@@ -6957,12 +7369,8 @@ mod tests {
         );
         assert!(html.contains("Project C"), "the finished row must carry its own project's name: {html}");
         assert!(
-            html.contains(r#"data-hub-group="waiting" data-hub-count="1""#),
-            "the Waiting count must be the sum across projects: {html}"
-        );
-        assert!(
-            html.contains(r#"data-hub-group="in-progress" data-hub-count="1""#),
-            "the In Progress count must be the sum across projects: {html}"
+            html.contains(r#"data-hub-group="in-progress" data-hub-count="2""#),
+            "the In Progress count must be the sum across projects, both waiting-feat and progress-feat: {html}"
         );
         assert!(
             html.contains(r#"data-hub-group="finished" data-hub-count="1""#),
@@ -7216,10 +7624,11 @@ mod tests {
         }
     }
 
-    /// (project-color-identity) A project contributing both a card (a
-    /// Waiting feature) and a Finished row (an archived feature) gets the
-    /// same colour slot in both -- the map is built once, up front, and
-    /// threaded down, never recomputed per renderer.
+    /// (project-color-identity) A project contributing both a card (an In
+    /// Progress feature carrying a Waiting on you line) and a Finished row
+    /// (an archived feature) gets the same colour slot in both -- the map is
+    /// built once, up front, and threaded down, never recomputed per
+    /// renderer.
     #[test]
     fn cross_project_same_project_gets_the_same_slot_on_its_card_and_its_finished_row() {
         let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-color-a-{}", std::process::id()));
@@ -7283,10 +7692,10 @@ mod tests {
         let card_slot = (1..=10)
             .find(|n| {
                 html.contains(&format!(
-                    "bee-hub__shell--p{n}\"><a class=\"bee-hub__card\" data-hub-group=\"waiting\" href=\"/p/proj-a/"
+                    "bee-hub__shell--p{n}\"><a class=\"bee-hub__card\" data-hub-group=\"in-progress\" href=\"/p/proj-a/"
                 ))
             })
-            .unwrap_or_else(|| panic!("proj-a's own waiting card must carry a colour modifier: {html}"));
+            .unwrap_or_else(|| panic!("proj-a's own In Progress card must carry a colour modifier: {html}"));
         let row_slot = (1..=10)
             .find(|n| html.contains(&format!("bee-hub__row-project--p{n}\">Project A</span>")))
             .unwrap_or_else(|| panic!("proj-a's own Finished row must carry a colour modifier: {html}"));
@@ -7327,7 +7736,7 @@ mod tests {
             tab: "t1".into(),
         }];
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "waiting", 1, 2, None, "Main", None, None, None, None, &panes,
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &panes,
         );
         // project_badges' own markup, with only its aria-label swapped for
         // the checkout-naming one this card must carry and its own
@@ -7393,7 +7802,7 @@ mod tests {
     #[test]
     fn bee_hub_card_with_no_panes_renders_no_badge_container() {
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "waiting", 1, 2, None, "Main", None, None, None, None, &[],
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
         );
         assert!(
             !card_html.contains("proj-row__badges"),
@@ -7467,7 +7876,7 @@ mod tests {
         let card_html = bee_hub_card(
             "proj-a",
             "feat-a",
-            "waiting",
+            "in-progress",
             1,
             2,
             None,
@@ -7501,7 +7910,7 @@ mod tests {
         let card_html = bee_hub_card(
             "proj-a",
             "feat-a",
-            "waiting",
+            "in-progress",
             1,
             2,
             None,
@@ -7536,7 +7945,7 @@ mod tests {
         let card_html = bee_hub_card(
             "proj-a",
             "feat-a",
-            "waiting",
+            "in-progress",
             1,
             2,
             None,
@@ -7549,7 +7958,7 @@ mod tests {
         );
         assert_eq!(
             card_html,
-            r#"<div class="fg-card bee-hub__shell"><a class="bee-hub__card" data-hub-group="waiting" href="/p/proj-a/_bee/feature/feat-a"><div class="fg-card__title">Human Title</div><div class="bee-hub__slug">feat-a<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></a></div>"#,
+            r#"<div class="fg-card bee-hub__shell"><a class="bee-hub__card" data-hub-group="in-progress" href="/p/proj-a/_bee/feature/feat-a"><div class="fg-card__title">Human Title</div><div class="bee-hub__slug">feat-a<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></a></div>"#,
             "a card with no project label must keep the byte-identical shell/colour and now carry its worktree state in the slug subtitle: {card_html}"
         );
         assert!(!card_html.contains("bee-hub__shell--p"), "no project label must mean no colour modifier: {card_html}");
@@ -7566,7 +7975,7 @@ mod tests {
     #[test]
     fn bee_hub_card_with_no_project_label_and_no_title_names_its_worktree_alone() {
         let card_html =
-            bee_hub_card("proj-a", "feat-a", "waiting", 1, 2, None, "merged", None, None, None, None, &[]);
+            bee_hub_card("proj-a", "feat-a", "in-progress", 1, 2, None, "merged", None, None, None, None, &[]);
         assert!(
             card_html.contains(
                 r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">merged</span></div>"#
@@ -7598,7 +8007,7 @@ mod tests {
             let card_html = bee_hub_card(
                 "proj-a",
                 "feat-a",
-                "waiting",
+                "in-progress",
                 1,
                 2,
                 None,
@@ -7622,7 +8031,15 @@ mod tests {
     /// `project_color` the caller hands it.
     #[test]
     fn bee_hub_finished_row_with_project_label_carries_matching_color_modifier() {
-        let row = bee_hub_finished_row("proj-a", "shipped-feat", None, Some("Project A"), Some(3), None);
+        let row = bee_hub_finished_row(
+            "finished",
+            "/p/proj-a/_bee/feature/shipped-feat",
+            "shipped-feat",
+            None,
+            Some("Project A"),
+            Some(3),
+            None,
+        );
         assert!(
             row.contains(r#"<span class="bee-hub__row-project bee-hub__row-project--p3">Project A</span>"#),
             "the Finished row's project span must carry the colour modifier it was handed: {row}"
