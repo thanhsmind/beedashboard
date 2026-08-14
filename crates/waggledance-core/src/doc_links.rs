@@ -140,6 +140,33 @@ fn trim_trailing_url_punctuation(url: &str) -> &str {
     &url[..end]
 }
 
+/// How far a URL runs inside `rest`, which is already-escaped HTML.
+///
+/// A plain character scan cannot be used on its own: `&`, `;`, `#` and the
+/// letters of an entity are all legal URL characters, so a URL an agent wrote
+/// inside quotes (`"https://x.dev/a"`, escaped to `&quot;https://x.dev/a&quot;`)
+/// would swallow the closing `&quot;` into its own href. Every entity ends the
+/// match except `&amp;`, which is the one that really belongs inside a query
+/// string.
+fn url_run_len(rest: &str) -> usize {
+    let mut i = 0usize;
+    while i < rest.len() {
+        let c = rest[i..].chars().next().expect("i is a char boundary");
+        if c == '&' {
+            if rest[i..].starts_with("&amp;") {
+                i += "&amp;".len();
+                continue;
+            }
+            break;
+        }
+        if !is_url_char(c) {
+            break;
+        }
+        i += c.len_utf8();
+    }
+    i
+}
+
 /// Whether `url` names a host after its scheme. Prose that merely *mentions*
 /// a scheme — "only `http://` and `https://` qualify" — matches the scheme
 /// pattern with nothing behind it, and a link to `http://` goes nowhere; a
@@ -213,7 +240,7 @@ pub fn linkify_urls(html: &str) -> String {
                     .unwrap_or(false);
             let rest = &html[i..];
             if at_boundary && (rest.starts_with("http://") || rest.starts_with("https://")) {
-                let end = rest.find(|c: char| !is_url_char(c)).unwrap_or(rest.len());
+                let end = url_run_len(rest);
                 let url = trim_trailing_url_punctuation(&rest[..end]);
                 if has_host(url) {
                     out.push_str(&format!(
@@ -361,6 +388,40 @@ mod tests {
             "{out}"
         );
         assert!(out.ends_with("foo</a>."), "{out}");
+    }
+
+    /// A URL an agent wrote inside quotes reaches this function already
+    /// escaped, so the closing quote is `&quot;` — every character of which
+    /// is a legal URL character. The entity ends the match instead.
+    #[test]
+    fn stops_a_url_at_a_quote_entity() {
+        let out = linkify_urls("curl &quot;https://example.dev/a&quot; now");
+        assert!(
+            out.contains(r#"href="https://example.dev/a""#),
+            "{out}"
+        );
+        assert!(out.contains("/a</a>&quot; now"), "{out}");
+    }
+
+    /// `&lt;` ends a match the same way — it is markup an agent printed, not
+    /// part of the address.
+    #[test]
+    fn stops_a_url_at_a_less_than_entity() {
+        let out = linkify_urls("see https://example.dev/a&lt;tag&gt;");
+        assert!(out.contains(r#"href="https://example.dev/a""#), "{out}");
+        assert!(out.contains("/a</a>&lt;tag&gt;"), "{out}");
+    }
+
+    /// The one entity that belongs inside a URL: a query string's own
+    /// ampersand, escaped on its way through the ANSI translation.
+    #[test]
+    fn keeps_an_escaped_ampersand_inside_a_query_string() {
+        let out = linkify_urls("open https://example.dev/a?x=1&amp;y=2 now");
+        assert!(
+            out.contains(r#"href="https://example.dev/a?x=1&amp;y=2""#),
+            "{out}"
+        );
+        assert!(out.ends_with(" now"), "{out}");
     }
 
     /// An agent explaining the rule prints the schemes themselves — "only
