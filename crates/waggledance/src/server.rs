@@ -446,6 +446,7 @@ fn router(state: AppState) -> Router {
         .route("/p/:id/_bee", get(bee_board))
         .route("/p/:id/_bee/cell/:cell_id", get(bee_cell_detail))
         .route("/p/:id/_bee/feature/:feature", get(bee_feature_detail))
+        .route("/p/:id/_bee/pbi/:pbi_id", get(bee_pbi_detail))
         // Gated (D4/D7/D12): `terminal_family_enabled` is the only check
         // left in front of this route.
         .route("/p/:id/_terminal", get(terminal_page))
@@ -3515,6 +3516,45 @@ async fn bee_feature_detail(
     .into_response()
 }
 
+/// `GET /p/:id/_bee/pbi/:pbi_id` — one proposed backlog item's own page
+/// (pbi-detail-1): title, status and condition-of-satisfaction text, plus a
+/// link to its owning feature when the snapshot knows that feature. An
+/// unknown id — no PBI in `snapshot.backlog.pbis` carries it — answers the
+/// same way [`bee_feature_detail`] answers an unknown feature: a plain
+/// `not_found`, no second shape.
+async fn bee_pbi_detail(
+    State(st): State<AppState>,
+    Path((id, pbi_id)): Path<(String, String)>,
+) -> Response {
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("project not found");
+    };
+    let snapshot = waggledance_core::bee::read_snapshot(&project.root_path);
+    if !snapshot.present {
+        return not_found("this project has no .bee/ store");
+    }
+    let Some(pbi) = snapshot.backlog.pbis.iter().find(|p| p.id == pbi_id) else {
+        return not_found("pbi not found");
+    };
+    let feature_known = !pbi.feature.is_empty() && bee_pbi_feature_is_known(&project.root_path, &snapshot, &pbi.feature);
+    Html(views::bee_pbi_page(&project, pbi, feature_known)).into_response()
+}
+
+/// [`bee_pbi_detail`]'s own "does the owning feature have a page to link
+/// to" check — the same union [`bee_feature_detail`]'s own `known_feature`
+/// tests (shipped, archived, any live bucket, or a `phase_board` entry),
+/// minus the buckets/lane/gate work that route needs and this link does
+/// not: a PBI whose feature would 404 must never be linked at all.
+fn bee_pbi_feature_is_known(root: &std::path::Path, snapshot: &waggledance_core::bee::BeeSnapshot, feature: &str) -> bool {
+    snapshot.shipped.iter().any(|f| f.feature == feature)
+        || snapshot.phase_board.iter().any(|f| f.feature == feature)
+        || snapshot.buckets.doing.iter().any(|c| c.feature == feature)
+        || snapshot.buckets.waiting.iter().any(|c| c.feature == feature)
+        || snapshot.buckets.stuck.iter().any(|c| c.feature == feature)
+        || snapshot.buckets.done.iter().any(|c| c.feature == feature)
+        || !waggledance_core::bee::read_archived_cells(root, feature).is_empty()
+}
+
 /// Render `s` relative to `root` when it names a path under `root`; reduce
 /// to its bare filename when it is absolute but falls outside `root`. A
 /// local twin of `waggledance_core::bee`'s private `relativize` — that module is
@@ -5023,9 +5063,9 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (kanban-columns D2/D3, happy) A `proposed` backlog PBI renders as a
-    /// dense flat row under Todo, below the feature already there, linked
-    /// to this project's own bee board rather than a feature page — a
+    /// (kanban-columns D2/D3, pbi-detail-1) A `proposed` backlog PBI renders
+    /// as a dense flat row under Todo, below the feature already there,
+    /// linked to that PBI's own detail page rather than a feature page — a
     /// `proposed` PBI generally has neither lane nor docs of its own.
     #[tokio::test]
     async fn proposed_pbi_renders_a_linked_todo_row_below_the_feature_rows() {
@@ -5050,9 +5090,9 @@ mod bee_route_tests {
 
         assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"2\""), "{body}");
         let feature_href = format!("data-hub-group=\"todo\" href=\"/p/{}/_bee/feature/todo-feat\"", project.id);
-        let pbi_href = format!("data-hub-group=\"todo\" href=\"/p/{}/_bee\"", project.id);
+        let pbi_href = format!("data-hub-group=\"todo\" href=\"/p/{}/_bee/pbi/PBI-1\"", project.id);
         let feature_pos = body.find(&feature_href).expect(&format!("the feature row must render: {body}"));
-        let pbi_pos = body.find(&pbi_href).expect(&format!("the PBI row must render, linked to the project's own bee board: {body}"));
+        let pbi_pos = body.find(&pbi_href).expect(&format!("the PBI row must render, linked to its own detail page: {body}"));
         assert!(pbi_pos > feature_pos, "the PBI row must sit below the feature row within Todo: {body}");
         assert!(body.contains("Ship the widget"), "the PBI's own title must render: {body}");
 
@@ -5088,10 +5128,10 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (kanban-columns D3, edge) The PBI's own `feature` field names no
-    /// lane at all (a `proposed` PBI generally has none yet) — the row
-    /// still renders with a working link to the owning project's own bee
-    /// board, since D3 never routes through a feature page.
+    /// (kanban-columns D3, pbi-detail-1, edge) The PBI's own `feature` field
+    /// names no lane at all (a `proposed` PBI generally has none yet) — the
+    /// row still renders with a working link to that PBI's own detail page,
+    /// since D3 never routes through a feature page.
     #[tokio::test]
     async fn pbi_todo_row_links_to_the_project_board_even_when_its_feature_names_no_lane() {
         let root = fresh_root("hub-pbi-no-lane");
@@ -5109,10 +5149,92 @@ mod bee_route_tests {
 
         assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"1\""), "{body}");
         assert!(
-            body.contains(&format!("data-hub-group=\"todo\" href=\"/p/{}/_bee\"", project.id)),
-            "a PBI whose feature names no lane must still render a working project-board link: {body}"
+            body.contains(&format!("data-hub-group=\"todo\" href=\"/p/{}/_bee/pbi/PBI-1\"", project.id)),
+            "a PBI whose feature names no lane must still render a working link to its own detail page: {body}"
         );
         assert!(body.contains("No lane yet"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (pbi-detail-1, happy) A proposed PBI's own detail page renders its
+    /// title, status and condition-of-satisfaction text, and links the
+    /// owning feature when the snapshot knows it.
+    #[tokio::test]
+    async fn pbi_detail_page_renders_title_status_cos_and_the_owning_feature_link() {
+        let root = fresh_root("pbi-detail-happy");
+        write(
+            &root,
+            ".bee/lanes/todo-feat.json",
+            &lane_json("todo-feat", "swarming", "standard", "keep going", None, None),
+        );
+        write(&root, ".bee/cells/a.json", &feature_cell_json("wf-1", "todo-feat", "open", None, None));
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Ship the widget\",\"status\":\"proposed\",\"feature\":\"todo-feat\",\"cos\":\"widget ships\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "pbi-detail-happy");
+        let resp = get(router(st), &format!("/p/{}/_bee/pbi/PBI-1", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("Ship the widget"), "the PBI's own title must render: {body}");
+        assert!(body.contains("proposed"), "the PBI's own status must render: {body}");
+        assert!(body.contains("widget ships"), "the PBI's own condition-of-satisfaction text must render: {body}");
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/todo-feat\"", project.id)),
+            "the owning feature, known to the snapshot, must be linked: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (pbi-detail-1, edge) A PBI whose `feature` field names a feature the
+    /// snapshot does not know (no lane, no cells, never shipped, no
+    /// archive) still names that feature but never links it — a link to a
+    /// route that would itself 404 is worse than no link at all.
+    #[tokio::test]
+    async fn pbi_detail_page_names_an_unknown_owning_feature_without_linking_it() {
+        let root = fresh_root("pbi-detail-unknown-feature");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"No lane yet\",\"status\":\"proposed\",\"feature\":\"never-lane-feature\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "pbi-detail-unknown-feature");
+        let resp = get(router(st), &format!("/p/{}/_bee/pbi/PBI-1", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("never-lane-feature"), "the unknown feature must still be named: {body}");
+        assert!(
+            !body.contains(&format!("href=\"/p/{}/_bee/feature/never-lane-feature\"", project.id)),
+            "a feature the snapshot does not know must never be linked: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (pbi-detail-1, edge) An id matching no PBI answers the same way an
+    /// unknown feature name does (`bee_feature_detail`) — a plain not-found.
+    #[tokio::test]
+    async fn unknown_pbi_id_is_not_found() {
+        let root = fresh_root("pbi-detail-unknown-id");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Ship the widget\",\"status\":\"proposed\",\"feature\":\"todo-feat\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "pbi-detail-unknown-id");
+        let resp = get(router(st), &format!("/p/{}/_bee/pbi/does-not-exist", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -15119,9 +15241,9 @@ mod bee_route_tests {
             "every feature row must sit above every PBI row within the merged Todo column, got hrefs in order {todo_hrefs:?}"
         );
         assert!(
-            todo_hrefs.contains(&format!("/p/{}/_bee", project_a.id).as_str())
-                && todo_hrefs.contains(&format!("/p/{}/_bee", project_b.id).as_str()),
-            "both projects' own PBI rows must link to their own bee board: {todo_hrefs:?}"
+            todo_hrefs.contains(&format!("/p/{}/_bee/pbi/PBI-A", project_a.id).as_str())
+                && todo_hrefs.contains(&format!("/p/{}/_bee/pbi/PBI-B", project_b.id).as_str()),
+            "both projects' own PBI rows must link to that PBI's own detail page: {todo_hrefs:?}"
         );
 
         std::fs::remove_dir_all(&dir).ok();

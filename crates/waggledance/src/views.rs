@@ -2703,7 +2703,7 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement], pbi
             todo_count += 1;
             todo_rows.push(bee_hub_finished_row(
                 "todo",
-                &bee_hub_project_bee_href(&project.id),
+                &bee_hub_pbi_href(&project.id, &pbi.id),
                 &pbi.title,
                 None,
                 None,
@@ -2931,7 +2931,7 @@ pub fn bee_cross_project_features_section(
                 todo_count += 1;
                 todo_pbi_rows.push(bee_hub_finished_row(
                     "todo",
-                    &bee_hub_project_bee_href(&project.id),
+                    &bee_hub_pbi_href(&project.id, &pbi.id),
                     &pbi.title,
                     None,
                     Some(&project.name),
@@ -3319,10 +3319,19 @@ fn bee_hub_feature_href(project_id: &str, feature: &str) -> String {
     format!("/p/{pid}/_bee/feature/{feature_href}", pid = esc(project_id), feature_href = esc(feature))
 }
 
-/// (kanban-columns D3) Where a Todo PBI row links -- the owning project's
-/// whole bee board, never a feature page: a `proposed` PBI generally has
-/// neither a lane nor CONTEXT docs of its own for [`bee_hub_feature_href`]
-/// to point at.
+/// (pbi-detail-1) A proposed PBI's own detail-page href
+/// (`/p/:id/_bee/pbi/:pbi_id`) -- [`bee_hub_feature_href`]'s sibling for a
+/// PBI that has no feature of its own yet. Both proposed-PBI board renderers
+/// (the per-project board and the homepage Kanban tab) build their row's
+/// href through this one function, so they can never drift apart.
+fn bee_hub_pbi_href(project_id: &str, pbi_id: &str) -> String {
+    format!("/p/{pid}/_bee/pbi/{pbi_href}", pid = esc(project_id), pbi_href = esc(pbi_id))
+}
+
+/// (pbi-detail-1) The owning project's whole bee board href
+/// (`/p/:id/_bee`) — [`bee_pbi_page`]'s own "back to board" link, the same
+/// destination the proposed-PBI board rows pointed at before they gained
+/// their own page.
 fn bee_hub_project_bee_href(project_id: &str) -> String {
     format!("/p/{pid}/_bee", pid = esc(project_id))
 }
@@ -4192,6 +4201,61 @@ pub fn bee_feature_page(
         tabs = tabs,
     );
     layout(&format!("{} · {}", feature, project.name), "", &body)
+}
+
+/// (pbi-detail-1) A proposed backlog item's own detail page — the real
+/// destination the proposed-PBI board rows now link to instead of falling
+/// back to the whole project board (a proposed PBI has no lane or CONTEXT
+/// docs of its own, so it reuses [`bee_feature_page`]'s own layout, chip
+/// and card classes rather than a stylesheet block of its own). The owning
+/// feature only links when the caller has already confirmed the snapshot
+/// knows it — `feature_known` false leaves it named, plain text, exactly
+/// like a PBI whose `feature` field is blank.
+pub fn bee_pbi_page(project: &Project, pbi: &waggledance_core::bee::BeePbi, feature_known: bool) -> String {
+    let status_chip = format!(r#"<span class="fg-chip fg-chip--neutral">{}</span>"#, esc(&pbi.status));
+    let feature_html = if pbi.feature.is_empty() {
+        String::new()
+    } else if feature_known {
+        format!(
+            r#"<p class="bee-cell__meta">feature: <a href="{href}">{feature}</a></p>"#,
+            href = bee_hub_feature_href(&project.id, &pbi.feature),
+            feature = esc(&pbi.feature),
+        )
+    } else {
+        format!(r#"<p class="bee-cell__meta">feature: {}</p>"#, esc(&pbi.feature))
+    };
+    let cos_html = if pbi.cos.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<p class="bee-detail-desc">{}</p>"#, esc(&pbi.cos))
+    };
+    let body = format!(
+        r#"{topbar}
+{style}
+<main class="fg-page bee-hub-theme">
+  <div class="bee-detail-head">
+    <div>
+      <h2 class="fg-pagehead__title">{title}</h2>
+      {feature_html}
+      {cos_html}
+    </div>
+    {status_chip}
+  </div>
+  <p class="bee-cell__meta"><a href="{board_href}">Back to board</a></p>
+</main>"#,
+        topbar = topbar(&format!(
+            "<span class=\"crumb\">{name} · {title}</span>",
+            name = esc(&project.name),
+            title = esc(&pbi.title),
+        )),
+        style = bee_hub_style(),
+        title = esc(&pbi.title),
+        feature_html = feature_html,
+        cos_html = cos_html,
+        status_chip = status_chip,
+        board_href = bee_hub_project_bee_href(&project.id),
+    );
+    layout(&format!("{} · {}", pbi.title, project.name), "", &body)
 }
 
 /// D2's detail header docs row (feature-titles, extended by hub-fallbacks):
