@@ -663,6 +663,10 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    agent meant to convey — and says it is a link by underlining. */
 .term-doc-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
 .term-doc-link:hover { text-decoration-thickness: 2px; }
+/* A http/https URL an agent printed, now clickable — same treatment as a
+   doc link: it keeps the surrounding ANSI colour and just underlines. */
+.term-url-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.term-url-link:hover { text-decoration-thickness: 2px; }
 /* Below this width the answer is the same whatever the measurement says: no
    readable type size fits a terminal frame on a handset, so the lines wrap.
    Stated in CSS rather than left to the script, because a page whose script

@@ -2023,6 +2023,10 @@ async fn terminal_screen(
                 &waggledance_core::ansi::to_html(&read.text),
                 &waggledance_core::doc_links::link_base(&id, configured_hostname(&st).as_deref()),
             );
+            // An agent prints URLs into its terminal just as constantly.
+            // Run after linkify_docs so a doc link's own anchor text is
+            // never linked a second time.
+            let html = waggledance_core::doc_links::linkify_urls(&html);
             Json(json!({ "text": html, "revision": revision })).into_response()
         }
         Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
@@ -3304,8 +3308,11 @@ async fn unassigned_terminal_screen(
     match read {
         Ok(read) => {
             let revision = waggledance_core::ansi::revision_of(&read.text);
-            Json(json!({ "text": waggledance_core::ansi::to_html(&read.text), "revision": revision }))
-                .into_response()
+            // An unassigned pane's screen carries no project to link a doc
+            // path into, but a URL an agent printed is absolute on its own —
+            // this path needs no project base to linkify it.
+            let html = waggledance_core::doc_links::linkify_urls(&waggledance_core::ansi::to_html(&read.text));
+            Json(json!({ "text": html, "revision": revision })).into_response()
         }
         Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
         Err(_) => herdr_down_response(),
@@ -10128,6 +10135,48 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// An agent prints URLs into its terminal just as constantly as it
+    /// prints doc paths — a plain `http`/`https` URL on the project pane
+    /// screen must come back clickable too.
+    #[tokio::test]
+    async fn terminal_screen_links_the_urls_an_agent_printed() {
+        let dir = fresh_root("terminal-screen-url-links");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-screen-url-links-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let screen = "see https://example.dev/status and box.local:7700 too\n";
+        fake.seed_scroll_pane(&started.pane_id, screen, screen, None);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let project = register(&st, &root, "screen-url-links");
+        let app = router(st);
+
+        let resp = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body_string(resp).await).unwrap();
+        let text = json["text"].as_str().unwrap();
+
+        assert!(
+            text.contains(r#"<a class="term-url-link" href="https://example.dev/status""#),
+            "the URL must become a link: {text}"
+        );
+        assert!(text.contains(r#"target="_blank""#), "{text}");
+        assert!(
+            !text.contains(r#"href="box.local:7700""#),
+            "a bare host:port with no scheme must stay plain text: {text}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// The screen route serves herdr's scrollback, not just the visible
     /// frame: a pane with more history than fits on screen answers with the
     /// older lines too, capped at [`SCREEN_READ_LINES`]. This failed against
@@ -16592,6 +16641,50 @@ mod bee_route_tests {
             fake.sent_text_log(&stray.pane_id).await.is_empty(),
             "an absent history param must never route through PaneScroller"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// The Unassigned group's screen route links no doc paths — a stray
+    /// pane carries no project to link into — but a URL is absolute on its
+    /// own, so it must still come back clickable.
+    #[tokio::test]
+    async fn unassigned_terminal_screen_links_the_urls_an_agent_printed() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("unassigned-screen-url-links");
+        enable_terminal(&dir);
+        enable_unassigned_group(&dir);
+        let scratch = fresh_root("unassigned-screen-url-links-scratch");
+        let stray_root = scratch.join("stray");
+        std::fs::create_dir_all(&stray_root).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let stray = fake
+            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let text = "see https://example.dev/status now";
+        fake.seed_scroll_pane(&stray.pane_id, text, text, None);
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake.clone();
+        let app = router(st);
+
+        let resp = app
+            .oneshot(unassigned_screen_req(&stray.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let out = json["text"].as_str().unwrap();
+        assert!(
+            out.contains(r#"<a class="term-url-link" href="https://example.dev/status""#),
+            "{out}"
+        );
+        assert!(out.contains(r#"target="_blank""#), "{out}");
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&scratch).ok();

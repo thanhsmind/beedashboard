@@ -82,6 +82,145 @@ pub fn linkify_docs(html: &str, base: &str) -> String {
     out
 }
 
+/// The characters a URL may contain. Wide enough for a real path, query
+/// string, and fragment; narrow enough to stop at whitespace, ANSI-HTML
+/// markup, and the prose punctuation an agent wraps around a link.
+fn is_url_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '/' | '.'
+                | '-'
+                | '_'
+                | '~'
+                | ':'
+                | '?'
+                | '#'
+                | '['
+                | ']'
+                | '@'
+                | '!'
+                | '$'
+                | '&'
+                | '\''
+                | '('
+                | ')'
+                | '*'
+                | '+'
+                | ','
+                | ';'
+                | '='
+                | '%'
+        )
+}
+
+/// Trim trailing punctuation an agent's prose wraps around a URL — a
+/// sentence's `.`, `,`, `;`, `:`, `!`, `?`, or a closing bracket/quote that
+/// has no opener earlier in the match. `https://x.dev/(a)` keeps its own
+/// paired `)`; `(see https://x.dev/foo)` keeps the sentence's `)` outside.
+fn trim_trailing_url_punctuation(url: &str) -> &str {
+    let mut end = url.len();
+    while end > 0 {
+        let c = url[..end].chars().next_back().expect("end > 0");
+        let clen = c.len_utf8();
+        let before = &url[..end - clen];
+        let trim = match c {
+            '.' | ',' | ';' | ':' | '!' | '?' => true,
+            ')' => before.matches('(').count() <= before.matches(')').count(),
+            ']' => before.matches('[').count() <= before.matches(']').count(),
+            '}' => before.matches('{').count() <= before.matches('}').count(),
+            '\'' | '"' => !before.contains(c),
+            _ => false,
+        };
+        if !trim {
+            break;
+        }
+        end -= clen;
+    }
+    &url[..end]
+}
+
+/// Rewrite every bare `http://` or `https://` URL in `html` into a link that
+/// opens in a new tab.
+///
+/// `html` must be the output of [`crate::ansi::to_html`] (or otherwise
+/// already HTML-escaped), the same contract [`linkify_docs`] runs under —
+/// text inside a tag is never touched. It also tracks whether it currently
+/// sits inside an `<a>…</a>` pair: a URL that lands in a link's own anchor
+/// text (say, one [`linkify_docs`] already produced, or one the caller ran
+/// first) must never be wrapped in a second, nested anchor.
+///
+/// Deliberately narrow: only a literal `http://` or `https://` scheme
+/// qualifies. A bare hostname (`example.com`) or a `host:port` with no
+/// scheme is never linked — the wide net would catch far too much of an
+/// agent's ordinary prose (a git remote, a `host:port` pair, a version
+/// number).
+///
+/// A URL a terminal wrapped across two screen rows is not rejoined — each
+/// line is handled on its own, since the character set a match runs over
+/// stops at a newline the same way it stops at a space.
+pub fn linkify_urls(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0usize;
+    let mut in_tag = false;
+    let mut anchor_depth: u32 = 0;
+
+    while i < html.len() {
+        let c = html[i..].chars().next().expect("i is a char boundary");
+        let clen = c.len_utf8();
+
+        if in_tag {
+            out.push(c);
+            if c == '>' {
+                in_tag = false;
+            }
+            i += clen;
+            continue;
+        }
+
+        if c == '<' {
+            // Peek the whole tag to see whether it opens or closes an
+            // anchor, so text inside one is never linked a second time.
+            let tag_end = html[i..].find('>').map(|p| i + p + 1).unwrap_or(html.len());
+            let tag_lower = html[i..tag_end].trim_start_matches('<').to_ascii_lowercase();
+            if tag_lower.starts_with("a ") || tag_lower.starts_with("a>") {
+                anchor_depth += 1;
+            } else if tag_lower.starts_with("/a>") {
+                anchor_depth = anchor_depth.saturating_sub(1);
+            }
+            in_tag = true;
+            out.push(c);
+            i += clen;
+            continue;
+        }
+
+        if anchor_depth == 0 {
+            let at_boundary = i == 0
+                || !html[..i]
+                    .chars()
+                    .next_back()
+                    .map(|c: char| c.is_ascii_alphanumeric())
+                    .unwrap_or(false);
+            let rest = &html[i..];
+            if at_boundary && (rest.starts_with("http://") || rest.starts_with("https://")) {
+                let end = rest.find(|c: char| !is_url_char(c)).unwrap_or(rest.len());
+                let url = trim_trailing_url_punctuation(&rest[..end]);
+                if !url.is_empty() {
+                    out.push_str(&format!(
+                        r#"<a class="term-url-link" href="{url}" target="_blank" rel="noopener noreferrer">{url}</a>"#
+                    ));
+                    i += url.len();
+                    continue;
+                }
+            }
+        }
+
+        out.push(c);
+        i += clen;
+    }
+    out
+}
+
 /// The link prefix for `project_id`: absolute when a display hostname is
 /// configured, same-origin otherwise. A hostname carrying its own scheme is
 /// taken as given; a bare one is assumed to be reached over https, which is
@@ -191,5 +330,53 @@ mod tests {
             link_base("bee", Some("http://box.local:7700/")),
             "http://box.local:7700/p/bee/"
         );
+    }
+
+    #[test]
+    fn links_a_plain_url() {
+        let out = linkify_urls("see https://example.dev/foo now");
+        assert!(
+            out.contains(r#"<a class="term-url-link" href="https://example.dev/foo" target="_blank" rel="noopener noreferrer">https://example.dev/foo</a>"#),
+            "{out}"
+        );
+        assert!(out.starts_with("see "), "{out}");
+        assert!(out.ends_with(" now"), "{out}");
+    }
+
+    #[test]
+    fn keeps_the_full_stop_outside_a_url_ending_a_sentence() {
+        let out = linkify_urls("check https://example.dev/foo.");
+        assert!(
+            out.contains(r#"href="https://example.dev/foo""#),
+            "{out}"
+        );
+        assert!(out.ends_with("foo</a>."), "{out}");
+    }
+
+    /// A URL inside another link's own anchor text must never be wrapped a
+    /// second time — a nested `<a>` is the failure this guards against.
+    #[test]
+    fn never_nests_an_anchor_inside_an_existing_anchor_text() {
+        let html = r#"<a class="term-doc-link" href="/p/bee/x">https://example.dev/foo</a>"#;
+        let out = linkify_urls(html);
+        assert_eq!(out, html, "{out}");
+        assert_eq!(out.matches("<a ").count(), 1, "{out}");
+    }
+
+    /// A URL sitting inside another tag's attribute — an `href`, say — is
+    /// markup, not screen text, and must stay untouched.
+    #[test]
+    fn never_rewrites_a_url_inside_an_attribute() {
+        let html = r#"<a href="https://example.dev/foo">click here</a>"#;
+        let out = linkify_urls(html);
+        assert_eq!(out, html, "{out}");
+        assert_eq!(out.matches("<a ").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn leaves_a_bare_hostname_as_text() {
+        let text = "visit example.dev or box.local:7700 for more";
+        let out = linkify_urls(text);
+        assert_eq!(out, text, "{out}");
     }
 }
