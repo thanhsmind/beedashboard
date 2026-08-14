@@ -599,6 +599,13 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .pane-strip { display: flex; flex-wrap: wrap; gap: var(--space-2); min-width: 0; }
 .pane-strip__tab { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text-muted); text-decoration: none; background: var(--color-surface-raised); }
 .pane-strip__tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
+/* terminals-pane-select: the homepage Terminals tab's own switcher — one
+   select rather than `.pane-strip`'s row of button-shaped anchors, so the
+   live screen starts one line down on a phone instead of four. Its own
+   class and rule, never `.pane-strip`/`.pane-strip__tab`: the project
+   terminal page's own strip (`aria-label="Panes"`) keeps rendering exactly
+   as it did before this feature. */
+.terminals-pane-select { display: block; width: 100%; max-width: 100%; padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-surface-raised); font: inherit; }
 .term-pane__meta { flex: 0 0 auto; color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
 /* A pane's frame is a grid, not prose: `pre-wrap` + `word-break` re-flowed
    every long line and broke the box drawing of any TUI agent, and a fixed
@@ -1034,30 +1041,33 @@ fn terminals_tab(panes: &[TerminalsMenuPane], selected_pane: Option<&str>, herdr
     };
     let effective_id = effective.map(|p| p.view.pane_id.as_str());
 
-    let mut menu = String::from(r#"<nav class="pane-strip" aria-label="Terminals">"#);
+    let mut menu = String::from(r#"<select class="terminals-pane-select" aria-label="Terminals">"#);
     for p in panes {
-        let active = effective_id == Some(p.view.pane_id.as_str());
-        let cls = if active {
-            "pane-strip__tab pane-strip__tab--active"
+        let selected = if effective_id == Some(p.view.pane_id.as_str()) {
+            " selected"
         } else {
-            "pane-strip__tab"
+            ""
         };
         let title_suffix = if p.view.title.is_empty() {
             String::new()
         } else {
-            format!(" — {}", esc(&p.view.title))
+            format!(" — {}", p.view.title)
         };
-        menu.push_str(&format!(
-            r#"<a class="{cls}" href="/?tab=terminals&pane={pane_id}"><span class="term-pane__id">{project}</span> {status_pill}<span class="term-pane__meta">{program}{title}</span></a>"#,
-            cls = cls,
-            pane_id = esc(&p.view.pane_id),
-            project = esc(&p.project_label),
-            status_pill = status_pill(&p.view.status),
-            program = esc(&p.view.kind),
+        let label = format!(
+            "{project} — {status} — {program}{title}",
+            project = p.project_label,
+            status = p.view.status,
+            program = p.view.kind,
             title = title_suffix,
+        );
+        menu.push_str(&format!(
+            r#"<option value="{pane_id}"{selected}>{label}</option>"#,
+            pane_id = esc(&p.view.pane_id),
+            selected = selected,
+            label = esc(&label),
         ));
     }
-    menu.push_str("</nav>");
+    menu.push_str("</select>");
 
     let body = match effective {
         Some(pane) => screen_frame(pane),

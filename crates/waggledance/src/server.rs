@@ -15457,15 +15457,15 @@ mod bee_route_tests {
 
         let body = body_string(get(app, "/?tab=terminals").await).await;
         assert!(
-            body.contains(&format!("pane={}", project_agent.pane_id)),
+            body.contains(&format!(r#"<option value="{}""#, project_agent.pane_id)),
             "the project's own agent-backed pane must appear in the switch menu: {body}"
         );
         assert!(
-            body.contains(&format!("pane={}", unassigned_agent.pane_id)),
+            body.contains(&format!(r#"<option value="{}""#, unassigned_agent.pane_id)),
             "an agent-backed pane outside every registered project must still appear: {body}"
         );
         assert!(
-            !body.contains(&format!("pane={}", shell.pane_id)),
+            !body.contains(&format!(r#"<option value="{}""#, shell.pane_id)),
             "a bare shell pane must never appear in the switch menu: {body}"
         );
 
@@ -15512,7 +15512,7 @@ mod bee_route_tests {
 
         let body = body_string(get(app, "/?tab=terminals").await).await;
         let pos = |pane_id: &str| {
-            body.find(&format!("pane={pane_id}"))
+            body.find(&format!(r#"<option value="{pane_id}""#))
                 .unwrap_or_else(|| panic!("{pane_id} must appear in the menu: {body}"))
         };
         let blocked_pos = pos(&blocked.pane_id);
@@ -15562,16 +15562,15 @@ mod bee_route_tests {
             "a vanished pane must render a plain not-found line: {body}"
         );
         assert!(
-            body.contains(&format!("pane={}", agent.pane_id)),
-            "the full menu must still list the real, present pane: {body}"
+            body.contains(&format!(r#"<option value="{}""#, agent.pane_id)),
+            "the full select must still list the real, present pane: {body}"
         );
-        // The anchor's own class attribute, never `PROJECT_TAB_STYLE`'s CSS
-        // rule for the same class name (`.pane-strip__tab--active { ... }`,
-        // always present in the injected `<style>` block regardless of
-        // selection) — the space before the class name is what tells the
-        // two apart.
+        // No `<option>` may carry `selected` once `?pane` names nothing
+        // present — the space before the attribute is what tells a real
+        // `selected` option apart from the substring appearing inside a
+        // pane id or label by coincidence.
         assert_eq!(
-            body.matches(" pane-strip__tab--active").count(),
+            body.matches(" selected>").count(),
             0,
             "no menu entry may be marked selected once ?pane names nothing present: {body}"
         );
