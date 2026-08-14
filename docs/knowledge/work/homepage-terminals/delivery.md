@@ -70,7 +70,11 @@ naming a closed terminal, the two empty states told apart, the reply box and
 keys present, the image control offered only where the route supports it, and
 each terminal's address prefix pointing at the route that owns it.
 
-Not yet confirmed against the running daemon.
+Confirmed against the running daemon: the tab strip carries three tabs with
+Terminals marked, the switch strip lists live agents from several projects at
+once, each entry points at the route that owns it, the reply box and keys are
+present, the live screen answers with content, and an address naming a closed
+terminal selects nothing while still listing everything.
 
 ## Deviations
 
