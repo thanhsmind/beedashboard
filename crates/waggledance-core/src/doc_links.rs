@@ -140,6 +140,16 @@ fn trim_trailing_url_punctuation(url: &str) -> &str {
     &url[..end]
 }
 
+/// Whether `url` names a host after its scheme. Prose that merely *mentions*
+/// a scheme — "only `http://` and `https://` qualify" — matches the scheme
+/// pattern with nothing behind it, and a link to `http://` goes nowhere; a
+/// host has to start with an alphanumeric character to count.
+fn has_host(url: &str) -> bool {
+    url.split_once("://")
+        .and_then(|(_, host)| host.chars().next())
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+}
+
 /// Rewrite every bare `http://` or `https://` URL in `html` into a link that
 /// opens in a new tab.
 ///
@@ -205,7 +215,7 @@ pub fn linkify_urls(html: &str) -> String {
             if at_boundary && (rest.starts_with("http://") || rest.starts_with("https://")) {
                 let end = rest.find(|c: char| !is_url_char(c)).unwrap_or(rest.len());
                 let url = trim_trailing_url_punctuation(&rest[..end]);
-                if !url.is_empty() {
+                if has_host(url) {
                     out.push_str(&format!(
                         r#"<a class="term-url-link" href="{url}" target="_blank" rel="noopener noreferrer">{url}</a>"#
                     ));
@@ -351,6 +361,23 @@ mod tests {
             "{out}"
         );
         assert!(out.ends_with("foo</a>."), "{out}");
+    }
+
+    /// An agent explaining the rule prints the schemes themselves — "only
+    /// http:// and https:// qualify". A scheme with no host behind it links
+    /// nowhere, so it stays prose.
+    #[test]
+    fn leaves_a_scheme_with_no_host_as_plain_text() {
+        let out = linkify_urls("only http:// and https:// qualify");
+        assert_eq!(out, "only http:// and https:// qualify", "{out}");
+    }
+
+    /// Punctuation is not a host either: the trailing `.` trims away and what
+    /// remains is still a bare scheme.
+    #[test]
+    fn leaves_a_scheme_followed_only_by_punctuation_as_plain_text() {
+        let out = linkify_urls("the prefix is https://.");
+        assert_eq!(out, "the prefix is https://.", "{out}");
     }
 
     /// A URL inside another link's own anchor text must never be wrapped a
