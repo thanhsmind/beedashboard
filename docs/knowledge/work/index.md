@@ -22,6 +22,7 @@ never a generation timestamp or any other wall-clock value.
 - [homepage-terminals/](homepage-terminals/index.md) — 1 concept(s)
 - [kanban-columns/](kanban-columns/index.md) — 1 concept(s)
 - [no-input-zoom/](no-input-zoom/index.md) — 1 concept(s)
+- [pbi-detail/](pbi-detail/index.md) — 1 concept(s)
 - [project-color-identity/](project-color-identity/index.md) — 1 concept(s)
 - [terminals-pane-select/](terminals-pane-select/index.md) — 1 concept(s)
 - [upstream-code-viewer/](upstream-code-viewer/index.md) — 1 concept(s)
