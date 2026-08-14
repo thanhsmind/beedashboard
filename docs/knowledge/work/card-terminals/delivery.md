@@ -15,9 +15,11 @@ bee:
 
 ## What shipped
 
-The cross-project Features board's Waiting on you and In Progress cards now
-carry one marker per terminal session running in that feature's own checkout,
-each opening that session's own terminal view.
+The cross-project Features board's cards now carry one marker per terminal
+session running in that feature's own checkout, each opening that session's own
+terminal view. (At the time this shipped the board had Waiting on you and In
+Progress cards; since kanban-columns, In Progress is the only column that
+renders cards.)
 
 Nothing in the record ties a session to a feature — a session knows which
 feature it works but not which terminal it occupies, and a terminal knows its

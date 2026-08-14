@@ -20,9 +20,11 @@ as the decision a feature is stopped at. Work that reached the execution gate
 has plainly been through the earlier ones whatever their flags say.
 
 The shape this came from: a lane at planning with six of seven cells capped and
-an unstamped context flag reported "Explore gate awaiting your decision" and sat
-under Waiting on you. A feature whose interview genuinely stopped for an answer,
-with nothing approved after it, is still placed there.
+an unstamped context flag reported "Explore gate awaiting your decision" and was
+marked as waiting on the reader. A feature whose interview genuinely stopped for
+an answer, with nothing approved after it, is still marked that way. (The rule
+outlives its presentation: since kanban-columns the mark is a line on the card in
+In Progress rather than a Waiting on you column of its own.)
 
 ## Verify
 

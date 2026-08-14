@@ -17,8 +17,9 @@ bee:
 
 The viewer's front page became a roll-up of bee state across every registered
 project that has a `.bee/` store: a cross-project Live strip, a cross-project
-Features board with the same three columns the per-project board uses, and the
-existing project list beneath them, unchanged.
+Features board with the same columns the per-project board uses — three at the
+time, five since kanban-columns — and the existing project list beneath them,
+unchanged.
 
 - **cross-board-1** — Added `read_rollup`: a synchronous multi-project roll-up
   returning a per-root `BeeSnapshot` plus each archived feature's ship time,
