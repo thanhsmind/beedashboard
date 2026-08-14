@@ -132,46 +132,105 @@ pub fn project_list_page(
     layout("Projects", "", &body)
 }
 
-/// cross-board (D1, superseded): the home page `/` is ordered Features
-/// (cross-project), then this exact project list, unmoved and unreordered
-/// inside itself — nothing in [`project_list_main`] changes for this
-/// feature. The cross-project Live section D1 originally placed above
-/// Features shipped, then was dropped after the user saw it run
-/// (`docs/history/board-drop-live/CONTEXT.md`); this function now emits no
-/// Live markup at all. `cross_features_html`
-/// ([`bee_cross_project_features_section`]) is the caller's own decision of
-/// what to show (`server.rs::index_page` applies D8's qualification and
-/// D9's empty rule before calling this); empty is treated as "nothing
-/// qualified" and this function returns exactly [`project_list_page`]'s own
-/// output, not a byte different -- D9's "the page is what it is today" is
-/// met by construction, not by matching markup by hand. Otherwise the
-/// section renders inside its own themed `<main>` (the same
-/// `.bee-hub-theme` scoping [`bee_board_page`] uses, reusing its
-/// [`bee_hub_style`] rather than declaring new tokens), directly above the
-/// unthemed project list `<main>` [`project_list_main`] already renders.
+/// homepage-tabs: which of the home page's two sections `/` renders.
+/// `Default` is `Kanban` so that an absent, empty, unknown, or otherwise
+/// unparseable `tab` query value (`server.rs`'s `RegisterFlag` visitor)
+/// always resolves here rather than needing its own fallback branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HomeTab {
+    #[default]
+    Kanban,
+    Projects,
+}
+
+/// homepage-tabs: the tab strip above the selected section, reusing the
+/// design system's existing `.fg-tabs`/`.fg-tab`/`.fg-tab--on` component
+/// (`components.css:188-198`) rather than declaring a second one. Real
+/// anchors, not buttons or `<a href="#">` plus JS: the homepage does a full
+/// `location.reload()` on any watched change (`app.js:810-840`), and the tab
+/// choice has to survive that reload and work with JavaScript off.
+fn home_tab_strip(selected: HomeTab) -> String {
+    let tab_link = |tab: HomeTab, href: &str, label: &str| {
+        let on = tab == selected;
+        format!(
+            r#"<a class="fg-tab{on_class}" href="{href}"{aria}>{label}</a>"#,
+            on_class = if on { " fg-tab--on" } else { "" },
+            href = href,
+            aria = if on { r#" aria-current="page""# } else { "" },
+            label = label,
+        )
+    };
+    format!(
+        r#"<nav class="fg-tabs" aria-label="Home sections">{kanban}{projects}</nav>"#,
+        kanban = tab_link(HomeTab::Kanban, "/?tab=kanban", "Kanban"),
+        projects = tab_link(HomeTab::Projects, "/?tab=projects", "Projects"),
+    )
+}
+
+/// cross-board (D1, superseded) / homepage-tabs: the home page `/` used to
+/// stack Features (cross-project) directly above the project list; it now
+/// renders exactly one of the two as a tab, chosen by `tab` (server.rs's
+/// `RegisterFlag` query extractor). `cross_features_html`
+/// ([`bee_cross_project_features_section`]) is still the caller's own
+/// decision of what to show (`server.rs::index_page` applies D8's
+/// qualification and D9's empty rule before calling this); empty is treated
+/// as "nothing qualified" and this function returns exactly
+/// [`project_list_page`]'s own output, not a byte different, WITH NO TAB
+/// STRIP AT ALL -- D9's "the page is what it is today" holds for the whole
+/// page, including the strip, not only the section markup. A registration
+/// error forces the Projects tab regardless of `tab`: the banner
+/// [`project_list_main`] renders lives only there, and a user who just
+/// submitted the add-project form must see why it failed rather than land
+/// back on Kanban.
+///
+/// `bee_hub_style()` / `.bee-hub-theme` are scoped to Kanban only: every
+/// rule the style block declares is itself scoped under the
+/// `.bee-hub-theme` selector (`bee_hub_style`'s own doc), so emitting it on
+/// the Projects tab's render would add a dead `<style>` block with no
+/// selector able to match anything on that page -- there is no reason to
+/// ship it there.
 pub fn home_page(
     projects: &[(Project, usize, Vec<TerminalPaneView>)],
     unassigned_visible: bool,
     suggestions: &[ProjectSuggestion],
     register_error: Option<&str>,
     cross_features_html: &str,
+    tab: HomeTab,
 ) -> String {
     if cross_features_html.is_empty() {
         return project_list_page(projects, unassigned_visible, suggestions, register_error);
     }
-    let body = format!(
-        r#"{topbar}
-{style}
+    let tab = if register_error.is_some() {
+        HomeTab::Projects
+    } else {
+        tab
+    };
+    let (title, section) = match tab {
+        HomeTab::Kanban => (
+            "Kanban",
+            format!(
+                r#"{style}
 <main class="fg-page bee-hub-theme">
   {features}
-</main>
-{list_main}"#,
+</main>"#,
+                style = bee_hub_style(),
+                features = cross_features_html,
+            ),
+        ),
+        HomeTab::Projects => (
+            "Projects",
+            project_list_main(projects, unassigned_visible, suggestions, register_error),
+        ),
+    };
+    let body = format!(
+        r#"{topbar}
+{tabs}
+{section}"#,
         topbar = topbar(""),
-        style = bee_hub_style(),
-        features = cross_features_html,
-        list_main = project_list_main(projects, unassigned_visible, suggestions, register_error),
+        tabs = home_tab_strip(tab),
+        section = section,
     );
-    layout("Projects", "", &body)
+    layout(title, "", &body)
 }
 
 /// The project list itself — everything [`project_list_page`] used to build

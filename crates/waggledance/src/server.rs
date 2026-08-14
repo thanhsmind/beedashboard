@@ -541,6 +541,13 @@ struct RegisterFlag {
     /// D10's fixed error code from a refused `register_project` redirect —
     /// never the submitted path (see `views::register_error_message`).
     register_error: Option<String>,
+    /// homepage-tabs: which of the two home page sections `/` renders.
+    /// Parsed the same defensive way as `register_error` below — a
+    /// repeated key never 400s the whole request, it just keeps walking —
+    /// and any value that is not exactly `"kanban"` or `"projects"` when
+    /// the walk finishes resolves to `HomeTab::Kanban` (its `Default`),
+    /// same as an absent or empty query string does.
+    tab: views::HomeTab,
 }
 
 // `#[derive(Deserialize)]`'s generated struct visitor refuses a repeated
@@ -572,12 +579,25 @@ impl<'de> serde::Deserialize<'de> for RegisterFlag {
                 A: serde::de::MapAccess<'de>,
             {
                 let mut register_error = None;
+                let mut tab = views::HomeTab::default();
                 while let Some((key, value)) = map.next_entry::<String, String>()? {
-                    if key == "register_error" {
-                        register_error = Some(value);
+                    match key.as_str() {
+                        "register_error" => register_error = Some(value),
+                        // homepage-tabs: last value for a repeated key wins,
+                        // exactly like `register_error` above; any value
+                        // besides these two exact strings resolves to the
+                        // `Default` (Kanban) rather than erroring.
+                        "tab" => {
+                            tab = match value.as_str() {
+                                "kanban" => views::HomeTab::Kanban,
+                                "projects" => views::HomeTab::Projects,
+                                _ => views::HomeTab::default(),
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                Ok(RegisterFlag { register_error })
+                Ok(RegisterFlag { register_error, tab })
             }
         }
 
@@ -703,6 +723,7 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                 &suggestions,
                 flag.register_error.as_deref(),
                 &cross_features_html,
+                flag.tab,
             ))
             .into_response()
         }
@@ -14689,8 +14710,13 @@ mod bee_route_tests {
     /// entries from more than one project — the whole point of D4's flat
     /// merge rather than one block per project — and emits no Live section
     /// at all, cross-project or otherwise.
+    ///
+    /// homepage-tabs: Features and the project list now live on separate
+    /// tabs, so `/` (default Kanban) carries only Features and `/?tab=projects`
+    /// carries only the project list — this proves both sections still
+    /// render, on their own tab, rather than in one combined response.
     #[tokio::test]
-    async fn home_page_renders_cross_project_features_above_the_project_list_and_no_live_section() {
+    async fn home_page_renders_cross_project_features_on_kanban_and_projects_on_its_own_tab() {
         let dir = fresh_root("home-cross-several");
         let st = build_state_with_dir(&dir);
         let root_a = dir.join("proj-a");
@@ -14701,19 +14727,18 @@ mod bee_route_tests {
         write_bee_project_fixture(&root_b, "feat-b");
         register(&st, &root_a, "Project A");
         register(&st, &root_b, "Project B");
+        let app = router(st);
 
-        let resp = get(router(st), "/").await;
+        let resp = get(app.clone(), "/").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        let features_at = body
-            .find(r#"data-feature-hub="cross-project""#)
-            .expect(&format!("the cross-project Features section must render: {body}"));
-        let list_at = body
-            .find("<ul class=\"proj-list\">")
-            .expect(&format!("the project list must still render: {body}"));
-
-        assert!(features_at < list_at, "Features must render above the project list (D1): {body}");
+        body.find(r#"data-feature-hub="cross-project""#)
+            .expect(&format!("the cross-project Features section must render on the default (Kanban) tab: {body}"));
+        assert!(
+            !body.contains("<ul class=\"proj-list\">"),
+            "the Kanban tab must not also render the project list: {body}"
+        );
         assert!(body.contains("feat-a") && body.contains("feat-b"), "both projects' features must appear: {body}");
         assert!(
             body.contains("Project A") && body.contains("Project B"),
@@ -14723,6 +14748,157 @@ mod bee_route_tests {
             !body.contains(r#"data-feature-hub="cross-project-live""#) && !body.contains(r#"class="bee-strip""#),
             "the home page must emit no Live section at all: {body}"
         );
+
+        let projects_body = body_string(get(app, "/?tab=projects").await).await;
+        assert!(
+            projects_body.contains("<ul class=\"proj-list\">"),
+            "the Projects tab must render the project list: {projects_body}"
+        );
+        assert!(
+            !projects_body.contains(r#"data-feature-hub="cross-project""#),
+            "the Projects tab must not also render the Features section: {projects_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// homepage-tabs: the tab strip itself — exactly one `fg-tab--on` and
+    /// one `aria-current="page"`, both on the tab actually selected, and
+    /// both real anchors to `/?tab=kanban` / `/?tab=projects` so the page
+    /// works with JavaScript off and survives the homepage's own
+    /// `location.reload()`.
+    #[tokio::test]
+    async fn home_page_tab_strip_marks_exactly_one_tab_selected() {
+        let dir = fresh_root("home-tab-strip");
+        let st = build_state_with_dir(&dir);
+        let root = dir.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+        register(&st, &root, "Project A");
+        let app = router(st);
+
+        let kanban_body = body_string(get(app.clone(), "/").await).await;
+        assert!(
+            kanban_body.contains(r#"<nav class="fg-tabs" aria-label="Home sections">"#),
+            "the tab strip must render on the Kanban tab: {kanban_body}"
+        );
+        assert_eq!(
+            kanban_body.matches("fg-tab--on").count(),
+            1,
+            "exactly one tab must be marked selected: {kanban_body}"
+        );
+        assert_eq!(
+            kanban_body.matches(r#"aria-current="page""#).count(),
+            1,
+            "exactly one tab must carry aria-current: {kanban_body}"
+        );
+        assert!(
+            kanban_body.contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=kanban" aria-current="page">Kanban</a>"#),
+            "Kanban must be the selected tab by default: {kanban_body}"
+        );
+        assert!(
+            kanban_body.contains(r#"<a class="fg-tab" href="/?tab=projects">Projects</a>"#),
+            "Projects must be the plain, unselected tab: {kanban_body}"
+        );
+
+        let projects_body = body_string(get(app, "/?tab=projects").await).await;
+        assert_eq!(
+            projects_body.matches("fg-tab--on").count(),
+            1,
+            "exactly one tab must be marked selected on the Projects tab too: {projects_body}"
+        );
+        assert!(
+            projects_body.contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=projects" aria-current="page">Projects</a>"#),
+            "Projects must be the selected tab when asked for: {projects_body}"
+        );
+        assert!(
+            projects_body.contains(r#"<a class="fg-tab" href="/?tab=kanban">Kanban</a>"#),
+            "Kanban must be the plain, unselected tab: {projects_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// homepage-tabs: an unknown, empty, or repeated `tab` value all resolve
+    /// to Kanban rather than erroring or leaving the query unresolved.
+    #[tokio::test]
+    async fn home_page_unrecognized_tab_value_resolves_to_kanban() {
+        let dir = fresh_root("home-tab-unknown");
+        let st = build_state_with_dir(&dir);
+        let root = dir.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+        register(&st, &root, "Project A");
+        let app = router(st);
+
+        for uri in ["/?tab=bogus", "/?tab=", "/?tab=projects&tab=bogus"] {
+            let resp = get(app.clone(), uri).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{uri} must still render");
+            let body = body_string(resp).await;
+            assert!(
+                body.contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=kanban" aria-current="page">Kanban</a>"#),
+                "{uri} must resolve to the Kanban tab: {body}"
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// homepage-tabs edge (b): a registration error forces the Projects tab
+    /// — where the banner lives — even when `tab=kanban` is explicitly
+    /// asked for, so a user who just submitted the add-project form always
+    /// sees why it failed.
+    #[tokio::test]
+    async fn home_page_register_error_forces_the_projects_tab_over_an_explicit_kanban_request() {
+        let dir = fresh_root("home-tab-register-error");
+        let st = build_state_with_dir(&dir);
+        let root = dir.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+        register(&st, &root, "Project A");
+
+        let resp = get(router(st), "/?tab=kanban&register_error=denied").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=projects" aria-current="page">Projects</a>"#),
+            "a register_error must force the Projects tab even when tab=kanban was asked for: {body}"
+        );
+        assert!(
+            !body.contains(r#"data-feature-hub="cross-project""#),
+            "the forced Projects tab must not also render the Features section: {body}"
+        );
+        assert!(
+            body.contains("fg-banner--danger"),
+            "the register_error banner must be visible on the forced Projects tab: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// homepage-tabs edge (a): with no qualifying project at all, `/` still
+    /// renders exactly `project_list_page`'s own output — no tab strip, no
+    /// `bee-hub-theme`, whatever `tab` was asked for.
+    #[tokio::test]
+    async fn home_page_with_no_qualifying_project_renders_no_tab_strip() {
+        let dir = fresh_root("home-tab-none-qualify");
+        let st = build_state_with_dir(&dir);
+        let root = dir.join("no-bee-project");
+        std::fs::create_dir_all(&root).unwrap();
+        register(&st, &root, "no-bee-project");
+
+        let resp = get(router(st), "/?tab=projects").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            !body.contains("fg-tabs"),
+            "no qualifying project means no tab strip at all: {body}"
+        );
+        assert!(
+            !body.contains("bee-hub-theme"),
+            "no qualifying project means no Kanban theme either: {body}"
+        );
+        assert!(body.contains("<ul class=\"proj-list\">") || body.contains("fg-empty"), "the plain project list must still render: {body}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
