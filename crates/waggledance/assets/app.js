@@ -807,7 +807,17 @@
   // index reloads on any change. Terminal/transcript pages never reload
   // from a markdown edit — they poll their own endpoints and a forced
   // reload would drop in-progress input.
+  //
+  // homepage-terminal-refresh: that last rule used to be spelled as a path
+  // test, and the path test only covered `/p/<id>/_terminal...`. The homepage
+  // grew a Terminals tab of its own at `/?tab=terminals`, whose path is `/` —
+  // it fell through to the `return true` below and reloaded on any markdown
+  // edit in any project, resetting a live terminal mid-session. The honest
+  // rule is the reason itself, not the path: a document showing a live screen
+  // never force-reloads, wherever it is served from. The Kanban and Projects
+  // tabs carry no `.term-screen` and keep reloading exactly as before.
   function shouldReload(changed) {
+    if (document.querySelector(".term-screen")) return false;
     var m = location.pathname.match(/^\/p\/([^\/]+)\/(.*)$/);
     if (!m) return true;
     var pid, rest;
