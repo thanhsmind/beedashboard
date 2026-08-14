@@ -5023,6 +5023,100 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (kanban-columns D2/D3, happy) A `proposed` backlog PBI renders as a
+    /// dense flat row under Todo, below the feature already there, linked
+    /// to this project's own bee board rather than a feature page — a
+    /// `proposed` PBI generally has neither lane nor docs of its own.
+    #[tokio::test]
+    async fn proposed_pbi_renders_a_linked_todo_row_below_the_feature_rows() {
+        let root = fresh_root("hub-pbi-proposed");
+        write(
+            &root,
+            ".bee/lanes/todo-feat.json",
+            &lane_json("todo-feat", "swarming", "standard", "keep going", None, None),
+        );
+        write(&root, ".bee/cells/a.json", &feature_cell_json("wf-1", "todo-feat", "open", None, None));
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Ship the widget\",\"status\":\"proposed\",\"feature\":\"todo-feat\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-pbi-proposed");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"2\""), "{body}");
+        let feature_href = format!("data-hub-group=\"todo\" href=\"/p/{}/_bee/feature/todo-feat\"", project.id);
+        let pbi_href = format!("data-hub-group=\"todo\" href=\"/p/{}/_bee\"", project.id);
+        let feature_pos = body.find(&feature_href).expect(&format!("the feature row must render: {body}"));
+        let pbi_pos = body.find(&pbi_href).expect(&format!("the PBI row must render, linked to the project's own bee board: {body}"));
+        assert!(pbi_pos > feature_pos, "the PBI row must sit below the feature row within Todo: {body}");
+        assert!(body.contains("Ship the widget"), "the PBI's own title must render: {body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (kanban-columns D2/D3, edge) A PBI in any status other than
+    /// `proposed` renders no Todo row at all — only `proposed` PBIs are a
+    /// second kind of Todo item.
+    #[tokio::test]
+    async fn pbi_in_any_other_status_renders_no_todo_row() {
+        let root = fresh_root("hub-pbi-non-proposed");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"Not yet due\",\"status\":\"in-flight\",\"feature\":\"ghost-feature\"}\n\
+             {\"kind\":\"pbi\",\"id\":\"PBI-2\",\"title\":\"Already shipped\",\"status\":\"done\",\"feature\":\"ghost-feature\"}\n\
+             {\"kind\":\"pbi\",\"id\":\"PBI-3\",\"title\":\"Parked for now\",\"status\":\"parked\",\"feature\":\"ghost-feature\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-pbi-non-proposed");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"0\""), "{body}");
+        assert!(
+            !body.contains(&format!("data-hub-group=\"todo\" href=\"/p/{}/_bee\"", project.id)),
+            "no PBI row may render for a non-proposed status: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (kanban-columns D3, edge) The PBI's own `feature` field names no
+    /// lane at all (a `proposed` PBI generally has none yet) — the row
+    /// still renders with a working link to the owning project's own bee
+    /// board, since D3 never routes through a feature page.
+    #[tokio::test]
+    async fn pbi_todo_row_links_to_the_project_board_even_when_its_feature_names_no_lane() {
+        let root = fresh_root("hub-pbi-no-lane");
+        write(
+            &root,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-1\",\"title\":\"No lane yet\",\"status\":\"proposed\",\"feature\":\"never-lane-feature\"}\n",
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-pbi-no-lane");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"1\""), "{body}");
+        assert!(
+            body.contains(&format!("data-hub-group=\"todo\" href=\"/p/{}/_bee\"", project.id)),
+            "a PBI whose feature names no lane must still render a working project-board link: {body}"
+        );
+        assert!(body.contains("No lane yet"), "{body}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (regression, feature-hub-3 F2) Independent review found this
     /// guarantee deleted from the test suite: the independent-review gate
     /// is never a current stop (`bee_gate_current_stop`'s own `filter`,
@@ -14957,6 +15051,77 @@ mod bee_route_tests {
             !terminals_body.contains(r#"data-feature-hub="cross-project""#)
                 && !terminals_body.contains("<ul class=\"proj-list\">"),
             "the Terminals tab must render neither the Features section nor the project list: {terminals_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// (kanban-columns D2, edge) On the cross-project board, every
+    /// project's feature Todo row must sit above every project's PBI Todo
+    /// row within the merged column — a single accumulator appending each
+    /// project's rows as they're classified would put project A's PBIs
+    /// above project B's features and break D2's order for the merge
+    /// alone, not just within one project. Two projects, each carrying
+    /// both kinds, is the shape that would catch that regression.
+    #[tokio::test]
+    async fn cross_project_board_orders_every_projects_feature_rows_above_every_projects_pbi_rows() {
+        let dir = fresh_root("home-cross-pbi-order");
+        let st = build_state_with_dir(&dir);
+        let root_a = dir.join("proj-a");
+        let root_b = dir.join("proj-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+
+        write(&root_a, ".bee/lanes/feat-a.json", &lane_json("feat-a", "swarming", "standard", "keep going", None, None));
+        write(&root_a, ".bee/cells/a.json", &feature_cell_json("a-1", "feat-a", "open", None, None));
+        write(
+            &root_a,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-A\",\"title\":\"Widget A\",\"status\":\"proposed\",\"feature\":\"feat-a\"}\n",
+        );
+
+        write(&root_b, ".bee/lanes/feat-b.json", &lane_json("feat-b", "swarming", "standard", "keep going", None, None));
+        write(&root_b, ".bee/cells/a.json", &feature_cell_json("b-1", "feat-b", "open", None, None));
+        write(
+            &root_b,
+            ".bee/backlog.jsonl",
+            "{\"kind\":\"pbi\",\"id\":\"PBI-B\",\"title\":\"Widget B\",\"status\":\"proposed\",\"feature\":\"feat-b\"}\n",
+        );
+
+        let project_a = register(&st, &root_a, "Project A");
+        let project_b = register(&st, &root_b, "Project B");
+
+        let resp = get(router(st), "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        // Every `data-hub-group="todo"` row's own href, in the order they
+        // render.
+        let marker = "data-hub-group=\"todo\" href=\"";
+        let mut todo_hrefs: Vec<&str> = Vec::new();
+        let mut idx = 0usize;
+        while let Some(pos) = body[idx..].find(marker) {
+            let start = idx + pos + marker.len();
+            let end = body[start..].find('"').unwrap() + start;
+            todo_hrefs.push(&body[start..end]);
+            idx = end;
+        }
+        assert_eq!(todo_hrefs.len(), 4, "two feature rows and two PBI rows must render under Todo: {body}");
+
+        let last_feature_idx =
+            todo_hrefs.iter().rposition(|h| h.contains("/feature/")).expect("at least one feature row must render");
+        let first_pbi_idx = todo_hrefs
+            .iter()
+            .position(|h| !h.contains("/feature/"))
+            .expect("at least one PBI row (linking straight to a project's own bee board) must render");
+        assert!(
+            last_feature_idx < first_pbi_idx,
+            "every feature row must sit above every PBI row within the merged Todo column, got hrefs in order {todo_hrefs:?}"
+        );
+        assert!(
+            todo_hrefs.contains(&format!("/p/{}/_bee", project_a.id).as_str())
+                && todo_hrefs.contains(&format!("/p/{}/_bee", project_b.id).as_str()),
+            "both projects' own PBI rows must link to their own bee board: {todo_hrefs:?}"
         );
 
         std::fs::remove_dir_all(&dir).ok();

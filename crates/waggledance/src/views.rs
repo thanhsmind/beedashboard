@@ -2386,7 +2386,7 @@ fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String 
     let archived_features: std::collections::HashSet<String> =
         list_archived_feature_dirs(&project.root_path).into_iter().collect();
     let placements = bee_classify_features(snapshot, &archived_features);
-    bee_render_hub_section(project, &placements)
+    bee_render_hub_section(project, &placements, &snapshot.backlog.pbis)
 }
 
 /// One feature already sorted into one of the feature hub's five columns
@@ -2596,8 +2596,13 @@ fn bee_classify_features(
 /// place. Passes an empty pane slice to every card (card-terminals-1): the
 /// per-project board at `/p/:id/_bee` does not read herdr today, and
 /// giving it terminal badges is deliberately out of scope for that cell --
-/// this keeps its output byte-identical.
-fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> String {
+/// this keeps its output byte-identical. `pbis` (kanban-columns D2/D3) is
+/// `snapshot.backlog.pbis` -- every `proposed` one renders through the same
+/// [`bee_hub_finished_row`], appended to `todo_rows` after every feature
+/// Todo row is already in it, so the column always reads features first,
+/// PBIs second (D2); a single project needs no second accumulator for
+/// this, unlike the cross-project merge below.
+fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement], pbis: &[BeePbi]) -> String {
     let mut todo_rows: Vec<String> = Vec::new();
     let mut in_progress_cards = String::new();
     let mut review_rows: Vec<String> = Vec::new();
@@ -2678,6 +2683,25 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> 
             }
         }
     }
+    // (kanban-columns D2/D3) Every `proposed` PBI joins Todo as a dense row
+    // below the features already in `todo_rows` -- pushed after the loop
+    // above, so it can never land ahead of a feature row. Links to the
+    // owning project's own bee board, not a feature page (D3): a proposed
+    // PBI generally has neither lane nor docs of its own.
+    for pbi in pbis {
+        if pbi.status == "proposed" {
+            todo_count += 1;
+            todo_rows.push(bee_hub_finished_row(
+                "todo",
+                &bee_hub_project_bee_href(&project.id),
+                &pbi.title,
+                None,
+                None,
+                None,
+                None,
+            ));
+        }
+    }
     let todo_cards = bee_hub_finished_rows(&todo_rows);
     let review_cards = bee_hub_finished_rows(&review_rows);
     let compound_cards = bee_hub_finished_rows(&compound_rows);
@@ -2754,11 +2778,21 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> 
 /// somewhere (a card in either live group, or a Finished row), then handed
 /// down into every [`bee_hub_card`]/[`bee_hub_finished_row`] call in the
 /// render pass below rather than either renderer hashing its own.
+///
+/// kanban-columns D2/D3: Todo also merges every project's `proposed` PBIs
+/// (`rollup.snapshot.backlog.pbis`), built into a *second* accumulator
+/// (`todo_pbi_rows`) kept apart from `todo_rows` through the whole render
+/// pass and only appended onto it once, right before paging -- appending
+/// each project's PBI rows into `todo_rows` in placement order as they're
+/// found would interleave one project's PBIs above another project's
+/// features and break D2's features-before-PBIs order for the merged
+/// column, not just within one project.
 pub fn bee_cross_project_features_section(
     rollups: &[(&Project, &BeeProjectRollup)],
     feature_panes: &std::collections::HashMap<String, std::collections::HashMap<String, Vec<TerminalPaneView>>>,
 ) -> String {
     let mut todo_rows: Vec<String> = Vec::new();
+    let mut todo_pbi_rows: Vec<String> = Vec::new();
     let mut in_progress_cards = String::new();
     let mut review_rows: Vec<String> = Vec::new();
     let mut compound_rows: Vec<String> = Vec::new();
@@ -2878,7 +2912,31 @@ pub fn bee_cross_project_features_section(
                 }
             }
         }
+
+        // (kanban-columns D2/D3) This project's own `proposed` PBIs join
+        // the SECOND Todo accumulator, never `todo_rows` directly -- see
+        // this function's own doc comment for why the merge must wait.
+        for pbi in &rollup.snapshot.backlog.pbis {
+            if pbi.status == "proposed" {
+                todo_count += 1;
+                todo_pbi_rows.push(bee_hub_finished_row(
+                    "todo",
+                    &bee_hub_project_bee_href(&project.id),
+                    &pbi.title,
+                    None,
+                    Some(&project.name),
+                    project_color,
+                    None,
+                ));
+            }
+        }
     }
+
+    // (kanban-columns D2) Every project's feature Todo rows are already in
+    // `todo_rows`; every project's PBI Todo rows join only now, appended as
+    // one block after them -- so within the merged column every feature
+    // row sits above every PBI row, matching D2's own order.
+    todo_rows.extend(todo_pbi_rows);
 
     // D10: timed entries first, most recent first; untimed entries after,
     // alphabetically by feature name across every project.
@@ -3249,6 +3307,14 @@ fn bee_hub_card(
 /// [`bee_hub_card`] already does.
 fn bee_hub_feature_href(project_id: &str, feature: &str) -> String {
     format!("/p/{pid}/_bee/feature/{feature_href}", pid = esc(project_id), feature_href = esc(feature))
+}
+
+/// (kanban-columns D3) Where a Todo PBI row links -- the owning project's
+/// whole bee board, never a feature page: a `proposed` PBI generally has
+/// neither a lane nor CONTEXT docs of its own for [`bee_hub_feature_href`]
+/// to point at.
+fn bee_hub_project_bee_href(project_id: &str) -> String {
+    format!("/p/{pid}/_bee", pid = esc(project_id))
 }
 
 /// One dense row (hub-finished-compact; kanban-columns D12 grows this from
