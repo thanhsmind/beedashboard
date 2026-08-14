@@ -2264,15 +2264,17 @@ fn bee_classify_features(
     placements
 }
 
-/// Turns [`bee_classify_features`]'s per-project placements back into
-/// exactly the section [`bee_feature_hub_section`] rendered before
-/// cross-board-2 (D2) -- every card and row carries no project label
-/// (`bee_hub_card`/`bee_hub_finished_row`'s `project_label: None`),
-/// matching this project's page having only ever shown itself. Passes an
-/// empty pane slice to every card (card-terminals-1): the per-project board
-/// at `/p/:id/_bee` does not read herdr today, and giving it terminal
-/// badges is deliberately out of scope for that cell -- this keeps its
-/// output byte-identical.
+/// Turns [`bee_classify_features`]'s per-project placements back into the
+/// section [`bee_feature_hub_section`] rendered before cross-board-2 (D2)
+/// -- every card and row carries no project label (`bee_hub_card`/
+/// `bee_hub_finished_row`'s `project_label: None`), matching this
+/// project's page having only ever shown itself. project-color-identity-3:
+/// each card's `worktree_label` still travels through, since `bee_hub_card`
+/// now folds it into that page's own slug subtitle in the chip row's
+/// place. Passes an empty pane slice to every card (card-terminals-1): the
+/// per-project board at `/p/:id/_bee` does not read herdr today, and
+/// giving it terminal badges is deliberately out of scope for that cell --
+/// this keeps its output byte-identical.
 fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement]) -> String {
     let mut waiting_cards = String::new();
     let mut in_progress_cards = String::new();
@@ -2699,10 +2701,16 @@ fn bee_cross_project_board_project_colors<'a>(
 /// built once by the caller and threaded down rather than hashed here)
 /// gives the card's shell a `bee-hub__shell--pN` modifier so cards of the
 /// same project share one fixed accent. `project_label: None` (every
-/// per-project board call) renders no subtitle swap and no modifier class,
-/// byte-identical to before this feature for the subtitle and colour —
-/// `worktree_label` goes unused on that path, since a per-project board
-/// card names no project and so has nowhere to put a worktree half either.
+/// per-project board call) renders no modifier class, byte-identical to
+/// before this feature for the colour — but project-color-identity-3
+/// still swaps the plain slug subtitle for `<slug> / <worktree>`, in the
+/// same `bee-hub__slug` class and reusing the `Some` arm's exact
+/// worktree-half span, whenever that subtitle renders at all (beside a
+/// human title, per feature-titles/hub-fallbacks — a title-less card's
+/// own title is already the slug, so it still gains no redundant subtitle
+/// and so no worktree half either), since a per-project board still needs
+/// to say which of its own features has an open worktree even without a
+/// project name to hang it off of.
 ///
 /// `panes` (card-terminals-1) is the terminal panes running in this
 /// feature's own checkout -- the worktree-vs-main-checkout join is already
@@ -2745,11 +2753,21 @@ fn bee_hub_card(
 ) -> String {
     let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
     // project-color-identity: `project_label: Some` swaps the slug subtitle
-    // for the project name plus its worktree state -- and, unlike the slug
-    // (which only ever shows beside a human title), still shows it under a
-    // title-less card too, so the project name is never dropped.
-    // `project_label: None` (every per-project board call) keeps the
-    // slug-only behavior byte-identical to before this feature.
+    // for the project name plus its worktree state -- and, unlike the old
+    // slug-only subtitle (which only ever showed beside a human title),
+    // still shows it under a title-less card too, so the project name is
+    // never dropped.
+    // project-color-identity-3: `project_label: None` (every per-project
+    // board call) still only renders the slug subtitle beside a human
+    // title (hub-fallbacks: a title-less card's own title already is the
+    // slug, so a second copy of it below would be a redundant subtitle),
+    // but when it does render, it now appends the card's own worktree
+    // state after the same ` / ` separator, reusing the `Some` arm's exact
+    // worktree-half span -- a per-project board still needs to say which
+    // of its features has an open worktree even though it never shows a
+    // project name to hang that information off. A title-less card on
+    // that board renders no subtitle at all, same as before this feature,
+    // so it names no worktree state either.
     let subtitle_html = match project_label {
         Some(label) => format!(
             r#"<div class="bee-hub__project">{label}<span class="bee-hub__project-worktree"> / {worktree}</span></div>"#,
@@ -2757,7 +2775,11 @@ fn bee_hub_card(
             worktree = esc(worktree_label),
         ),
         None => match title {
-            Some(_) => format!(r#"<div class="bee-hub__slug">{feature}</div>"#, feature = esc(feature)),
+            Some(_) => format!(
+                r#"<div class="bee-hub__slug">{feature}<span class="bee-hub__project-worktree"> / {worktree}</span></div>"#,
+                feature = esc(feature),
+                worktree = esc(worktree_label),
+            ),
             None => String::new(),
         },
     };
@@ -7241,26 +7263,92 @@ mod tests {
         );
     }
 
-    /// A card rendered with no project label is byte-identical to its
-    /// pre-change output for the subtitle and colour: slug subtitle, no
-    /// modifier class, no colour -- project-color-identity-2 also drops the
-    /// chip row here, since a per-project board card shares this exact
-    /// renderer with the cross-project card.
+    /// A card rendered with no project label keeps its colour and shell
+    /// byte-identical to before this feature (no modifier class), but
+    /// project-color-identity-3 now folds the worktree state into the same
+    /// `bee-hub__slug` subtitle -- a per-project board still needs to say
+    /// which of its own features has an open worktree even though it never
+    /// shows a project name to hang that information off.
     #[test]
-    fn bee_hub_card_with_no_project_label_is_unchanged() {
+    fn bee_hub_card_with_no_project_label_shows_slug_and_worktree_subtitle() {
         let docs = waggledance_core::bee::BeeFeatureDocs {
             title: Some("Human Title".to_string()),
             description: None,
             docs: vec![],
         };
-        let card_html =
-            bee_hub_card("proj-a", "feat-a", "waiting", 1, 2, None, "Main", None, Some(&docs), None, None, &[]);
+        let card_html = bee_hub_card(
+            "proj-a",
+            "feat-a",
+            "waiting",
+            1,
+            2,
+            None,
+            "wt/hold-holder-attribution",
+            None,
+            Some(&docs),
+            None,
+            None,
+            &[],
+        );
         assert_eq!(
             card_html,
-            r#"<div class="fg-card bee-hub__shell"><a class="bee-hub__card" data-hub-group="waiting" href="/p/proj-a/_bee/feature/feat-a"><div class="fg-card__title">Human Title</div><div class="bee-hub__slug">feat-a</div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></a></div>"#,
-            "a card with no project label must render its subtitle and colour byte-identical to before this feature, and now carry no chip row: {card_html}"
+            r#"<div class="fg-card bee-hub__shell"><a class="bee-hub__card" data-hub-group="waiting" href="/p/proj-a/_bee/feature/feat-a"><div class="fg-card__title">Human Title</div><div class="bee-hub__slug">feat-a<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></a></div>"#,
+            "a card with no project label must keep the byte-identical shell/colour and now carry its worktree state in the slug subtitle: {card_html}"
         );
         assert!(!card_html.contains("bee-hub__shell--p"), "no project label must mean no colour modifier: {card_html}");
+        assert!(!card_html.contains("bee-hub__chips"), "the chip row must be gone entirely: {card_html}");
+        assert!(!card_html.contains("bee-hub__project\""), "the project subtitle class must not render here: {card_html}");
+    }
+
+    /// (hub-fallbacks) A title-less card with no project label still
+    /// renders no subtitle at all, and so no worktree half either -- its
+    /// own title is already the slug, so a second copy beneath it would be
+    /// a redundant subtitle, exactly as before this feature.
+    #[test]
+    fn bee_hub_card_with_no_project_label_and_no_title_still_shows_no_subtitle() {
+        let card_html =
+            bee_hub_card("proj-a", "feat-a", "waiting", 1, 2, None, "merged", None, None, None, None, &[]);
+        assert!(
+            !card_html.contains(r#"class="bee-hub__slug""#),
+            "a title-less card must never render a redundant slug subtitle: {card_html}"
+        );
+        assert!(
+            !card_html.contains("bee-hub__project-worktree"),
+            "with no subtitle to hold it, a title-less card must name no worktree state either: {card_html}"
+        );
+    }
+
+    /// All four worktree-line spellings [`bee_hub_worktree_label`] can hand
+    /// `bee_hub_card` render through the slug subtitle unchanged, on the
+    /// per-project board's own `project_label: None` path.
+    #[test]
+    fn bee_hub_card_with_no_project_label_renders_all_four_worktree_spellings() {
+        let docs = waggledance_core::bee::BeeFeatureDocs {
+            title: Some("Human Title".to_string()),
+            description: None,
+            docs: vec![],
+        };
+        for worktree_label in ["hold-holder-attribution", "worktree", "merged", "Main"] {
+            let card_html = bee_hub_card(
+                "proj-a",
+                "feat-a",
+                "waiting",
+                1,
+                2,
+                None,
+                worktree_label,
+                None,
+                Some(&docs),
+                None,
+                None,
+                &[],
+            );
+            let expected = format!(r#"<span class="bee-hub__project-worktree"> / {worktree_label}</span>"#);
+            assert!(
+                card_html.contains(&expected),
+                "the {worktree_label} spelling must render verbatim in the slug subtitle: {card_html}"
+            );
+        }
     }
 
     /// The Finished row for the same project carries the matching
