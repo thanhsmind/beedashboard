@@ -4448,10 +4448,9 @@ mod bee_route_tests {
             "both the waiting and in-progress cards must show one open cell not yet done: {body}"
         );
 
-        assert_eq!(
-            body.matches("fg-chip--neutral\">Main</span>").count(),
-            2,
-            "the waiting and in-progress cards must both read Main (no open worktree grant): {body}"
+        assert!(
+            !body.contains("<div class=\"bee-hub__chips\">") && !body.contains("fg-chip--neutral\">Main"),
+            "project-color-identity: a per-project board card shares bee_hub_card with the cross-project board, so its chip row (including the worktree chip) is gone too: {body}"
         );
         assert!(
             !body.contains("Merged"),
