@@ -774,10 +774,12 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
 
 /// cross-board-3: `waggledance_core::bee::read_rollup` is strictly synchronous
 /// filesystem work — `waggledance-core` deliberately forbids tokio/axum/hyper
-/// (`bee.rs:3604`), so running it directly on `index_page`'s async task the
-/// way `bee_board` still does today for one project (`read_snapshot` at
-/// `server.rs:1268`) would put every qualifying project's `.bee/` walk on
-/// the request thread that serves `/`. Instead each qualifying project gets
+/// (`bee.rs:3604`), so running it directly on `index_page`'s async task
+/// would put every qualifying project's `.bee/` walk on the request thread
+/// that serves `/`. (inprogress-priority-order-1: `bee_board` below now
+/// follows the same `spawn_blocking` rule for its own single-project
+/// rollup read, rather than the synchronous `read_snapshot` call it used
+/// before.) Instead each qualifying project gets
 /// its own `spawn_blocking` task — the same precedent already in this file
 /// (`server.rs:294`, `1027`, `1085`) — and every task is spawned before any
 /// of them is awaited: a `spawn_blocking` task starts running the moment it
@@ -1430,15 +1432,48 @@ fn is_bee_project(project: &waggledance_core::domain::Project) -> bool {
 /// `GET /p/:id/_bee` — the read-only cell board (D4). Renders the four D7
 /// buckets over the project's live `.bee/cells/`. A project with no `.bee/`
 /// gets a clean not-found, never an empty bee page (D3).
+///
+/// inprogress-priority-order-1 (D5): gains the same herdr snapshot the
+/// homepage already reads (`st.herdr.snapshot().await`) and one
+/// `read_rollup(&[project.root_path.clone()])` -- run inside
+/// `spawn_blocking`, the same rule `cross_project_rollup` above already
+/// follows, since `read_rollup` is strictly synchronous filesystem work.
+/// `BeeProjectRollup` carries its own `.snapshot`, so this rollup read
+/// REPLACES the old standalone `read_snapshot` call rather than adding a
+/// second disk pass, and the `if !snapshot.present` not-found rule (D3)
+/// still runs against that same `.snapshot`. The feature->panes map is
+/// built through the existing `project_feature_panes` join (card-terminals-1)
+/// -- never a second one -- and threaded into `bee_board_page` so its In
+/// Progress cards render real terminal badges instead of an empty slice. A
+/// `None` herdr snapshot (the terminal switch off, or herdr unreachable)
+/// flows through `project_feature_panes` as an empty map, exactly as the
+/// homepage already handles herdr being down; the board still renders, just
+/// with no badges. A rollup read that never comes back (a `spawn_blocking`
+/// panic, vanishingly rare since `read_rollup` never itself panics) answers
+/// the same not-found the page gives a genuinely absent `.bee/`, rather than
+/// a raw error.
 async fn bee_board(State(st): State<AppState>, Path(id): Path<String>) -> Response {
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
     };
-    let snapshot = waggledance_core::bee::read_snapshot(&project.root_path);
-    if !snapshot.present {
+    let herdr_snapshot = match st.herdr.snapshot().await {
+        Ok(snapshot) => Some(snapshot),
+        Err(_) => None,
+    };
+    let root = project.root_path.clone();
+    let rollup = match tokio::task::spawn_blocking(move || {
+        waggledance_core::bee::read_rollup(&[root]).into_iter().next()
+    })
+    .await
+    {
+        Ok(Some(rollup)) => rollup,
+        Ok(None) | Err(_) => return not_found("this project has no .bee/ store"),
+    };
+    if !rollup.snapshot.present {
         return not_found("this project has no .bee/ store");
     }
-    Html(views::bee_board_page(&project, &snapshot)).into_response()
+    let feature_panes = project_feature_panes(herdr_snapshot.as_ref(), &project, &rollup);
+    Html(views::bee_board_page(&project, &rollup.snapshot, &feature_panes)).into_response()
 }
 
 /// `GET /p/:id/_bee/cell/:cell_id` — one cell in full (D4): title, action,
@@ -5457,6 +5492,93 @@ mod bee_route_tests {
             "project home page must link to the bee board when .bee/ is present: {body}"
         );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// inprogress-priority-order-1 (D5, must-have): the per-project bee
+    /// board threads real pane data into its own In Progress cards, the
+    /// same terminal badge nav the homepage cross-project board already
+    /// shows for the identical fixture shape (`write_cross_project_live_feature`,
+    /// `home_page_cross_project_card_badges_the_pane_in_its_own_checkout_and_no_other_card`
+    /// above).
+    #[tokio::test]
+    async fn bee_board_renders_terminal_badges_for_an_in_progress_feature_with_a_pane_in_its_checkout() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let config_dir = fresh_root("bee-board-terminals-config");
+        enable_terminal(&config_dir);
+        let root = fresh_root("bee-board-terminals-project");
+        write_cross_project_live_feature(&root, "feat-badged", "live-badged");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let pane = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&config_dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "bee-board-terminals-project");
+
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/feat-badged\"", project.id)),
+            "the feature's own card must still render: {body}"
+        );
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_terminal/pane/{}\"", project.id, pane.pane_id)),
+            "the card must badge the pane running in its own checkout: {body}"
+        );
+        assert!(
+            body.contains("Terminals in this checkout"),
+            "the badge group's accessible label must name the checkout: {body}"
+        );
+
+        std::fs::remove_dir_all(&config_dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// inprogress-priority-order-1 (D5, must-have): an unavailable herdr
+    /// snapshot must leave the per-project board rendering, just without
+    /// badges -- the same fail-open shape the homepage already gives every
+    /// other pane list (`FakeHerdr::set_available(false)`).
+    #[tokio::test]
+    async fn bee_board_renders_no_badges_when_herdr_snapshot_is_unavailable() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let config_dir = fresh_root("bee-board-terminals-down-config");
+        enable_terminal(&config_dir);
+        let root = fresh_root("bee-board-terminals-down-project");
+        write_cross_project_live_feature(&root, "feat-quiet", "live-quiet");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let pane = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_available(false);
+
+        let mut st = build_state_with_dir(&config_dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "bee-board-terminals-down-project");
+
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains(&format!("href=\"/p/{}/_bee/feature/feat-quiet\"", project.id)),
+            "the board must still render the feature's own card with herdr down: {body}"
+        );
+        assert!(
+            !body.contains("proj-row__badges") && !body.contains(&pane.pane_id),
+            "with herdr unavailable the board must carry no badge container and no pane id: {body}"
+        );
+
+        std::fs::remove_dir_all(&config_dir).ok();
         std::fs::remove_dir_all(&root).ok();
     }
 

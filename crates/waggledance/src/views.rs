@@ -1798,7 +1798,11 @@ pub fn terminal_down_page(project: &Project) -> String {
 /// nowhere close to a revival of the D1 Sessions panel it sits where that
 /// panel used to live; see that function's own doc comment for exactly how
 /// little it carries.
-pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
+pub fn bee_board_page(
+    project: &Project,
+    snapshot: &BeeSnapshot,
+    feature_panes: &std::collections::HashMap<String, Vec<TerminalPaneView>>,
+) -> String {
     let body = format!(
         r#"{topbar}
 {style}
@@ -1816,7 +1820,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         style = bee_hub_style(),
         top = bee_board_top(project),
         live = bee_live_strip_section(snapshot),
-        board = bee_feature_hub_section(project, snapshot),
+        board = bee_feature_hub_section(project, snapshot, feature_panes),
         finished = bee_finished_section(&project.id, &snapshot.shipped),
         panels = bee_panels_section(snapshot),
     );
@@ -2473,11 +2477,15 @@ const WORKING_MINUTES: f64 = 5.0;
 /// `read_rollup` instead of reading the archive itself, so a feature still
 /// lands in the same column its own project's board would put it in,
 /// merged with every other project's instead of rendered alone.
-fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String {
+fn bee_feature_hub_section(
+    project: &Project,
+    snapshot: &BeeSnapshot,
+    feature_panes: &std::collections::HashMap<String, Vec<TerminalPaneView>>,
+) -> String {
     let archived_features: std::collections::HashSet<String> =
         list_archived_feature_dirs(&project.root_path).into_iter().collect();
     let placements = bee_classify_features(snapshot, &archived_features);
-    bee_render_hub_section(project, &placements, &snapshot.backlog.pbis)
+    bee_render_hub_section(project, &placements, &snapshot.backlog.pbis, feature_panes)
 }
 
 /// One feature already sorted into one of the feature hub's five columns
@@ -2684,16 +2692,25 @@ fn bee_classify_features(
 /// project's page having only ever shown itself. project-color-identity-3:
 /// each card's `worktree_label` still travels through, since `bee_hub_card`
 /// now folds it into that page's own slug subtitle in the chip row's
-/// place. Passes an empty pane slice to every card (card-terminals-1): the
-/// per-project board at `/p/:id/_bee` does not read herdr today, and
-/// giving it terminal badges is deliberately out of scope for that cell --
-/// this keeps its output byte-identical. `pbis` (kanban-columns D2/D3) is
+/// place. `feature_panes` (inprogress-priority-order-1, D5) is
+/// `server.rs::bee_board`'s own `project_feature_panes` join, keyed by
+/// feature name alone -- a single project needs no per-project outer key
+/// the way the cross-project map below does. A feature absent from it (no
+/// pane in its own checkout, or herdr unreachable) looks up to an empty
+/// slice, rendering exactly as an empty pane slice always has -- so a
+/// switched-off or herdr-down board still renders byte-identically to
+/// before this feature. `pbis` (kanban-columns D2/D3) is
 /// `snapshot.backlog.pbis` -- every `proposed` one renders through the same
 /// [`bee_hub_finished_row`], appended to `todo_rows` after every feature
 /// Todo row is already in it, so the column always reads features first,
 /// PBIs second (D2); a single project needs no second accumulator for
 /// this, unlike the cross-project merge below.
-fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement], pbis: &[BeePbi]) -> String {
+fn bee_render_hub_section(
+    project: &Project,
+    placements: &[BeeHubPlacement],
+    pbis: &[BeePbi],
+    feature_panes: &std::collections::HashMap<String, Vec<TerminalPaneView>>,
+) -> String {
     let mut todo_rows: Vec<String> = Vec::new();
     let mut in_progress_cards = String::new();
     let mut review_rows: Vec<String> = Vec::new();
@@ -2704,11 +2721,13 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement], pbi
     let mut review_count = 0usize;
     let mut compound_count = 0usize;
     let mut finished_count = 0usize;
+    let no_panes: Vec<TerminalPaneView> = Vec::new();
 
     for placement in placements {
         match placement {
             BeeHubPlacement::InProgress(data) => {
                 in_progress_count += 1;
+                let panes = feature_panes.get(data.feature.as_str()).unwrap_or(&no_panes);
                 in_progress_cards.push_str(&bee_hub_card(
                     &project.id,
                     &data.feature,
@@ -2721,7 +2740,7 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement], pbi
                     data.docs.as_ref(),
                     None,
                     None,
-                    &[],
+                    panes,
                 ));
             }
             BeeHubPlacement::Finished(data) => {
@@ -6249,7 +6268,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"data-hub-group="in-progress" data-hub-count="0""#),
@@ -6310,7 +6329,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/session-bound-feat""#),
@@ -6359,7 +6378,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/wt-bound-feat""#),
@@ -6445,7 +6464,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/working-feat""#),
@@ -6533,7 +6552,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/active-feat""#),
@@ -6593,7 +6612,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/active-feat""#),
@@ -6644,7 +6663,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
         let strip_html = bee_live_strip_section(&snapshot);
 
         assert!(
@@ -6702,7 +6721,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/handoff-idle-feat""#),
@@ -6751,7 +6770,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#),
@@ -6980,7 +6999,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             !html.contains("parked-feat"),
@@ -7050,7 +7069,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/closed-session-feat""#),
@@ -7099,7 +7118,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/closed-reviewed-feat""#),
@@ -7165,7 +7184,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/live-reviewed-feat""#),
@@ -7208,7 +7227,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"data-hub-group="review" href="/p/proj-1/_bee/feature/both-signal-feat""#),
@@ -7255,7 +7274,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             !html.contains(r#"data-hub-group="review" href="/p/proj-1/_bee/feature/settled-feat""#),
@@ -8456,7 +8475,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(html.contains(r#"data-hub-group="finished" data-hub-count="12""#), "{html}");
         assert_eq!(
