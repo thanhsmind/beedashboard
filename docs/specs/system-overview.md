@@ -58,6 +58,10 @@ launcher — CLI, MCP, future desktop — coordinates through `~/.waggledance/da
   outside the project root, symlinks included).
 - **Live reload** — a filesystem watcher (debounced) updates the index on change
   and pushes a reload signal over WebSocket; the browser reloads the page.
+  A page currently showing a live terminal screen never reloads on that
+  signal — the homepage's Terminals tab and the standalone terminal page both
+  stay put, so an edit anywhere can never reset a running terminal — while the
+  homepage's Kanban and Projects tabs keep reloading as before.
 - **Search** — full-text (keyword) across a project or all projects.
 - **Code** — a second way to read a project: its files as they sit on disk,
   folders before files, each source file shown with its syntax coloured and
