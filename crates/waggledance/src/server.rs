@@ -16079,6 +16079,13 @@ mod bee_route_tests {
     /// screen carries the selected pane's project label, its `status_pill`
     /// and its program (`kind`) — the identity that before this feature
     /// lived only inside the closed `<select>`'s own option text.
+    ///
+    /// home-terminal-header: that line is now a two-line header block. The
+    /// title line carries the status pill and the pane's own name — project
+    /// label plus the `workspace · tab` pair the project page's strip
+    /// already prints — and the sub line keeps the program and title in the
+    /// muted tone. Every fact the old single line carried is still asserted
+    /// here; only which of the two lines carries it has changed.
     #[tokio::test]
     async fn terminals_tab_identity_line_names_project_status_and_program() {
         use crate::herdr::fake::FakeHerdr;
@@ -16114,16 +16121,24 @@ mod bee_route_tests {
         )
         .await;
         assert!(
-            project_body.contains(r#"<div class="term-pane__meta">proj-a "#),
-            "the identity line must name the selected pane's own project: {project_body}"
+            project_body.contains(r#"<div class="term-pane__head">"#),
+            "the selected pane must be named by a header block: {project_body}"
+        );
+        // `frontend-app · main` is the fake herdr's own seeded window/tab
+        // label pair — the same pair `terminal_page`'s strip is asserted
+        // against elsewhere in this module, which is the point: a pane reads
+        // identically on both surfaces.
+        assert!(
+            project_body.contains(r#"<span>proj-a · frontend-app · main</span>"#),
+            "the header's title line must name the selected pane's own project and its workspace/tab identity: {project_body}"
         );
         assert!(
-            project_body.contains(r#"<span class="fg-status fg-status--warn"><span class="fg-status__dot"></span>working</span>"#),
-            "the identity line must carry the selected pane's status pill: {project_body}"
+            project_body.contains(r#"<div class="term-pane__title"><span class="fg-status fg-status--warn"><span class="fg-status__dot"></span>working</span>"#),
+            "the header's title line must open with the selected pane's status pill: {project_body}"
         );
         assert!(
-            project_body.contains("claude"),
-            "the identity line must name the selected pane's program: {project_body}"
+            project_body.contains(r#"<div class="term-pane__sub">claude"#),
+            "the header's sub line must name the selected pane's program: {project_body}"
         );
 
         let unassigned_body = body_string(
@@ -16131,8 +16146,8 @@ mod bee_route_tests {
         )
         .await;
         assert!(
-            unassigned_body.contains(r#"<div class="term-pane__meta">Unassigned "#),
-            "an unassigned pane's identity line must read Unassigned rather than a project name: {unassigned_body}"
+            unassigned_body.contains(r#"<span>Unassigned · docs-site · main</span>"#),
+            "an unassigned pane's header must read Unassigned rather than a project name: {unassigned_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -16243,12 +16258,22 @@ mod bee_route_tests {
     /// the selected pane is unassigned, since `/p/:id/_terminal/create/…`
     /// is the only create route there is and an unassigned pane has no
     /// `:id` to build one against.
+    ///
+    /// home-terminal-header: what those controls *offer* here is now agent
+    /// presets only. The plain "New shell" button is gone from this tab —
+    /// the Agents drawer is how a terminal is reached and started from the
+    /// home page, and a shell button above someone else's running screen
+    /// only ever meant "a shell in whichever project that screen belongs
+    /// to". It stays on the project terminal page, which
+    /// `terminal_page_drawer_and_create_controls_are_unchanged` and the
+    /// `views.rs` `terminal_page_*` tests still prove.
     #[tokio::test]
     async fn terminals_tab_create_controls_render_for_project_pane_and_absent_for_unassigned() {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("terminals-tab-create");
         enable_terminal(&dir);
+        configure_preset(&dir, "Claude", &["claude"]);
         let scratch = fresh_root("terminals-tab-create-scratch");
         let root = scratch.join("proj-a");
         std::fs::create_dir_all(&root).unwrap();
@@ -16280,8 +16305,12 @@ mod bee_route_tests {
             "create controls must render for a selected project pane, targeting its own project: {project_body}"
         );
         assert!(
-            project_body.contains(">New shell<"),
-            "the New shell button must render: {project_body}"
+            project_body.contains(r#"data-preset="Claude""#),
+            "a configured agent preset must still be offered: {project_body}"
+        );
+        assert!(
+            !project_body.contains(">New shell<") && !project_body.contains("class=\"term-create__pane\""),
+            "the Terminals tab must offer no plain-shell button: {project_body}"
         );
 
         let unassigned_body = body_string(
@@ -16291,6 +16320,50 @@ mod bee_route_tests {
         assert!(
             !unassigned_body.contains("class=\"term-create\""),
             "no create controls render for a selected unassigned pane: {unassigned_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// home-terminal-header: with the plain-shell button gone from this tab,
+    /// a deployment that configures no agent presets has nothing left to
+    /// offer here — so the `.term-create` box itself must not ship, rather
+    /// than shipping empty. Same silence a selected unassigned pane already
+    /// gets, for the same reason: no control to render.
+    #[tokio::test]
+    async fn terminals_tab_renders_no_create_box_when_no_preset_is_configured() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminals-tab-create-none");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminals-tab-create-none-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let project_agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let body = body_string(
+            get(app, &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+        )
+        .await;
+        assert!(
+            !body.contains("class=\"term-create\""),
+            "no configured preset and no plain-shell button must render no create box at all: {body}"
+        );
+        assert!(
+            body.contains(r#"<div class="term-pane__head">"#),
+            "the pane itself must still render: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -19543,8 +19616,13 @@ mod bee_route_tests {
             )),
             "no card for the shell pane: {body}"
         );
+        // home-terminal-header: matched as rendered markup, not as a bare
+        // token — `PROJECT_TAB_STYLE` now *styles* `.term-pane__head` for the
+        // homepage tab's own header block, and that rule ships on this page
+        // too. The truth being proved is unchanged: this page's pane card
+        // renders no heading element of its own.
         assert!(
-            !body.contains("term-pane__head"),
+            !body.contains(r#"<div class="term-pane__head">"#),
             "a pane card must carry no heading of its own: {body}"
         );
 
