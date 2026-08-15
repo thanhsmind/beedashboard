@@ -1092,22 +1092,47 @@ fn terminals_tab(panes: &[TerminalsMenuPane], selected_pane: Option<&str>, herdr
 
 /// homepage-terminals D6: the selected pane's live screen viewport plus
 /// [`pane_controls`]'s reply form, key buttons and (project panes only)
-/// attach control — [`pane_cards`]'s exact card shape, minus the
-/// `.term-scroll` history controls (out of this feature's D2 scope; the tab
-/// shows one live screen, not a scrollback browser). `data-term-base` is
-/// what lets `assets/app.js`'s existing screen poller *and* its
-/// input/keys/attach wiring build this pane's URLs without a
-/// `data-project-id` on this page — see plan "Technical design" 2 and each
-/// function's own doc.
+/// attach control — [`pane_cards`]'s exact card shape (home-terminal-parity:
+/// including its `.term-scroll` history stack — the tab is now a scrollback
+/// browser too, not a live-only viewport). `data-term-base` is what lets
+/// `assets/app.js`'s existing screen poller *and* its input/keys/attach/
+/// scroll wiring build this pane's URLs without a `data-project-id` on this
+/// page — see plan "Technical design" 2 and each function's own doc.
+///
+/// home-terminal-parity: the identity line above the screen — project
+/// label, [`status_pill`], program and (when non-empty) title — is the same
+/// text the switcher's own `<option>` already carries (`terminals_tab`), now
+/// also readable once a pane is selected and its screen fills the tab,
+/// instead of living only inside the closed dropdown. It reuses
+/// `.term-pane__meta` and `status_pill`'s `.fg-status` markup — no new
+/// style block, matching [`pane_tab`]'s own identity line shape.
 fn screen_frame(pane: &TerminalsMenuPane) -> String {
+    let title_suffix = if pane.view.title.is_empty() {
+        String::new()
+    } else {
+        format!(" — {}", esc(&pane.view.title))
+    };
     format!(
         r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
+  <div class="term-pane__meta">{project} {status_pill} {program}{title}</div>
   <div class="term-screen-wrap">
     <pre class="term-screen" data-pane-id="{pane_id}" data-term-base="{base}" aria-live="polite">Loading screen…</pre>
+    <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
+      <div class="term-scroll__stack">
+        <button type="button" data-scroll="older" aria-label="Older">↑</button>
+        <button type="button" data-scroll="newer" aria-label="Newer" disabled>↓</button>
+        <button type="button" data-scroll="live" aria-label="Live">Live</button>
+      </div>
+    </div>
   </div>
   {controls}
 </div>"#,
         pane_id = esc(&pane.view.pane_id),
+        project = esc(&pane.project_label),
+        status_pill = status_pill(&pane.view.status),
+        program = esc(&pane.view.kind),
+        title = title_suffix,
+        name = esc(&pane.view.name),
         base = esc(&pane.base),
         controls = pane_controls(&pane.view.pane_id, &pane.view.name, pane.is_project_pane, Some(&pane.base)),
     )

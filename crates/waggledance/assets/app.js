@@ -1117,6 +1117,12 @@
       var card = group.closest(".term-pane");
       var screenEl = card ? card.querySelector(".term-screen[data-pane-id]") : null;
       if (!screenEl) return;
+      // homepage-terminal-parity: the same per-element `data-term-base`
+      // `pollOne` already reads (app.js:1033) — present only on the
+      // homepage Terminals tab's `.term-screen` (`views.rs::screen_frame`),
+      // absent (so `screenUrl` falls back to `projectId`) on the project
+      // and Unassigned pages, unchanged.
+      var base = screenEl.getAttribute("data-term-base");
       var olderBtn = group.querySelector('[data-scroll="older"]');
       var newerBtn = group.querySelector('[data-scroll="newer"]');
       var liveBtn = group.querySelector('[data-scroll="live"]');
@@ -1137,7 +1143,7 @@
         olderBtn.addEventListener("click", function () {
           viewingHistory[paneId] = true; // pause the poller before the round trip, not after
           var requestedDepth = paneHistoryDepth[paneId] + 1;
-          fetch(screenUrl(paneId, requestedDepth), { credentials: "same-origin" })
+          fetch(screenUrl(paneId, requestedDepth, base), { credentials: "same-origin" })
             .then(function (res) {
               return res.ok ? res.json() : null;
             })
@@ -1162,7 +1168,7 @@
           // requesting.
           viewingHistory[paneId] = true; // pause the poller before the round trip, not after
           var requestedDepth = Math.max(paneHistoryDepth[paneId] - 1, 0);
-          fetch(screenUrl(paneId, requestedDepth), { credentials: "same-origin" })
+          fetch(screenUrl(paneId, requestedDepth, base), { credentials: "same-origin" })
             .then(function (res) {
               return res.ok ? res.json() : null;
             })
@@ -1192,7 +1198,7 @@
           // this press's job alone, never left to race the next poll tick.
           paneHistoryDepth[paneId] = 0;
           updateNewerDisabled(); // Live always lands at depth 0, so Newer disables immediately
-          fetch(screenUrl(paneId, 0), { credentials: "same-origin" })
+          fetch(screenUrl(paneId, 0, base), { credentials: "same-origin" })
             .then(function (res) {
               return res.ok ? res.json() : null;
             })

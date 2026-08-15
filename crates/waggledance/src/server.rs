@@ -11283,9 +11283,14 @@ mod bee_route_tests {
             .expect("the pagehide/visibilitychange restore must follow the Live button's block");
         let live_btn_block = &js[live_btn_start..live_btn_end];
         assert!(
-            live_btn_block.contains("screenUrl(paneId, 0)"),
-            "the Live button must request screenUrl(paneId, 0) -- an explicit depth-0 request, \
-             never the presence-less plain poll URL: {live_btn_block}"
+            // home-terminal-parity: the three scroll click handlers now pass
+            // the screen's own `data-term-base` through as `screenUrl`'s
+            // third argument (`views.rs::screen_frame`'s doc) -- `base)`
+            // proves the depth-0 request still lands, base argument and all.
+            live_btn_block.contains("screenUrl(paneId, 0, base)"),
+            "the Live button must request screenUrl(paneId, 0, base) -- an explicit depth-0 \
+             request carrying the pane's own base, never the presence-less plain poll URL: \
+             {live_btn_block}"
         );
     }
 
@@ -11914,8 +11919,12 @@ mod bee_route_tests {
             "Newer must request one page toward live, never below depth 0: {newer_block}"
         );
         assert!(
-            newer_block.contains("screenUrl(paneId, requestedDepth)"),
-            "Newer must request through the same screenUrl path Older uses: {newer_block}"
+            // home-terminal-parity: `base` is the screen's own
+            // `data-term-base`, read once above the button handlers and
+            // passed through unchanged by all three.
+            newer_block.contains("screenUrl(paneId, requestedDepth, base)"),
+            "Newer must request through the same screenUrl path Older uses, base argument and \
+             all: {newer_block}"
         );
         assert!(
             newer_block.contains("viewingHistory[paneId] = true;"),
@@ -15865,6 +15874,55 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
+    /// home-terminal-parity (plan Slice 1): `screen_frame` now renders the
+    /// same `.term-scroll` older/newer/live stack `pane_cards` already
+    /// renders on the project and Unassigned pages — same markup, same aria
+    /// labels, Newer starting disabled — so the homepage tab is a
+    /// scrollback browser too, not a live-only viewport.
+    #[tokio::test]
+    async fn terminals_tab_screen_renders_the_scroll_history_stack_for_the_selected_pane() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminals-tab-scroll-stack");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminals-tab-scroll-stack-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let body = body_string(get(app, &format!("/?tab=terminals&pane={}", agent.pane_id)).await).await;
+        assert!(
+            body.contains(&format!(r#"class="term-scroll" data-pane-id="{}""#, agent.pane_id)),
+            "the selected pane's scroll box must render on the homepage tab: {body}"
+        );
+        assert!(
+            body.contains(r#"<button type="button" data-scroll="older" aria-label="Older">↑</button>"#),
+            "the Older button must render: {body}"
+        );
+        assert!(
+            body.contains(r#"<button type="button" data-scroll="newer" aria-label="Newer" disabled>↓</button>"#),
+            "the Newer button must start disabled: {body}"
+        );
+        assert!(
+            body.contains(r#"<button type="button" data-scroll="live" aria-label="Live">Live</button>"#),
+            "the Live button must render: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
     /// D6: the selected pane's own reply form and key buttons render for
     /// both a project pane and an unassigned one, each carrying the same
     /// `data-term-base` the screen frame already proved above — so
@@ -15941,6 +15999,70 @@ mod bee_route_tests {
                 unassigned_agent.pane_id, unassigned_base
             )),
             "an unassigned pane's move keys must carry the Unassigned base: {unassigned_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// home-terminal-parity (plan Slice 1): the identity line above the
+    /// screen carries the selected pane's project label, its `status_pill`
+    /// and its program (`kind`) — the identity that before this feature
+    /// lived only inside the closed `<select>`'s own option text.
+    #[tokio::test]
+    async fn terminals_tab_identity_line_names_project_status_and_program() {
+        use crate::herdr::fake::FakeHerdr;
+        use crate::herdr::wire::AgentStatus;
+
+        let dir = fresh_root("terminals-tab-identity-line");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminals-tab-identity-line-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let project_agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake.set_status(&project_agent.pane_id, AgentStatus::Working).await.unwrap();
+        let unassigned_agent = fake
+            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let project_body = body_string(
+            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+        )
+        .await;
+        assert!(
+            project_body.contains(r#"<div class="term-pane__meta">proj-a "#),
+            "the identity line must name the selected pane's own project: {project_body}"
+        );
+        assert!(
+            project_body.contains(r#"<span class="fg-status fg-status--warn"><span class="fg-status__dot"></span>working</span>"#),
+            "the identity line must carry the selected pane's status pill: {project_body}"
+        );
+        assert!(
+            project_body.contains("claude"),
+            "the identity line must name the selected pane's program: {project_body}"
+        );
+
+        let unassigned_body = body_string(
+            get(app, &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+        )
+        .await;
+        assert!(
+            unassigned_body.contains(r#"<div class="term-pane__meta">Unassigned "#),
+            "an unassigned pane's identity line must read Unassigned rather than a project name: {unassigned_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
