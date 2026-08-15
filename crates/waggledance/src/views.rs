@@ -675,7 +675,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    the edge. */
 @media (max-width: 720px) {
   .term-screen { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
-  .term-keys button, .term-reply__send, .term-reply__stage { padding: var(--space-2) var(--space-3); }
+  .term-keys button, .term-reply__send, .term-reply__stage, .term-reply__approve { padding: var(--space-2) var(--space-3); }
   .term-reply__actions { justify-content: stretch; }
   .term-reply__actions button { flex: 1; }
 }
@@ -701,7 +701,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
   .term-reply__text { font-size: 16px; }
 }
 .term-reply__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
-.term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-3); min-height: 44px; border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; }
+.term-reply__send, .term-reply__stage, .term-reply__approve { padding: var(--space-1) var(--space-3); min-height: 44px; border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; }
 /* Send is the primary of the pair — Stage beside it stays the quiet one. */
 .term-reply__send { background: var(--color-action); border-color: var(--color-action); color: var(--color-bg); font-weight: var(--weight-semibold); }
 /* One tight control block under the screen, on a single line: the arrows and
@@ -1258,6 +1258,7 @@ fn pane_controls(pane_id: &str, name: &str, attach: bool, base: Option<&str>) ->
   <form class="term-reply" data-pane-id="{pane_id}"{base_attr}>
     <textarea class="term-reply__text" rows="3" placeholder="Type a reply… (Ctrl+Enter to send)" aria-label="Reply to {name}" autocomplete="off"></textarea>{attach_block}
     <div class="term-reply__actions">
+      <button type="button" class="term-reply__approve">Approve</button>
       <button type="button" class="term-reply__stage">Stage</button>
       <button type="submit" class="term-reply__send">Send</button>
     </div>
@@ -1636,6 +1637,7 @@ const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
       var paneId = form.getAttribute("data-pane-id");
       var input = form.querySelector(".term-reply__text");
       var stageBtn = form.querySelector(".term-reply__stage");
+      var approveBtn = form.querySelector(".term-reply__approve");
       form.addEventListener("submit", function (ev) {
         ev.preventDefault();
         sendReply(paneId, input.value, true, input);
@@ -1651,6 +1653,11 @@ const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
       if (stageBtn) {
         stageBtn.addEventListener("click", function () {
           sendReply(paneId, input.value, false, input);
+        });
+      }
+      if (approveBtn) {
+        approveBtn.addEventListener("click", function () {
+          postJson(inputUrl(paneId), { text: "Approve", submit: true }).catch(function () {});
         });
       }
     });
@@ -6340,6 +6347,75 @@ mod tests {
         assert!(
             !html.contains(".term-reply__send { min-width: 44px") && !html.contains(".term-reply__stage { min-width: 44px"),
             "the reply buttons must carry no such rule: {html}"
+        );
+    }
+
+    /// D1 (terminal-approve-button): Approve leads the row — Approve,
+    /// Stage, Send — so a one-tap send never sits shoulder to shoulder with
+    /// Send, and Stage/Send keep their existing relative order.
+    #[test]
+    fn pane_controls_renders_approve_before_stage_and_send() {
+        let html = pane_controls("pane-1", "Agent One", false, None);
+        assert!(
+            html.contains(r#"<button type="button" class="term-reply__approve">Approve</button>"#),
+            "the Approve button must render: {html}"
+        );
+        let approve_at = html.find("term-reply__approve").expect("Approve button must render");
+        let stage_at = html.find("term-reply__stage").expect("Stage button must render");
+        let send_at = html.find("term-reply__send").expect("Send button must render");
+        assert!(
+            approve_at < stage_at && stage_at < send_at,
+            "the row must read Approve, Stage, Send: {html}"
+        );
+    }
+
+    /// D1: the new button sizes exactly like its siblings — no new colours,
+    /// no new tokens — so it joins both the shared reply-button rule and the
+    /// mobile sizing tweak alongside term-reply__send/term-reply__stage.
+    #[test]
+    fn term_reply_approve_shares_the_stage_send_css_rule() {
+        let project = sample_project();
+        let html = terminal_page(&project, &[], None, &[]);
+        assert!(
+            html.contains(".term-reply__send, .term-reply__stage, .term-reply__approve {"),
+            "the shared reply-button rule must include term-reply__approve: {html}"
+        );
+        assert!(
+            html.contains(".term-keys button, .term-reply__send, .term-reply__stage, .term-reply__approve {"),
+            "the mobile sizing tweak must include term-reply__approve: {html}"
+        );
+    }
+
+    /// D2/D4: `assets/app.js` wires the Approve button the same way it
+    /// wires Stage — posting through the existing `postJson`/`inputUrl`
+    /// helpers, never a new fetch — so the project page and the homepage
+    /// Terminals tab both get a working button for free.
+    #[test]
+    fn app_js_wires_the_approve_button() {
+        let script = include_str!("../assets/app.js");
+        assert!(
+            script.contains(r#"var approveBtn = form.querySelector(".term-reply__approve");"#),
+            "app.js must read the Approve button: {script}"
+        );
+        assert!(
+            script.contains(r#"postJson(inputUrl(paneId, base), { text: "Approve", submit: true })"#),
+            "app.js's Approve handler must post the exact text Approve with submit true: {script}"
+        );
+    }
+
+    /// D4: the Unassigned page has no `data-project-id` to key off, so it is
+    /// wired by its own inline `UNASSIGNED_TERMINAL_SCRIPT` rather than
+    /// `assets/app.js` — the Approve handler has to be duplicated here too,
+    /// or the button on that page would render inert.
+    #[test]
+    fn unassigned_terminal_script_wires_the_approve_button() {
+        assert!(
+            UNASSIGNED_TERMINAL_SCRIPT.contains(r#"var approveBtn = form.querySelector(".term-reply__approve");"#),
+            "UNASSIGNED_TERMINAL_SCRIPT must read the Approve button: {UNASSIGNED_TERMINAL_SCRIPT}"
+        );
+        assert!(
+            UNASSIGNED_TERMINAL_SCRIPT.contains(r#"postJson(inputUrl(paneId), { text: "Approve", submit: true })"#),
+            "UNASSIGNED_TERMINAL_SCRIPT's Approve handler must post the exact text Approve with submit true to that page's own input URL: {UNASSIGNED_TERMINAL_SCRIPT}"
         );
     }
 
