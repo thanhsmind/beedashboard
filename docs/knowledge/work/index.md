@@ -18,6 +18,7 @@ never a generation timestamp or any other wall-clock value.
 - [cross-board/](cross-board/index.md) — 1 concept(s)
 - [ctrl-c-key/](ctrl-c-key/index.md) — 1 concept(s)
 - [gate-stop-superseded/](gate-stop-superseded/index.md) — 1 concept(s)
+- [home-terminal-parity/](home-terminal-parity/index.md) — 1 concept(s)
 - [homepage-tabs/](homepage-tabs/index.md) — 1 concept(s)
 - [homepage-terminals/](homepage-terminals/index.md) — 1 concept(s)
 - [kanban-columns/](kanban-columns/index.md) — 1 concept(s)
