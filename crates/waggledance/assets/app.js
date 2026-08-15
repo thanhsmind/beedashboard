@@ -1760,23 +1760,19 @@
     // page's (`views.rs::agent_switch_drawer`'s `homepage` flag) — read
     // once, since the attribute never changes for the lifetime of this
     // static markup.
+    // home-terminal-header-2: since both instances now render the same
+    // project-grouped shape, this flag decides exactly one thing — where a
+    // row leads (`agentRow`).
     var homepage = list.hasAttribute("data-agent-drawer-homepage");
 
     var POLL_MS = 5000;
     var timer = null;
 
-    var SECTIONS = [
-      { key: "working", label: "Working" },
-      { key: "blocked", label: "Waiting" },
-      { key: "done", label: "Done" },
-      { key: "idle", label: "Idle" },
-    ];
-
     // The same mapping `views.rs::status_pill` applies server-side: `done`
     // reads ready, `working` reads warn, `blocked` reads blocked, and every
     // other status (`idle`, `unknown`, or anything this list has never seen
-    // before) keeps the bare, unmodified dot — and groups under this
-    // drawer's own "Idle" section below rather than being dropped.
+    // before) keeps the bare, unmodified dot rather than borrowing another
+    // state's colour.
     function pillModifier(status) {
       if (status === "done") return " fg-status--ready";
       if (status === "working") return " fg-status--warn";
@@ -1784,15 +1780,11 @@
       return "";
     }
 
-    function sectionKey(status) {
-      return status === "working" || status === "blocked" || status === "done" ? status : "idle";
-    }
-
     // home-terminal-parity-2: blocked before working before the rest — the
     // same D4 rank `views.rs::terminals_status_rank` applies server-side to
-    // this tab's own pane inventory — used only to order rows *within* each
-    // homepage project group; the project page's own status sections above
-    // already carry this ordering structurally and never call this.
+    // this tab's own pane inventory — used to order rows *within* each
+    // project group. home-terminal-header-2: that is now every group, on
+    // both pages, since status sections are gone.
     function statusRank(status) {
       if (status === "blocked") return 0;
       if (status === "working") return 1;
@@ -1827,31 +1819,18 @@
       return item;
     }
 
-    // The project page's own shape, unchanged: one section per status,
-    // `SECTIONS`' own fixed order.
-    function renderByStatus(agents) {
-      var groups = { working: [], blocked: [], done: [], idle: [] };
-      agents.forEach(function (agent) {
-        groups[sectionKey(agent.status)].push(agent);
-      });
-      SECTIONS.forEach(function (section) {
-        var rows = groups[section.key];
-        if (!rows.length) return;
-        var heading = document.createElement("div");
-        heading.className = "agent-drawer__section";
-        heading.textContent = section.label;
-        list.appendChild(heading);
-        rows.forEach(function (agent) {
-          list.appendChild(agentRow(agent));
-        });
-      });
-    }
-
-    // home-terminal-parity-2: the homepage instance's own shape — one
-    // section per project, in the order its first agent was seen in the
-    // feed (`GET /api/agents` already walks projects in a stable order,
-    // unassigned panes last), each section's own rows sorted blocked
-    // before working before the rest.
+    // home-terminal-parity-2: one section per project, in the order its
+    // first agent was seen in the feed (`GET /api/agents` already walks
+    // projects in a stable order, unassigned panes last), each section's own
+    // rows sorted blocked before working before the rest.
+    //
+    // home-terminal-header-2: this is now the only shape. The project page
+    // used to group its rows under status headings instead, so the same
+    // cross-project switcher rearranged itself depending on which page you
+    // happened to open it from — and the thing a reader is looking for in it
+    // is which project an agent belongs to, which the status shape buried in
+    // each row's suffix. One shape, both pages. What still differs between
+    // the two instances is only where a row leads (`agentRow`).
     function renderByProject(agents) {
       var order = [];
       var groups = {};
@@ -1886,11 +1865,7 @@
         list.appendChild(empty);
         return;
       }
-      if (homepage) {
-        renderByProject(agents);
-      } else {
-        renderByStatus(agents);
-      }
+      renderByProject(agents);
     }
 
     function fetchAgents() {
