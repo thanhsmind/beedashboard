@@ -4773,7 +4773,7 @@ mod bee_route_tests {
         assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""), "{body}");
         assert_eq!(
             body.matches(&format!(
-                "class=\"bee-hub__card\" data-hub-group=\"in-progress\" href=\"/p/{}/_bee/feature/handoff-feat\"",
+                "bee-hub__detail-link\" href=\"/p/{}/_bee/feature/handoff-feat\"",
                 project.id
             ))
             .count(),
@@ -4823,7 +4823,7 @@ mod bee_route_tests {
 
         assert!(
             body.contains(&format!(
-                "data-hub-group=\"in-progress\" href=\"/p/{}/_bee/feature/planned-next-feat\"",
+                "bee-hub__detail-link\" href=\"/p/{}/_bee/feature/planned-next-feat\"",
                 project.id
             )),
             "the active feature still renders under In Progress: {body}"
@@ -5325,7 +5325,7 @@ mod bee_route_tests {
 
         assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""), "{body}");
         assert_eq!(
-            body.matches("data-hub-group=\"in-progress\" href=\"").count(),
+            body.matches("bee-hub__detail-link\" href=\"").count(),
             1,
             "the feature must render exactly one In Progress card, never counted in a second group: {body}"
         );

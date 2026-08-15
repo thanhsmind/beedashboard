@@ -1961,7 +1961,39 @@ html[data-scheme="dark"] .bee-hub-theme {{
    badge `<nav>` both land inside one painted box instead of the badges
    sitting as a bare row underneath it — see `bee_hub_card`'s doc comment. */
 .bee-hub__shell {{ display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }}
-.bee-hub__card {{ display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }}
+/* card-collapse-inprogress: `.bee-hub__card` now names the `<details>`
+   itself rather than the old whole-card `<a>` -- the flex-column layout
+   moved to `.bee-hub__body` below (only that inner div still needs to
+   stack the card's own rows), leaving this rule only the `min-width: 0`
+   the hub-fallbacks shrink chain still requires from every level between
+   the grid track and the clamped description. */
+.bee-hub__card {{ min-width: 0; }}
+/* card-collapse-inprogress D1/D3/D6: the collapsed header row -- name plus
+   chevron -- is the details element's own `<summary>`, native to the
+   `<details>`/`<summary>` disclosure this card now uses (no JS, no
+   persisted state); the `list-style`/`::-webkit-details-marker` pair
+   strips the browser's own default marker so only `.bee-hub__chev` below
+   draws one. */
+.bee-hub__summary {{ display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); cursor: pointer; list-style: none; }}
+.bee-hub__summary::-webkit-details-marker {{ display: none; }}
+.bee-hub__summary:focus-visible {{ outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }}
+/* Same rotation `.chap-folders__chev` uses (app.css) for its own disclosure
+   chevron, keyed off the native `[open]` attribute a `<details>` toggles
+   itself rather than that pattern's own `.is-open` class. */
+.bee-hub__chev {{ flex: none; line-height: 1; color: var(--color-text-subtle); transition: transform var(--motion-fast) var(--ease-standard); }}
+.bee-hub__card[open] .bee-hub__chev {{ transform: rotate(90deg); }}
+/* D2: everything the collapsed header does not show -- the subtitle,
+   description, progress bar, reason and activity lines -- plus D4's own
+   Feature detail link row, stacked in the same column gap the old
+   whole-card `<a>` used. `min-width: 0` keeps the hub-fallbacks shrink
+   chain intact now that `.bee-hub__desc` sits one flex level deeper than
+   before. */
+.bee-hub__body {{ display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }}
+/* D4: the feature-detail link row -- the one place the card still reaches
+   its own detail page now that the `<details>` can no longer be that link
+   itself. */
+.bee-hub__detail-link {{ display: flex; align-items: center; gap: var(--space-1); color: var(--color-link); font-size: var(--type-body-sm-size); font-weight: var(--weight-strong); text-decoration: none; }}
+.bee-hub__detail-link:hover {{ color: var(--color-link-hover); }}
 /* project-color-identity: the Features board card's own chip row is gone
    (D3), but this rule stays -- [`bee_feature_terminal_tab`]'s pane rows
    still reuse it for their own status-pill layout, unrelated to this
@@ -3210,24 +3242,27 @@ fn bee_cross_project_board_project_colors<'a>(
 /// feature's own checkout -- the worktree-vs-main-checkout join is already
 /// resolved by the caller (`server.rs::project_feature_panes`); this
 /// function only renders them, as a sibling `<nav>` after the card's own
-/// `<a>` rather than nested inside it (an anchor inside an anchor is
-/// invalid HTML, the same reason `project_badges` sits beside
-/// `proj-row__link` rather than inside it). card-badge-inside wraps that
-/// anchor/nav pair in a `<div class="fg-card bee-hub__shell">`, moving the
-/// box paint (`.fg-card`'s border, background, radius, padding) off the
-/// anchor and onto the shell, so the badges land inside the card's own
-/// painted box at its foot instead of on a bare row underneath it -- the
-/// anchor itself keeps only `bee-hub__card`, since the anchor-in-anchor
-/// rule above still forbids folding the nav's own links into the card
-/// link. The nav carries an extra `bee-hub__badges` class in this context
+/// `<details>` (card-collapse-inprogress: previously the card's own `<a>`)
+/// rather than nested inside it -- an anchor inside the details' own body
+/// would still be legal HTML, but keeping the badges outside is what lets
+/// them show collapsed and expanded alike (D1), the same reason
+/// `project_badges` sits beside `proj-row__link` rather than inside it.
+/// card-badge-inside wraps that details/nav pair in a
+/// `<div class="fg-card bee-hub__shell">`, moving the box paint
+/// (`.fg-card`'s border, background, radius, padding) off the card and
+/// onto the shell, so the badges land inside the card's own painted box at
+/// its foot instead of on a bare row underneath it -- the details element
+/// itself keeps only `bee-hub__card`. The nav carries an extra
+/// `bee-hub__badges` class in this context
 /// (a hairline top rule replacing the project-row's own bottom/right
 /// padding), reusing [`terminal_badges_nav`]'s exact per-badge markup and
 /// the accessible label "Terminals in this checkout" rather than anything
 /// naming the feature: for a Main feature the panes are shared with every
 /// other Main feature of that project, so the label must not claim
 /// otherwise. Empty `panes` renders no `<nav>` at all -- the shell still
-/// wraps the bare anchor, so the card looks exactly as it did before this
-/// feature -- and the per-project board's own call
+/// wraps the bare details/summary, so the card looks exactly as it did
+/// before this feature aside from the collapse itself -- and the
+/// per-project board's own call
 /// (`bee_render_hub_section`) always passes an empty slice, so this path
 /// renders every time there too.
 #[allow(clippy::too_many_arguments)]
@@ -3283,17 +3318,14 @@ fn bee_hub_card(
             ),
         },
     };
-    let name_html = match title {
-        Some(t) => format!(
-            r#"<div class="fg-card__title">{title}</div>{subtitle_html}"#,
-            title = esc(t),
-            subtitle_html = subtitle_html,
-        ),
-        None => format!(
-            r#"<div class="fg-card__title">{feature}</div>{subtitle_html}"#,
-            feature = esc(feature),
-            subtitle_html = subtitle_html,
-        ),
+    // card-collapse-inprogress D1/D2: the card's own name alone (its
+    // CONTEXT title, or the slug fallback) is all the collapsed header
+    // shows -- `subtitle_html` above now moves into the expandable body
+    // below instead of riding along with the title the way the old
+    // `name_html` bundled them.
+    let title_html = match title {
+        Some(t) => format!(r#"<div class="fg-card__title">{title}</div>"#, title = esc(t)),
+        None => format!(r#"<div class="fg-card__title">{feature}</div>"#, feature = esc(feature)),
     };
     let desc_html = match docs.and_then(|d| d.description.as_deref()).filter(|d| !d.is_empty()) {
         Some(d) => format!(r#"<p class="bee-hub__desc">{}</p>"#, esc(d)),
@@ -3345,13 +3377,21 @@ fn bee_hub_card(
     // own content while both sit inside the shared `bee-hub__shell` box.
     let terminal_badges_html =
         terminal_badges_nav(project_id, panes, "Terminals in this checkout", "bee-hub__badges");
+    // card-collapse-inprogress D1/D3/D6: a native `<details>` with no
+    // `open` attribute renders every card collapsed on every page load,
+    // with no persisted state and no JavaScript -- clicking the
+    // `<summary>` header is the browser's own toggle. D4 moves the
+    // feature-detail link off the card entirely and into its own row at
+    // the top of the expandable body, since a `<details>`/`<summary>`
+    // pair, unlike the old whole-card `<a>`, cannot itself be a link.
     format!(
-        r#"<div class="{shell_class}"><a class="bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}{desc_html}{progress_html}{reason_html}{activity_html}</a>{terminal_badges_html}</div>"#,
+        r#"<div class="{shell_class}"><details class="bee-hub__card" data-hub-group="{group_key}"><summary class="bee-hub__summary">{title_html}<span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/{pid}/_bee/feature/{feature_href}">Feature detail<span aria-hidden="true"> →</span></a>{subtitle_html}{desc_html}{progress_html}{reason_html}{activity_html}</div></details>{terminal_badges_html}</div>"#,
         shell_class = shell_class,
         group_key = group_key,
+        title_html = title_html,
         pid = esc(project_id),
         feature_href = esc(feature),
-        name_html = name_html,
+        subtitle_html = subtitle_html,
         desc_html = desc_html,
         progress_html = progress_html,
         reason_html = reason_html,
@@ -6216,7 +6256,7 @@ mod tests {
             "a closed feature owes no decision, so In Progress must be empty: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/closed-feat""#),
+            !html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/closed-feat""#),
             "the closed feature must render no In Progress card, and so no Waiting on you line: {html}"
         );
         assert!(
@@ -6273,7 +6313,7 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/session-bound-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/session-bound-feat""#),
             "a zero-cell feature with a live session bound to its lane must render under In Progress: {html}"
         );
         assert!(
@@ -6322,7 +6362,7 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/wt-bound-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/wt-bound-feat""#),
             "a zero-cell feature named by a granted worktree's own active feature must render under In Progress: {html}"
         );
 
@@ -6408,7 +6448,7 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/working-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/working-feat""#),
             "a feature whose session beat a minute ago must render under In Progress even with a gate unapproved: {html}"
         );
         assert!(
@@ -6496,11 +6536,11 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/active-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/active-feat""#),
             "a lane-less session beating a minute ago works the ACTIVE feature: {html}"
         );
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/other-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/other-feat""#),
             "the other gate-stopped feature with a live cell must also render under In Progress: {html}"
         );
         let active_pos = html
@@ -6556,7 +6596,7 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/active-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/active-feat""#),
             "the feature still has live work (it is the active feature), so it stays under In Progress: {html}"
         );
         assert!(
@@ -6608,7 +6648,7 @@ mod tests {
         let strip_html = bee_live_strip_section(&snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/stale-working-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/stale-working-feat""#),
             "the feature still has live work, so it stays under In Progress: {html}"
         );
         assert!(
@@ -6665,7 +6705,7 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/handoff-idle-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/handoff-idle-feat""#),
             "the active feature keeps live work and stays under In Progress: {html}"
         );
         assert!(
@@ -6714,7 +6754,7 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#),
             "the granted worktree's own liveness pull keeps the card under In Progress: {html}"
         );
         assert!(
@@ -7021,7 +7061,7 @@ mod tests {
             "a closed feature owes no decision even while a session is bound to its lane: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/closed-session-feat""#),
+            !html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/closed-session-feat""#),
             "a bound live session must never drag a finished feature back into In Progress: {html}"
         );
 
@@ -7128,7 +7168,7 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/live-reviewed-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/live-reviewed-feat""#),
             "live work must keep the feature under In Progress despite the unresolved candidate: {html}"
         );
         assert!(
@@ -7539,7 +7579,7 @@ mod tests {
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-a/_bee/feature/waiting-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-a/_bee/feature/waiting-feat""#),
             "waiting-feat must land under In Progress, same as its own project's board would: {html}"
         );
         assert!(
@@ -7548,7 +7588,7 @@ mod tests {
         );
         assert!(html.contains("Project A"), "the card must carry its own project's name: {html}");
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-b/_bee/feature/progress-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-b/_bee/feature/progress-feat""#),
             "progress-feat must land under In Progress: {html}"
         );
         assert!(html.contains("Project B"), "the in-progress card must carry its own project's name: {html}");
@@ -7881,7 +7921,7 @@ mod tests {
         let card_slot = (1..=10)
             .find(|n| {
                 html.contains(&format!(
-                    "bee-hub__shell--p{n}\"><a class=\"bee-hub__card\" data-hub-group=\"in-progress\" href=\"/p/proj-a/"
+                    "bee-hub__shell--p{n}\"><details class=\"bee-hub__card\" data-hub-group=\"in-progress\">"
                 ))
             })
             .unwrap_or_else(|| panic!("proj-a's own In Progress card must carry a colour modifier: {html}"));
@@ -7952,12 +7992,12 @@ mod tests {
             "the card anchor and its badge nav must share one fg-card bee-hub__shell wrapper: {card_html}"
         );
         assert!(
-            card_html.contains(r#"<a class="bee-hub__card""#),
-            "the anchor itself must no longer carry fg-card -- the shell paints the box now: {card_html}"
+            card_html.contains(r#"<details class="bee-hub__card""#),
+            "card-collapse-inprogress: the details element itself must no longer carry fg-card -- the shell paints the box now: {card_html}"
         );
         assert!(
             !card_html.contains(r#"class="fg-card bee-hub__card""#),
-            "fg-card must move off the anchor onto the shell, never stay on both: {card_html}"
+            "fg-card must move off the card onto the shell, never stay on both: {card_html}"
         );
         assert!(
             card_html.contains(r#"aria-label="Terminals in this checkout""#),
@@ -7971,13 +8011,13 @@ mod tests {
             !card_html.contains("agent-name-must-not-appear"),
             "the pane's own agent name must never reach this markup (D1a's rule, reused here): {card_html}"
         );
-        let card_a_end = card_html.find("</a>").expect("the card's own anchor must close");
+        let details_end = card_html.find("</details>").expect("the card's own details must close");
         let badge_nav_start = card_html
             .find(r#"<nav class="proj-row__badges"#)
             .expect("badges must render");
         assert!(
-            badge_nav_start > card_a_end,
-            "the badge nav must be a sibling after the card's own </a>, not nested inside it: {card_html}"
+            badge_nav_start > details_end,
+            "the badge nav must be a sibling after the card's own </details>, not nested inside it: {card_html}"
         );
     }
 
@@ -8006,8 +8046,8 @@ mod tests {
             "the shell must still wrap the bare card anchor: {card_html}"
         );
         assert!(
-            card_html.ends_with("</a></div>"),
-            "with no badges, the shell must close right after the card's own </a>: {card_html}"
+            card_html.ends_with("</details></div>"),
+            "with no badges, the shell must close right after the card's own </details>: {card_html}"
         );
     }
 
@@ -8110,9 +8150,17 @@ mod tests {
             Some(3),
             &[],
         );
+        // card-collapse-inprogress: the title (now in the collapsed
+        // `<summary>`) and the subtitle (now in the expandable body) are no
+        // longer adjacent in the rendered markup, so each is checked on its
+        // own rather than as one contiguous string.
+        assert!(
+            card_html.contains(r#"<div class="fg-card__title">feat-a</div>"#),
+            "a title-less card must still render its slug as the card's own name: {card_html}"
+        );
         assert!(
             card_html.contains(
-                r#"<div class="fg-card__title">feat-a</div><div class="bee-hub__project">Project A<span class="bee-hub__project-worktree"> / Main</span></div>"#
+                r#"<div class="bee-hub__project">Project A<span class="bee-hub__project-worktree"> / Main</span></div>"#
             ),
             "a title-less card with a project label must still carry the project subtitle: {card_html}"
         );
@@ -8147,7 +8195,7 @@ mod tests {
         );
         assert_eq!(
             card_html,
-            r#"<div class="fg-card bee-hub__shell"><a class="bee-hub__card" data-hub-group="in-progress" href="/p/proj-a/_bee/feature/feat-a"><div class="fg-card__title">Human Title</div><div class="bee-hub__slug">feat-a<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></a></div>"#,
+            r#"<div class="fg-card bee-hub__shell"><details class="bee-hub__card" data-hub-group="in-progress"><summary class="bee-hub__summary"><div class="fg-card__title">Human Title</div><span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/proj-a/_bee/feature/feat-a">Feature detail<span aria-hidden="true"> →</span></a><div class="bee-hub__slug">feat-a<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></div></details></div>"#,
             "a card with no project label must keep the byte-identical shell/colour and now carry its worktree state in the slug subtitle: {card_html}"
         );
         assert!(!card_html.contains("bee-hub__shell--p"), "no project label must mean no colour modifier: {card_html}");
