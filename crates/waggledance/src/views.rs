@@ -8051,6 +8051,46 @@ mod tests {
         );
     }
 
+    /// (card-collapse-inprogress-2) CONTEXT D1/D6: every card renders
+    /// collapsed on every page load, with no persisted open/closed state --
+    /// a stray `open` attribute here would ship every card pre-expanded and
+    /// nothing else in this file would ever notice.
+    #[test]
+    fn bee_hub_card_renders_collapsed_with_no_open_attribute() {
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+        );
+        assert!(
+            card_html.contains(r#"<details class="bee-hub__card" data-hub-group="in-progress">"#),
+            "the card must render as a details element carrying its own group key: {card_html}"
+        );
+        assert!(
+            !card_html.contains(r#"bee-hub__card" data-hub-group="in-progress" open"#),
+            "the details element must carry no `open` attribute -- every card must start collapsed: {card_html}"
+        );
+        assert!(
+            card_html.contains(r#"<summary class="bee-hub__summary">"#)
+                && card_html.contains(r#"<span class="bee-hub__chev" aria-hidden="true">"#),
+            "the collapsed header must carry both its summary and its chevron: {card_html}"
+        );
+    }
+
+    /// (card-collapse-inprogress-2) CONTEXT D4: the Feature detail link row
+    /// is the one place the card still reaches its own detail page now that
+    /// the `<details>`/`<summary>` pair can no longer be that link itself.
+    #[test]
+    fn bee_hub_card_body_opens_with_the_feature_detail_link() {
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+        );
+        assert!(
+            card_html.contains(
+                r#"<div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/proj-a/_bee/feature/feat-a">Feature detail"#
+            ),
+            "the body must open with a Feature detail link carrying the feature's own detail-page href: {card_html}"
+        );
+    }
+
     // --- project-color-identity ---
 
     /// Ten distinct projects get ten distinct slots -- proving the palette
