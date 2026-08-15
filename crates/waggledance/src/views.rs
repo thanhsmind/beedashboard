@@ -605,6 +605,15 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .pane-strip__tab { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text-muted); text-decoration: none; background: var(--color-surface-raised); }
 .pane-strip__tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
 .term-pane__meta { flex: 0 0 auto; color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
+/* home-terminal-header: the homepage tab's selected pane names itself in a
+   real header, not a caption. The old single muted line read as one more
+   piece of chrome above the screen; a reader scanning the tab could not tell
+   at a glance which terminal they were watching. Two lines, weighted apart —
+   who this is, then what it is running — with a hairline closing the block so
+   the header stops where the screen starts. */
+.term-pane__head { display: flex; flex-direction: column; gap: var(--space-1); padding-bottom: var(--space-2); margin-bottom: var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); }
+.term-pane__title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; color: var(--color-text); font-size: var(--type-heading-sm-size); font-weight: var(--weight-semibold); }
+.term-pane__sub { color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
 /* A pane's frame is a grid, not prose: `pre-wrap` + `word-break` re-flowed
    every long line and broke the box drawing of any TUI agent, and a fixed
    height cut the frame off behind an inner scrollbar. `pre` keeps the grid;
@@ -1069,15 +1078,18 @@ fn terminals_tab(
     };
 
     // home-terminal-parity-2: create targets the *selected* pane's own
-    // project, so a new shell or agent starts where the terminal being
+    // project, so a new agent starts where the terminal being
     // watched lives — never a default or the first project in the list.
+    // home-terminal-header: agent presets only here (`plain_shell: false`) —
+    // the plain "New shell" button belongs to a page that is already scoped
+    // to one project, which this tab is not.
     // A selected pane resolved through `unassigned_panes` (`project_id:
     // None`) renders no create controls at all: `/p/:id/_terminal/create/…`
     // is the only create route that exists, and there is no `:id` for a
     // pane outside every registered project.
     let create = effective
         .and_then(|pane| pane.project_id.as_deref())
-        .map(|project_id| terminal_create_controls(project_id, presets))
+        .map(|project_id| terminal_create_controls(project_id, presets, false))
         .unwrap_or_default();
 
     format!(
@@ -1107,9 +1119,19 @@ fn terminals_tab(
 /// label, [`status_pill`], program and (when non-empty) title — is the same
 /// text the switcher's own `<option>` already carries (`terminals_tab`), now
 /// also readable once a pane is selected and its screen fills the tab,
-/// instead of living only inside the closed dropdown. It reuses
-/// `.term-pane__meta` and `status_pill`'s `.fg-status` markup — no new
-/// style block, matching [`pane_tab`]'s own identity line shape.
+/// instead of living only inside the closed dropdown.
+///
+/// home-terminal-header: that line is now a header block, not a caption. One
+/// muted run of text set in the same small grey as every other `.term-pane__meta`
+/// on the page did not read as the name of the thing below it, and the
+/// homepage tab is the one surface where the pane's own name is the only
+/// thing telling a reader which of several terminals they are watching.
+/// `.term-pane__title` carries the identity — [`status_pill`], the project
+/// label and the pane's `workspace · tab` pair — at heading weight;
+/// `.term-pane__sub` keeps the program and (when non-empty) title in the old
+/// muted tone underneath. The `workspace · tab` pair is deliberately the same
+/// one [`pane_tab`] prints as `.term-pane__id`, so a pane reads identically
+/// whether it is named on the project page's strip or here.
 fn screen_frame(pane: &TerminalsMenuPane) -> String {
     let title_suffix = if pane.view.title.is_empty() {
         String::new()
@@ -1118,7 +1140,10 @@ fn screen_frame(pane: &TerminalsMenuPane) -> String {
     };
     format!(
         r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
-  <div class="term-pane__meta">{project} {status_pill} {program}{title}</div>
+  <div class="term-pane__head">
+    <div class="term-pane__title">{status_pill}<span>{project} · {workspace} · {tab}</span></div>
+    <div class="term-pane__sub">{program}{title}</div>
+  </div>
   <div class="term-screen-wrap">
     <pre class="term-screen" data-pane-id="{pane_id}" data-term-base="{base}" aria-live="polite">Loading screen…</pre>
     <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
@@ -1133,6 +1158,8 @@ fn screen_frame(pane: &TerminalsMenuPane) -> String {
 </div>"#,
         pane_id = esc(&pane.view.pane_id),
         project = esc(&pane.project_label),
+        workspace = esc(&pane.view.workspace),
+        tab = esc(&pane.view.tab),
         status_pill = status_pill(&pane.view.status),
         program = esc(&pane.view.kind),
         title = title_suffix,
@@ -1345,7 +1372,19 @@ const TERMINAL_CREATE_SCRIPT: &str = r#"<script>
 /// creation control offers nothing [for agents]" at the render layer — the
 /// route-level half of that same truth is `terminal_create_agent`'s own
 /// refusal when `body.preset` matches nothing.
-fn terminal_create_controls(project_id: &str, presets: &[String]) -> String {
+///
+/// home-terminal-header: `plain_shell` gates that always-offered button, and
+/// only the homepage Terminals tab passes `false`. There, the Agents drawer
+/// is already the way a terminal is reached and started, and a second,
+/// project-guessing "New shell" sitting above someone else's running screen
+/// only offered a shell in whichever project the *watched* pane happened to
+/// belong to. The project terminal page passes `true` and is untouched — a
+/// page scoped to one project is exactly where "new shell here" means
+/// something. With `plain_shell` false and no presets configured, nothing
+/// would render at all, so the `.term-create` box itself is omitted rather
+/// than shipped empty — the same silence a pane outside every registered
+/// project already gets from [`terminals_tab`].
+fn terminal_create_controls(project_id: &str, presets: &[String], plain_shell: bool) -> String {
     let preset_buttons: String = presets
         .iter()
         .map(|label| {
@@ -1356,13 +1395,22 @@ fn terminal_create_controls(project_id: &str, presets: &[String]) -> String {
             )
         })
         .collect();
+    if !plain_shell && preset_buttons.is_empty() {
+        return String::new();
+    }
+    let pane_button = if plain_shell {
+        r#"<button type="button" class="term-create__pane">New shell</button>
+  "#
+    } else {
+        ""
+    };
     format!(
         r#"<div class="term-create" data-project-id="{pid}">
-  <button type="button" class="term-create__pane">New shell</button>
-  {preset_buttons}
+  {pane_button}{preset_buttons}
 </div>
 {script}"#,
         pid = esc(project_id),
+        pane_button = pane_button,
         preset_buttons = preset_buttons,
         script = TERMINAL_CREATE_SCRIPT,
     )
@@ -1433,7 +1481,7 @@ pub fn terminal_page(
         "terminal",
         panes,
         selected,
-        &terminal_create_controls(&project.id, presets),
+        &terminal_create_controls(&project.id, presets, true),
     );
     // `data-project-id` lets `assets/app.js`'s screen poller build each
     // pane's `/p/:id/_terminal/:pane_id/screen` URL without threading the id
@@ -6306,9 +6354,46 @@ mod tests {
     /// module follows.
     #[test]
     fn terminal_create_controls_escapes_preset_labels() {
-        let html = terminal_create_controls("proj-1", &["<script>alert(1)</script>".to_string()]);
+        let html = terminal_create_controls("proj-1", &["<script>alert(1)</script>".to_string()], true);
         assert!(!html.contains("<script>alert(1)</script>"), "{html}");
         assert!(html.contains("&lt;script&gt;"), "{html}");
+    }
+
+    /// home-terminal-header: `plain_shell` is the whole difference between
+    /// the two callers. `true` (the project terminal page) keeps the
+    /// always-offered plain-shell button; `false` (the homepage Terminals
+    /// tab) drops it and leaves the configured agent presets standing. With
+    /// `false` and nothing configured, no `.term-create` box renders at all
+    /// rather than an empty one — the same silence a pane outside every
+    /// registered project already gets.
+    #[test]
+    fn terminal_create_controls_offer_the_plain_shell_button_only_when_asked() {
+        let presets = vec!["Claude".to_string()];
+
+        let with_shell = terminal_create_controls("proj-1", &presets, true);
+        assert!(with_shell.contains("class=\"term-create__pane\""), "{with_shell}");
+        assert!(with_shell.contains(r#"data-preset="Claude""#), "{with_shell}");
+
+        let without_shell = terminal_create_controls("proj-1", &presets, false);
+        assert!(
+            !without_shell.contains("class=\"term-create__pane\"") && !without_shell.contains(">New shell<"),
+            "the plain-shell button must not render when it was not asked for: {without_shell}"
+        );
+        assert!(
+            without_shell.contains(r#"data-preset="Claude""#)
+                && without_shell.contains(r#"class="term-create" data-project-id="proj-1""#),
+            "the agent presets must still render, still targeting the project: {without_shell}"
+        );
+
+        let nothing = terminal_create_controls("proj-1", &[], false);
+        assert!(
+            nothing.is_empty(),
+            "no button to offer must render no box at all: {nothing}"
+        );
+        assert!(
+            terminal_create_controls("proj-1", &[], true).contains("class=\"term-create__pane\""),
+            "a plain-shell caller with no presets still gets its button"
+        );
     }
 
     /// D5 (terminal-pane-scope), amended 2026-08-08 (term-key-height):
