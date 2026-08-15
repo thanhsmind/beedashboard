@@ -228,6 +228,26 @@ implementation. Code entry points are listed in `reading-map.md`.
   boundary, the named preset is not one an operator configured, or the
   underlying start attempt itself fails — each of these is refused
   distinctly, with nothing started in any case.
+- **Where each control appears:** the project terminal page offers both the
+  presets and the plain shell; the homepage's Terminals tab offers the
+  presets only — no plain-shell control there. When a surface would show no
+  creation control at all (no presets configured and no plain shell offered),
+  the creation box is omitted entirely rather than shipped empty.
+
+### The pane's header
+
+A terminal pane names itself in a two-line header: the first line carries the
+pane's status pill, its project label, and its own workspace-and-tab identity;
+the second carries the rest of the pane's detail that a single muted line used
+to hold. A reader glancing at any pane — on the homepage tab or the project
+page — can tell whose terminal it is without opening anything.
+
+The Agents drawer lists its rows grouped by project on every surface — the
+homepage's Terminals tab and the project terminal page share one shape. A row
+opened from the homepage stays on the homepage, selecting that pane in the
+tab; a row opened from a project page goes to the agent's own view. Rows keep
+their pane name, status pill, and `project · workspace:tab` suffix, ordered by
+status.
 
 ### Viewing the transcript
 
