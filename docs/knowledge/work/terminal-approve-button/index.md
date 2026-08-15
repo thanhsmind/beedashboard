@@ -6,8 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# work/project-color-identity/
+# work/terminal-approve-button/
 
 ## Concepts
 
-- [project-color-identity — delivery](delivery.md) — Delivery record for work item project-color-identity: 4 capped cell(s), 1 recorded deviation(s).
+- [terminal-approve-button — delivery](delivery.md) — Delivery record for work item terminal-approve-button: every terminal reply box gained a one-tap Approve.

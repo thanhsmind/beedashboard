@@ -8,11 +8,7 @@ bee:
   lifecycle: active
   areas: [bee-cockpit, appearance]
   required_context: [docs/specs/bee-cockpit.md, docs/specs/appearance.md]
-  sources:
-    - .bee/cells/archive/project-color-identity/project-color-identity-1.json
-    - .bee/cells/archive/project-color-identity/project-color-identity-2.json
-    - .bee/cells/archive/project-color-identity/project-color-identity-3.json
-    - .bee/cells/archive/project-color-identity/project-color-identity-4.json
+  sources: [.bee/cells/archive/project-color-identity/project-color-identity-1.json, .bee/cells/archive/project-color-identity/project-color-identity-2.json, .bee/cells/archive/project-color-identity/project-color-identity-3.json, .bee/cells/archive/project-color-identity/project-color-identity-4.json]
 ---
 
 # project-color-identity — Delivery

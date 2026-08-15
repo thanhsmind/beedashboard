@@ -6,8 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# work/project-color-identity/
+# work/inprogress-priority-order/
 
 ## Concepts
 
-- [project-color-identity — delivery](delivery.md) — Delivery record for work item project-color-identity: 4 capped cell(s), 1 recorded deviation(s).
+- [inprogress-priority-order — delivery](delivery.md) — Delivery record for work item inprogress-priority-order: In Progress leads the board on a phone, and its cards order themselves by what is waiting.

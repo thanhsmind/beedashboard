@@ -6,8 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# work/project-color-identity/
+# work/card-collapse-inprogress/
 
 ## Concepts
 
-- [project-color-identity — delivery](delivery.md) — Delivery record for work item project-color-identity: 4 capped cell(s), 1 recorded deviation(s).
+- [card-collapse-inprogress — delivery](delivery.md) — Delivery record for work item card-collapse-inprogress: the In Progress card now ships collapsed and opens on a click.
