@@ -153,6 +153,32 @@ cell. A long description wraps and is visually clamped — on the card, and on t
 feature's own detail page too — rather than overflowing or forcing either page to
 scroll sideways. A card links onward to the feature's own detail page.
 
+### Live signals on a card
+
+A card's "Last activity" line reports the freshest of two clocks: the feature's own
+cell claim and cap times, and — only on the card of the checkout's currently active
+feature — the checkout-wide activity stamp that the agent refreshes on every action.
+Work in progress before any cell is claimed therefore moves the active card instead
+of leaving it frozen; a checkout whose records predate the stamp simply falls back to
+cell times alone. When the active checkout's most recent agent action happened within
+the last two minutes, that card additionally shows a small animated "working now"
+pulse dot beside the activity line — present only while the action is that fresh,
+absent otherwise and on every non-active card.
+
+The active feature's card also carries a colored badge naming the run state of its
+work — shaping, awaiting approval, running, blocked, or done — with awaiting
+approval rendered as the most prominent of them, because it is the one state where a
+person is the blocker. A checkout that records no run state shows no badge, and no
+other card ever borrows the active feature's badge.
+
+Separately from those active-only signals, any card whose feature owes deferred
+follow-up work (captures, promotions, reviews queued for later) shows a count badge
+naming how many items wait; hovering it reveals each item's kind and reason. Debt is
+matched to the feature that owes it, so sibling cards of the same project each show
+exactly their own, and a card with nothing owed shows no badge at all. All of these
+signals live on the cards themselves — none of them brings back a board-level panel,
+and none of them moves a card between groups.
+
 ### The terminals running behind a card
 
 On the cross-project board, a Waiting on you or In Progress card also carries one

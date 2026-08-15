@@ -4,9 +4,9 @@
 
 use waggledance_core::bee::{
     feature_cell_span, list_archived_feature_dirs, BeeApprovedGates, BeeBacklog, BeeBuckets,
-    BeeCell, BeeDecisionSummary, BeeFeaturePhase, BeePbi, BeeProjectRollup, BeeReview,
-    BeeReviewStatus, BeeSession, BeeShippedFeature, BeeSnapshot, BeeState, BeeWorkspace,
-    BeeWorktree,
+    BeeCell, BeeDecisionSummary, BeeDeferredEntry, BeeFeaturePhase, BeePbi, BeeProjectRollup,
+    BeeReview, BeeReviewStatus, BeeSession, BeeShippedFeature, BeeSnapshot, BeeState,
+    BeeWorkspace, BeeWorktree,
 };
 use waggledance_core::code_source::DirListing;
 use waggledance_core::config::Config;
@@ -2065,6 +2065,28 @@ html[data-scheme="dark"] .bee-hub-theme {{
 .bee-hub__badges {{ border-top: var(--border-width-hairline) solid var(--color-border); padding: var(--space-2) 0 0 0; flex: 0 0 auto; }}
 .bee-hub__progress-label {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
 .bee-hub__reason {{ font-style: italic; }}
+/* kanban-live-signals D2: the run_state badge rides in the collapsed
+   `<summary>` beside the title (see `bee_hub_card`'s own doc comment) --
+   the same `.fg-chip` tone modifiers every other badge on this board
+   already uses, never a palette of its own. */
+.bee-hub__run-state {{ margin-left: var(--space-2); }}
+/* kanban-live-signals D1: a small "working now" dot beside the Last
+   activity line -- `.fg-status__dot`'s own sizing (components.css) plus a
+   gentle pulse animation, since a plain static dot would read identically
+   to `.fg-status`'s existing non-live indicators, and this one specifically
+   means "a tool call landed in the last couple of minutes", not just "has
+   a status". */
+.bee-hub__pulse {{ display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--color-success); vertical-align: middle; animation: beeHubPulse 1.6s ease-in-out infinite; }}
+@keyframes beeHubPulse {{ 0%, 100% {{ opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 55%, transparent); }} 50% {{ opacity: 0.55; box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-success) 0%, transparent); }} }}
+/* kanban-live-signals D3: the deferred-debt badge reuses `.fg-badge` for
+   its own collapsed `<summary>` and the board's existing click-to-reveal
+   `<details>` idiom (`.bee-cell__detail`, the backlog card's "Condition of
+   satisfaction" disclosure) for its per-entry detail list. */
+.bee-hub__deferred {{ margin: 0; }}
+.bee-hub__deferred > summary {{ cursor: pointer; list-style: none; }}
+.bee-hub__deferred > summary::-webkit-details-marker {{ display: none; }}
+.bee-hub__deferred-list {{ margin: var(--space-1) 0 0 0; padding-left: var(--space-4); font-size: var(--type-body-sm-size); color: var(--color-text-muted); }}
+.bee-hub__deferred-kind {{ font-weight: var(--weight-strong); color: var(--color-text); }}
 /* hub-finished-compact, kanban-columns D12: the shared dense-row shape now
    rendered by all four of Todo, Review, Compound and Finished — name only,
    linking straight to the detail page — mirroring `.bee-done-line`'s
@@ -2577,6 +2599,21 @@ enum BeeHubPlacement {
 /// column's own line, `Waiting on you — ` plus its existing reason text,
 /// when this feature is stopped on a gate or a paused handoff; `None` for
 /// every other In Progress card.
+///
+/// kanban-live-signals D1/D2/D3 add three more fields, all sourced from
+/// [`BeeSnapshot`] by [`bee_classify_features`] rather than re-read here:
+/// `last_activity` (D1) is already [`bee_hub_effective_activity`]'s merge of
+/// the cell-derived timestamp and `state.json`'s own `last_activity` — never
+/// the raw cell-only value past this point. `run_state` and
+/// `last_tool_call` (D1/D2) are `state.json`'s own fields, carried onto this
+/// card only when the card's feature is the one `state.json` names active
+/// (`BeeState::feature`) — `state.json` is one file per project describing
+/// whichever single feature bee is currently pointed at, so attaching its
+/// run state or its liveness pulse to a DIFFERENT In Progress card on the
+/// same project would misattribute someone else's activity. `deferred` (D3)
+/// has no such restriction: each `BeeDeferredEntry` already names its own
+/// `feature`, so every card gets exactly its own unresolved debt regardless
+/// of which feature `state.json` currently points at.
 struct BeeHubCardData {
     feature: String,
     done: usize,
@@ -2585,6 +2622,9 @@ struct BeeHubCardData {
     worktree_label: String,
     reason: Option<String>,
     docs: Option<waggledance_core::bee::BeeFeatureDocs>,
+    run_state: Option<String>,
+    last_tool_call: Option<String>,
+    deferred: Vec<BeeDeferredEntry>,
 }
 
 /// [`bee_hub_finished_row`]'s render inputs for one Todo, Review, Compound
@@ -2696,7 +2736,31 @@ fn bee_classify_features(
             } else {
                 None
             };
-            let last_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
+            let cell_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
+            // kanban-live-signals D1/D2: `state.json` describes one project's
+            // single currently-active feature at a time (`BeeState::feature`)
+            // -- its `last_activity`, `run_state` and the tools.jsonl-derived
+            // `last_tool_call` liveness pulse belong on THIS card only when
+            // `is_active` says this is that feature, never borrowed onto a
+            // sibling In Progress card for the same project.
+            let last_activity = bee_hub_effective_activity(
+                cell_activity.as_deref(),
+                if is_active { snapshot.state.as_ref().and_then(|s| s.last_activity.as_deref()) } else { None },
+            );
+            let run_state =
+                if is_active { snapshot.state.as_ref().and_then(|s| s.run_state.clone()) } else { None };
+            let last_tool_call = if is_active { snapshot.last_tool_call.clone() } else { None };
+            // kanban-live-signals D3: unlike the three fields above, deferred
+            // debt carries its own `feature` per entry, so every In Progress
+            // card gets exactly its own debt regardless of which feature is
+            // currently active.
+            let deferred: Vec<BeeDeferredEntry> = snapshot
+                .deferred_queue
+                .unresolved
+                .iter()
+                .filter(|e| e.feature.as_deref() == Some(f.feature.as_str()))
+                .cloned()
+                .collect();
             let worktree_label =
                 bee_hub_worktree_label(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
             let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
@@ -2708,6 +2772,9 @@ fn bee_classify_features(
                 worktree_label,
                 reason,
                 docs,
+                run_state,
+                last_tool_call,
+                deferred,
             }));
         } else if is_finished {
             let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
@@ -2866,6 +2933,9 @@ fn bee_render_hub_section(
                     None,
                     None,
                     panes,
+                    data.run_state.as_deref(),
+                    data.last_tool_call.as_deref(),
+                    &data.deferred,
                 );
                 in_progress_entries.push((key, html));
             }
@@ -3103,6 +3173,9 @@ pub fn bee_cross_project_features_section(
                         Some(&project.name),
                         project_color,
                         panes,
+                        data.run_state.as_deref(),
+                        data.last_tool_call.as_deref(),
+                        &data.deferred,
                     );
                     in_progress_entries.push((key, html));
                 }
@@ -3425,6 +3498,19 @@ fn bee_cross_project_board_project_colors<'a>(
 /// per-project board's own call
 /// (`bee_render_hub_section`) always passes an empty slice, so this path
 /// renders every time there too.
+///
+/// kanban-live-signals adds three trailing arguments, all already scoped to
+/// this card by [`BeeHubCardData`]'s own doc comment (`bee_classify_features`
+/// does the active-feature gating, never this function): `run_state` (D2)
+/// renders [`bee_hub_run_state_badge`] in the collapsed `<summary>` itself,
+/// beside the title, so the badge stays visible without expanding the card
+/// -- `None` renders nothing there. `last_activity`'s own line
+/// (`activity_html` below) is `last_activity` unchanged, but now gains
+/// [`bee_hub_is_working_now`]'s pulse dot beside it when `last_tool_call`
+/// (D1) lands inside the liveness window. `deferred` (D3) renders
+/// [`bee_hub_deferred_badge`] in the card's own body -- never the
+/// `<summary>`, whose content model cannot nest a `<details>` the way that
+/// badge's click-to-reveal detail needs.
 #[allow(clippy::too_many_arguments)]
 fn bee_hub_card(
     project_id: &str,
@@ -3439,6 +3525,9 @@ fn bee_hub_card(
     project_label: Option<&str>,
     project_color: Option<u8>,
     panes: &[TerminalPaneView],
+    run_state: Option<&str>,
+    last_tool_call: Option<&str>,
+    deferred: &[BeeDeferredEntry],
 ) -> String {
     let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
     // project-color-identity: `project_label: Some` swaps the slug subtitle
@@ -3506,13 +3595,33 @@ fn bee_hub_card(
             plural = if total == 1 { "" } else { "s" },
         )
     };
+    // kanban-live-signals D1: the pulse dot rides beside this same line,
+    // never its own paragraph -- it is a live annotation of "Last
+    // activity", not a second fact.
+    let pulse_html = if bee_hub_is_working_now(last_tool_call, time::OffsetDateTime::now_utc()) {
+        r#" <span class="bee-hub__pulse" role="status" aria-label="Working now" title="Working now"></span>"#
+            .to_string()
+    } else {
+        String::new()
+    };
     let activity_html = match last_activity {
         Some(iso) => format!(
-            r#"<p class="bee-cell__meta">Last activity {}</p>"#,
-            esc(&bee_fmt_trace_time(iso))
+            r#"<p class="bee-cell__meta">Last activity {}{pulse}</p>"#,
+            esc(&bee_fmt_trace_time(iso)),
+            pulse = pulse_html,
         ),
-        None => r#"<p class="bee-cell__meta">No activity recorded.</p>"#.to_string(),
+        None => format!(r#"<p class="bee-cell__meta">No activity recorded.{pulse}</p>"#, pulse = pulse_html),
     };
+    // kanban-live-signals D2: rendered in the collapsed `<summary>` itself
+    // (see this function's own doc comment) so the badge stays visible
+    // without expanding the card.
+    let run_state_html = match run_state {
+        Some(rs) if !rs.is_empty() => bee_hub_run_state_badge(rs),
+        _ => String::new(),
+    };
+    // kanban-live-signals D3: in the card's own body, grouped with the
+    // other "needs a look" lines above the plain activity timestamp.
+    let deferred_html = bee_hub_deferred_badge(deferred);
     let reason_html = match reason {
         Some(r) if !r.is_empty() => format!(r#"<p class="bee-cell__meta bee-hub__reason">{}</p>"#, esc(r)),
         _ => String::new(),
@@ -3555,10 +3664,11 @@ fn bee_hub_card(
     // the top of the expandable body, since a `<details>`/`<summary>`
     // pair, unlike the old whole-card `<a>`, cannot itself be a link.
     format!(
-        r#"<div class="{shell_class}"><details class="bee-hub__card" data-hub-group="{group_key}"><summary class="bee-hub__summary">{title_html}<span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/{pid}/_bee/feature/{feature_href}">Feature detail<span aria-hidden="true"> →</span></a>{subtitle_html}{desc_html}{progress_html}{reason_html}{blocked_reason_html}{activity_html}</div></details>{terminal_badges_html}</div>"#,
+        r#"<div class="{shell_class}"><details class="bee-hub__card" data-hub-group="{group_key}"><summary class="bee-hub__summary">{title_html}{run_state_html}<span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/{pid}/_bee/feature/{feature_href}">Feature detail<span aria-hidden="true"> →</span></a>{subtitle_html}{desc_html}{progress_html}{reason_html}{blocked_reason_html}{deferred_html}{activity_html}</div></details>{terminal_badges_html}</div>"#,
         shell_class = shell_class,
         group_key = group_key,
         title_html = title_html,
+        run_state_html = run_state_html,
         pid = esc(project_id),
         feature_href = esc(feature),
         subtitle_html = subtitle_html,
@@ -3566,6 +3676,7 @@ fn bee_hub_card(
         progress_html = progress_html,
         reason_html = reason_html,
         blocked_reason_html = blocked_reason_html,
+        deferred_html = deferred_html,
         activity_html = activity_html,
         terminal_badges_html = terminal_badges_html,
     )
@@ -3780,7 +3891,11 @@ fn bee_hub_worktree_label(feature: &str, worktrees: &[BeeWorktree], workspaces: 
 /// `read_archived_cells` for a finished one) — the later of the two RFC
 /// 3339 timestamps a cell carries, across every cell in the slice; `None`
 /// when none of them parse or the slice is empty, never a fabricated
-/// "just now".
+/// "just now". kanban-live-signals D1: this cell-derived value is only ONE
+/// input the In Progress card's own activity line now takes — see
+/// [`bee_hub_effective_activity`], which merges this with `state.json`'s own
+/// `last_activity`; a finished card still reads this function alone, since
+/// D1's merge is scoped to the live In Progress card only.
 fn bee_hub_latest_activity<'a>(cells: impl Iterator<Item = &'a BeeCell>) -> Option<String> {
     let mut latest: Option<(time::OffsetDateTime, String)> = None;
     for c in cells {
@@ -3794,6 +3909,107 @@ fn bee_hub_latest_activity<'a>(cells: impl Iterator<Item = &'a BeeCell>) -> Opti
         }
     }
     latest.map(|(_, s)| s)
+}
+
+/// kanban-live-signals D1: an In Progress card's "Last activity" is the
+/// LATER of the cell-derived value ([`bee_hub_latest_activity`]) and
+/// `state.json`'s own `last_activity` (`BeeState::last_activity`, carried
+/// onto the card only for the currently-active feature — see
+/// [`BeeHubCardData`]'s own doc comment). Either side missing or unparsable
+/// falls back to whichever side still parses; both missing is still `None`,
+/// never a fabricated "just now". The cell-derived fallback this preserves
+/// is exactly the CONTEXT.md D1 exception for a bee version whose
+/// `state.json` predates `last_activity` — that project must keep reading a
+/// real timestamp off its cells rather than going blank.
+fn bee_hub_effective_activity(cell_activity: Option<&str>, state_activity: Option<&str>) -> Option<String> {
+    let rfc3339 = time::format_description::well_known::Rfc3339;
+    let parse = |s: &str| time::OffsetDateTime::parse(s, &rfc3339).ok();
+    let cell = cell_activity.and_then(|s| parse(s).map(|t| (t, s)));
+    let state = state_activity.and_then(|s| parse(s).map(|t| (t, s)));
+    match (cell, state) {
+        (Some((ct, cs)), Some((st, ss))) => Some(if st >= ct { ss } else { cs }.to_string()),
+        (Some((_, cs)), None) => Some(cs.to_string()),
+        (None, Some((_, ss))) => Some(ss.to_string()),
+        (None, None) => None,
+    }
+}
+
+/// kanban-live-signals D1: the ~2-minute "working now" window CONTEXT.md
+/// locks in order of magnitude, exact width left to agent discretion — see
+/// [`bee_hub_is_working_now`].
+const TOOL_CALL_PULSE_MINUTES: i64 = 2;
+
+/// kanban-live-signals D1: true when `last_tool_call`
+/// (`BeeSnapshot::last_tool_call`, the newest `ts` cell 1's bounded
+/// `tools.jsonl` tail read could find) parses as RFC 3339 and lands within
+/// [`TOOL_CALL_PULSE_MINUTES`] of `now`, in EITHER direction — a small clock
+/// skew that puts the timestamp a few seconds into the future must not flip
+/// the pulse off, so this is a plain magnitude check on the gap rather than
+/// a one-sided "not yet" test. A missing or unparsable timestamp never
+/// pulses.
+fn bee_hub_is_working_now(last_tool_call: Option<&str>, now: time::OffsetDateTime) -> bool {
+    let Some(ts) = last_tool_call else { return false };
+    let Ok(parsed) = time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339) else {
+        return false;
+    };
+    (now - parsed).abs() <= time::Duration::minutes(TOOL_CALL_PULSE_MINUTES)
+}
+
+/// kanban-live-signals D2: `run_state`'s colored badge — `.fg-chip`'s
+/// existing five tone modifiers (`crates/waggledance/assets/atelier/components.css`,
+/// "CHIP / BADGE"), never a new palette of this feature's own. Every
+/// recognized state gets a distinct tone; `awaiting-approval` alone gets
+/// `--danger`, the highest-contrast tone the existing chip set carries, per
+/// CONTEXT.md D2's "visually prominent" requirement — every other state
+/// reads calmer. An unrecognized future state (bee writes whatever string
+/// it wants, verbatim — see `BeeState::run_state`) still renders, in the
+/// neutral tone, with its own raw text rather than being swallowed.
+fn bee_hub_run_state_badge(run_state: &str) -> String {
+    let (class, label) = match run_state {
+        "shaping" => ("fg-chip--neutral", "Shaping"),
+        "awaiting-approval" => ("fg-chip--danger", "Awaiting approval"),
+        "running" => ("fg-chip--accent", "Running"),
+        "blocked" => ("fg-chip--warning", "Blocked"),
+        "done" => ("fg-chip--success", "Done"),
+        _ => ("fg-chip--neutral", run_state),
+    };
+    format!(
+        r#"<span class="fg-chip {class} bee-hub__run-state">{label}</span>"#,
+        class = class,
+        label = esc(label),
+    )
+}
+
+/// kanban-live-signals D3: the deferred-debt badge, empty `entries`
+/// rendering nothing at all (D3's "zero debt renders nothing"). Reuses the
+/// board's own click-to-reveal `<details>` idiom (`bee-cell__detail`, the
+/// backlog card's "Condition of satisfaction" disclosure) rather than a bare
+/// `title` tooltip, so the per-entry kind and reason are reachable on
+/// mobile, not just on hover. Lives in the card's own `<div
+/// class="bee-hub__body">` (never inside `<summary>`, whose content model
+/// forbids nesting a `<details>`), one `<li>` per unresolved entry, its kind
+/// defaulting to "unspecified" and its reason to "no reason recorded" —
+/// both `Option` on [`BeeDeferredEntry`], never fabricated past that.
+fn bee_hub_deferred_badge(entries: &[BeeDeferredEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let count = entries.len();
+    let items: String = entries
+        .iter()
+        .map(|e| {
+            format!(
+                r#"<li><span class="bee-hub__deferred-kind">{kind}</span> — {reason}</li>"#,
+                kind = esc(e.kind.as_deref().unwrap_or("unspecified")),
+                reason = esc(e.reason.as_deref().unwrap_or("no reason recorded")),
+            )
+        })
+        .collect();
+    format!(
+        r#"<details class="bee-hub__deferred"><summary class="fg-badge">{count} deferred</summary><ul class="bee-hub__deferred-list">{items}</ul></details>"#,
+        count = count,
+        items = items,
+    )
 }
 
 /// The board's Finished list (D5/D10), rendered as a native
@@ -5889,6 +6105,9 @@ mod tests {
             worktree_label: "Main".to_string(),
             reason: None,
             docs: None,
+            run_state: None,
+            last_tool_call: None,
+            deferred: Vec::new(),
         })
     }
 
@@ -8558,6 +8777,9 @@ mod tests {
         }];
         let card_html = bee_hub_card(
             "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &panes,
+            None,
+            None,
+            &[],
         );
         // project_badges' own markup, with only its aria-label swapped for
         // the checkout-naming one this card must carry and its own
@@ -8624,6 +8846,9 @@ mod tests {
     fn bee_hub_card_with_no_panes_renders_no_badge_container() {
         let card_html = bee_hub_card(
             "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+            None,
+            None,
+            &[],
         );
         assert!(
             !card_html.contains("proj-row__badges"),
@@ -8652,6 +8877,9 @@ mod tests {
         let panes = vec![pane_with_status("blocked")];
         let card_html = bee_hub_card(
             "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &panes,
+            None,
+            None,
+            &[],
         );
         assert!(
             card_html.contains(r#"<p class="bee-cell__meta bee-hub__reason">Waiting on you — a terminal is blocked</p>"#),
@@ -8668,6 +8896,9 @@ mod tests {
         let gate_reason = "Waiting on you — Shape gate awaiting your decision";
         let card_html = bee_hub_card(
             "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", Some(gate_reason), None, None, None, &panes,
+            None,
+            None,
+            &[],
         );
         let gate_at = card_html
             .find(gate_reason)
@@ -8688,6 +8919,9 @@ mod tests {
         let panes = vec![pane_with_status("working")];
         let card_html = bee_hub_card(
             "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &panes,
+            None,
+            None,
+            &[],
         );
         assert!(
             !card_html.contains("bee-hub__reason"),
@@ -8703,6 +8937,9 @@ mod tests {
     fn bee_hub_card_renders_collapsed_with_no_open_attribute() {
         let card_html = bee_hub_card(
             "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+            None,
+            None,
+            &[],
         );
         assert!(
             card_html.contains(r#"<details class="bee-hub__card" data-hub-group="in-progress">"#),
@@ -8726,6 +8963,9 @@ mod tests {
     fn bee_hub_card_body_opens_with_the_feature_detail_link() {
         let card_html = bee_hub_card(
             "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+            None,
+            None,
+            &[],
         );
         assert!(
             card_html.contains(
@@ -8733,6 +8973,291 @@ mod tests {
             ),
             "the body must open with a Feature detail link carrying the feature's own detail-page href: {card_html}"
         );
+    }
+
+    // --- kanban-live-signals D1/D2/D3 ---
+
+    /// kanban-live-signals D1: `state.json`'s own `last_activity` wins when
+    /// it is newer than the cell-derived value -- the merge
+    /// [`bee_hub_effective_activity`] does, never a re-derivation inside
+    /// this test.
+    #[test]
+    fn bee_hub_effective_activity_prefers_state_last_activity_when_newer() {
+        let cell = "2026-08-01T00:00:00.000Z";
+        let state = "2026-08-15T15:48:08.674Z";
+        assert_eq!(
+            bee_hub_effective_activity(Some(cell), Some(state)),
+            Some(state.to_string()),
+            "the newer state.json timestamp must win"
+        );
+    }
+
+    /// kanban-live-signals D1: the cell-derived value wins when it is newer
+    /// than `state.json`'s own -- the merge is a true max, not a blind
+    /// preference for state.json.
+    #[test]
+    fn bee_hub_effective_activity_prefers_cell_activity_when_newer() {
+        let cell = "2026-08-15T15:48:08.674Z";
+        let state = "2026-08-01T00:00:00.000Z";
+        assert_eq!(
+            bee_hub_effective_activity(Some(cell), Some(state)),
+            Some(cell.to_string()),
+            "the newer cell-derived timestamp must win"
+        );
+    }
+
+    /// kanban-live-signals D1: a bee version whose `state.json` predates
+    /// `last_activity` entirely (the key absent, `None` here) must still
+    /// fall back to the cell-derived value, never go blank.
+    #[test]
+    fn bee_hub_effective_activity_falls_back_to_cell_activity_when_state_absent() {
+        let cell = "2026-08-01T00:00:00.000Z";
+        assert_eq!(
+            bee_hub_effective_activity(Some(cell), None),
+            Some(cell.to_string()),
+            "an absent state.json last_activity must fall back to the cell-derived value"
+        );
+    }
+
+    /// kanban-live-signals D1: neither side present is still `None`, never
+    /// a fabricated "just now".
+    #[test]
+    fn bee_hub_effective_activity_both_absent_is_none() {
+        assert_eq!(bee_hub_effective_activity(None, None), None);
+    }
+
+    /// kanban-live-signals D1: a tool call inside the ~2-minute window
+    /// renders the pulse dot beside the activity line.
+    #[test]
+    fn bee_hub_card_with_a_recent_tool_call_renders_the_pulse_dot() {
+        let recent = (time::OffsetDateTime::now_utc() - time::Duration::seconds(30))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, Some("2026-08-15T15:48:08.674Z"), "Main", None, None,
+            None, None, &[], None, Some(&recent), &[],
+        );
+        assert!(
+            card_html.contains(r#"<span class="bee-hub__pulse""#),
+            "a tool call landed 30 seconds ago must render the pulse dot: {card_html}"
+        );
+    }
+
+    /// kanban-live-signals D1: a tool call outside the ~2-minute window
+    /// renders no pulse dot at all.
+    #[test]
+    fn bee_hub_card_with_an_old_tool_call_renders_no_pulse_dot() {
+        let old = (time::OffsetDateTime::now_utc() - time::Duration::minutes(20))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, Some("2026-08-15T15:48:08.674Z"), "Main", None, None,
+            None, None, &[], None, Some(&old), &[],
+        );
+        assert!(
+            !card_html.contains("bee-hub__pulse"),
+            "a tool call 20 minutes old must render no pulse dot: {card_html}"
+        );
+    }
+
+    /// kanban-live-signals D1: no `last_tool_call` at all renders no pulse
+    /// dot -- the same "never fabricated" discipline every other signal
+    /// here follows.
+    #[test]
+    fn bee_hub_card_with_no_tool_call_renders_no_pulse_dot() {
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[], None, None, &[],
+        );
+        assert!(!card_html.contains("bee-hub__pulse"), "no last_tool_call must render no pulse dot: {card_html}");
+    }
+
+    /// kanban-live-signals D2: `awaiting-approval` renders the run_state
+    /// badge in its own prominent `--danger` tone, in the collapsed
+    /// `<summary>` so it stays visible without expanding the card.
+    #[test]
+    fn bee_hub_card_awaiting_approval_run_state_renders_prominent_badge() {
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+            Some("awaiting-approval"), None, &[],
+        );
+        assert!(
+            card_html.contains(r#"<span class="fg-chip fg-chip--danger bee-hub__run-state">Awaiting approval</span>"#),
+            "awaiting-approval must render its own prominent danger-toned badge: {card_html}"
+        );
+        let summary_end = card_html.find("</summary>").expect("summary must close");
+        let badge_at = card_html.find("bee-hub__run-state").expect("badge must render");
+        assert!(badge_at < summary_end, "the run_state badge must render inside the collapsed summary: {card_html}");
+    }
+
+    /// kanban-live-signals D2: distinct run_state values get distinct
+    /// tones, never sharing awaiting-approval's own prominent one.
+    #[test]
+    fn bee_hub_card_running_run_state_renders_its_own_distinct_tone() {
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+            Some("running"), None, &[],
+        );
+        assert!(
+            card_html.contains(r#"<span class="fg-chip fg-chip--accent bee-hub__run-state">Running</span>"#),
+            "running must render its own accent-toned badge, distinct from awaiting-approval's danger tone: {card_html}"
+        );
+    }
+
+    /// kanban-live-signals D2: no `run_state` key at all (an older
+    /// `state.json`, or a non-active feature -- see [`BeeHubCardData`]'s
+    /// doc comment) renders no badge.
+    #[test]
+    fn bee_hub_card_with_no_run_state_renders_no_badge() {
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[], None, None, &[],
+        );
+        assert!(
+            !card_html.contains("bee-hub__run-state"),
+            "absent run_state must render no badge at all: {card_html}"
+        );
+    }
+
+    /// kanban-live-signals D3: unresolved deferred debt renders a count
+    /// badge plus its per-entry kind and reason behind the board's own
+    /// click-to-reveal detail idiom.
+    #[test]
+    fn bee_hub_card_deferred_debt_renders_count_badge_and_detail() {
+        let deferred = vec![
+            BeeDeferredEntry {
+                id: "d1".to_string(),
+                kind: Some("question".to_string()),
+                feature: Some("feat-a".to_string()),
+                reason: Some("waiting on a UX call".to_string()),
+            },
+            BeeDeferredEntry {
+                id: "d2".to_string(),
+                kind: Some("cleanup".to_string()),
+                feature: Some("feat-a".to_string()),
+                reason: Some("dead code left behind".to_string()),
+            },
+        ];
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[], None, None,
+            &deferred,
+        );
+        assert!(
+            card_html.contains(r#"<summary class="fg-badge">2 deferred</summary>"#),
+            "two unresolved entries must render a '2 deferred' count badge: {card_html}"
+        );
+        assert!(
+            card_html.contains("question") && card_html.contains("waiting on a UX call"),
+            "the first entry's own kind and reason must be reachable in the detail: {card_html}"
+        );
+        assert!(
+            card_html.contains("cleanup") && card_html.contains("dead code left behind"),
+            "the second entry's own kind and reason must be reachable in the detail: {card_html}"
+        );
+    }
+
+    /// kanban-live-signals D3: zero unresolved debt renders nothing at all
+    /// -- no empty badge, no empty detail container.
+    #[test]
+    fn bee_hub_card_with_zero_deferred_debt_renders_nothing() {
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[], None, None, &[],
+        );
+        assert!(
+            !card_html.contains("bee-hub__deferred") && !card_html.contains("deferred"),
+            "zero unresolved debt must render no badge and no detail container: {card_html}"
+        );
+    }
+
+    /// kanban-live-signals D1/D2: `state.json` describes ONE project's
+    /// single currently-active feature (`state.feature`) -- its
+    /// `last_activity`, `run_state` and tools.jsonl liveness pulse must land
+    /// on that feature's own In Progress card only, never bleed onto a
+    /// sibling In Progress card for a DIFFERENT feature in the same
+    /// project. D3's deferred debt carries no such restriction: each entry
+    /// already names its own feature, so both cards get their own.
+    #[test]
+    fn hub_scopes_state_json_signals_to_the_active_feature_only_but_deferred_debt_to_each_own_feature() {
+        let root = std::env::temp_dir()
+            .join(format!("waggledance-views-hub-active-feature-scope-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            ".bee/state.json",
+            &format!(
+                r#"{{"feature": "active-feat", "phase": "swarming", "last_activity": "{now}", "run_state": "awaiting-approval"}}"#
+            ),
+        );
+        write(".bee/logs/tools.jsonl", &format!(r#"{{"ts":"{now}","tool_name":"Bash"}}"#));
+        write(
+            ".bee/lanes/active-feat.json",
+            r#"{"feature": "active-feat", "phase": "swarming", "mode": "standard", "next_action": "keep going"}"#,
+        );
+        write(
+            ".bee/lanes/other-feat.json",
+            r#"{"feature": "other-feat", "phase": "swarming", "mode": "standard", "next_action": "keep going"}"#,
+        );
+        write(
+            ".bee/sessions/s1.json",
+            &format!(r#"{{"id": "s1", "last_heartbeat": "{now}", "lane": "active-feat"}}"#),
+        );
+        write(
+            ".bee/sessions/s2.json",
+            &format!(r#"{{"id": "s2", "last_heartbeat": "{now}", "lane": "other-feat"}}"#),
+        );
+        write(
+            ".bee/deferred-queue.jsonl",
+            "{\"id\": \"d1\", \"event\": \"add\", \"feature\": \"active-feat\", \"kind\": \"question\", \"reason\": \"needs a call\"}\n\
+             {\"id\": \"d2\", \"event\": \"add\", \"feature\": \"other-feat\", \"kind\": \"cleanup\", \"reason\": \"leftover code\"}\n",
+        );
+
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
+
+        let active_link = "href=\"/p/proj-1/_bee/feature/active-feat\"";
+        let other_link = "href=\"/p/proj-1/_bee/feature/other-feat\"";
+        let active_start = html.find(active_link).expect("active-feat card must render");
+        let other_start = html.find(other_link).expect("other-feat card must render");
+        let (active_card, other_card) = if active_start < other_start {
+            (&html[..other_start], &html[other_start..])
+        } else {
+            (&html[active_start..], &html[..active_start])
+        };
+
+        assert!(
+            active_card.contains("bee-hub__run-state") && active_card.contains(r#"fg-chip--danger"#),
+            "the active feature's card must carry the awaiting-approval badge: {active_card}"
+        );
+        assert!(
+            active_card.contains("bee-hub__pulse"),
+            "the active feature's card must carry the working-now pulse: {active_card}"
+        );
+        assert!(
+            !other_card.contains("bee-hub__run-state"),
+            "a DIFFERENT feature's card must never borrow the active feature's run_state badge: {other_card}"
+        );
+        assert!(
+            !other_card.contains("bee-hub__pulse"),
+            "a DIFFERENT feature's card must never borrow the active feature's liveness pulse: {other_card}"
+        );
+
+        assert!(
+            active_card.contains("question") && active_card.contains("needs a call"),
+            "the active feature's own deferred entry must render on its own card: {active_card}"
+        );
+        assert!(
+            other_card.contains("cleanup") && other_card.contains("leftover code"),
+            "the other feature's own deferred entry must render on its own card too, unrelated to activeness: {other_card}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // --- project-color-identity ---
@@ -8799,6 +9324,9 @@ mod tests {
             Some("Project A"),
             Some(3),
             &[],
+            None,
+            None,
+            &[],
         );
         assert!(
             card_html.contains(
@@ -8832,6 +9360,9 @@ mod tests {
             None,
             Some("Project A"),
             Some(3),
+            &[],
+            None,
+            None,
             &[],
         );
         // card-collapse-inprogress: the title (now in the collapsed
@@ -8876,6 +9407,9 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            None,
+            &[],
         );
         assert_eq!(
             card_html,
@@ -8896,7 +9430,7 @@ mod tests {
     #[test]
     fn bee_hub_card_with_no_project_label_and_no_title_names_its_worktree_alone() {
         let card_html =
-            bee_hub_card("proj-a", "feat-a", "in-progress", 1, 2, None, "merged", None, None, None, None, &[]);
+            bee_hub_card("proj-a", "feat-a", "in-progress", 1, 2, None, "merged", None, None, None, None, &[], None, None, &[]);
         assert!(
             card_html.contains(
                 r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">merged</span></div>"#
@@ -8935,6 +9469,9 @@ mod tests {
                 worktree_label,
                 None,
                 Some(&docs),
+                None,
+                None,
+                &[],
                 None,
                 None,
                 &[],
