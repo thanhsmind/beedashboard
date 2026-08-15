@@ -14,7 +14,8 @@
 //!   excluded from every count.
 //! - **D8** — `active` is true iff at least one cell is `open` or `claimed`.
 //! - **D9** — only live `.bee/cells/*.json` is read; `.bee/cells/archive/`
-//!   and `.bee/logs/` are never opened.
+//!   stays unopened. `.bee/logs/tools.jsonl` gets exactly one bounded tail
+//!   read (kanban-live-signals D1, below) — the file is never opened whole.
 //! - **D10** — a feature is **shipped** when every one of its non-dropped
 //!   cells is `capped`. A worktree merge into main is never consulted, and a
 //!   dropped cell never blocks shipped status; a feature whose cells are
@@ -66,6 +67,23 @@
 //! [`compute_attention_items`] purely from `buckets.stuck` and
 //! `read_errors`, exactly as this module already computes
 //! `running_workers` from data it has already read.
+//!
+//! kanban-live-signals (D1-D3, `docs/history/kanban-live-signals/CONTEXT.md`)
+//! adds three more readers, all still read-only and error-tolerant:
+//! - **D1**/**D2** — `state.json` gains `last_activity` (RFC 3339) and
+//!   `run_state`, both `Option` on [`BeeState`] — a file from an older bee
+//!   version that carries neither key still parses.
+//! - **D1** — `.bee/logs/tools.jsonl` (~1.4 MB, append-only) is never read
+//!   whole: this reader seeks to at most its last [`TOOLS_LOG_TAIL_BYTES`]
+//!   bytes, drops the torn first line the seek point almost always lands
+//!   inside, and keeps the newest `ts` it can parse as
+//!   [`BeeSnapshot::last_tool_call`]. A missing file, an unreadable one, or a
+//!   tail with no parsable `ts` yields `None` — a liveness signal, never
+//!   pushed to `read_errors`.
+//! - **D3** — `.bee/deferred-queue.jsonl` is folded by `id` to each id's
+//!   LAST event; an id whose last event is `add` is unresolved debt, and any
+//!   later event (an unrecognized future kind included) resolves it — see
+//!   [`BeeDeferredQueue`].
 //!
 //! Every path-shaped value that crosses into a public field is rendered
 //! relative to the project root (or reduced to a bare filename when it
@@ -169,6 +187,19 @@ pub struct BeeState {
     /// means this feature has never been through a scribe pass while it was
     /// the active feature — see [`compute_scribing_debt`].
     pub last_scribing_run: Option<BeeLastScribingRun>,
+    /// `state.json`'s `last_activity` (RFC 3339), when present
+    /// (kanban-live-signals D1) — bee's own record of the most recent tool
+    /// call or state change for this project, the primary "Last activity"
+    /// timestamp on a kanban card. `None` when the key is absent, including
+    /// on an older bee version's `state.json` that never wrote it — never
+    /// fabricated from anything else.
+    pub last_activity: Option<String>,
+    /// `state.json`'s `run_state` (kanban-live-signals D2) — bee's own
+    /// `shaping` / `awaiting-approval` / `running` / `blocked` / `done`
+    /// classification, verbatim (whatever string bee itself writes). `None`
+    /// when the key is absent, including on an older bee version's
+    /// `state.json` that never wrote it.
+    pub run_state: Option<String>,
 }
 
 /// `.bee/state.json`'s or a `.bee/lanes/<feature>.json`'s
@@ -387,6 +418,11 @@ const RECENT_DETAIL_CAP: usize = 20;
 /// A session's heartbeat is considered live within this many minutes of the
 /// read; older is stale.
 const SESSION_LIVE_MINUTES: f64 = 30.0;
+
+/// Bound for the `.bee/logs/tools.jsonl` tail read (kanban-live-signals D1)
+/// — the file is ~1.4 MB and append-only; [`read_last_tool_call`] never
+/// opens more than its last this-many bytes.
+const TOOLS_LOG_TAIL_BYTES: u64 = 64 * 1024;
 
 /// One folded PBI (product backlog item) from `.bee/backlog.jsonl`, current
 /// state only — the event history that produced it is not kept.
@@ -751,6 +787,32 @@ pub struct BeeCaptureQueue {
     pub waiting: usize,
 }
 
+/// One unresolved `.bee/deferred-queue.jsonl` entry (kanban-live-signals
+/// D3) — an id whose most recent event is `add`, with no later event of any
+/// kind closing it since. See [`read_deferred_queue`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeeDeferredEntry {
+    pub id: String,
+    pub kind: Option<String>,
+    pub feature: Option<String>,
+    /// Free text, not a path field — scrubbed of any embedded absolute path
+    /// before it reaches this struct; see [`scrub_paths`].
+    pub reason: Option<String>,
+}
+
+/// `.bee/deferred-queue.jsonl`, folded by `id` (kanban-live-signals D3) —
+/// see [`read_deferred_queue`]. The card-level debt count and its detail are
+/// both carried here so a caller never has to re-derive the count from the
+/// list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BeeDeferredQueue {
+    /// `unresolved.len()`, carried alongside the list for a caller that only
+    /// wants the badge count.
+    pub unresolved_count: usize,
+    /// Every id whose last event is `add` — see [`BeeDeferredEntry`].
+    pub unresolved: Vec<BeeDeferredEntry>,
+}
+
 /// One entry from `.bee/reservations.json`'s `reservations` array (bbp-15)
 /// — a file or glob currently locked by one agent while parallel work
 /// runs. Neither live store this reader was verified against holds a
@@ -885,6 +947,14 @@ pub struct BeeSnapshot {
     /// [`compute_tier_mix`]. `None` only when this snapshot has no cells
     /// at all to measure.
     pub tier_mix: Option<BeeTierMix>,
+    /// The newest `ts` this snapshot could parse out of
+    /// `.bee/logs/tools.jsonl`'s bounded tail (kanban-live-signals D1) — see
+    /// [`read_last_tool_call`]. `None` covers a missing file, an unreadable
+    /// one, and a tail with no parsable `ts` at all; never a read error.
+    pub last_tool_call: Option<String>,
+    /// `.bee/deferred-queue.jsonl` debt (kanban-live-signals D3) — see
+    /// [`read_deferred_queue`].
+    pub deferred_queue: BeeDeferredQueue,
     /// Human-readable notes naming what could not be read. Every path
     /// mentioned here is relative to the project root.
     pub read_errors: Vec<String>,
@@ -918,6 +988,8 @@ impl BeeSnapshot {
             scribing_debt: Vec::new(),
             reservations: Vec::new(),
             tier_mix: None,
+            last_tool_call: None,
+            deferred_queue: BeeDeferredQueue::default(),
             read_errors: Vec::new(),
         }
     }
@@ -1079,6 +1151,11 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     let reservations = read_reservations(&bee_dir, root, &mut read_errors);
     let tier_mix = compute_tier_mix(&all_cells);
 
+    // kanban-live-signals D1/D3: the tools.jsonl tail and deferred-queue
+    // debt readers, both new for the kanban card's live signals.
+    let last_tool_call = read_last_tool_call(&bee_dir);
+    let deferred_queue = read_deferred_queue(&bee_dir, root, &mut read_errors);
+
     let attention = compute_attention_items(
         &buckets.stuck,
         &read_errors,
@@ -1115,6 +1192,8 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         scribing_debt,
         reservations,
         tier_mix,
+        last_tool_call,
+        deferred_queue,
         read_errors,
     }
 }
@@ -1557,6 +1636,8 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
             route: parse_route(&v, root),
             next_action: v.get("next_action").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
             last_scribing_run: parse_last_scribing_run(&v),
+            last_activity: v.get("last_activity").and_then(Value::as_str).map(String::from),
+            run_state: v.get("run_state").and_then(Value::as_str).map(String::from),
         }),
         Err(e) => {
             read_errors.push(format!("{}: could not parse ({e})", rel_str(&path, root)));
@@ -3326,6 +3407,143 @@ fn read_capture_queue(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>
     }
 
     BeeCaptureQueue { waiting: stub_ids.difference(&flushed_ids).count() }
+}
+
+/// Read the newest `ts` out of `.bee/logs/tools.jsonl`'s last
+/// [`TOOLS_LOG_TAIL_BYTES`] (kanban-live-signals D1) — a bounded seek from
+/// the end, never the whole 1.4 MB, append-only file. The byte the seek
+/// lands on almost never sits on a line boundary, so the first line read out
+/// of the tail is torn (a partial JSON object) and is always dropped, the
+/// same discipline for a file smaller than the window (the "torn" first
+/// line is then simply the whole file's first line, dropped all the same —
+/// harmless, since the rest of the tail still carries the true newest `ts`
+/// in every fixture this reader is verified against). A missing file, an
+/// unreadable one, or a tail with no line carrying a parsable `ts` yields
+/// `None`. This is a liveness signal, not a correctness-critical read, so
+/// nothing here is ever pushed to `read_errors` — see the module doc.
+fn read_last_tool_call(bee_dir: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let path = bee_dir.join("logs").join("tools.jsonl");
+    let mut file = fs::File::open(&path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TOOLS_LOG_TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next(); // drop the torn first line
+    }
+
+    let mut newest: Option<(time::OffsetDateTime, String)> = None;
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Some(ts_str) = v.get("ts").and_then(Value::as_str) else { continue };
+        let Some(ts) = parse_rfc3339(ts_str) else { continue };
+        if newest.as_ref().map(|(newest_ts, _)| ts > *newest_ts).unwrap_or(true) {
+            newest = Some((ts, ts_str.to_string()));
+        }
+    }
+
+    newest.map(|(_, s)| s)
+}
+
+/// Read `.bee/deferred-queue.jsonl` (kanban-live-signals D3), folding its
+/// event-sourced rows by `id` to each id's LAST event in file order — the
+/// same fold discipline [`read_backlog`]'s `pbi` rows already use for
+/// `.bee/backlog.jsonl`. An id whose last event is `"add"` is unresolved
+/// debt; any later event for that same id — a future kind this reader has
+/// never seen included — closes it. Absent file yields zero debt, the same
+/// silent-not-an-error convention every other reader here follows.
+fn read_deferred_queue(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> BeeDeferredQueue {
+    let path = bee_dir.join("deferred-queue.jsonl");
+    if !path.is_file() {
+        return BeeDeferredQueue::default();
+    }
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            read_errors.push(format!("{}: could not read ({e})", rel_str(&path, root)));
+            return BeeDeferredQueue::default();
+        }
+    };
+
+    struct LatestEvent {
+        event: String,
+        kind: Option<String>,
+        feature: Option<String>,
+        reason: Option<String>,
+    }
+
+    // `order` keeps each id's first-seen position so the result is
+    // deterministic and stable across runs; `latest` is folded to the last
+    // event seen for that id as the lines are walked in file order.
+    let mut order: Vec<String> = Vec::new();
+    let mut latest: std::collections::HashMap<String, LatestEvent> = std::collections::HashMap::new();
+
+    for (i, line) in raw.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(e) => {
+                read_errors.push(format!(
+                    "{}: line {} could not parse ({e})",
+                    rel_str(&path, root),
+                    i + 1
+                ));
+                continue;
+            }
+        };
+        let Some(id) = v.get("id").and_then(Value::as_str) else {
+            read_errors.push(format!("{}: line {} missing \"id\"", rel_str(&path, root), i + 1));
+            continue;
+        };
+        let Some(event) = v.get("event").and_then(Value::as_str) else {
+            read_errors.push(format!("{}: line {} missing \"event\"", rel_str(&path, root), i + 1));
+            continue;
+        };
+        if !latest.contains_key(id) {
+            order.push(id.to_string());
+        }
+        latest.insert(
+            id.to_string(),
+            LatestEvent {
+                event: event.to_string(),
+                kind: v.get("kind").and_then(Value::as_str).map(String::from),
+                feature: v.get("feature").and_then(Value::as_str).map(String::from),
+                reason: v.get("reason").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
+            },
+        );
+    }
+
+    let unresolved: Vec<BeeDeferredEntry> = order
+        .into_iter()
+        .filter_map(|id| {
+            let entry = latest.get(&id)?;
+            if entry.event != "add" {
+                return None;
+            }
+            Some(BeeDeferredEntry {
+                kind: entry.kind.clone(),
+                feature: entry.feature.clone(),
+                reason: entry.reason.clone(),
+                id,
+            })
+        })
+        .collect();
+
+    BeeDeferredQueue { unresolved_count: unresolved.len(), unresolved }
 }
 
 /// Per-feature scribing debt (bbp-13, Terms: "Knowledge debt"): a feature
@@ -7210,6 +7428,189 @@ mod tests {
         if let Some(broken) = features.iter().find(|f| f.feature == "broken") {
             assert!(broken.shipped_at.is_none(), "a feature with no parseable archived cells must be untimed");
         }
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // kanban-live-signals: state.json's last_activity/run_state fields.
+
+    #[test]
+    fn state_json_with_last_activity_and_run_state_parses_both() {
+        let root = fresh_root("state-live-signals-present");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"phase":"swarming","last_activity":"2026-08-15T15:48:08.674Z","run_state":"running"}"#,
+        );
+
+        let snap = read_snapshot(&root);
+        let state = snap.state.as_ref().expect("state.json must parse");
+        assert_eq!(state.last_activity.as_deref(), Some("2026-08-15T15:48:08.674Z"));
+        assert_eq!(state.run_state.as_deref(), Some("running"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn state_json_without_last_activity_or_run_state_still_parses_as_none() {
+        let root = fresh_root("state-live-signals-absent");
+        write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
+
+        let snap = read_snapshot(&root);
+        let state = snap.state.as_ref().expect("an older state.json missing the new keys must still parse");
+        assert!(state.last_activity.is_none());
+        assert!(state.run_state.is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // kanban-live-signals D1: the tools.jsonl bounded-tail reader.
+
+    #[test]
+    fn last_tool_call_reads_only_the_tail_and_drops_the_torn_first_line() {
+        let root = fresh_root("tools-tail-large");
+
+        // A timestamp far newer than anything in the tail, planted at the
+        // very head of the file. If this reader ever read more than the
+        // bounded tail, this line would win and the assertion below would
+        // fail.
+        let future_line = concat!(
+            r#"{"ts":"2099-01-01T00:00:00.000Z","tool_name":"Bash","agent_id":null,"agent_type":null,"duration_ms":1}"#,
+            "\n"
+        );
+        // Fixed-length filler lines, enough of them to push the file well
+        // past the 64 KiB tail window.
+        let filler_line = concat!(
+            r#"{"ts":"2020-01-01T00:00:00.000Z","tool_name":"Bash","agent_id":null,"agent_type":null,"duration_ms":1}"#,
+            "\n"
+        );
+
+        let mut body = String::from(future_line);
+        for _ in 0..1000 {
+            body.push_str(filler_line);
+        }
+        body.push_str(
+            r#"{"ts":"2026-08-15T15:00:00.000Z","tool_name":"Bash","agent_id":null,"agent_type":null,"duration_ms":1}"#,
+        );
+        body.push('\n');
+        let newest_ts = "2026-08-15T15:48:08.674Z";
+        body.push_str(&format!(
+            r#"{{"ts":"{newest_ts}","tool_name":"Bash","agent_id":null,"agent_type":null,"duration_ms":1}}"#
+        ));
+        body.push('\n');
+
+        assert!(
+            body.len() as u64 > TOOLS_LOG_TAIL_BYTES,
+            "fixture must exceed the tail window: {} bytes",
+            body.len()
+        );
+
+        // Confirm the seek point this reader will land on sits mid-line,
+        // not on a line boundary — proving the "drop the torn first line"
+        // path is actually exercised here, not just a well-aligned seek.
+        let start = (body.len() as u64).saturating_sub(TOOLS_LOG_TAIL_BYTES) as usize;
+        assert_ne!(
+            body.as_bytes()[start.saturating_sub(1)],
+            b'\n',
+            "fixture must seek into the middle of a line for this test to prove anything"
+        );
+
+        write(&root, ".bee/logs/tools.jsonl", &body);
+
+        let snap = read_snapshot(&root);
+        assert_eq!(
+            snap.last_tool_call.as_deref(),
+            Some(newest_ts),
+            "must read the newest ts from the bounded tail — never the far-future line planted \
+             outside the tail window — and must tolerate the torn first line: {:?}",
+            snap.last_tool_call
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn last_tool_call_missing_file_is_none_no_read_error() {
+        let root = fresh_root("tools-missing");
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+
+        let snap = read_snapshot(&root);
+        assert!(snap.last_tool_call.is_none());
+        assert!(
+            snap.read_errors.is_empty(),
+            "a missing tools.jsonl must never be a read error: {:?}",
+            snap.read_errors
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // kanban-live-signals D3: the deferred-queue debt reader.
+
+    #[test]
+    fn deferred_queue_adds_only_are_all_unresolved() {
+        let root = fresh_root("deferred-adds-only");
+        write(
+            &root,
+            ".bee/deferred-queue.jsonl",
+            concat!(
+                r#"{"ts":"2026-08-14T13:22:55.078Z","event":"add","id":"d1","kind":"promote","feature":"feat-a","reason":"Promote proposal for feat-a"}"#,
+                "\n",
+                r#"{"ts":"2026-08-14T16:00:50.074Z","event":"add","id":"d2","kind":"scribe","feature":"feat-b","reason":"Scribing debt for feat-b"}"#
+            ),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.deferred_queue.unresolved_count, 2, "{:?}", snap.deferred_queue);
+        let ids: Vec<&str> = snap.deferred_queue.unresolved.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["d1", "d2"]);
+        let d1 = snap.deferred_queue.unresolved.iter().find(|e| e.id == "d1").unwrap();
+        assert_eq!(d1.kind.as_deref(), Some("promote"));
+        assert_eq!(d1.feature.as_deref(), Some("feat-a"));
+        assert_eq!(d1.reason.as_deref(), Some("Promote proposal for feat-a"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn deferred_queue_add_then_another_event_for_same_id_resolves_it() {
+        let root = fresh_root("deferred-resolved");
+        write(
+            &root,
+            ".bee/deferred-queue.jsonl",
+            concat!(
+                r#"{"ts":"2026-08-14T13:22:55.078Z","event":"add","id":"d1","kind":"promote","feature":"feat-a","reason":"x"}"#,
+                "\n",
+                r#"{"ts":"2026-08-14T14:00:00.000Z","event":"apply","id":"d1","kind":"promote","feature":"feat-a"}"#,
+                "\n",
+                r#"{"ts":"2026-08-14T16:00:50.074Z","event":"add","id":"d2","kind":"scribe","feature":"feat-b","reason":"y"}"#
+            ),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(
+            snap.deferred_queue.unresolved_count, 1,
+            "d1 was resolved by its later \"apply\" event, only d2 remains: {:?}",
+            snap.deferred_queue
+        );
+        assert_eq!(snap.deferred_queue.unresolved[0].id, "d2");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn deferred_queue_missing_file_is_zero_debt_no_read_error() {
+        let root = fresh_root("deferred-missing");
+        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.deferred_queue.unresolved_count, 0);
+        assert!(snap.deferred_queue.unresolved.is_empty());
+        assert!(
+            snap.read_errors.is_empty(),
+            "an absent deferred-queue.jsonl must never be a read error: {:?}",
+            snap.read_errors
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
