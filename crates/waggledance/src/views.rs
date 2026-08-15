@@ -684,7 +684,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
    the edge. */
 @media (max-width: 720px) {
   .term-screen { white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
-  .term-keys button, .term-reply__send, .term-reply__stage { padding: var(--space-2) var(--space-3); }
+  .term-keys button, .term-reply__send, .term-reply__stage, .term-reply__approve { padding: var(--space-2) var(--space-3); }
   .term-reply__actions { justify-content: stretch; }
   .term-reply__actions button { flex: 1; }
 }
@@ -710,7 +710,7 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
   .term-reply__text { font-size: 16px; }
 }
 .term-reply__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
-.term-reply__send, .term-reply__stage { padding: var(--space-1) var(--space-3); min-height: 44px; border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; }
+.term-reply__send, .term-reply__stage, .term-reply__approve { padding: var(--space-1) var(--space-3); min-height: 44px; border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-raised); color: var(--color-text); cursor: pointer; }
 /* Send is the primary of the pair — Stage beside it stays the quiet one. */
 .term-reply__send { background: var(--color-action); border-color: var(--color-action); color: var(--color-bg); font-weight: var(--weight-semibold); }
 /* One tight control block under the screen, on a single line: the arrows and
@@ -1285,6 +1285,7 @@ fn pane_controls(pane_id: &str, name: &str, attach: bool, base: Option<&str>) ->
   <form class="term-reply" data-pane-id="{pane_id}"{base_attr}>
     <textarea class="term-reply__text" rows="3" placeholder="Type a reply… (Ctrl+Enter to send)" aria-label="Reply to {name}" autocomplete="off"></textarea>{attach_block}
     <div class="term-reply__actions">
+      <button type="button" class="term-reply__approve">Approve</button>
       <button type="button" class="term-reply__stage">Stage</button>
       <button type="submit" class="term-reply__send">Send</button>
     </div>
@@ -1684,6 +1685,7 @@ const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
       var paneId = form.getAttribute("data-pane-id");
       var input = form.querySelector(".term-reply__text");
       var stageBtn = form.querySelector(".term-reply__stage");
+      var approveBtn = form.querySelector(".term-reply__approve");
       form.addEventListener("submit", function (ev) {
         ev.preventDefault();
         sendReply(paneId, input.value, true, input);
@@ -1699,6 +1701,11 @@ const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
       if (stageBtn) {
         stageBtn.addEventListener("click", function () {
           sendReply(paneId, input.value, false, input);
+        });
+      }
+      if (approveBtn) {
+        approveBtn.addEventListener("click", function () {
+          postJson(inputUrl(paneId), { text: "Approve", submit: true }).catch(function () {});
         });
       }
     });
@@ -1846,7 +1853,11 @@ pub fn terminal_down_page(project: &Project) -> String {
 /// nowhere close to a revival of the D1 Sessions panel it sits where that
 /// panel used to live; see that function's own doc comment for exactly how
 /// little it carries.
-pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
+pub fn bee_board_page(
+    project: &Project,
+    snapshot: &BeeSnapshot,
+    feature_panes: &std::collections::HashMap<String, Vec<TerminalPaneView>>,
+) -> String {
     let body = format!(
         r#"{topbar}
 {style}
@@ -1864,7 +1875,7 @@ pub fn bee_board_page(project: &Project, snapshot: &BeeSnapshot) -> String {
         style = bee_hub_style(),
         top = bee_board_top(project),
         live = bee_live_strip_section(snapshot),
-        board = bee_feature_hub_section(project, snapshot),
+        board = bee_feature_hub_section(project, snapshot, feature_panes),
         finished = bee_finished_section(&project.id, &snapshot.shipped),
         panels = bee_panels_section(snapshot),
     );
@@ -2009,7 +2020,39 @@ html[data-scheme="dark"] .bee-hub-theme {{
    badge `<nav>` both land inside one painted box instead of the badges
    sitting as a bare row underneath it — see `bee_hub_card`'s doc comment. */
 .bee-hub__shell {{ display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }}
-.bee-hub__card {{ display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }}
+/* card-collapse-inprogress: `.bee-hub__card` now names the `<details>`
+   itself rather than the old whole-card `<a>` -- the flex-column layout
+   moved to `.bee-hub__body` below (only that inner div still needs to
+   stack the card's own rows), leaving this rule only the `min-width: 0`
+   the hub-fallbacks shrink chain still requires from every level between
+   the grid track and the clamped description. */
+.bee-hub__card {{ min-width: 0; }}
+/* card-collapse-inprogress D1/D3/D6: the collapsed header row -- name plus
+   chevron -- is the details element's own `<summary>`, native to the
+   `<details>`/`<summary>` disclosure this card now uses (no JS, no
+   persisted state); the `list-style`/`::-webkit-details-marker` pair
+   strips the browser's own default marker so only `.bee-hub__chev` below
+   draws one. */
+.bee-hub__summary {{ display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); cursor: pointer; list-style: none; }}
+.bee-hub__summary::-webkit-details-marker {{ display: none; }}
+.bee-hub__summary:focus-visible {{ outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }}
+/* Same rotation `.chap-folders__chev` uses (app.css) for its own disclosure
+   chevron, keyed off the native `[open]` attribute a `<details>` toggles
+   itself rather than that pattern's own `.is-open` class. */
+.bee-hub__chev {{ flex: none; line-height: 1; color: var(--color-text-subtle); transition: transform var(--motion-fast) var(--ease-standard); }}
+.bee-hub__card[open] .bee-hub__chev {{ transform: rotate(90deg); }}
+/* D2: everything the collapsed header does not show -- the subtitle,
+   description, progress bar, reason and activity lines -- plus D4's own
+   Feature detail link row, stacked in the same column gap the old
+   whole-card `<a>` used. `min-width: 0` keeps the hub-fallbacks shrink
+   chain intact now that `.bee-hub__desc` sits one flex level deeper than
+   before. */
+.bee-hub__body {{ display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }}
+/* D4: the feature-detail link row -- the one place the card still reaches
+   its own detail page now that the `<details>` can no longer be that link
+   itself. */
+.bee-hub__detail-link {{ display: flex; align-items: center; gap: var(--space-1); color: var(--color-link); font-size: var(--type-body-sm-size); font-weight: var(--weight-strong); text-decoration: none; }}
+.bee-hub__detail-link:hover {{ color: var(--color-link-hover); }}
 /* project-color-identity: the Features board card's own chip row is gone
    (D3), but this rule stays -- [`bee_feature_terminal_tab`]'s pane rows
    still reuse it for their own status-pill layout, unrelated to this
@@ -2188,6 +2231,14 @@ html[data-scheme="dark"] .bee-hub-theme {{
   .bee-panels,
   .bee-done-grid {{
     grid-template-columns: 1fr;
+  }}
+  /* inprogress-priority-order-2 (D1): on a narrow screen the one column
+     that still carries cards moves to the very top of the stacked board,
+     above Todo -- selected through the group's own `data-hub-group`
+     attribute (`bee_hub_group`, no markup change) so this rule never
+     leaks outside this media query and wide screens render unchanged. */
+  .bee-hub__groups > [data-hub-group="in-progress"] {{
+    order: -1;
   }}
 }}
 </style>"#
@@ -2489,11 +2540,15 @@ const WORKING_MINUTES: f64 = 5.0;
 /// `read_rollup` instead of reading the archive itself, so a feature still
 /// lands in the same column its own project's board would put it in,
 /// merged with every other project's instead of rendered alone.
-fn bee_feature_hub_section(project: &Project, snapshot: &BeeSnapshot) -> String {
+fn bee_feature_hub_section(
+    project: &Project,
+    snapshot: &BeeSnapshot,
+    feature_panes: &std::collections::HashMap<String, Vec<TerminalPaneView>>,
+) -> String {
     let archived_features: std::collections::HashSet<String> =
         list_archived_feature_dirs(&project.root_path).into_iter().collect();
     let placements = bee_classify_features(snapshot, &archived_features);
-    bee_render_hub_section(project, &placements, &snapshot.backlog.pbis)
+    bee_render_hub_section(project, &placements, &snapshot.backlog.pbis, feature_panes)
 }
 
 /// One feature already sorted into one of the feature hub's five columns
@@ -2700,18 +2755,88 @@ fn bee_classify_features(
 /// project's page having only ever shown itself. project-color-identity-3:
 /// each card's `worktree_label` still travels through, since `bee_hub_card`
 /// now folds it into that page's own slug subtitle in the chip row's
-/// place. Passes an empty pane slice to every card (card-terminals-1): the
-/// per-project board at `/p/:id/_bee` does not read herdr today, and
-/// giving it terminal badges is deliberately out of scope for that cell --
-/// this keeps its output byte-identical. `pbis` (kanban-columns D2/D3) is
+/// place. `feature_panes` (inprogress-priority-order-1, D5) is
+/// `server.rs::bee_board`'s own `project_feature_panes` join, keyed by
+/// feature name alone -- a single project needs no per-project outer key
+/// the way the cross-project map below does. A feature absent from it (no
+/// pane in its own checkout, or herdr unreachable) looks up to an empty
+/// slice, rendering exactly as an empty pane slice always has -- so a
+/// switched-off or herdr-down board still renders byte-identically to
+/// before this feature. `pbis` (kanban-columns D2/D3) is
 /// `snapshot.backlog.pbis` -- every `proposed` one renders through the same
 /// [`bee_hub_finished_row`], appended to `todo_rows` after every feature
 /// Todo row is already in it, so the column always reads features first,
 /// PBIs second (D2); a single project needs no second accumulator for
 /// this, unlike the cross-project merge below.
-fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement], pbis: &[BeePbi]) -> String {
+/// D7: the shared `blocked > working > rest` ranking
+/// `terminals_status_rank` (`server.rs:3052`) already applies in the Agents
+/// drawer -- matched here, never re-derived independently, so the two
+/// rankings can never quietly drift apart. `"idle"`, `"done"`, `"unknown"`
+/// and `"shell"` all fall into the same "everything else" tier -- only an
+/// exact `"blocked"` or `"working"` status earns a tier of its own.
+fn bee_hub_in_progress_tier(panes: &[TerminalPaneView]) -> u8 {
+    if panes.iter().any(|p| p.status == "blocked") {
+        0
+    } else if panes.iter().any(|p| p.status == "working") {
+        1
+    } else {
+        2
+    }
+}
+
+/// D7's own sort key for one In Progress card: its terminal tier
+/// ([`bee_hub_in_progress_tier`]), its own `last_activity` parsed as RFC
+/// 3339 the same way [`bee_fmt_trace_time`] already parses it (`None` for
+/// an absent or unparseable timestamp), and its feature name -- the final
+/// tie-break. [`bee_hub_in_progress_cmp`] is the comparator that reads it,
+/// and both boards build this key the same way so neither can drift from
+/// the other (D4/D5).
+fn bee_hub_in_progress_sort_key(
+    feature: &str,
+    last_activity: Option<&str>,
+    panes: &[TerminalPaneView],
+) -> (u8, Option<time::OffsetDateTime>, String) {
+    let parsed = last_activity.and_then(|s| {
+        time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+    });
+    (bee_hub_in_progress_tier(panes), parsed, feature.to_string())
+}
+
+/// D7: one shared comparator over [`bee_hub_in_progress_sort_key`], used by
+/// both the per-project board ([`bee_render_hub_section`]) and the
+/// cross-project homepage ([`bee_cross_project_features_section`], D4) --
+/// never a second spelling of the same rule. The tier wins first
+/// (ascending: blocked, then working, then rest); within a tier the newest
+/// `last_activity` wins, a `None` sorting last -- the same
+/// newest-first/untimed-last shape the existing Finished re-sort (D10,
+/// below) already imitates for its own timed-vs-untimed split; feature name
+/// A→Z breaks every remaining tie.
+fn bee_hub_in_progress_cmp(
+    a: &(u8, Option<time::OffsetDateTime>, String),
+    b: &(u8, Option<time::OffsetDateTime>, String),
+) -> std::cmp::Ordering {
+    a.0.cmp(&b.0)
+        .then_with(|| match (&a.1, &b.1) {
+            (Some(x), Some(y)) => y.cmp(x),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        })
+        .then_with(|| a.2.cmp(&b.2))
+}
+
+fn bee_render_hub_section(
+    project: &Project,
+    placements: &[BeeHubPlacement],
+    pbis: &[BeePbi],
+    feature_panes: &std::collections::HashMap<String, Vec<TerminalPaneView>>,
+) -> String {
     let mut todo_rows: Vec<String> = Vec::new();
-    let mut in_progress_cards = String::new();
+    // D7: collected as (sort key, rendered html) rather than appended
+    // straight into a String -- placements arrive in name order
+    // (`bee_classify_features`), so the cards must be re-sorted by
+    // `bee_hub_in_progress_cmp` once every card is built, then flattened.
+    let mut in_progress_entries: Vec<((u8, Option<time::OffsetDateTime>, String), String)> = Vec::new();
     let mut review_rows: Vec<String> = Vec::new();
     let mut compound_rows: Vec<String> = Vec::new();
     let mut finished_rows: Vec<String> = Vec::new();
@@ -2720,12 +2845,15 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement], pbi
     let mut review_count = 0usize;
     let mut compound_count = 0usize;
     let mut finished_count = 0usize;
+    let no_panes: Vec<TerminalPaneView> = Vec::new();
 
     for placement in placements {
         match placement {
             BeeHubPlacement::InProgress(data) => {
                 in_progress_count += 1;
-                in_progress_cards.push_str(&bee_hub_card(
+                let panes = feature_panes.get(data.feature.as_str()).unwrap_or(&no_panes);
+                let key = bee_hub_in_progress_sort_key(&data.feature, data.last_activity.as_deref(), panes);
+                let html = bee_hub_card(
                     &project.id,
                     &data.feature,
                     "in-progress",
@@ -2737,8 +2865,9 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement], pbi
                     data.docs.as_ref(),
                     None,
                     None,
-                    &[],
-                ));
+                    panes,
+                );
+                in_progress_entries.push((key, html));
             }
             BeeHubPlacement::Finished(data) => {
                 finished_count += 1;
@@ -2809,6 +2938,10 @@ fn bee_render_hub_section(project: &Project, placements: &[BeeHubPlacement], pbi
             ));
         }
     }
+    // D7: sorted once, right before rendering -- blocked first, then
+    // working, then the rest, newest activity breaking ties within a tier.
+    in_progress_entries.sort_by(|a, b| bee_hub_in_progress_cmp(&a.0, &b.0));
+    let in_progress_cards: String = in_progress_entries.into_iter().map(|(_, html)| html).collect();
     let todo_cards = bee_hub_finished_rows(&todo_rows);
     let review_cards = bee_hub_finished_rows(&review_rows);
     let compound_cards = bee_hub_finished_rows(&compound_rows);
@@ -2900,7 +3033,11 @@ pub fn bee_cross_project_features_section(
 ) -> String {
     let mut todo_rows: Vec<String> = Vec::new();
     let mut todo_pbi_rows: Vec<String> = Vec::new();
-    let mut in_progress_cards = String::new();
+    // D4/D7: every project's In Progress cards collect into ONE list here
+    // (sort key, project id, rendered html) rather than one block per
+    // project -- a global sort cannot follow a per-project append order,
+    // so this stops appending project-by-project and merges instead.
+    let mut in_progress_entries: Vec<((u8, Option<time::OffsetDateTime>, String), String)> = Vec::new();
     let mut review_rows: Vec<String> = Vec::new();
     let mut compound_rows: Vec<String> = Vec::new();
     let mut todo_count = 0usize;
@@ -2952,7 +3089,8 @@ pub fn bee_cross_project_features_section(
                     let panes = project_panes
                         .and_then(|m| m.get(data.feature.as_str()))
                         .unwrap_or(&no_panes);
-                    in_progress_cards.push_str(&bee_hub_card(
+                    let key = bee_hub_in_progress_sort_key(&data.feature, data.last_activity.as_deref(), panes);
+                    let html = bee_hub_card(
                         &project.id,
                         &data.feature,
                         "in-progress",
@@ -2965,7 +3103,8 @@ pub fn bee_cross_project_features_section(
                         Some(&project.name),
                         project_color,
                         panes,
-                    ));
+                    );
+                    in_progress_entries.push((key, html));
                 }
                 BeeHubPlacement::Finished(data) => {
                     let shipped_at_str = shipped_by_feature.get(data.feature.as_str()).copied().flatten();
@@ -3055,6 +3194,11 @@ pub fn bee_cross_project_features_section(
     });
     let finished_count = finished.len();
     let finished_rows: Vec<String> = finished.into_iter().map(|e| e.html).collect();
+    // D4/D7: sorted once, across every project, right before rendering --
+    // the same comparator the per-project board uses, so the merged column
+    // reads as one list rather than project-by-project blocks.
+    in_progress_entries.sort_by(|a, b| bee_hub_in_progress_cmp(&a.0, &b.0));
+    let in_progress_cards: String = in_progress_entries.into_iter().map(|(_, html)| html).collect();
     let todo_cards = bee_hub_finished_rows(&todo_rows);
     let review_cards = bee_hub_finished_rows(&review_rows);
     let compound_cards = bee_hub_finished_rows(&compound_rows);
@@ -3258,24 +3402,27 @@ fn bee_cross_project_board_project_colors<'a>(
 /// feature's own checkout -- the worktree-vs-main-checkout join is already
 /// resolved by the caller (`server.rs::project_feature_panes`); this
 /// function only renders them, as a sibling `<nav>` after the card's own
-/// `<a>` rather than nested inside it (an anchor inside an anchor is
-/// invalid HTML, the same reason `project_badges` sits beside
-/// `proj-row__link` rather than inside it). card-badge-inside wraps that
-/// anchor/nav pair in a `<div class="fg-card bee-hub__shell">`, moving the
-/// box paint (`.fg-card`'s border, background, radius, padding) off the
-/// anchor and onto the shell, so the badges land inside the card's own
-/// painted box at its foot instead of on a bare row underneath it -- the
-/// anchor itself keeps only `bee-hub__card`, since the anchor-in-anchor
-/// rule above still forbids folding the nav's own links into the card
-/// link. The nav carries an extra `bee-hub__badges` class in this context
+/// `<details>` (card-collapse-inprogress: previously the card's own `<a>`)
+/// rather than nested inside it -- an anchor inside the details' own body
+/// would still be legal HTML, but keeping the badges outside is what lets
+/// them show collapsed and expanded alike (D1), the same reason
+/// `project_badges` sits beside `proj-row__link` rather than inside it.
+/// card-badge-inside wraps that details/nav pair in a
+/// `<div class="fg-card bee-hub__shell">`, moving the box paint
+/// (`.fg-card`'s border, background, radius, padding) off the card and
+/// onto the shell, so the badges land inside the card's own painted box at
+/// its foot instead of on a bare row underneath it -- the details element
+/// itself keeps only `bee-hub__card`. The nav carries an extra
+/// `bee-hub__badges` class in this context
 /// (a hairline top rule replacing the project-row's own bottom/right
 /// padding), reusing [`terminal_badges_nav`]'s exact per-badge markup and
 /// the accessible label "Terminals in this checkout" rather than anything
 /// naming the feature: for a Main feature the panes are shared with every
 /// other Main feature of that project, so the label must not claim
 /// otherwise. Empty `panes` renders no `<nav>` at all -- the shell still
-/// wraps the bare anchor, so the card looks exactly as it did before this
-/// feature -- and the per-project board's own call
+/// wraps the bare details/summary, so the card looks exactly as it did
+/// before this feature aside from the collapse itself -- and the
+/// per-project board's own call
 /// (`bee_render_hub_section`) always passes an empty slice, so this path
 /// renders every time there too.
 #[allow(clippy::too_many_arguments)]
@@ -3331,17 +3478,14 @@ fn bee_hub_card(
             ),
         },
     };
-    let name_html = match title {
-        Some(t) => format!(
-            r#"<div class="fg-card__title">{title}</div>{subtitle_html}"#,
-            title = esc(t),
-            subtitle_html = subtitle_html,
-        ),
-        None => format!(
-            r#"<div class="fg-card__title">{feature}</div>{subtitle_html}"#,
-            feature = esc(feature),
-            subtitle_html = subtitle_html,
-        ),
+    // card-collapse-inprogress D1/D2: the card's own name alone (its
+    // CONTEXT title, or the slug fallback) is all the collapsed header
+    // shows -- `subtitle_html` above now moves into the expandable body
+    // below instead of riding along with the title the way the old
+    // `name_html` bundled them.
+    let title_html = match title {
+        Some(t) => format!(r#"<div class="fg-card__title">{title}</div>"#, title = esc(t)),
+        None => format!(r#"<div class="fg-card__title">{feature}</div>"#, feature = esc(feature)),
     };
     let desc_html = match docs.and_then(|d| d.description.as_deref()).filter(|d| !d.is_empty()) {
         Some(d) => format!(r#"<p class="bee-hub__desc">{}</p>"#, esc(d)),
@@ -3373,6 +3517,16 @@ fn bee_hub_card(
         Some(r) if !r.is_empty() => format!(r#"<p class="bee-cell__meta bee-hub__reason">{}</p>"#, esc(r)),
         _ => String::new(),
     };
+    // D8: a second, independent reason line -- appended after any existing
+    // gate/handoff line above, never in its place, since a paused feature
+    // and a blocked terminal are two different things waiting on the user
+    // at once. Exact wording, matching the existing gate line's own em-dash
+    // punctuation (`server.rs`'s `Waiting on you — {label} gate ...`).
+    let blocked_reason_html = if panes.iter().any(|p| p.status == "blocked") {
+        r#"<p class="bee-cell__meta bee-hub__reason">Waiting on you — a terminal is blocked</p>"#.to_string()
+    } else {
+        String::new()
+    };
     // project-color-identity: no chip row at all any more -- the group
     // chip is redundant with the kanban column heading and the worktree
     // chip moved to the project line above -- and the shell gains a
@@ -3393,16 +3547,25 @@ fn bee_hub_card(
     // own content while both sit inside the shared `bee-hub__shell` box.
     let terminal_badges_html =
         terminal_badges_nav(project_id, panes, "Terminals in this checkout", "bee-hub__badges");
+    // card-collapse-inprogress D1/D3/D6: a native `<details>` with no
+    // `open` attribute renders every card collapsed on every page load,
+    // with no persisted state and no JavaScript -- clicking the
+    // `<summary>` header is the browser's own toggle. D4 moves the
+    // feature-detail link off the card entirely and into its own row at
+    // the top of the expandable body, since a `<details>`/`<summary>`
+    // pair, unlike the old whole-card `<a>`, cannot itself be a link.
     format!(
-        r#"<div class="{shell_class}"><a class="bee-hub__card" data-hub-group="{group_key}" href="/p/{pid}/_bee/feature/{feature_href}">{name_html}{desc_html}{progress_html}{reason_html}{activity_html}</a>{terminal_badges_html}</div>"#,
+        r#"<div class="{shell_class}"><details class="bee-hub__card" data-hub-group="{group_key}"><summary class="bee-hub__summary">{title_html}<span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/{pid}/_bee/feature/{feature_href}">Feature detail<span aria-hidden="true"> →</span></a>{subtitle_html}{desc_html}{progress_html}{reason_html}{blocked_reason_html}{activity_html}</div></details>{terminal_badges_html}</div>"#,
         shell_class = shell_class,
         group_key = group_key,
+        title_html = title_html,
         pid = esc(project_id),
         feature_href = esc(feature),
-        name_html = name_html,
+        subtitle_html = subtitle_html,
         desc_html = desc_html,
         progress_html = progress_html,
         reason_html = reason_html,
+        blocked_reason_html = blocked_reason_html,
         activity_html = activity_html,
         terminal_badges_html = terminal_badges_html,
     )
@@ -5713,6 +5876,144 @@ mod tests {
         }
     }
 
+    /// inprogress-priority-order-2: a minimal In Progress placement for the
+    /// D7 sort tests below -- only `feature` and `last_activity` vary, so
+    /// each test can build exactly the cards its own claim needs without
+    /// restating every `BeeHubCardData` field.
+    fn in_progress_card(feature: &str, last_activity: Option<&str>) -> BeeHubPlacement {
+        BeeHubPlacement::InProgress(BeeHubCardData {
+            feature: feature.to_string(),
+            done: 0,
+            total: 0,
+            last_activity: last_activity.map(|s| s.to_string()),
+            worktree_label: "Main".to_string(),
+            reason: None,
+            docs: None,
+        })
+    }
+
+    /// inprogress-priority-order-2: one bare `TerminalPaneView` carrying
+    /// only the `status` the D7 sort tests below actually vary.
+    fn pane_with_status(status: &str) -> TerminalPaneView {
+        TerminalPaneView {
+            pane_id: format!("w1:{status}"),
+            kind: "claude".into(),
+            name: "agent".into(),
+            status: status.into(),
+            title: String::new(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+        }
+    }
+
+    /// inprogress-priority-order-2 (D7, must-have): three cards -- one
+    /// carrying a `"blocked"` pane with the OLDEST activity, one carrying a
+    /// `"working"` pane with no recorded activity, and one carrying no
+    /// pane at all with the NEWEST activity -- must render blocked, then
+    /// working, then neither: the terminal tier beats activity outright,
+    /// never the other way around.
+    #[test]
+    fn bee_render_hub_section_orders_in_progress_blocked_then_working_then_rest_regardless_of_activity() {
+        let project = sample_project();
+        let placements = vec![
+            in_progress_card("feat-blocked", Some("2020-01-01T00:00:00.000Z")),
+            in_progress_card("feat-working", None),
+            in_progress_card("feat-neither", Some("2026-08-15T00:00:00.000Z")),
+        ];
+        let mut feature_panes: std::collections::HashMap<String, Vec<TerminalPaneView>> =
+            std::collections::HashMap::new();
+        feature_panes.insert("feat-blocked".to_string(), vec![pane_with_status("blocked")]);
+        feature_panes.insert("feat-working".to_string(), vec![pane_with_status("working")]);
+
+        let html = bee_render_hub_section(&project, &placements, &[], &feature_panes);
+
+        let blocked_at = html
+            .find(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/feat-blocked""#)
+            .unwrap_or_else(|| panic!("feat-blocked's own card must render: {html}"));
+        let working_at = html
+            .find(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/feat-working""#)
+            .unwrap_or_else(|| panic!("feat-working's own card must render: {html}"));
+        let neither_at = html
+            .find(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/feat-neither""#)
+            .unwrap_or_else(|| panic!("feat-neither's own card must render: {html}"));
+        assert!(
+            blocked_at < working_at && working_at < neither_at,
+            "order must be blocked, working, neither -- oldest/no activity on the blocked and working cards must not move them down: {html}"
+        );
+    }
+
+    /// inprogress-priority-order-2 (D7, must-have): `"idle"`, `"done"`,
+    /// `"unknown"` and `"shell"` panes earn no tier of their own -- a card
+    /// carrying only one of those sorts purely by activity among the
+    /// "rest" tier, the same as a card with no pane at all, and every one
+    /// of them still sits behind a genuinely `"working"` card even though
+    /// that card's own activity is the oldest of the five.
+    #[test]
+    fn bee_render_hub_section_gives_idle_done_unknown_and_shell_panes_no_tier() {
+        let project = sample_project();
+        let placements = vec![
+            in_progress_card("e-working", Some("2019-01-01T00:00:00.000Z")),
+            in_progress_card("d-idle", Some("2026-04-01T00:00:00.000Z")),
+            in_progress_card("c-done", Some("2026-03-01T00:00:00.000Z")),
+            in_progress_card("b-unknown", Some("2026-02-01T00:00:00.000Z")),
+            in_progress_card("a-shell", Some("2026-01-01T00:00:00.000Z")),
+        ];
+        let mut feature_panes: std::collections::HashMap<String, Vec<TerminalPaneView>> =
+            std::collections::HashMap::new();
+        feature_panes.insert("e-working".to_string(), vec![pane_with_status("working")]);
+        feature_panes.insert("d-idle".to_string(), vec![pane_with_status("idle")]);
+        feature_panes.insert("c-done".to_string(), vec![pane_with_status("done")]);
+        feature_panes.insert("b-unknown".to_string(), vec![pane_with_status("unknown")]);
+        feature_panes.insert("a-shell".to_string(), vec![pane_with_status("shell")]);
+
+        let html = bee_render_hub_section(&project, &placements, &[], &feature_panes);
+
+        let at = |feature: &str| {
+            html.find(&format!(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/{feature}""#))
+                .unwrap_or_else(|| panic!("{feature}'s own card must render: {html}"))
+        };
+        let (e, d, c, b, a) = (at("e-working"), at("d-idle"), at("c-done"), at("b-unknown"), at("a-shell"));
+        assert!(
+            e < d && d < c && c < b && b < a,
+            "the working card must lead despite the oldest activity, and idle/done/unknown/shell must fall back to plain newest-first activity order among themselves: {html}"
+        );
+    }
+
+    /// inprogress-priority-order-2 (D7, must-have): within one tier, newer
+    /// activity wins; a card with no recorded activity renders last; two
+    /// cards tied on both tier and activity fall back to feature name A→Z.
+    #[test]
+    fn bee_render_hub_section_breaks_ties_within_a_tier_by_activity_then_name() {
+        let project = sample_project();
+        let placements = vec![
+            in_progress_card("bravo", Some("2026-01-01T00:00:00.000Z")),
+            in_progress_card("charlie", Some("2026-01-01T00:00:00.000Z")),
+            in_progress_card("alpha", None),
+        ];
+        let mut feature_panes: std::collections::HashMap<String, Vec<TerminalPaneView>> =
+            std::collections::HashMap::new();
+        for feature in ["bravo", "charlie", "alpha"] {
+            feature_panes.insert(feature.to_string(), vec![pane_with_status("working")]);
+        }
+
+        let html = bee_render_hub_section(&project, &placements, &[], &feature_panes);
+
+        let at = |feature: &str| {
+            html.find(&format!(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/{feature}""#))
+                .unwrap_or_else(|| panic!("{feature}'s own card must render: {html}"))
+        };
+        let (bravo, charlie, alpha) = (at("bravo"), at("charlie"), at("alpha"));
+        assert!(
+            bravo < charlie,
+            "tied on tier and activity, name order must break the tie (bravo before charlie): {html}"
+        );
+        assert!(
+            charlie < alpha,
+            "a card with no recorded activity must render last, even though its name (alpha) sorts first: {html}"
+        );
+    }
+
     /// agent-terminal-13, must-have: "the terminal page gains the creation
     /// controls, offering only the configured preset labels" — every
     /// configured label renders as its own button, carrying the label as
@@ -6134,6 +6435,75 @@ mod tests {
         );
     }
 
+    /// D1 (terminal-approve-button): Approve leads the row — Approve,
+    /// Stage, Send — so a one-tap send never sits shoulder to shoulder with
+    /// Send, and Stage/Send keep their existing relative order.
+    #[test]
+    fn pane_controls_renders_approve_before_stage_and_send() {
+        let html = pane_controls("pane-1", "Agent One", false, None);
+        assert!(
+            html.contains(r#"<button type="button" class="term-reply__approve">Approve</button>"#),
+            "the Approve button must render: {html}"
+        );
+        let approve_at = html.find("term-reply__approve").expect("Approve button must render");
+        let stage_at = html.find("term-reply__stage").expect("Stage button must render");
+        let send_at = html.find("term-reply__send").expect("Send button must render");
+        assert!(
+            approve_at < stage_at && stage_at < send_at,
+            "the row must read Approve, Stage, Send: {html}"
+        );
+    }
+
+    /// D1: the new button sizes exactly like its siblings — no new colours,
+    /// no new tokens — so it joins both the shared reply-button rule and the
+    /// mobile sizing tweak alongside term-reply__send/term-reply__stage.
+    #[test]
+    fn term_reply_approve_shares_the_stage_send_css_rule() {
+        let project = sample_project();
+        let html = terminal_page(&project, &[], None, &[]);
+        assert!(
+            html.contains(".term-reply__send, .term-reply__stage, .term-reply__approve {"),
+            "the shared reply-button rule must include term-reply__approve: {html}"
+        );
+        assert!(
+            html.contains(".term-keys button, .term-reply__send, .term-reply__stage, .term-reply__approve {"),
+            "the mobile sizing tweak must include term-reply__approve: {html}"
+        );
+    }
+
+    /// D2/D4: `assets/app.js` wires the Approve button the same way it
+    /// wires Stage — posting through the existing `postJson`/`inputUrl`
+    /// helpers, never a new fetch — so the project page and the homepage
+    /// Terminals tab both get a working button for free.
+    #[test]
+    fn app_js_wires_the_approve_button() {
+        let script = include_str!("../assets/app.js");
+        assert!(
+            script.contains(r#"var approveBtn = form.querySelector(".term-reply__approve");"#),
+            "app.js must read the Approve button: {script}"
+        );
+        assert!(
+            script.contains(r#"postJson(inputUrl(paneId, base), { text: "Approve", submit: true })"#),
+            "app.js's Approve handler must post the exact text Approve with submit true: {script}"
+        );
+    }
+
+    /// D4: the Unassigned page has no `data-project-id` to key off, so it is
+    /// wired by its own inline `UNASSIGNED_TERMINAL_SCRIPT` rather than
+    /// `assets/app.js` — the Approve handler has to be duplicated here too,
+    /// or the button on that page would render inert.
+    #[test]
+    fn unassigned_terminal_script_wires_the_approve_button() {
+        assert!(
+            UNASSIGNED_TERMINAL_SCRIPT.contains(r#"var approveBtn = form.querySelector(".term-reply__approve");"#),
+            "UNASSIGNED_TERMINAL_SCRIPT must read the Approve button: {UNASSIGNED_TERMINAL_SCRIPT}"
+        );
+        assert!(
+            UNASSIGNED_TERMINAL_SCRIPT.contains(r#"postJson(inputUrl(paneId), { text: "Approve", submit: true })"#),
+            "UNASSIGNED_TERMINAL_SCRIPT's Approve handler must post the exact text Approve with submit true to that page's own input URL: {UNASSIGNED_TERMINAL_SCRIPT}"
+        );
+    }
+
     /// The Older/Newer/Live column is bounded by the screen it moves: the
     /// rail it lives in is positioned against `.term-screen-wrap`, which is
     /// the only ancestor that establishes a containing block, so every one of
@@ -6294,14 +6664,14 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"data-hub-group="in-progress" data-hub-count="0""#),
             "a closed feature owes no decision, so In Progress must be empty: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/closed-feat""#),
+            !html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/closed-feat""#),
             "the closed feature must render no In Progress card, and so no Waiting on you line: {html}"
         );
         assert!(
@@ -6355,10 +6725,10 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/session-bound-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/session-bound-feat""#),
             "a zero-cell feature with a live session bound to its lane must render under In Progress: {html}"
         );
         assert!(
@@ -6404,10 +6774,10 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/wt-bound-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/wt-bound-feat""#),
             "a zero-cell feature named by a granted worktree's own active feature must render under In Progress: {html}"
         );
 
@@ -6490,10 +6860,10 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/working-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/working-feat""#),
             "a feature whose session beat a minute ago must render under In Progress even with a gate unapproved: {html}"
         );
         assert!(
@@ -6578,14 +6948,14 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/active-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/active-feat""#),
             "a lane-less session beating a minute ago works the ACTIVE feature: {html}"
         );
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/other-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/other-feat""#),
             "the other gate-stopped feature with a live cell must also render under In Progress: {html}"
         );
         let active_pos = html
@@ -6638,10 +7008,10 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/active-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/active-feat""#),
             "the feature still has live work (it is the active feature), so it stays under In Progress: {html}"
         );
         assert!(
@@ -6689,11 +7059,11 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
         let strip_html = bee_live_strip_section(&snapshot);
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/stale-working-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/stale-working-feat""#),
             "the feature still has live work, so it stays under In Progress: {html}"
         );
         assert!(
@@ -6747,10 +7117,10 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/handoff-idle-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/handoff-idle-feat""#),
             "the active feature keeps live work and stays under In Progress: {html}"
         );
         assert!(
@@ -6796,10 +7166,10 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#),
             "the granted worktree's own liveness pull keeps the card under In Progress: {html}"
         );
         assert!(
@@ -7025,7 +7395,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             !html.contains("parked-feat"),
@@ -7095,7 +7465,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/closed-session-feat""#),
@@ -7106,7 +7476,7 @@ mod tests {
             "a closed feature owes no decision even while a session is bound to its lane: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/closed-session-feat""#),
+            !html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/closed-session-feat""#),
             "a bound live session must never drag a finished feature back into In Progress: {html}"
         );
 
@@ -7144,7 +7514,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/closed-reviewed-feat""#),
@@ -7210,10 +7580,10 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-1/_bee/feature/live-reviewed-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/live-reviewed-feat""#),
             "live work must keep the feature under In Progress despite the unresolved candidate: {html}"
         );
         assert!(
@@ -7253,7 +7623,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             html.contains(r#"data-hub-group="review" href="/p/proj-1/_bee/feature/both-signal-feat""#),
@@ -7300,7 +7670,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
             !html.contains(r#"data-hub-group="review" href="/p/proj-1/_bee/feature/settled-feat""#),
@@ -7624,7 +7994,7 @@ mod tests {
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-a/_bee/feature/waiting-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-a/_bee/feature/waiting-feat""#),
             "waiting-feat must land under In Progress, same as its own project's board would: {html}"
         );
         assert!(
@@ -7633,7 +8003,7 @@ mod tests {
         );
         assert!(html.contains("Project A"), "the card must carry its own project's name: {html}");
         assert!(
-            html.contains(r#"data-hub-group="in-progress" href="/p/proj-b/_bee/feature/progress-feat""#),
+            html.contains(r#"bee-hub__detail-link" href="/p/proj-b/_bee/feature/progress-feat""#),
             "progress-feat must land under In Progress: {html}"
         );
         assert!(html.contains("Project B"), "the in-progress card must carry its own project's name: {html}");
@@ -7652,6 +8022,183 @@ mod tests {
         );
 
         for r in [&root_a, &root_b, &root_c] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+    }
+
+    /// inprogress-priority-order-2 (D4/D6/D7): two projects, each
+    /// contributing one In Progress feature and one Todo feature. The In
+    /// Progress column must merge into ONE list ordered by the shared D7
+    /// comparator -- proj-b's blocked feature outranks proj-a's quiet one
+    /// even though it is alphabetically later and belongs to the SECOND
+    /// project in input order, proving this is a real cross-project sort,
+    /// not a per-project concatenation. The Todo column, D6 says, keeps its
+    /// own per-project grouping untouched: proj-a's Todo row must still sit
+    /// above proj-b's, in project order, even though proj-b's own feature
+    /// name sorts alphabetically first -- proving Todo was never handed
+    /// through the new comparator at all.
+    #[test]
+    fn cross_project_in_progress_interleaves_by_comparator_while_todo_keeps_its_project_grouping() {
+        let root_a =
+            std::env::temp_dir().join(format!("waggledance-views-cross-d4-a-{}", std::process::id()));
+        let root_b =
+            std::env::temp_dir().join(format!("waggledance-views-cross-d4-b-{}", std::process::id()));
+        for r in [&root_a, &root_b] {
+            let _ = std::fs::remove_dir_all(r);
+        }
+        let write = |root: &std::path::Path, rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        let open_cell_json = |id: &str, feature: &str| -> String {
+            format!(
+                r#"{{
+                    "id": "{id}",
+                    "feature": "{feature}",
+                    "lane": "standard",
+                    "title": "Cell {id}",
+                    "action": "do the thing",
+                    "verify": "cargo test",
+                    "files": [],
+                    "read_first": [],
+                    "deps": [],
+                    "decisions": [],
+                    "must_haves": {{}},
+                    "behavior_change": false,
+                    "change_class": "behavior",
+                    "pbi": null,
+                    "status": "open",
+                    "tier": "generation",
+                    "trace": {{"worker": "w1", "claimed_at": null, "capped_at": null}}
+                }}"#
+            )
+        };
+        let fresh_hb = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+
+        // Project A: "aaa-quiet" is In Progress with no pane at all (D7's
+        // rest tier); "zzz-todo-a" is Todo.
+        write(
+            &root_a,
+            ".bee/lanes/aaa-quiet.json",
+            r#"{
+                "feature": "aaa-quiet",
+                "phase": "swarming",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
+            }"#,
+        );
+        write(
+            &root_a,
+            ".bee/sessions/live-a.json",
+            &format!(r#"{{"id": "live-a", "last_heartbeat": "{fresh_hb}", "lane": "aaa-quiet"}}"#),
+        );
+        write(
+            &root_a,
+            ".bee/lanes/zzz-todo-a.json",
+            r#"{
+                "feature": "zzz-todo-a",
+                "phase": "exploring",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": false, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        write(&root_a, ".bee/cells/zzz-todo-a-1.json", &open_cell_json("zzz-todo-a-1", "zzz-todo-a"));
+
+        // Project B: "zzz-blocked" is In Progress and will carry a
+        // `"blocked"` pane through `feature_panes` below (D7's top tier);
+        // "aaa-todo-b" is Todo, alphabetically ahead of proj-a's own Todo
+        // feature, so an alphabetical (rather than per-project) Todo merge
+        // would put it first.
+        write(
+            &root_b,
+            ".bee/lanes/zzz-blocked.json",
+            r#"{
+                "feature": "zzz-blocked",
+                "phase": "swarming",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
+            }"#,
+        );
+        write(
+            &root_b,
+            ".bee/sessions/live-b.json",
+            &format!(r#"{{"id": "live-b", "last_heartbeat": "{fresh_hb}", "lane": "zzz-blocked"}}"#),
+        );
+        write(
+            &root_b,
+            ".bee/lanes/aaa-todo-b.json",
+            r#"{
+                "feature": "aaa-todo-b",
+                "phase": "exploring",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": false, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        write(&root_b, ".bee/cells/aaa-todo-b-1.json", &open_cell_json("aaa-todo-b-1", "aaa-todo-b"));
+
+        let mut project_a = sample_project();
+        project_a.id = "proj-a".into();
+        project_a.name = "Project A".into();
+        project_a.root_path = root_a.clone();
+        let mut project_b = sample_project();
+        project_b.id = "proj-b".into();
+        project_b.name = "Project B".into();
+        project_b.root_path = root_b.clone();
+
+        let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
+        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+
+        let blocked_pane = TerminalPaneView {
+            pane_id: "w1:blocked-pane".into(),
+            kind: "codex".into(),
+            name: "agent".into(),
+            status: "blocked".into(),
+            title: String::new(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+        };
+        let mut proj_b_panes: std::collections::HashMap<String, Vec<TerminalPaneView>> =
+            std::collections::HashMap::new();
+        proj_b_panes.insert("zzz-blocked".to_string(), vec![blocked_pane]);
+        let mut feature_panes: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, Vec<TerminalPaneView>>,
+        > = std::collections::HashMap::new();
+        feature_panes.insert("proj-b".to_string(), proj_b_panes);
+
+        let html = bee_cross_project_features_section(&pairs, &feature_panes);
+
+        let blocked_at = html
+            .find(r#"bee-hub__detail-link" href="/p/proj-b/_bee/feature/zzz-blocked""#)
+            .unwrap_or_else(|| panic!("zzz-blocked's own card must render: {html}"));
+        let quiet_at = html
+            .find(r#"bee-hub__detail-link" href="/p/proj-a/_bee/feature/aaa-quiet""#)
+            .unwrap_or_else(|| panic!("aaa-quiet's own card must render: {html}"));
+        assert!(
+            blocked_at < quiet_at,
+            "the blocked feature must sort ahead of the quiet one across projects, D7 tier beating both alphabetical and input order: {html}"
+        );
+
+        let todo_a_at = html
+            .find(r#"data-hub-group="todo" href="/p/proj-a/_bee/feature/zzz-todo-a""#)
+            .unwrap_or_else(|| panic!("zzz-todo-a's own row must render: {html}"));
+        let todo_b_at = html
+            .find(r#"data-hub-group="todo" href="/p/proj-b/_bee/feature/aaa-todo-b""#)
+            .unwrap_or_else(|| panic!("aaa-todo-b's own row must render: {html}"));
+        assert!(
+            todo_a_at < todo_b_at,
+            "Todo must keep its own per-project grouping (D6): proj-a's row must still precede proj-b's, even though proj-b's feature name sorts alphabetically first: {html}"
+        );
+
+        for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
     }
@@ -7966,7 +8513,7 @@ mod tests {
         let card_slot = (1..=10)
             .find(|n| {
                 html.contains(&format!(
-                    "bee-hub__shell--p{n}\"><a class=\"bee-hub__card\" data-hub-group=\"in-progress\" href=\"/p/proj-a/"
+                    "bee-hub__shell--p{n}\"><details class=\"bee-hub__card\" data-hub-group=\"in-progress\">"
                 ))
             })
             .unwrap_or_else(|| panic!("proj-a's own In Progress card must carry a colour modifier: {html}"));
@@ -8037,12 +8584,12 @@ mod tests {
             "the card anchor and its badge nav must share one fg-card bee-hub__shell wrapper: {card_html}"
         );
         assert!(
-            card_html.contains(r#"<a class="bee-hub__card""#),
-            "the anchor itself must no longer carry fg-card -- the shell paints the box now: {card_html}"
+            card_html.contains(r#"<details class="bee-hub__card""#),
+            "card-collapse-inprogress: the details element itself must no longer carry fg-card -- the shell paints the box now: {card_html}"
         );
         assert!(
             !card_html.contains(r#"class="fg-card bee-hub__card""#),
-            "fg-card must move off the anchor onto the shell, never stay on both: {card_html}"
+            "fg-card must move off the card onto the shell, never stay on both: {card_html}"
         );
         assert!(
             card_html.contains(r#"aria-label="Terminals in this checkout""#),
@@ -8056,13 +8603,13 @@ mod tests {
             !card_html.contains("agent-name-must-not-appear"),
             "the pane's own agent name must never reach this markup (D1a's rule, reused here): {card_html}"
         );
-        let card_a_end = card_html.find("</a>").expect("the card's own anchor must close");
+        let details_end = card_html.find("</details>").expect("the card's own details must close");
         let badge_nav_start = card_html
             .find(r#"<nav class="proj-row__badges"#)
             .expect("badges must render");
         assert!(
-            badge_nav_start > card_a_end,
-            "the badge nav must be a sibling after the card's own </a>, not nested inside it: {card_html}"
+            badge_nav_start > details_end,
+            "the badge nav must be a sibling after the card's own </details>, not nested inside it: {card_html}"
         );
     }
 
@@ -8091,8 +8638,100 @@ mod tests {
             "the shell must still wrap the bare card anchor: {card_html}"
         );
         assert!(
-            card_html.ends_with("</a></div>"),
-            "with no badges, the shell must close right after the card's own </a>: {card_html}"
+            card_html.ends_with("</details></div>"),
+            "with no badges, the shell must close right after the card's own </details>: {card_html}"
+        );
+    }
+
+    /// inprogress-priority-order-2 (D8, must-have): a card carrying a
+    /// `"blocked"` pane and no gate/handoff reason of its own gains exactly
+    /// one reason line, reading `Waiting on you — a terminal is blocked`,
+    /// in the existing `bee-hub__reason` style.
+    #[test]
+    fn bee_hub_card_with_a_blocked_pane_carries_its_own_waiting_on_you_line() {
+        let panes = vec![pane_with_status("blocked")];
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &panes,
+        );
+        assert!(
+            card_html.contains(r#"<p class="bee-cell__meta bee-hub__reason">Waiting on you — a terminal is blocked</p>"#),
+            "a blocked pane must add its own exact reason line: {card_html}"
+        );
+    }
+
+    /// inprogress-priority-order-2 (D8, must-have): a card that already
+    /// carries a gate/handoff reason AND a blocked pane shows BOTH lines,
+    /// the existing gate line first -- neither line swallows the other.
+    #[test]
+    fn bee_hub_card_with_a_gate_reason_and_a_blocked_pane_carries_both_lines_gate_first() {
+        let panes = vec![pane_with_status("blocked")];
+        let gate_reason = "Waiting on you — Shape gate awaiting your decision";
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", Some(gate_reason), None, None, None, &panes,
+        );
+        let gate_at = card_html
+            .find(gate_reason)
+            .unwrap_or_else(|| panic!("the existing gate reason line must still render: {card_html}"));
+        let blocked_at = card_html
+            .find("Waiting on you — a terminal is blocked")
+            .unwrap_or_else(|| panic!("the blocked pane's own reason line must also render: {card_html}"));
+        assert!(
+            gate_at < blocked_at,
+            "the gate line must come first, the blocked line after it, never the other way round: {card_html}"
+        );
+    }
+
+    /// inprogress-priority-order-2 (D8, must-have): a card with no gate
+    /// reason and no blocked pane carries neither reason line.
+    #[test]
+    fn bee_hub_card_with_no_blocked_pane_and_no_gate_reason_carries_neither_line() {
+        let panes = vec![pane_with_status("working")];
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &panes,
+        );
+        assert!(
+            !card_html.contains("bee-hub__reason"),
+            "with no gate reason and no blocked pane, neither reason line may render: {card_html}"
+        );
+    }
+
+    /// (card-collapse-inprogress-2) CONTEXT D1/D6: every card renders
+    /// collapsed on every page load, with no persisted open/closed state --
+    /// a stray `open` attribute here would ship every card pre-expanded and
+    /// nothing else in this file would ever notice.
+    #[test]
+    fn bee_hub_card_renders_collapsed_with_no_open_attribute() {
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+        );
+        assert!(
+            card_html.contains(r#"<details class="bee-hub__card" data-hub-group="in-progress">"#),
+            "the card must render as a details element carrying its own group key: {card_html}"
+        );
+        assert!(
+            !card_html.contains(r#"bee-hub__card" data-hub-group="in-progress" open"#),
+            "the details element must carry no `open` attribute -- every card must start collapsed: {card_html}"
+        );
+        assert!(
+            card_html.contains(r#"<summary class="bee-hub__summary">"#)
+                && card_html.contains(r#"<span class="bee-hub__chev" aria-hidden="true">"#),
+            "the collapsed header must carry both its summary and its chevron: {card_html}"
+        );
+    }
+
+    /// (card-collapse-inprogress-2) CONTEXT D4: the Feature detail link row
+    /// is the one place the card still reaches its own detail page now that
+    /// the `<details>`/`<summary>` pair can no longer be that link itself.
+    #[test]
+    fn bee_hub_card_body_opens_with_the_feature_detail_link() {
+        let card_html = bee_hub_card(
+            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+        );
+        assert!(
+            card_html.contains(
+                r#"<div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/proj-a/_bee/feature/feat-a">Feature detail"#
+            ),
+            "the body must open with a Feature detail link carrying the feature's own detail-page href: {card_html}"
         );
     }
 
@@ -8195,9 +8834,17 @@ mod tests {
             Some(3),
             &[],
         );
+        // card-collapse-inprogress: the title (now in the collapsed
+        // `<summary>`) and the subtitle (now in the expandable body) are no
+        // longer adjacent in the rendered markup, so each is checked on its
+        // own rather than as one contiguous string.
+        assert!(
+            card_html.contains(r#"<div class="fg-card__title">feat-a</div>"#),
+            "a title-less card must still render its slug as the card's own name: {card_html}"
+        );
         assert!(
             card_html.contains(
-                r#"<div class="fg-card__title">feat-a</div><div class="bee-hub__project">Project A<span class="bee-hub__project-worktree"> / Main</span></div>"#
+                r#"<div class="bee-hub__project">Project A<span class="bee-hub__project-worktree"> / Main</span></div>"#
             ),
             "a title-less card with a project label must still carry the project subtitle: {card_html}"
         );
@@ -8232,7 +8879,7 @@ mod tests {
         );
         assert_eq!(
             card_html,
-            r#"<div class="fg-card bee-hub__shell"><a class="bee-hub__card" data-hub-group="in-progress" href="/p/proj-a/_bee/feature/feat-a"><div class="fg-card__title">Human Title</div><div class="bee-hub__slug">feat-a<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></a></div>"#,
+            r#"<div class="fg-card bee-hub__shell"><details class="bee-hub__card" data-hub-group="in-progress"><summary class="bee-hub__summary"><div class="fg-card__title">Human Title</div><span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/proj-a/_bee/feature/feat-a">Feature detail<span aria-hidden="true"> →</span></a><div class="bee-hub__slug">feat-a<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></div></details></div>"#,
             "a card with no project label must keep the byte-identical shell/colour and now carry its worktree state in the slug subtitle: {card_html}"
         );
         assert!(!card_html.contains("bee-hub__shell--p"), "no project label must mean no colour modifier: {card_html}");
@@ -8352,6 +8999,38 @@ mod tests {
         );
     }
 
+    /// inprogress-priority-order-2 (D1, must-have): the In Progress
+    /// ordering rule lives INSIDE the existing `@media (max-width: 700px)`
+    /// block, reuses that same breakpoint (no new one), and never leaks
+    /// outside it -- a wide-screen render must carry no `order` rule at
+    /// all.
+    #[test]
+    fn bee_hub_style_puts_in_progress_order_rule_only_inside_the_narrow_media_query() {
+        let css = bee_hub_style();
+        let media_at = css
+            .find("@media (max-width: 700px)")
+            .unwrap_or_else(|| panic!("the existing narrow-screen breakpoint must still exist: {css}"));
+        assert!(
+            css.matches("@media (max-width: 700px)").count() == 1,
+            "D1 must reuse the existing breakpoint, never add a second one: {css}"
+        );
+        let media_end = css[media_at..]
+            .find("</style>")
+            .map(|i| media_at + i)
+            .unwrap_or(css.len());
+        let media_block = &css[media_at..media_end];
+        assert!(
+            media_block.contains(r#"[data-hub-group="in-progress"]"#) && media_block.contains("order: -1;"),
+            "the In Progress group must be selected by its existing data-hub-group attribute and moved to order -1 inside the media query: {media_block}"
+        );
+        let before_media = &css[..media_at];
+        let after_media = &css[media_end..];
+        assert!(
+            !before_media.contains("order: -1;") && !after_media.contains("order: -1;"),
+            "the order rule must never appear outside the max-width: 700px block, so wide-screen rendering is unchanged: {css}"
+        );
+    }
+
     /// The four worktree-line spellings [`bee_hub_worktree_label`] must
     /// carry: an open worktree with a known branch reads the branch name
     /// alone (no chip's `Open · ` prefix).
@@ -8453,7 +9132,7 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
         project.root_path = root.clone();
-        let html = bee_feature_hub_section(&project, &snapshot);
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(html.contains(r#"data-hub-group="finished" data-hub-count="12""#), "{html}");
         assert_eq!(

@@ -1813,3 +1813,30 @@ pre.mermaid.zoomable:focus-within .mermaid-controls {
     font-size: 16px;
   }
 }
+
+/* ── Kanban boards: break the article-width clamp ─────────────────────
+   Atelier's `.fg-page` core role centers content in a ~1200px reading
+   column, which is right for prose but starves a multi-column board of
+   room. `:has(.bee-hub__groups)` scopes this to the two pages that
+   actually render a board (the home Kanban tab and a project's bee
+   board) — every other `.fg-page` (feature/PBI detail included) never
+   has that child, so it keeps the 1200px clamp. `.fg-page` itself is
+   `width: 100%` with no global `box-sizing: border-box` reset, so
+   letting it also carry inline padding without `border-box` here would
+   push its content past the viewport edge; declaring it locally keeps
+   this rule self-contained instead of depending on a reset elsewhere. */
+@media (min-width: 1240px) {
+  main.fg-page.bee-hub-theme:has(.bee-hub__groups) {
+    max-width: none;
+    box-sizing: border-box;
+    padding-inline: var(--space-6);
+  }
+}
+
+/* Card titles on bee pages read as UI, not editorial prose — swap out the
+   theme's Manrope (chosen for headings/body copy) for the platform's own
+   sans, matching the rest of the board's chrome. */
+.bee-hub-theme .fg-card__title {
+  font-family: system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', Arial,
+    sans-serif;
+}

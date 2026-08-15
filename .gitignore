@@ -47,6 +47,7 @@
 .claude/agents/bee-*.md
 .claude/skills/.bee-*.json
 .agents/skills/.bee-*.json
+.opencode/
 *.bak
 .claude/skills/distill/
 .agents/skills/distill/

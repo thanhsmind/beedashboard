@@ -36,8 +36,8 @@ Four boundaries hold in every mode:
   locked ones — cite them, never reinterpret them.
 - Code-touching feature work lives in its feature worktree from the
   start (`bee worktree new --feature <slug>`); the main checkout takes
-  integration, docs-lane, release work, and a solo `tiny` fix when no
-  other session is live — land through `bee worktree merge`.
+  integration and release work, plus docs-lane and a solo `tiny` fix
+  when no other session is live — land through `bee worktree merge`.
 
 `bee --help --json` prints the porcelain flow surface; `--names` adds a
 one-line-per-command index (plain `bee --help` / `bee --help --all` are the
@@ -133,8 +133,8 @@ behavior changes.
 
 The user hears the work in their own terms, never bee mechanics. Open
 with one line of state; keep narration under five lines; link records
-instead of pasting them — when `doc_viewer` is configured, give the
-viewer URL, not the bare path; close on exactly ONE next action — the
+instead of pasting them — name a doc by its bare repo-relative path
+(`docs/...`), never a viewer URL; close on exactly ONE next action — the
 agent's own next move, or the one thing only the user can decide,
 never a menu. Emit one short progress line per visible step, on by
 default — `▸` started, `✓` green, `⚡` auto-approved, `✗` red — and a
@@ -147,6 +147,20 @@ message must answer what happened and what's next; then strip every
 bee term — if nothing the user needs is lost, those terms did not
 belong there. The full turn shape and rules load with the `bee-hive`
 skill ("Communication contract").
+
+## Token efficiency
+
+- Never re-read a file you just wrote or edited — you know its contents.
+- Never re-run a command to "verify" unless the outcome was uncertain
+  ("Prove, then say so" still holds: a done/green claim still needs its
+  fresh output — test and verify runs ARE the uncertain outcome).
+- Do not echo large blocks of code or file contents back unless asked.
+- Batch related edits into one operation — never five edits where one
+  serves.
+- Skip filler confirmations ("I'll continue…") — just do it.
+- If a task needs one tool call, do not spend three. Plan before acting.
+- Do not summarize what you just did unless the result is ambiguous or
+  you need additional input.
 
 ## Care for the session
 
