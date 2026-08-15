@@ -750,6 +750,10 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                     rollups.iter().map(|(p, r)| (p, r)).collect();
                 views::bee_cross_project_features_section(&pairs, &feature_panes)
             };
+            // home-terminal-parity-2: the same configured D8 preset labels
+            // `terminal_page_inner` already threads into `terminal_page`, so
+            // the Terminals tab's own create controls offer the same set.
+            let terminals_presets = configured_preset_labels(&st);
             Html(views::home_page(
                 &with_counts,
                 unassigned_visible,
@@ -760,6 +764,7 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                 &terminals_panes,
                 flag.pane.as_deref(),
                 terminals_herdr_ok,
+                &terminals_presets,
             ))
             .into_response()
         }
@@ -2979,6 +2984,7 @@ fn terminals_menu_panes(
                 base: format!("/p/{}/_terminal/{}", project.id, pane.pane_id),
                 project_label: project.name.clone(),
                 is_project_pane: true,
+                project_id: Some(project.id.clone()),
                 view: pane.clone(),
             });
         }
@@ -2991,6 +2997,7 @@ fn terminals_menu_panes(
             base: format!("/_terminal/unassigned/{}", pane.pane_id),
             project_label: "Unassigned".to_string(),
             is_project_pane: false,
+            project_id: None,
             view: pane,
         });
     }
@@ -15603,9 +15610,13 @@ mod bee_route_tests {
     // --- homepage-terminals: the Terminals tab's own inventory, ordering,
     // selection and empty states ---
 
-    /// D3: the switch menu drops a bare shell pane (`kind == "shell"`) but
-    /// keeps an agent-backed one, including one outside every registered
-    /// project (D3's own "kể cả pane nằm ngoài mọi project đã đăng ký").
+    /// D3, updated home-terminal-parity-2 (the `<select>` this asserted
+    /// against is gone, replaced by the Agents drawer): the tab's own pane
+    /// inventory drops a bare shell pane (`kind == "shell"`) but keeps an
+    /// agent-backed one selectable via `?pane=`, including one outside
+    /// every registered project (D3's own "kể cả pane nằm ngoài mọi
+    /// project đã đăng ký") — proven by selecting each pane in turn and
+    /// reading whether its own screen frame or the not-found line renders.
     #[tokio::test]
     async fn terminals_tab_filters_shell_panes_and_includes_unassigned_agent_panes() {
         use crate::herdr::fake::FakeHerdr;
@@ -15635,27 +15646,41 @@ mod bee_route_tests {
         register(&st, &root, "proj-a");
         let app = router(st);
 
-        let body = body_string(get(app, "/?tab=terminals").await).await;
+        let project_body = body_string(
+            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+        )
+        .await;
         assert!(
-            body.contains(&format!(r#"<option value="{}""#, project_agent.pane_id)),
-            "the project's own agent-backed pane must appear in the switch menu: {body}"
+            project_body.contains(&format!(r#"data-pane-id="{}""#, project_agent.pane_id)),
+            "the project's own agent-backed pane must be selectable from the tab: {project_body}"
         );
+
+        let unassigned_body = body_string(
+            get(app.clone(), &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+        )
+        .await;
         assert!(
-            body.contains(&format!(r#"<option value="{}""#, unassigned_agent.pane_id)),
-            "an agent-backed pane outside every registered project must still appear: {body}"
+            unassigned_body.contains(&format!(r#"data-pane-id="{}""#, unassigned_agent.pane_id)),
+            "an agent-backed pane outside every registered project must still be selectable: {unassigned_body}"
         );
+
+        let shell_body = body_string(get(app, &format!("/?tab=terminals&pane={}", shell.pane_id)).await).await;
         assert!(
-            !body.contains(&format!(r#"<option value="{}""#, shell.pane_id)),
-            "a bare shell pane must never appear in the switch menu: {body}"
+            shell_body.contains("This terminal is gone."),
+            "a bare shell pane must never be selectable from the tab: {shell_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// D4: blocked before working before the rest (done/idle/unknown),
-    /// proven by creating the three panes in the opposite order so a
-    /// passing test cannot be an accident of insertion order.
+    /// D4, updated home-terminal-parity-2 (the `<select>` this compared
+    /// `<option>` positions inside is gone; ordering now decides which
+    /// pane a bare `?pane`-less load selects by default): blocked before
+    /// working before the rest (done/idle/unknown) — proven across two
+    /// scenarios (all three present, then working and the rest alone) so
+    /// a passing default selection cannot be an accident of insertion
+    /// order or of only ever facing one candidate.
     #[tokio::test]
     async fn terminals_tab_orders_blocked_before_working_before_the_rest() {
         use crate::herdr::fake::FakeHerdr;
@@ -15668,7 +15693,16 @@ mod bee_route_tests {
         std::fs::create_dir_all(&root).unwrap();
         write_bee_project_fixture(&root, "feat-a");
 
+        // `FakeHerdr::new()`'s own four seeded agents (`w1:p1` working,
+        // `w1:p2` blocked, `w2:p3` done, `w2:p4` idle) live outside every
+        // registered project here, so they would otherwise contend for this
+        // test's own default-selection assertions — neutralized to Idle
+        // (D4's own "the rest") so only the three panes this test builds
+        // itself carry a Blocked or Working status.
         let fake = std::sync::Arc::new(FakeHerdr::new());
+        for seeded in ["w1:p1", "w1:p2", "w2:p3", "w2:p4"] {
+            fake.set_status(seeded, AgentStatus::Idle).await.unwrap();
+        }
         let rest = fake
             .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
             .await
@@ -15691,31 +15725,72 @@ mod bee_route_tests {
         let app = router(st);
 
         let body = body_string(get(app, "/?tab=terminals").await).await;
-        let pos = |pane_id: &str| {
-            body.find(&format!(r#"<option value="{pane_id}""#))
-                .unwrap_or_else(|| panic!("{pane_id} must appear in the menu: {body}"))
-        };
-        let blocked_pos = pos(&blocked.pane_id);
-        let working_pos = pos(&working.pane_id);
-        let rest_pos = pos(&rest.pane_id);
         assert!(
-            blocked_pos < working_pos,
-            "blocked must come before working: {body}"
+            body.contains(&format!(r#"data-pane-id="{}""#, blocked.pane_id)),
+            "blocked must be the default selection over working and the rest: {body}"
         );
         assert!(
-            working_pos < rest_pos,
-            "working must come before the rest: {body}"
+            !body.contains(&format!(r#"data-pane-id="{}""#, working.pane_id)),
+            "working must not be the default selection while blocked exists: {body}"
+        );
+        assert!(
+            !body.contains(&format!(r#"data-pane-id="{}""#, rest.pane_id)),
+            "the rest must not be the default selection while blocked exists: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
+
+        // Scenario 2: working and the rest only (no blocked candidate) —
+        // working must now win the same default-selection race.
+        let dir2 = fresh_root("terminals-tab-order-2");
+        enable_terminal(&dir2);
+        let root2 = scratch.join("proj-b");
+        std::fs::create_dir_all(&root2).unwrap();
+        write_bee_project_fixture(&root2, "feat-b");
+
+        let fake2 = std::sync::Arc::new(FakeHerdr::new());
+        for seeded in ["w1:p1", "w1:p2", "w2:p3", "w2:p4"] {
+            fake2.set_status(seeded, AgentStatus::Idle).await.unwrap();
+        }
+        let rest2 = fake2
+            .agent_start("w1", Some(&root2.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        fake2.set_status(&rest2.pane_id, AgentStatus::Done).await.unwrap();
+        let working2 = fake2
+            .agent_start("w1", Some(&root2.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+        fake2.set_status(&working2.pane_id, AgentStatus::Working).await.unwrap();
+
+        let mut st2 = build_state_with_dir(&dir2);
+        st2.herdr = fake2;
+        register(&st2, &root2, "proj-b");
+        let app2 = router(st2);
+
+        let body2 = body_string(get(app2, "/?tab=terminals").await).await;
+        assert!(
+            body2.contains(&format!(r#"data-pane-id="{}""#, working2.pane_id)),
+            "working must be the default selection over the rest when blocked is absent: {body2}"
+        );
+        assert!(
+            !body2.contains(&format!(r#"data-pane-id="{}""#, rest2.pane_id)),
+            "the rest must not be the default selection while working exists: {body2}"
+        );
+
+        std::fs::remove_dir_all(&dir2).ok();
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// D7: `?pane` naming a pane that is no longer present renders a plain
-    /// not-found line, keeps the full menu, and marks no entry selected —
-    /// never silently falling back to another pane.
+    /// D7, updated home-terminal-parity-2 (the `<select>` this asserted
+    /// against is gone; the Agents drawer is the only switcher now): `?pane`
+    /// naming a pane that is no longer present renders a plain not-found
+    /// line and no screen frame, while the drawer chrome — populated
+    /// client-side from `/api/agents`, so there is nothing server-rendered
+    /// left to assert per-pane — still renders, never silently falling back
+    /// to another pane.
     #[tokio::test]
-    async fn terminals_tab_pane_not_found_renders_gone_message_with_full_menu_and_no_selection() {
+    async fn terminals_tab_pane_not_found_renders_gone_message_with_no_screen() {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("terminals-tab-not-found");
@@ -15726,7 +15801,7 @@ mod bee_route_tests {
         write_bee_project_fixture(&root, "feat-a");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        let agent = fake
+        let _agent = fake
             .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
             .await
             .unwrap();
@@ -15742,21 +15817,16 @@ mod bee_route_tests {
             "a vanished pane must render a plain not-found line: {body}"
         );
         assert!(
-            body.contains(&format!(r#"<option value="{}""#, agent.pane_id)),
-            "the full select must still list the real, present pane: {body}"
-        );
-        // No `<option>` may carry `selected` once `?pane` names nothing
-        // present — the space before the attribute is what tells a real
-        // `selected` option apart from the substring appearing inside a
-        // pane id or label by coincidence.
-        assert_eq!(
-            body.matches(" selected>").count(),
-            0,
-            "no menu entry may be marked selected once ?pane names nothing present: {body}"
+            body.contains(r#"id="agent-drawer-toggle""#) && body.contains(r#"data-agent-drawer-homepage"#),
+            "the Agents drawer switcher must still render once the named pane is gone: {body}"
         );
         assert!(
             !body.contains("class=\"term-screen\""),
             "no screen frame renders once the named pane is gone: {body}"
+        );
+        assert!(
+            !body.contains("class=\"term-create\""),
+            "no create controls render once the named pane is gone (no pane is selected): {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -16117,6 +16187,154 @@ mod bee_route_tests {
         assert!(
             !unassigned_body.contains("term-attach"),
             "an unassigned pane must render no attach control: {unassigned_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// home-terminal-parity-2: the Terminals tab renders the same Agents
+    /// drawer chrome the project terminal page renders, marked as the
+    /// homepage variant (`data-agent-drawer-homepage`), and the `<select>`
+    /// it used to render is gone entirely — the drawer is now the only
+    /// switcher.
+    #[tokio::test]
+    async fn terminals_tab_renders_the_drawer_in_homepage_mode_and_no_select() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminals-tab-drawer-homepage");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminals-tab-drawer-homepage-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let body = body_string(get(app, "/?tab=terminals").await).await;
+        assert!(
+            body.contains(r#"id="agent-drawer-toggle""#) && body.contains(r#"data-agent-drawer-list"#),
+            "the tab must render the Agents drawer chrome: {body}"
+        );
+        assert!(
+            body.contains("data-agent-drawer-homepage"),
+            "the tab's own drawer instance must be marked as the homepage variant: {body}"
+        );
+        assert!(
+            !body.contains("<select") && !body.contains("terminals-pane-select"),
+            "the tab must render no select element at all: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// home-terminal-parity-2: create controls target the *selected* pane's
+    /// own project — present, carrying that project's own id, when the
+    /// selected pane belongs to a registered project; absent entirely when
+    /// the selected pane is unassigned, since `/p/:id/_terminal/create/…`
+    /// is the only create route there is and an unassigned pane has no
+    /// `:id` to build one against.
+    #[tokio::test]
+    async fn terminals_tab_create_controls_render_for_project_pane_and_absent_for_unassigned() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminals-tab-create");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminals-tab-create-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let project_agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let unassigned_agent = fake
+            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let project_body = body_string(
+            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+        )
+        .await;
+        assert!(
+            project_body.contains(&format!(r#"class="term-create" data-project-id="{}""#, project.id)),
+            "create controls must render for a selected project pane, targeting its own project: {project_body}"
+        );
+        assert!(
+            project_body.contains(">New shell<"),
+            "the New shell button must render: {project_body}"
+        );
+
+        let unassigned_body = body_string(
+            get(app, &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+        )
+        .await;
+        assert!(
+            !unassigned_body.contains("class=\"term-create\""),
+            "no create controls render for a selected unassigned pane: {unassigned_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// home-terminal-parity-2: the project terminal page's own Agents drawer
+    /// and create controls are untouched by the homepage's new instance —
+    /// its drawer never carries `data-agent-drawer-homepage`, and its
+    /// create controls still target the project the same way they did
+    /// before this cell.
+    #[tokio::test]
+    async fn terminal_page_drawer_and_create_controls_are_unchanged() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("terminal-page-drawer-unchanged");
+        enable_terminal(&dir);
+        let scratch = fresh_root("terminal-page-drawer-unchanged-scratch");
+        let root = scratch.join("proj-a");
+        std::fs::create_dir_all(&root).unwrap();
+        write_bee_project_fixture(&root, "feat-a");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        fake.agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let body = body_string(get(app, &format!("/p/{}/_terminal", project.id)).await).await;
+        assert!(
+            body.contains(r#"id="agent-drawer-toggle""#) && body.contains(r#"data-agent-drawer-list"#),
+            "the project terminal page must still render the Agents drawer: {body}"
+        );
+        assert!(
+            !body.contains("data-agent-drawer-homepage"),
+            "the project terminal page's own drawer instance must never carry the homepage marker: {body}"
+        );
+        assert!(
+            body.contains(&format!(r#"class="term-create" data-project-id="{}""#, project.id)),
+            "the project terminal page's own create controls must still target this project: {body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();

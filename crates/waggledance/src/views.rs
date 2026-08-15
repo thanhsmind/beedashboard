@@ -217,6 +217,11 @@ pub fn home_page(
     // `terminals_panes` means herdr answered but no agent is running
     // anywhere. The two read as different messages in `terminals_tab`.
     terminals_herdr_ok: bool,
+    // home-terminal-parity-2: the configured D8 preset labels
+    // `server.rs::index_page` obtains the same way `terminal_page_inner`
+    // already does — threaded through so `terminals_tab` can offer the
+    // same "New shell"/preset buttons the project terminal page offers.
+    terminals_presets: &[String],
 ) -> String {
     if cross_features_html.is_empty() {
         return project_list_page(projects, unassigned_visible, suggestions, register_error);
@@ -244,7 +249,7 @@ pub fn home_page(
         ),
         HomeTab::Terminals => (
             "Terminals",
-            terminals_tab(terminals_panes, terminals_selected_pane, terminals_herdr_ok),
+            terminals_tab(terminals_panes, terminals_selected_pane, terminals_herdr_ok, terminals_presets),
         ),
     };
     let body = format!(
@@ -599,13 +604,6 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .pane-strip { display: flex; flex-wrap: wrap; gap: var(--space-2); min-width: 0; }
 .pane-strip__tab { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text-muted); text-decoration: none; background: var(--color-surface-raised); }
 .pane-strip__tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
-/* terminals-pane-select: the homepage Terminals tab's own switcher — one
-   select rather than `.pane-strip`'s row of button-shaped anchors, so the
-   live screen starts one line down on a phone instead of four. Its own
-   class and rule, never `.pane-strip`/`.pane-strip__tab`: the project
-   terminal page's own strip (`aria-label="Panes"`) keeps rendering exactly
-   as it did before this feature. */
-.terminals-pane-select { display: block; width: 100%; max-width: 100%; padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text); background: var(--color-surface-raised); font: inherit; }
 .term-pane__meta { flex: 0 0 auto; color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
 /* A pane's frame is a grid, not prose: `pre-wrap` + `word-break` re-flowed
    every long line and broke the box drawing of any TUI agent, and a fixed
@@ -1000,24 +998,46 @@ pub struct TerminalsMenuPane {
     /// [`unassigned_terminal_page`] (plan finding 7): only a project pane
     /// has a `/attach` route to upload against.
     pub is_project_pane: bool,
+    /// home-terminal-parity-2: the registered project's own id when
+    /// `is_project_pane` is `true`, `None` for a pane `unassigned_panes`
+    /// resolved — the one thing `terminal_create_controls` needs
+    /// (`/p/:id/_terminal/create/...` is the only create route there is)
+    /// that `project_label` alone cannot supply, since a display label is
+    /// never a routable id. `terminals_tab` renders create controls only
+    /// when the *selected* pane carries a `Some` here.
+    pub project_id: Option<String>,
 }
 
-/// homepage-terminals D1/D2/D6: the Terminals tab's own body — a switch menu
-/// (D5's real links, `/?tab=terminals&pane=<pane_id>`) above the selected
-/// pane's live screen and its own reply form, key buttons and (project
-/// panes only) attach control, reusing `.term-screen`/`.term-reply`/
-/// `.term-keys` markup and [`PROJECT_TAB_STYLE`] the same way
-/// [`terminal_page`] already injects both.
+/// homepage-terminals D1/D2/D6, home-terminal-parity-2: the Terminals tab's
+/// own body — the same [`agent_switch_drawer`] the project terminal page
+/// renders (in its homepage mode, `homepage: true`: `assets/app.js` groups
+/// its rows by project and links each to `/?tab=terminals&pane=<pane_id>`
+/// instead of the project page's status groups and `agent.url`) above the
+/// selected pane's live screen, its own reply form, key buttons and
+/// (project panes only) attach control, plus [`terminal_create_controls`]
+/// when the selected pane belongs to a registered project — reusing
+/// `.term-screen`/`.term-reply`/`.term-keys` markup and [`PROJECT_TAB_STYLE`]
+/// the same way [`terminal_page`] already injects both. The `<select>` this
+/// tab used to render is gone; the drawer is now the only switcher.
 ///
 /// `panes` already carries D4's own order (blocked, then working, then the
 /// rest, stable within a group by `(project, pane_id)`) — `server.rs`'s
-/// job, never re-sorted here. `herdr_ok` is D8's own distinction between
+/// job, never re-sorted here; it is still what a bare `?pane`-less load
+/// selects by (`panes[0]`). `herdr_ok` is D8's own distinction between
 /// the two empty causes when `panes` is empty: `false` reads "herdr is not
 /// running" (off or unreachable, indistinguishable to this page — the same
 /// fail-open shape every other pane list on the home page already
 /// shares), `true` with an empty list reads "no agent is running" (herdr
-/// answered; genuinely nothing to show).
-fn terminals_tab(panes: &[TerminalsMenuPane], selected_pane: Option<&str>, herdr_ok: bool) -> String {
+/// answered; genuinely nothing to show). `presets` is the same configured
+/// D8 preset label list [`terminal_page`] already threads through —
+/// `server.rs::index_page` obtains it the same way
+/// `terminal_page_inner` does.
+fn terminals_tab(
+    panes: &[TerminalsMenuPane],
+    selected_pane: Option<&str>,
+    herdr_ok: bool,
+    presets: &[String],
+) -> String {
     if panes.is_empty() {
         let msg = if herdr_ok {
             "No agents are running right now."
@@ -1036,57 +1056,41 @@ fn terminals_tab(panes: &[TerminalsMenuPane], selected_pane: Option<&str>, herdr
 
     // D7: an explicit `?pane` naming nothing in `panes` leaves the
     // selection empty rather than silently falling back to another pane —
-    // `effective` stays `None`, and the menu loop below marks no entry
-    // active because no `pane_id` in `panes` can equal a `None`. An absent
-    // `?pane` takes D4's own first entry (`panes` is non-empty here).
+    // `effective` stays `None`. An absent `?pane` takes D4's own first
+    // entry (`panes` is non-empty here).
     let effective: Option<&TerminalsMenuPane> = match selected_pane {
         Some(pid) => panes.iter().find(|p| p.view.pane_id == pid),
         None => Some(&panes[0]),
     };
-    let effective_id = effective.map(|p| p.view.pane_id.as_str());
-
-    let mut menu = String::from(r#"<select class="terminals-pane-select" aria-label="Terminals">"#);
-    for p in panes {
-        let selected = if effective_id == Some(p.view.pane_id.as_str()) {
-            " selected"
-        } else {
-            ""
-        };
-        let title_suffix = if p.view.title.is_empty() {
-            String::new()
-        } else {
-            format!(" — {}", p.view.title)
-        };
-        let label = format!(
-            "{project} — {status} — {program}{title}",
-            project = p.project_label,
-            status = p.view.status,
-            program = p.view.kind,
-            title = title_suffix,
-        );
-        menu.push_str(&format!(
-            r#"<option value="{pane_id}"{selected}>{label}</option>"#,
-            pane_id = esc(&p.view.pane_id),
-            selected = selected,
-            label = esc(&label),
-        ));
-    }
-    menu.push_str("</select>");
 
     let body = match effective {
         Some(pane) => screen_frame(pane),
         None => r#"<p class="fg-empty">This terminal is gone.</p>"#.to_string(),
     };
 
+    // home-terminal-parity-2: create targets the *selected* pane's own
+    // project, so a new shell or agent starts where the terminal being
+    // watched lives — never a default or the first project in the list.
+    // A selected pane resolved through `unassigned_panes` (`project_id:
+    // None`) renders no create controls at all: `/p/:id/_terminal/create/…`
+    // is the only create route that exists, and there is no `:id` for a
+    // pane outside every registered project.
+    let create = effective
+        .and_then(|pane| pane.project_id.as_deref())
+        .map(|project_id| terminal_create_controls(project_id, presets))
+        .unwrap_or_default();
+
     format!(
         r#"{tab_style}
 <main class="fg-page fg-page--tight">
-  {menu}
+  {create}
   {body}
-</main>"#,
+</main>
+{drawer}"#,
         tab_style = PROJECT_TAB_STYLE,
-        menu = menu,
+        create = create,
         body = body,
+        drawer = agent_switch_drawer(true),
     )
 }
 
@@ -1377,14 +1381,30 @@ fn terminal_create_controls(project_id: &str, presets: &[String]) -> String {
 /// the generic `.js-menu` handler `assets/app.js` already runs. Entirely
 /// static: `assets/app.js` fills `[data-agent-drawer-list]` in from JSON
 /// once the drawer opens, so there is nothing here to escape.
-const AGENT_SWITCH_DRAWER: &str = r#"<div class="agent-drawer js-menu">
+///
+/// home-terminal-parity-2: `homepage` marks the drawer body with
+/// `data-agent-drawer-homepage` for the homepage Terminals tab's own
+/// instance (`terminals_tab`) — the one data attribute
+/// `assets/app.js`'s drawer block reads to tell the two instances apart,
+/// since their rows behave differently: the project page (`homepage:
+/// false`, unchanged) groups by status and links through `agent.url`;
+/// the homepage instance groups by project name (blocked, then working,
+/// then the rest, within each group) and links each row to
+/// `/?tab=terminals&pane=<pane_id>` built from the agent's own `pane_id`.
+fn agent_switch_drawer(homepage: bool) -> String {
+    let homepage_attr = if homepage { " data-agent-drawer-homepage" } else { "" };
+    format!(
+        r#"<div class="agent-drawer js-menu">
   <input type="checkbox" id="agent-drawer-toggle" class="agent-drawer__check">
   <label for="agent-drawer-toggle" class="agent-drawer__tab">Agents</label>
   <div class="fg-drawer">
     <div class="fg-drawer__head"><span class="fg-drawer__title">Agents</span></div>
-    <div class="fg-drawer__body" data-agent-drawer-list></div>
+    <div class="fg-drawer__body" data-agent-drawer-list{homepage_attr}></div>
   </div>
-</div>"#;
+</div>"#,
+        homepage_attr = homepage_attr,
+    )
+}
 
 /// `GET /p/:id/_terminal` and `/p/:id/_terminal/pane/:pane_id` up state
 /// (D2/D4/D6): one pane's own page, chosen by `selected` from the pane strip
@@ -1438,7 +1458,7 @@ pub fn terminal_page(
         pid = esc(&project.id),
         bar = bar,
         rows = rows,
-        drawer = AGENT_SWITCH_DRAWER,
+        drawer = agent_switch_drawer(false),
     );
     layout(&format!("{} · terminal", project.name), "", &body)
 }

@@ -1745,7 +1745,7 @@
   })();
 
   // agent-switch-drawer-2: the cross-project agent feed
-  // (`views.rs::AGENT_SWITCH_DRAWER` renders the panel and its toggle;
+  // (`views.rs::agent_switch_drawer` renders the panel and its toggle;
   // `GET /api/agents` is the feed itself). Polled only while the drawer is
   // open — same fetch/repaint idiom as the terminal screen poller above,
   // but gated on the checkbox's own state, since this list is a jump menu
@@ -1754,6 +1754,13 @@
     var toggle = document.getElementById("agent-drawer-toggle");
     var list = document.querySelector("[data-agent-drawer-list]");
     if (!toggle || !list) return;
+
+    // home-terminal-parity-2: the one thing that tells the homepage
+    // Terminals tab's own drawer instance apart from the project terminal
+    // page's (`views.rs::agent_switch_drawer`'s `homepage` flag) — read
+    // once, since the attribute never changes for the lifetime of this
+    // static markup.
+    var homepage = list.hasAttribute("data-agent-drawer-homepage");
 
     var POLL_MS = 5000;
     var timer = null;
@@ -1781,10 +1788,24 @@
       return status === "working" || status === "blocked" || status === "done" ? status : "idle";
     }
 
+    // home-terminal-parity-2: blocked before working before the rest — the
+    // same D4 rank `views.rs::terminals_status_rank` applies server-side to
+    // this tab's own pane inventory — used only to order rows *within* each
+    // homepage project group; the project page's own status sections above
+    // already carry this ordering structurally and never call this.
+    function statusRank(status) {
+      if (status === "blocked") return 0;
+      if (status === "working") return 1;
+      return 2;
+    }
+
     function agentRow(agent) {
       var item = document.createElement("a");
       item.className = "fg-menu__item agent-drawer__item";
-      item.href = agent.url;
+      // home-terminal-parity-2: the homepage instance links to its own tab
+      // rather than the agent's own project page — `agent.url` still wins
+      // outright on the project page (`homepage: false`, unchanged).
+      item.href = homepage ? "/?tab=terminals&pane=" + encodeURIComponent(agent.pane_id) : agent.url;
 
       var name = document.createElement("span");
       name.textContent = agent.name;
@@ -1806,15 +1827,9 @@
       return item;
     }
 
-    function render(agents) {
-      list.textContent = "";
-      if (!agents.length) {
-        var empty = document.createElement("p");
-        empty.className = "fg-empty";
-        empty.textContent = "No agents";
-        list.appendChild(empty);
-        return;
-      }
+    // The project page's own shape, unchanged: one section per status,
+    // `SECTIONS`' own fixed order.
+    function renderByStatus(agents) {
       var groups = { working: [], blocked: [], done: [], idle: [] };
       agents.forEach(function (agent) {
         groups[sectionKey(agent.status)].push(agent);
@@ -1830,6 +1845,52 @@
           list.appendChild(agentRow(agent));
         });
       });
+    }
+
+    // home-terminal-parity-2: the homepage instance's own shape — one
+    // section per project, in the order its first agent was seen in the
+    // feed (`GET /api/agents` already walks projects in a stable order,
+    // unassigned panes last), each section's own rows sorted blocked
+    // before working before the rest.
+    function renderByProject(agents) {
+      var order = [];
+      var groups = {};
+      agents.forEach(function (agent) {
+        var key = agent.project_name;
+        if (!groups[key]) {
+          groups[key] = [];
+          order.push(key);
+        }
+        groups[key].push(agent);
+      });
+      order.forEach(function (project_name) {
+        var rows = groups[project_name].slice().sort(function (a, b) {
+          return statusRank(a.status) - statusRank(b.status);
+        });
+        var heading = document.createElement("div");
+        heading.className = "agent-drawer__section";
+        heading.textContent = project_name;
+        list.appendChild(heading);
+        rows.forEach(function (agent) {
+          list.appendChild(agentRow(agent));
+        });
+      });
+    }
+
+    function render(agents) {
+      list.textContent = "";
+      if (!agents.length) {
+        var empty = document.createElement("p");
+        empty.className = "fg-empty";
+        empty.textContent = "No agents";
+        list.appendChild(empty);
+        return;
+      }
+      if (homepage) {
+        renderByProject(agents);
+      } else {
+        renderByStatus(agents);
+      }
     }
 
     function fetchAgents() {
