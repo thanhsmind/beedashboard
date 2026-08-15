@@ -1628,6 +1628,7 @@
       var base = form.getAttribute("data-term-base");
       var input = form.querySelector(".term-reply__text");
       var stageBtn = form.querySelector(".term-reply__stage");
+      var approveBtn = form.querySelector(".term-reply__approve");
       var attachBox = form.querySelector(".term-attach[data-pane-id]");
       var fileInput = attachBox && attachBox.querySelector(".term-attach__input");
       var attachBtn = attachBox && attachBox.querySelector(".term-attach__btn");
@@ -1672,6 +1673,12 @@
       if (stageBtn) {
         stageBtn.addEventListener("click", function () {
           sendReply(paneId, input.value, false, input, base);
+        });
+      }
+
+      if (approveBtn) {
+        approveBtn.addEventListener("click", function () {
+          postJson(inputUrl(paneId, base), { text: "Approve", submit: true }).catch(function () {});
         });
       }
 
