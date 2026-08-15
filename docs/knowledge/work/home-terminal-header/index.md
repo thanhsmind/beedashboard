@@ -10,4 +10,4 @@ never a generation timestamp or any other wall-clock value.
 
 ## Concepts
 
-- [home-terminal-header — delivery](delivery.md) — Delivery record for work item home-terminal-header: 1 capped cell(s), 1 recorded deviation(s).
+- [home-terminal-header — delivery](delivery.md) — Delivery record for work item home-terminal-header: 2 capped cell(s), 2 recorded deviation(s).
