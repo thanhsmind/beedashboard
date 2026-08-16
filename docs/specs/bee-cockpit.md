@@ -44,6 +44,12 @@ never rendered as an empty dashboard.
 
 A qualifying project gains an entry point on its home page leading to its board.
 
+On a wide desktop screen the board pages — the home Kanban tab and a project's own
+bee board — span the full width of the window instead of stopping at the reading
+column other pages keep; feature and item detail pages keep the narrower column.
+Card titles render in the interface's own sans face rather than the reading face,
+so a wall of cards scans like a control surface, not a document.
+
 ## The cross-project board
 
 The same surface also exists once for everything at once. The viewer's own front
