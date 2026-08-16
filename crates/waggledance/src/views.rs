@@ -118,21 +118,6 @@ pub struct ProjectSuggestion {
     pub pane_count: usize,
 }
 
-pub fn project_list_page(
-    projects: &[(Project, usize, Vec<TerminalPaneView>)],
-    unassigned_visible: bool,
-    suggestions: &[ProjectSuggestion],
-    register_error: Option<&str>,
-) -> String {
-    let body = format!(
-        r#"{topbar}
-{main}"#,
-        topbar = topbar(""),
-        main = project_list_main(projects, unassigned_visible, suggestions, register_error),
-    );
-    layout("Projects", "", &body)
-}
-
 /// homepage-tabs: which of the home page's two sections `/` renders.
 /// `Default` is `Kanban` so that an absent, empty, unknown, or otherwise
 /// unparseable `tab` query value (`server.rs`'s `RegisterFlag` visitor)
@@ -184,14 +169,13 @@ fn home_tab_strip(selected: HomeTab) -> String {
 /// ([`bee_cross_project_features_section`]) is still the caller's own
 /// decision of what to show (`server.rs::index_page` applies D8's
 /// qualification and D9's empty rule before calling this); empty is treated
-/// as "nothing qualified" and this function returns exactly
-/// [`project_list_page`]'s own output, not a byte different, WITH NO TAB
-/// STRIP AT ALL -- D9's "the page is what it is today" holds for the whole
-/// page, including the strip, not only the section markup. A registration
-/// error forces the Projects tab regardless of `tab`: the banner
-/// [`project_list_main`] renders lives only there, and a user who just
-/// submitted the add-project form must see why it failed rather than land
-/// back on Kanban.
+/// as "nothing qualified" and the Kanban tab renders its own `fg-empty`
+/// state instead of `cross_features_html` (backlog-groom-2 D1) -- the tab
+/// strip, and the Terminals tab riding on it, always render regardless of
+/// whether any project carries a bee board. A registration error forces the
+/// Projects tab regardless of `tab`: the banner [`project_list_main`]
+/// renders lives only there, and a user who just submitted the add-project
+/// form must see why it failed rather than land back on Kanban.
 ///
 /// `bee_hub_style()` / `.bee-hub-theme` are scoped to Kanban only: every
 /// rule the style block declares is itself scoped under the
@@ -225,9 +209,6 @@ pub fn home_page(
     // same "New shell"/preset buttons the project terminal page offers.
     terminals_presets: &[String],
 ) -> String {
-    if cross_features_html.is_empty() {
-        return project_list_page(projects, unassigned_visible, suggestions, register_error);
-    }
     let tab = if register_error.is_some() {
         HomeTab::Projects
     } else {
@@ -242,7 +223,19 @@ pub fn home_page(
   {features}
 </main>"#,
                 style = bee_hub_style(),
-                features = cross_features_html,
+                // D1 (backlog-groom-2): an empty `cross_features_html`
+                // (D9 — no registered project carries a `.bee` board) used
+                // to make the whole page early-return the tabless plain
+                // project list, which dropped the tab strip and hid the
+                // Terminals tab along with it. The Kanban tab now renders
+                // its own honest empty state instead, so the strip — and
+                // Terminals — stay reachable no matter what the Kanban
+                // section has to show.
+                features = if cross_features_html.is_empty() {
+                    r#"<p class="fg-empty">No project here has a bee board yet.</p>"#.to_string()
+                } else {
+                    cross_features_html.to_string()
+                },
             ),
         ),
         HomeTab::Projects => (
@@ -270,8 +263,8 @@ pub fn home_page(
     layout(title, "", &body)
 }
 
-/// The project list itself — everything [`project_list_page`] used to build
-/// inline, factored out so [`home_page`] can render it unchanged beneath the
+/// The project list itself — everything the home page's own Projects tab
+/// needs, factored out so [`home_page`] can render it unchanged beneath the
 /// cross-project sections (cross-board D1) without duplicating a single line
 /// of this logic. Returns just the `<main>` element; topbar and `layout`
 /// wrapping stay each caller's own job.
@@ -6387,6 +6380,67 @@ mod tests {
             asset_fingerprint("a"),
             asset_fingerprint("b"),
             "different content must fingerprint differently"
+        );
+    }
+
+    /// backlog-groom-2 D1 (#26): an empty cross-project board must not
+    /// swallow the tab strip — Terminals has nothing to do with whether any
+    /// project carries a bee board, so it must stay reachable even when
+    /// Kanban itself has nothing of its own to show.
+    #[test]
+    fn home_page_with_empty_board_still_renders_tab_strip_and_terminals_tab() {
+        let body = home_page(
+            &[],
+            false,
+            &[],
+            None,
+            "",
+            HomeTab::Kanban,
+            &[],
+            None,
+            true,
+            &[],
+        );
+        assert!(
+            body.contains("fg-tabs"),
+            "an empty bee board must still carry the tab strip: {body}"
+        );
+        assert!(
+            body.contains(r#"href="/?tab=terminals""#),
+            "the Terminals tab anchor must stay reachable: {body}"
+        );
+        assert!(
+            body.contains("fg-empty"),
+            "the Kanban tab must show its own empty state instead of nothing: {body}"
+        );
+    }
+
+    /// backlog-groom-2 D1: a populated board renders exactly as before — the
+    /// tab strip plus the cross-project section verbatim, never the empty
+    /// state.
+    #[test]
+    fn home_page_with_populated_board_renders_kanban_section_unchanged() {
+        let marker = r#"<div data-feature-hub="cross-project">MARKER-CONTENT</div>"#;
+        let body = home_page(
+            &[],
+            false,
+            &[],
+            None,
+            marker,
+            HomeTab::Kanban,
+            &[],
+            None,
+            true,
+            &[],
+        );
+        assert!(body.contains("fg-tabs"), "{body}");
+        assert!(
+            body.contains("MARKER-CONTENT"),
+            "a populated cross-project section must render verbatim: {body}"
+        );
+        assert!(
+            !body.contains("fg-empty"),
+            "a populated board must not show the Kanban empty state: {body}"
         );
     }
 

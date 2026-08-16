@@ -14791,7 +14791,10 @@ mod bee_route_tests {
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
         register(&st, &project_root, "owned-project");
-        let resp = get(router(st), "/").await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the suggestion block this test
+        // cares about lives on the Projects tab.
+        let resp = get(router(st), "/?tab=projects").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
@@ -14877,7 +14880,10 @@ mod bee_route_tests {
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
-        let resp = get(router(st), "/").await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the suggestion block this test
+        // cares about lives on the Projects tab.
+        let resp = get(router(st), "/?tab=projects").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         let path = stray_root.to_string_lossy().to_string();
@@ -14926,7 +14932,10 @@ mod bee_route_tests {
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
-        let resp = get(router(st), "/").await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the suggestion block this test
+        // cares about lives on the Projects tab.
+        let resp = get(router(st), "/?tab=projects").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         // Same reasoning as the dedup test above: `FakeHerdr::new()`'s own
@@ -14975,7 +14984,10 @@ mod bee_route_tests {
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
-        let resp = get(router(st), "/").await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the suggestion block this test
+        // cares about lives on the Projects tab.
+        let resp = get(router(st), "/?tab=projects").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
@@ -15074,7 +15086,11 @@ mod bee_route_tests {
         // row count with the pane's *real* cwd first (proving it would
         // otherwise render), then assert overwriting to `Some("")` drops
         // that one row entirely rather than swapping it for a blank one.
-        let before = get(app.clone(), "/").await;
+        //
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the suggestion block this test
+        // cares about lives on the Projects tab.
+        let before = get(app.clone(), "/?tab=projects").await;
         let before_body = body_string(before).await;
         assert!(
             before_body.contains(&stray_root.to_string_lossy().to_string()),
@@ -15089,7 +15105,7 @@ mod bee_route_tests {
             .await
             .unwrap();
 
-        let after = get(app, "/").await;
+        let after = get(app, "/?tab=projects").await;
         assert_eq!(after.status(), StatusCode::OK);
         let after_body = body_string(after).await;
         assert!(
@@ -15364,7 +15380,10 @@ mod bee_route_tests {
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
         register(&st, &project_root, "owned-project");
-        let resp = get(router(st), "/").await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the suggestion block this test
+        // cares about lives on the Projects tab.
+        let resp = get(router(st), "/?tab=projects").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
@@ -15550,7 +15569,10 @@ mod bee_route_tests {
         let engine = st.engine.clone();
         let app = router(st);
 
-        let before = get(app.clone(), "/").await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the suggestion block and the
+        // project row this test cares about live on the Projects tab.
+        let before = get(app.clone(), "/?tab=projects").await;
         let before_body = body_string(before).await;
         assert!(
             before_body.contains(&stray_root.to_string_lossy().to_string()),
@@ -15576,7 +15598,7 @@ mod bee_route_tests {
             "the suggested path must now be registered"
         );
 
-        let after = get(app, "/").await;
+        let after = get(app, "/?tab=projects").await;
         let after_body = body_string(after).await;
         assert!(
             after_body.contains("href=\"/p/"),
@@ -15697,7 +15719,10 @@ mod bee_route_tests {
         let engine = st.engine.clone();
         let app = router(st);
 
-        let resp = get(app.clone(), "/").await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the suggestion block this test
+        // cares about lives on the Projects tab.
+        let resp = get(app.clone(), "/?tab=projects").await;
         let body = body_string(resp).await;
         assert!(
             body.contains("/etc"),
@@ -15759,7 +15784,10 @@ mod bee_route_tests {
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
         register(&st, &project_root, "owned-project");
-        let resp = get(router(st), "/").await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the row and suggestion block this
+        // test cares about live on the Projects tab.
+        let resp = get(router(st), "/?tab=projects").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
@@ -16086,7 +16114,10 @@ mod bee_route_tests {
         let orphan = register(&st, &orphan_root, "nowhere--wt--solo");
         let parent = register(&st, &parent_root, "demo");
 
-        let body = body_string(get(router(st), "/").await).await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the project rows this test cares
+        // about live on the Projects tab.
+        let body = body_string(get(router(st), "/?tab=projects").await).await;
 
         // Rows, not the old card grid.
         assert!(
@@ -16153,7 +16184,10 @@ mod bee_route_tests {
         std::fs::create_dir_all(&root).unwrap();
         let p = register(&st, &root, "demo");
 
-        let body = body_string(get(router(st), "/").await).await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the project rows this test cares
+        // about live on the Projects tab.
+        let body = body_string(get(router(st), "/?tab=projects").await).await;
 
         let full = &p.last_seen_at;
         let (date, rest) = full
@@ -16291,7 +16325,10 @@ mod bee_route_tests {
         let sibling = register(&st, &sibling_root, "sibling");
         let app = router(st);
 
-        let body = body_string(get(app, "/").await).await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the project rows this test cares
+        // about live on the Projects tab.
+        let body = body_string(get(app, "/?tab=projects").await).await;
         let href =
             |project_id: &str, pane_id: &str| format!("/p/{project_id}/_terminal/pane/{pane_id}");
 
@@ -16343,7 +16380,10 @@ mod bee_route_tests {
         register(&st, &root, "demo");
         let app = router(st);
 
-        let body = body_string(get(app, "/").await).await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the row this test cares about
+        // lives on the Projects tab.
+        let body = body_string(get(app, "/?tab=projects").await).await;
         assert!(
             !body.contains("proj-row__badges"),
             "a project with no pane in its boundary must render no badge container: {body}"
@@ -16379,7 +16419,10 @@ mod bee_route_tests {
         register(&st, &root, "demo");
         let app = router(st);
 
-        let resp = get(app, "/").await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the row this test cares about
+        // lives on the Projects tab.
+        let resp = get(app, "/?tab=projects").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
@@ -16519,7 +16562,10 @@ mod bee_route_tests {
         let project = register(&st, &root, "demo");
         let app = router(st);
 
-        let body = body_string(get(app.clone(), "/").await).await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the row this test cares about
+        // lives on the Projects tab.
+        let body = body_string(get(app.clone(), "/?tab=projects").await).await;
         let href = format!("/p/{}/_terminal/pane/{}", project.id, started.pane_id);
         assert!(
             body.contains(&href),
@@ -16585,7 +16631,10 @@ mod bee_route_tests {
         );
         let app = router(st);
 
-        let body = body_string(get(app, "/").await).await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the rows this test cares about
+        // live on the Projects tab.
+        let body = body_string(get(app, "/?tab=projects").await).await;
         assert!(
             body.contains(&format!(
                 "/p/{}/_terminal/pane/{}",
@@ -16672,7 +16721,10 @@ mod bee_route_tests {
         let project = register(&st, &root, "demo");
         let app = router(st);
 
-        let body = body_string(get(app, "/").await).await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the badges this test cares about
+        // live on the Projects tab.
+        let body = body_string(get(app, "/?tab=projects").await).await;
         let href = |pane_id: &str| format!("/p/{}/_terminal/pane/{}", project.id, pane_id);
         for pane_id in [
             &working.pane_id,
@@ -16737,7 +16789,10 @@ mod bee_route_tests {
         register(&st, &root, "demo");
         let app = router(st);
 
-        let body = body_string(get(app, "/").await).await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the row/badge markup this test
+        // cares about lives on the Projects tab.
+        let body = body_string(get(app, "/?tab=projects").await).await;
         assert!(
             body.contains("proj-row__badges"),
             "fixture must actually render a badge for this test to prove anything: {body}"
@@ -16773,7 +16828,10 @@ mod bee_route_tests {
         std::fs::create_dir_all(&root).unwrap();
         register(&st, &root, "demo");
 
-        let body = body_string(get(router(st), "/").await).await;
+        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
+        // shows its own empty state now — the row markup this test cares
+        // about lives on the Projects tab.
+        let body = body_string(get(router(st), "/?tab=projects").await).await;
         let script = include_str!("../assets/app.js");
 
         for (selector, needle, what) in [
@@ -17230,18 +17288,22 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// homepage-tabs edge (a): with no qualifying project at all, `/` still
-    /// renders exactly `project_list_page`'s own output — no tab strip, no
-    /// `bee-hub-theme`, whatever `tab` was asked for.
+    /// homepage-tabs edge (a), backlog-groom-2 D1 (supersedes the earlier
+    /// "no tab strip at all" rule): with no qualifying project at all, `/`
+    /// still renders the full tab strip — Kanban, Projects, Terminals — so
+    /// the Terminals tab stays reachable regardless of whether any project
+    /// carries a bee board. The Kanban tab itself falls back to its own
+    /// `fg-empty` state instead of the cross-project section; the Projects
+    /// tab still carries the plain project list.
     ///
     /// homepage-terminals: this axis (whether the strip itself renders at
     /// all) is orthogonal to D8 (whether Terminals shows up ON the strip
     /// once it does render) — D8 talks about herdr's own state, never about
-    /// `.bee/` project qualification, so this earlier, unrelated rule is
-    /// left exactly as it was; proven again with `tab=terminals` below so a
-    /// reader sees that holds for the third tab's own request too.
+    /// `.bee/` project qualification; proven again with `tab=terminals`
+    /// below so a reader sees the strip (and the Terminals anchor on it)
+    /// survives the third tab's own request too.
     #[tokio::test]
-    async fn home_page_with_no_qualifying_project_renders_no_tab_strip() {
+    async fn home_page_with_no_qualifying_project_still_renders_the_tab_strip() {
         let dir = fresh_root("home-tab-none-qualify");
         let st = build_state_with_dir(&dir);
         let root = dir.join("no-bee-project");
@@ -17253,33 +17315,46 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
-            !body.contains("fg-tabs"),
-            "no qualifying project means no tab strip at all: {body}"
+            body.contains("fg-tabs"),
+            "an empty bee board must still carry the tab strip: {body}"
         );
         assert!(
-            !body.contains("bee-hub-theme"),
-            "no qualifying project means no Kanban theme either: {body}"
+            body.contains(r#"href="/?tab=terminals""#),
+            "the Terminals tab anchor must stay reachable even with no qualifying project: {body}"
         );
         assert!(
             body.contains("<ul class=\"proj-list\">") || body.contains("fg-empty"),
-            "the plain project list must still render: {body}"
+            "the plain project list must still render, now as the Projects tab body: {body}"
+        );
+
+        let kanban_resp = get(app.clone(), "/?tab=kanban").await;
+        assert_eq!(kanban_resp.status(), StatusCode::OK);
+        let kanban_body = body_string(kanban_resp).await;
+        assert!(
+            kanban_body.contains("fg-tabs") && kanban_body.contains(r#"href="/?tab=terminals""#),
+            "the Kanban tab's own empty state must still carry the tab strip and Terminals anchor: {kanban_body}"
+        );
+        assert!(
+            kanban_body.contains("fg-empty"),
+            "an empty bee board's Kanban tab must show its own empty state: {kanban_body}"
         );
 
         let terminals_resp = get(app, "/?tab=terminals").await;
         assert_eq!(terminals_resp.status(), StatusCode::OK);
         let terminals_body = body_string(terminals_resp).await;
         assert!(
-            !terminals_body.contains("fg-tabs"),
-            "no qualifying project means no tab strip at all, even asking for Terminals: {terminals_body}"
+            terminals_body.contains("fg-tabs"),
+            "the tab strip must survive a direct Terminals request too, even with no qualifying project: {terminals_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// (cross-board D9, board-drop-live) No registered project has a
-    /// `.bee/` directory: the home page must carry no cross-project
-    /// section — Live or Features — and must match the page's own plain
-    /// project-list markup.
+    /// (cross-board D9, board-drop-live; backlog-groom-2 D1) No registered
+    /// project has a `.bee/` directory: the default Kanban tab must carry
+    /// no cross-project section — Live or Features — falling back to its
+    /// own `fg-empty` state instead; the plain project list still renders,
+    /// now as the Projects tab's own body.
     #[tokio::test]
     async fn home_page_omits_cross_project_sections_when_no_project_qualifies() {
         let dir = fresh_root("home-cross-none");
@@ -17287,8 +17362,9 @@ mod bee_route_tests {
         let root = dir.join("no-bee-project");
         std::fs::create_dir_all(&root).unwrap();
         register(&st, &root, "no-bee-project");
+        let app = router(st);
 
-        let resp = get(router(st), "/").await;
+        let resp = get(app.clone(), "/").await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
@@ -17298,8 +17374,16 @@ mod bee_route_tests {
             "neither cross-project section may render when nothing qualifies: {body}"
         );
         assert!(
-            body.contains("<ul class=\"proj-list\">"),
-            "the ordinary project list must still render: {body}"
+            body.contains("fg-empty"),
+            "the default Kanban tab must show its own empty state: {body}"
+        );
+
+        let projects_resp = get(app, "/?tab=projects").await;
+        assert_eq!(projects_resp.status(), StatusCode::OK);
+        let projects_body = body_string(projects_resp).await;
+        assert!(
+            projects_body.contains("<ul class=\"proj-list\">"),
+            "the ordinary project list must still render on the Projects tab: {projects_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -18690,9 +18774,13 @@ mod bee_route_tests {
         // Switch off (default): the home page must carry no trace of the
         // feature at all — not even the word "Unassigned". Byte-identical
         // to baseline: off means no herdr call, so nothing here changed.
+        // backlog-groom-2 D1: no project is registered here, so the default
+        // Kanban tab now shows its own empty state — the Unassigned marker
+        // and the suggestion block this test cares about both live in
+        // `project_list_main`, which only renders on the Projects tab.
         let mut st_off = build_state_with_dir(&dir);
         st_off.herdr = fake.clone();
-        let resp_off = get(router(st_off), "/").await;
+        let resp_off = get(router(st_off), "/?tab=projects").await;
         assert_eq!(resp_off.status(), StatusCode::OK);
         let body_off = body_string(resp_off).await;
         assert!(
@@ -18709,7 +18797,7 @@ mod bee_route_tests {
         enable_terminal(&dir);
         let mut st_family_only = build_state_with_dir(&dir);
         st_family_only.herdr = fake.clone();
-        let resp_family_only = get(router(st_family_only), "/").await;
+        let resp_family_only = get(router(st_family_only), "/?tab=projects").await;
         assert_eq!(resp_family_only.status(), StatusCode::OK);
         let body_family_only = body_string(resp_family_only).await;
         assert!(
@@ -18730,7 +18818,7 @@ mod bee_route_tests {
         enable_unassigned_group(&dir);
         let mut st_on = build_state_with_dir(&dir);
         st_on.herdr = fake;
-        let resp_on = get(router(st_on), "/").await;
+        let resp_on = get(router(st_on), "/?tab=projects").await;
         assert_eq!(resp_on.status(), StatusCode::OK);
         let body_on = body_string(resp_on).await;
         assert!(
