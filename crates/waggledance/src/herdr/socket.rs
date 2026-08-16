@@ -4,7 +4,6 @@
 //! closes. Error responses carry no `id` (correlate by being the sole reply).
 
 use std::path::{Path, PathBuf};
-#[cfg(windows)]
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -178,18 +177,79 @@ fn unavailable_connect_error(error: &std::io::Error) -> HerdrError {
     HerdrError::Unavailable(format!("{reason} ({error})"))
 }
 
+/// The settle-wait policy `wait_for_pane_to_settle` runs on -- production
+/// always gets `SocketHerdr::SETTLE_MIN_QUIET`/`SETTLE_POLL_INTERVAL`/
+/// `SETTLE_MAX_WAIT` (see `SocketHerdr::new`); tests substitute
+/// millisecond-scale stand-ins via `SocketHerdr::with_settle_durations_for_test`
+/// so the real polling logic in `send_input` can be proven through a real
+/// mock socket server without spending the real 250ms/1.5s wall-clock time
+/// per test.
+#[derive(Clone, Copy)]
+struct SettleDurations {
+    min_quiet: Duration,
+    poll_interval: Duration,
+    max_wait: Duration,
+}
+
 /// A herdr client bound to one socket path.
 #[derive(Clone)]
 pub struct SocketHerdr {
     path: PathBuf,
     counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    settle: SettleDurations,
 }
 
 impl SocketHerdr {
+    /// Minimum quiet window `wait_for_pane_to_settle` waits before its
+    /// first poll -- terminal-attach-submit-race: a slow attachment read
+    /// (the web Send composing `"prompt\n/path/to/img.png"`) has not even
+    /// started resolving into an `[Image #1]` chip yet at t=0, so polling
+    /// immediately would see a not-yet-changed screen and declare it
+    /// settled before the composer's own redraw has begun. 250ms is enough
+    /// for that redraw to have started and bumped the screen's revision --
+    /// live-tested against a real Claude Code pane.
+    const SETTLE_MIN_QUIET: Duration = Duration::from_millis(250);
+    /// Poll interval once the quiet window has elapsed (see
+    /// `SETTLE_MIN_QUIET`).
+    const SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+    /// Hard cap on the whole settle wait, measured from the text write, not
+    /// from the first poll -- past this the Enter is sent regardless of
+    /// what the last poll saw. A user's submit is never dropped because the
+    /// screen would not hold still.
+    const SETTLE_MAX_WAIT: Duration = Duration::from_millis(1500);
+
     pub fn new(path: PathBuf) -> Self {
         SocketHerdr {
             path,
             counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            settle: SettleDurations {
+                min_quiet: Self::SETTLE_MIN_QUIET,
+                poll_interval: Self::SETTLE_POLL_INTERVAL,
+                max_wait: Self::SETTLE_MAX_WAIT,
+            },
+        }
+    }
+
+    /// Test-only seam (see `SettleDurations`'s own doc): every production
+    /// caller goes through `new` and gets the real `SETTLE_*` consts --
+    /// this exists only so a test can exercise the real `send_input`/
+    /// `wait_for_pane_to_settle` polling logic against a real mock socket
+    /// server at millisecond scale instead of the real 250ms/1.5s.
+    #[cfg(all(test, unix))]
+    fn with_settle_durations_for_test(
+        path: PathBuf,
+        min_quiet: Duration,
+        poll_interval: Duration,
+        max_wait: Duration,
+    ) -> Self {
+        SocketHerdr {
+            path,
+            counter: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            settle: SettleDurations {
+                min_quiet,
+                poll_interval,
+                max_wait,
+            },
         }
     }
 
@@ -198,6 +258,46 @@ impl SocketHerdr {
             .counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         format!("gw-{n}")
+    }
+
+    /// Waits for `pane_id`'s screen to stop changing before the caller
+    /// issues the submit Enter -- see `Herdr::send_input`'s doc for the
+    /// fault this closes (terminal-attach-submit-race). Polls
+    /// `read_pane(.., ReadSource::Visible, ..)` after an initial quiet
+    /// window (`self.settle.min_quiet`) every `self.settle.poll_interval`
+    /// until two consecutive reads report the same revision, or
+    /// `self.settle.max_wait` (from this call's own start, i.e. from the
+    /// text write) elapses.
+    ///
+    /// Never returns an error: a poll read failure, any `HerdrError` from
+    /// the poll, or the cap all fall through to the same outcome -- give up
+    /// waiting and let the caller send the Enter anyway. A user's submit
+    /// must never be silently dropped for a screen that will not hold
+    /// still.
+    async fn wait_for_pane_to_settle(&self, pane_id: &str) {
+        let deadline = tokio::time::Instant::now() + self.settle.max_wait;
+        tokio::time::sleep(self.settle.min_quiet).await;
+
+        let mut last_revision: Option<u64> = None;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            let read = match self.read_pane(pane_id, ReadSource::Visible, 0).await {
+                Ok(read) => read,
+                Err(_) => return,
+            };
+            if last_revision == Some(read.revision) {
+                return;
+            }
+            last_revision = Some(read.revision);
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            tokio::time::sleep(self.settle.poll_interval.min(remaining)).await;
+        }
     }
 
     /// One request → one response, on a fresh connection. Returns the `result`
@@ -534,6 +634,11 @@ impl Herdr for SocketHerdr {
                 json!({ "pane_id": pane_id, "text": text }),
             )
             .await?;
+            if submit {
+                // terminal-attach-submit-race: let the composer settle
+                // before the Enter lands -- see `wait_for_pane_to_settle`.
+                self.wait_for_pane_to_settle(pane_id).await;
+            }
         }
         if submit {
             // Send≠submit: a separate Enter key submits the composer.
@@ -990,17 +1095,78 @@ mod tests {
         );
     }
 
-    /// agent-terminal-11: pins the send≠submit separation at the transport
-    /// layer, not only against `FakeHerdr` (which fuses text+submit into one
-    /// write by appending the newline itself and bumping the revision once —
-    /// see its own `send_input`). The real herdr wraps sent text in
-    /// bracketed paste, so a client that collapsed these into a single
-    /// `pane.send_input` call carrying both `text` and `keys` would leave
-    /// every reply sitting unsent in the composer while the screen poll
-    /// shows it there — a silent failure of the whole feature. Proven
-    /// against a real mock socket server: `submit: true` with non-empty text
-    /// must reach the socket as two distinct requests, the first carrying
-    /// only the text, the second carrying only the enter keypress.
+    /// Millisecond-scale stand-ins for `SocketHerdr::SETTLE_MIN_QUIET`/
+    /// `SETTLE_POLL_INTERVAL`/`SETTLE_MAX_WAIT`, fed to
+    /// `SocketHerdr::with_settle_durations_for_test` by the settle-wait
+    /// tests below -- wide enough (relative to each other) that ordinary
+    /// scheduler jitter on a loaded test box cannot collapse the intended
+    /// multi-poll window down to zero or one poll, unlike a handful of
+    /// single-digit milliseconds would.
+    #[cfg(unix)]
+    const TEST_SETTLE_MIN_QUIET: Duration = Duration::from_millis(5);
+    #[cfg(unix)]
+    const TEST_SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(5);
+    #[cfg(unix)]
+    const TEST_SETTLE_MAX_WAIT: Duration = Duration::from_millis(40);
+
+    /// A mock `herdr.sock` server for the `send_input` settle-wait tests
+    /// below: drains every request until the submit Enter arrives (rather
+    /// than a fixed count), answering each `pane.read` with `revision`
+    /// computed by `read_revision` so a test can script either "settles
+    /// after two identical reads" or "never settles" by choosing that
+    /// closure. Returns every request it saw, in arrival order.
+    #[cfg(unix)]
+    async fn run_settle_mock_server(
+        listener: tokio::net::UnixListener,
+        mut read_revision: impl FnMut() -> u64 + Send + 'static,
+    ) -> Vec<Value> {
+        let mut requests = Vec::new();
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                let n = stream.read(&mut byte).await.unwrap();
+                if n == 0 || byte[0] == b'\n' {
+                    break;
+                }
+                buf.push(byte[0]);
+            }
+            let value: Value = serde_json::from_slice(&buf).unwrap();
+            let is_submit_enter = value["params"]["keys"] == json!(["enter"]);
+            let result = if value["method"] == "pane.read" {
+                json!({ "type": "pane_read", "read": { "text": "", "revision": read_revision() } })
+            } else {
+                json!({})
+            };
+            requests.push(value);
+            let mut line = serde_json::to_vec(&json!({ "id": "gw-0", "result": result })).unwrap();
+            line.push(b'\n');
+            stream.write_all(&line).await.unwrap();
+            stream.flush().await.unwrap();
+            if is_submit_enter {
+                return requests;
+            }
+        }
+    }
+
+    /// agent-terminal-11 / terminal-attach-submit-race: pins the send≠submit
+    /// separation at the transport layer, not only against `FakeHerdr`
+    /// (which fuses text+submit into one write by appending the newline
+    /// itself and bumping the revision once — see its own `send_input`).
+    /// The real herdr wraps sent text in bracketed paste, so a client that
+    /// collapsed these into a single `pane.send_input` call carrying both
+    /// `text` and `keys` would leave every reply sitting unsent in the
+    /// composer while the screen poll shows it there — a silent failure of
+    /// the whole feature. Proven against a real mock socket server:
+    /// `submit: true` with non-empty text must reach the socket as the
+    /// FIRST request carrying only the text and the LAST carrying only the
+    /// enter keypress -- with the settle wait's own `pane.read` poll (added
+    /// by terminal-attach-submit-race) sitting between them, not fused into
+    /// either write. Uses `SocketHerdr::with_settle_durations_for_test`
+    /// (millisecond-scale stand-ins for the real 250ms/100ms/1.5s policy)
+    /// so the real settle-wait logic in `send_input` runs against a real
+    /// mock socket server at effectively no wall-clock cost.
     #[cfg(unix)]
     #[tokio::test]
     async fn sendinput_with_submit_issues_two_distinct_socket_requests() {
@@ -1008,30 +1174,17 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("herdr.sock");
             let listener = tokio::net::UnixListener::bind(&path).unwrap();
-            let client = SocketHerdr::new(path.clone());
+            let client = SocketHerdr::with_settle_durations_for_test(
+                path.clone(),
+                TEST_SETTLE_MIN_QUIET,
+                TEST_SETTLE_POLL_INTERVAL,
+                TEST_SETTLE_MAX_WAIT,
+            );
 
-            let server = tokio::spawn(async move {
-                let mut requests = Vec::new();
-                for _ in 0..2 {
-                    let (mut stream, _) = listener.accept().await.unwrap();
-                    let mut buf = Vec::new();
-                    let mut byte = [0u8; 1];
-                    loop {
-                        let n = stream.read(&mut byte).await.unwrap();
-                        if n == 0 || byte[0] == b'\n' {
-                            break;
-                        }
-                        buf.push(byte[0]);
-                    }
-                    let value: Value = serde_json::from_slice(&buf).unwrap();
-                    requests.push(value);
-                    let mut line = br#"{"id":"gw-0","result":{}}"#.to_vec();
-                    line.push(b'\n');
-                    stream.write_all(&line).await.unwrap();
-                    stream.flush().await.unwrap();
-                }
-                requests
-            });
+            // Settles after its second identical read, like a composer
+            // whose redraw has already finished by the time the poll loop
+            // catches up.
+            let server = tokio::spawn(run_settle_mock_server(listener, || 1));
 
             client.send_input("w1:p1", "hello", true).await.unwrap();
             server.await.unwrap()
@@ -1039,24 +1192,81 @@ mod tests {
         .await
         .expect("send_input must not hang");
 
+        let first = outcome.first().expect("at least the text request");
+        let last = outcome.last().expect("at least the enter request");
+
+        assert_eq!(first["method"], "pane.send_input");
+        assert_eq!(first["params"]["text"], "hello");
+        assert!(
+            first["params"].get("keys").is_none(),
+            "the first request must carry only the text, not the enter keypress: {first:?}"
+        );
+
+        assert_eq!(last["method"], "pane.send_input");
+        assert_eq!(last["params"]["keys"], json!(["enter"]));
+        assert!(
+            last["params"].get("text").is_none(),
+            "the last request must carry only the enter keypress, not the text: {last:?}"
+        );
+
+        assert!(
+            outcome[1..outcome.len() - 1]
+                .iter()
+                .any(|r| r["method"] == "pane.read"),
+            "at least one pane.read must sit between the text write and the submit Enter, \
+             proving the settle wait ran: {outcome:?}"
+        );
+    }
+
+    /// terminal-attach-submit-race: a pane whose screen never stops
+    /// changing (every `pane.read` answers a new revision) must not
+    /// withhold the submit Enter forever -- `wait_for_pane_to_settle`'s
+    /// `SETTLE_MAX_WAIT` cap must fire and the Enter must still reach the
+    /// socket, proving a user's submit is never silently dropped for a
+    /// screen that will not hold still. Uses
+    /// `SocketHerdr::with_settle_durations_for_test` (see the other
+    /// settle-wait test's doc) so the cap this proves costs single-digit
+    /// milliseconds, not the real 1.5s.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sendinput_still_sends_enter_when_screen_never_settles() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("herdr.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let client = SocketHerdr::with_settle_durations_for_test(
+                path.clone(),
+                TEST_SETTLE_MIN_QUIET,
+                TEST_SETTLE_POLL_INTERVAL,
+                TEST_SETTLE_MAX_WAIT,
+            );
+
+            let mut revision = 0u64;
+            let server = tokio::spawn(run_settle_mock_server(listener, move || {
+                revision += 1;
+                revision
+            }));
+
+            client.send_input("w1:p1", "hello", true).await.unwrap();
+            server.await.unwrap()
+        })
+        .await
+        .expect("send_input must not hang even when the screen never settles");
+
+        let last = outcome.last().expect("at least the enter request");
         assert_eq!(
-            outcome.len(),
-            2,
-            "submit=true must reach the socket as two distinct requests, not one fused write: {outcome:?}"
+            last["method"], "pane.send_input",
+            "the cap must still let the Enter through: {outcome:?}"
         );
-        assert_eq!(outcome[0]["method"], "pane.send_input");
-        assert_eq!(outcome[0]["params"]["text"], "hello");
-        assert!(
-            outcome[0]["params"].get("keys").is_none(),
-            "the first request must carry only the text, not the enter keypress: {:?}",
-            outcome[0]
+        assert_eq!(
+            last["params"]["keys"],
+            json!(["enter"]),
+            "the submit must never be dropped for an unsettled screen: {outcome:?}"
         );
-        assert_eq!(outcome[1]["method"], "pane.send_input");
-        assert_eq!(outcome[1]["params"]["keys"], json!(["enter"]));
         assert!(
-            outcome[1]["params"].get("text").is_none(),
-            "the second request must carry only the enter keypress, not the text: {:?}",
-            outcome[1]
+            outcome.iter().any(|r| r["method"] == "pane.read"),
+            "the settle-wait poll must have run at least once before the cap sent \
+             the Enter anyway: {outcome:?}"
         );
     }
 
