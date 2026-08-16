@@ -1117,11 +1117,11 @@ mod tests {
     /// multi-poll window down to zero or one poll, unlike a handful of
     /// single-digit milliseconds would.
     #[cfg(unix)]
-    const TEST_SETTLE_MIN_QUIET: Duration = Duration::from_millis(5);
+    const TEST_SETTLE_MIN_QUIET: Duration = Duration::from_millis(25);
     #[cfg(unix)]
-    const TEST_SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(5);
+    const TEST_SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(25);
     #[cfg(unix)]
-    const TEST_SETTLE_MAX_WAIT: Duration = Duration::from_millis(40);
+    const TEST_SETTLE_MAX_WAIT: Duration = Duration::from_millis(200);
 
     /// A mock `herdr.sock` server for the `send_input` settle-wait tests
     /// below: drains every request until the submit Enter arrives (rather
@@ -1134,12 +1134,15 @@ mod tests {
     /// -- so these tests exercise the settle wait exactly as it behaves
     /// against production, where `revision` alone could never distinguish
     /// "settled" from "still changing". Returns every request it saw, in
-    /// arrival order.
+    /// arrival order, paired with the `Instant` it was fully received at --
+    /// lets a test pin not just what requests arrived but when, e.g. that
+    /// the settle wait's first poll did not fire before its own min-quiet
+    /// window had actually elapsed.
     #[cfg(unix)]
     async fn run_settle_mock_server(
         listener: tokio::net::UnixListener,
         mut read_text: impl FnMut() -> String + Send + 'static,
-    ) -> Vec<Value> {
+    ) -> Vec<(Value, tokio::time::Instant)> {
         let mut requests = Vec::new();
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -1152,6 +1155,7 @@ mod tests {
                 }
                 buf.push(byte[0]);
             }
+            let received_at = tokio::time::Instant::now();
             let value: Value = serde_json::from_slice(&buf).unwrap();
             let is_submit_enter = value["params"]["keys"] == json!(["enter"]);
             let result = if value["method"] == "pane.read" {
@@ -1159,7 +1163,7 @@ mod tests {
             } else {
                 json!({})
             };
-            requests.push(value);
+            requests.push((value, received_at));
             let mut line = serde_json::to_vec(&json!({ "id": "gw-0", "result": result })).unwrap();
             line.push(b'\n');
             stream.write_all(&line).await.unwrap();
@@ -1211,7 +1215,10 @@ mod tests {
             server.await.unwrap()
         })
         .await
-        .expect("send_input must not hang");
+        .expect("send_input must not hang")
+        .into_iter()
+        .map(|(value, _)| value)
+        .collect::<Vec<Value>>();
 
         let first = outcome.first().expect("at least the text request");
         let last = outcome.last().expect("at least the enter request");
@@ -1251,7 +1258,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn sendinput_still_sends_enter_when_screen_never_settles() {
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (elapsed, outcome) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("herdr.sock");
             let listener = tokio::net::UnixListener::bind(&path).unwrap();
@@ -1268,13 +1275,30 @@ mod tests {
                 format!("frame-{frame}")
             }));
 
+            let started = tokio::time::Instant::now();
             client.send_input("w1:p1", "hello", true).await.unwrap();
-            server.await.unwrap()
+            let elapsed = started.elapsed();
+            // Keep the arrival Instant the mock already produces (rather
+            // than discarding it) -- it is what lets this test pin the
+            // poll loop's own pacing at socket.rs:313, not just that a
+            // read happened at all.
+            let outcome: Vec<(Value, tokio::time::Instant)> = server.await.unwrap();
+            (elapsed, outcome)
         })
         .await
         .expect("send_input must not hang even when the screen never settles");
 
-        let last = outcome.last().expect("at least the enter request");
+        // A cap-magnitude regression (e.g. the cap silently multiplied or
+        // dropped) must not slide under this test's 5s outer timeout --
+        // pin the cap's own order of magnitude directly.
+        assert!(
+            elapsed < TEST_SETTLE_MAX_WAIT * 3,
+            "the settle-wait cap must fire near {:?}, not balloon past it -- \
+             send_input took {elapsed:?}",
+            TEST_SETTLE_MAX_WAIT
+        );
+
+        let last = &outcome.last().expect("at least the enter request").0;
         assert_eq!(
             last["method"], "pane.send_input",
             "the cap must still let the Enter through: {outcome:?}"
@@ -1284,10 +1308,50 @@ mod tests {
             json!(["enter"]),
             "the submit must never be dropped for an unsettled screen: {outcome:?}"
         );
+
+        let read_arrivals: Vec<tokio::time::Instant> = outcome
+            .iter()
+            .filter(|(value, _)| value["method"] == "pane.read")
+            .map(|(_, at)| *at)
+            .collect();
         assert!(
-            outcome.iter().any(|r| r["method"] == "pane.read"),
-            "the settle-wait poll must have run at least once before the cap sent \
+            read_arrivals.len() >= 2,
+            "the settle-wait poll must have run more than once before the cap sent \
              the Enter anyway: {outcome:?}"
+        );
+
+        // (a) Pin the loop's own pacing: consecutive pane.read arrivals
+        // must be spaced by roughly TEST_SETTLE_POLL_INTERVAL. Deleting or
+        // zeroing the poll sleep at socket.rs:313 collapses the loop into
+        // a busy-spin, so consecutive arrivals land back-to-back instead.
+        // A jitter floor of 80% of the nominal interval absorbs ordinary
+        // scheduler noise on a loaded box without letting a collapsed
+        // sleep pass.
+        let min_expected_gap = TEST_SETTLE_POLL_INTERVAL.mul_f64(0.8);
+        let min_gap = read_arrivals
+            .windows(2)
+            .map(|pair| pair[1].saturating_duration_since(pair[0]))
+            .min()
+            .expect("read_arrivals.len() >= 2 guarantees at least one window");
+        assert!(
+            min_gap >= min_expected_gap,
+            "consecutive pane.read arrivals must be spaced by roughly the poll \
+             interval ({TEST_SETTLE_POLL_INTERVAL:?}, jitter floor {min_expected_gap:?}) -- \
+             got a gap as small as {min_gap:?}, suggesting the poll sleep at \
+             socket.rs:313 is missing or too short: {outcome:?}"
+        );
+
+        // (b) Pin the loop's own ceiling: a busy-spinning poll (the same
+        // missing/zeroed sleep as above) would also blow past the number
+        // of reads a correctly-paced loop can fit inside max_wait, so cap
+        // the read count independently of the timing assertion above.
+        let max_reads = TEST_SETTLE_MAX_WAIT.as_nanos() / TEST_SETTLE_POLL_INTERVAL.as_nanos() + 2;
+        assert!(
+            (read_arrivals.len() as u128) <= max_reads,
+            "the settle-wait poll must not exceed roughly max_wait/poll_interval \
+             reads ({max_reads}) -- got {} pane.read calls, suggesting the poll \
+             sleep at socket.rs:313 is missing or too short: {outcome:?}",
+            read_arrivals.len()
         );
     }
 
@@ -1303,7 +1367,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn sendinput_keeps_polling_while_text_changes_despite_flat_revision() {
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (elapsed, outcome) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("herdr.sock");
             let listener = tokio::net::UnixListener::bind(&path).unwrap();
@@ -1316,38 +1380,82 @@ mod tests {
 
             // "a", "ab", "abc" all differ; "abc" then repeats -- the
             // settle wait must poll through the first three (four reads
-            // total) and stop on the fourth, which is the first repeat.
-            let texts = ["a", "ab", "abc", "abc", "abc"];
+            // total) and stop on the fourth, which is the first repeat. A
+            // fifth pane.read arriving means stop-on-repeat failed to
+            // fire, so the closure itself panics rather than covering for
+            // it with a fallback text.
+            let texts = ["a", "ab", "abc", "abc"];
             let mut calls = 0usize;
             let server = tokio::spawn(run_settle_mock_server(listener, move || {
-                let text = texts.get(calls).copied().unwrap_or("abc").to_string();
+                let text = match texts.get(calls) {
+                    Some(text) => *text,
+                    None => panic!(
+                        "wait_for_pane_to_settle must stop polling on the first \
+                         repeated text -- a 5th pane.read arrived after only {} \
+                         scripted reads",
+                        texts.len()
+                    ),
+                };
                 calls += 1;
-                text
+                text.to_string()
             }));
 
+            let started = tokio::time::Instant::now();
             client.send_input("w1:p1", "hello", true).await.unwrap();
-            server.await.unwrap()
+            let elapsed = started.elapsed();
+            let outcome = server.await.unwrap();
+            (elapsed, outcome)
         })
         .await
         .expect("send_input must not hang");
 
-        let reads = outcome
-            .iter()
-            .filter(|r| r["method"] == "pane.read")
-            .count();
+        // Stopping on the first repeated text -- not the max-wait cap --
+        // is what must end this wait; if the cap were doing the work
+        // instead, elapsed would sit near TEST_SETTLE_MAX_WAIT rather than
+        // well under it.
         assert!(
-            reads >= 3,
-            "the settle wait must keep polling while the text keeps changing, even \
-             though revision stays flat at 0 like the real daemon -- only {reads} \
-             pane.read call(s) before settling: {outcome:?}"
+            elapsed < TEST_SETTLE_MAX_WAIT,
+            "the settle wait must stop on the first repeated text, not the cap -- \
+             elapsed {elapsed:?} is not well under the {:?} cap",
+            TEST_SETTLE_MAX_WAIT
+        );
+
+        let reads: Vec<&(Value, tokio::time::Instant)> = outcome
+            .iter()
+            .filter(|(value, _)| value["method"] == "pane.read")
+            .collect();
+        assert_eq!(
+            reads.len(),
+            4,
+            "the settle wait must poll exactly 4 times -- a, ab, abc, then the \
+             repeated abc that ends it -- but saw {} pane.read call(s): {:?}",
+            reads.len(),
+            outcome.iter().map(|(value, _)| value).collect::<Vec<_>>()
+        );
+
+        let text_request = outcome
+            .iter()
+            .find(|(value, _)| {
+                value["method"] == "pane.send_input" && value["params"].get("text").is_some()
+            })
+            .expect("at least the text request");
+        let first_read = reads.first().expect("at least one pane.read");
+        let quiet_before_first_read = first_read.1.saturating_duration_since(text_request.1);
+        assert!(
+            quiet_before_first_read >= TEST_SETTLE_MIN_QUIET,
+            "the first pane.read must not arrive before the min-quiet window has \
+             elapsed since the text write -- only {quiet_before_first_read:?} \
+             elapsed, want at least {:?}",
+            TEST_SETTLE_MIN_QUIET
         );
 
         let last = outcome.last().expect("at least the enter request");
-        assert_eq!(last["method"], "pane.send_input");
+        assert_eq!(last.0["method"], "pane.send_input");
         assert_eq!(
-            last["params"]["keys"],
+            last.0["params"]["keys"],
             json!(["enter"]),
-            "the settle wait must still send the Enter once the text repeats: {outcome:?}"
+            "the settle wait must still send the Enter once the text repeats: {:?}",
+            outcome.iter().map(|(value, _)| value).collect::<Vec<_>>()
         );
     }
 
