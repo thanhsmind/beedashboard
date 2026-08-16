@@ -167,7 +167,8 @@ html[data-scheme="dark"] .topbar .home {
 }
 .agent-drawer__section { padding: var(--space-3) var(--space-1) var(--space-1); color: var(--color-text-subtle); font-family: var(--type-label-font); font-size: var(--type-micro-size); letter-spacing: var(--type-label-tracking); text-transform: var(--type-label-case); }
 .agent-drawer__section:first-child { padding-top: 0; }
-.agent-drawer__item { flex-wrap: wrap; align-items: center; gap: 2px 8px; min-height: 44px; }
+.agent-drawer__item { flex-direction: column; align-items: flex-start; gap: 2px; min-height: 44px; }
+.agent-drawer__head { display: flex; align-items: center; gap: var(--space-2); }
 .agent-drawer__suffix { color: var(--color-text-muted); font-size: var(--type-caption-size); }
 /* ── Pane bar menu ───────────────────────────────────────────────────
    Same shape as the bar menu above, applied to the row over a terminal

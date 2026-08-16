@@ -2158,9 +2158,10 @@
       // outright on the project page (`homepage: false`, unchanged).
       item.href = homepage ? "/?tab=terminals&pane=" + encodeURIComponent(agent.pane_id) : agent.url;
 
-      var name = document.createElement("span");
-      name.textContent = agent.name;
-      item.appendChild(name);
+      // Two-line row: status + pane address on the head line, then the
+      // agent's terminal title (what it is doing) on its own line below.
+      var head = document.createElement("span");
+      head.className = "agent-drawer__head";
 
       var pill = document.createElement("span");
       pill.className = "fg-status" + pillModifier(agent.status);
@@ -2168,24 +2169,30 @@
       dot.className = "fg-status__dot";
       pill.appendChild(dot);
       pill.appendChild(document.createTextNode(agent.status));
-      item.appendChild(pill);
+      head.appendChild(pill);
+
+      var name = document.createElement("span");
+      name.textContent = agent.name;
+      head.appendChild(name);
+
+      // Rows already sit under their project's section heading
+      // (`renderByProject`), so this carries only the pane address.
+      var suffix = document.createElement("span");
+      suffix.className = "agent-drawer__suffix";
+      suffix.textContent = agent.workspace + ":" + agent.tab;
+      head.appendChild(suffix);
+
+      item.appendChild(head);
 
       // drawer-title-1: the agent's own terminal title — what it is doing
       // right now (`AgentPaneRow.title`). Skipped when empty or when it
-      // merely repeats the name, so a titleless agent's row stays two lines.
+      // merely repeats the name, so a titleless agent's row stays one line.
       if (agent.title && agent.title !== agent.name) {
         var title = document.createElement("span");
         title.className = "agent-drawer__suffix";
         title.textContent = agent.title;
         item.appendChild(title);
       }
-
-      // Rows already sit under their project's section heading
-      // (`renderByProject`), so the suffix carries only the pane address.
-      var suffix = document.createElement("span");
-      suffix.className = "agent-drawer__suffix";
-      suffix.textContent = agent.workspace + ":" + agent.tab;
-      item.appendChild(suffix);
 
       return item;
     }
