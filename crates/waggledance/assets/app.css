@@ -142,6 +142,32 @@ html[data-scheme="dark"] .topbar .home {
   align-items: center;
   gap: var(--space-4);
 }
+/* agents-drawer-global: `views.rs::agent_switch_drawer`'s slide-in panel
+   now renders on every page (`layout_with_drawer`), including pages that
+   never included the terminal-only `PROJECT_TAB_STYLE` block these rules
+   used to live inside — moved here so settings, search, file pages and the
+   home Kanban/Projects tabs get them too. The topbar menu's own "Agents"
+   label (`.topbar-menu__panel`, above) is the drawer's sole affordance now
+   — the floating `.agent-drawer__tab` edge pill this drawer used to carry
+   is retired along with its CSS; only the checkbox and the `.fg-drawer`
+   panel markup remain. No z-index change needed: `.fg-drawer`
+   (components.css) already uses `--z-modal`, which outranks both `--z-nav`
+   (this menu) and `--z-popover`. */
+.agent-drawer__check { position: absolute; opacity: 0; pointer-events: none; }
+/* `.fg-drawer` (components.css) is always fixed and full-height; every
+   other caller in the app only ever mounts it while open, so this is the
+   only page that needs to hide it off-screen itself. */
+.agent-drawer .fg-drawer {
+  transform: translateX(100%);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+.agent-drawer__check:checked ~ .fg-drawer {
+  transform: translateX(0);
+}
+.agent-drawer__section { padding: var(--space-3) var(--space-1) var(--space-1); color: var(--color-text-subtle); font-family: var(--type-label-font); font-size: var(--type-micro-size); letter-spacing: var(--type-label-tracking); text-transform: var(--type-label-case); }
+.agent-drawer__section:first-child { padding-top: 0; }
+.agent-drawer__item { flex-direction: column; align-items: flex-start; gap: 2px; min-height: 44px; }
+.agent-drawer__suffix { color: var(--color-text-muted); font-size: var(--type-caption-size); }
 /* ── Pane bar menu ───────────────────────────────────────────────────
    Same shape as the bar menu above, applied to the row over a terminal
    pane: wide, the strip and the creation controls lay out as they always

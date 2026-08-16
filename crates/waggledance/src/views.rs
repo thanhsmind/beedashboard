@@ -59,6 +59,30 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
     )
 }
 
+/// agents-drawer-global: `layout()`'s drawer-appending sibling. Before this,
+/// [`agent_switch_drawer`] only rendered on terminal pages and the homepage
+/// Terminals tab, each splicing it into their own body by hand — the agent
+/// list was unreachable from every other page. This appends the drawer
+/// markup to `body` before delegating to `layout()`, so every production
+/// page (all ~18 [`layout`] callers below, migrated to this one) carries it
+/// and can open it from the topbar menu's own "Agents" entry
+/// ([`topbar_full`]). `homepage` is `true` only for [`home_page`] itself —
+/// across every one of its tabs (Kanban, Projects, Terminals), not just
+/// Terminals — since home-terminal-parity-2's locked drawer-row shape
+/// (`/?tab=terminals&pane=<id>` links, `data-agent-drawer-homepage`) is a
+/// home-page property, not a per-tab one; every other caller passes
+/// `false` and keeps the project-page shape (rows link `agent.url`). Bare
+/// `layout()` is untouched — the low-level escaping tests below call it
+/// directly to exercise the raw contract, not this drawer-appending seam.
+pub fn layout_with_drawer(title: &str, head_extra: &str, body: &str, homepage: bool) -> String {
+    let body_with_drawer = format!(
+        "{body}\n{drawer}",
+        body = body,
+        drawer = agent_switch_drawer(homepage)
+    );
+    layout(title, head_extra, &body_with_drawer)
+}
+
 /// `unassigned_visible` is D5/D4's presence marker, never contents: `true`
 /// exactly when both the D7 `terminal.enabled` switch and, per toa-4/D9,
 /// the group's own `unassigned_enabled` switch are on (checked with no
@@ -260,7 +284,7 @@ pub fn home_page(
         tabs = home_tab_strip(tab),
         section = section,
     );
-    layout(title, "", &body)
+    layout_with_drawer(title, "", &body, true)
 }
 
 /// The project list itself — everything the home page's own Projects tab
@@ -574,7 +598,7 @@ pub fn project_home_page(project: &Project, entry: Option<&str>, bee: bool) -> S
         bee_card = bee_card,
         docs_card = docs_card,
     );
-    layout(&project.name, "", &body)
+    layout_with_drawer(&project.name, "", &body, false)
 }
 
 /// Inline styling for [`project_tabs`] — kept beside the pages that render
@@ -771,53 +795,6 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .term-scroll button:disabled { opacity: 0.4; cursor: not-allowed; }
 .term-transcript { margin-top: var(--space-2); padding: var(--space-2); background: var(--color-surface-sunken); border-radius: var(--radius-sm); font-family: var(--font-mono, monospace); font-size: var(--type-body-sm-size); max-height: 24em; overflow-y: auto; }
 .term-transcript__line { white-space: pre-wrap; word-break: break-word; }
-/* agent-switch-drawer-2: a fixed edge tab reaches the cross-project agent
-   feed (`GET /api/agents`) from any terminal page without first hunting
-   through the pane bar's own menu, which only ever lists this project's
-   own panes. Checkbox-driven the same way `pane_bar`'s own
-   `.pane-menu__toggle` is (`assets/app.css`) — no script owns open/closed,
-   only Escape/outside-click layers on top via the generic `.js-menu`
-   handler in `assets/app.js`, which this markup's own `js-menu` class
-   already opts into. */
-.agent-drawer__check { position: absolute; opacity: 0; pointer-events: none; }
-.agent-drawer__tab {
-  position: fixed;
-  top: 50%;
-  right: 0;
-  z-index: var(--z-nav);
-  transform: translateY(-50%);
-  display: inline-flex;
-  align-items: center;
-  min-height: 44px;
-  padding: var(--space-2) var(--space-3);
-  border: var(--border-width-hairline) solid var(--color-border-strong);
-  border-right: 0;
-  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
-  background: var(--color-surface-raised);
-  color: var(--color-text-muted);
-  font-size: var(--type-body-sm-size);
-  cursor: pointer;
-  box-shadow: var(--elevation-md);
-}
-.agent-drawer__check:checked + .agent-drawer__tab,
-.agent-drawer__check:focus-visible + .agent-drawer__tab {
-  color: var(--color-text);
-  border-color: var(--color-action);
-}
-/* `.fg-drawer` (components.css) is always fixed and full-height; every
-   other caller in the app only ever mounts it while open, so this is the
-   only page that needs to hide it off-screen itself. */
-.agent-drawer .fg-drawer {
-  transform: translateX(100%);
-  transition: transform var(--motion-fast) var(--ease-standard);
-}
-.agent-drawer__check:checked ~ .fg-drawer {
-  transform: translateX(0);
-}
-.agent-drawer__section { padding: var(--space-3) var(--space-1) var(--space-1); color: var(--color-text-subtle); font-family: var(--type-label-font); font-size: var(--type-micro-size); letter-spacing: var(--type-label-tracking); text-transform: var(--type-label-case); }
-.agent-drawer__section:first-child { padding-top: 0; }
-.agent-drawer__item { flex-direction: column; align-items: flex-start; gap: 2px; min-height: 44px; }
-.agent-drawer__suffix { color: var(--color-text-muted); font-size: var(--type-caption-size); }
 </style>"#;
 
 /// D6: the Terminal tab is always present on a project page, whether or not
@@ -1132,17 +1109,20 @@ fn terminals_tab(
         format!("/?tab=terminals&pane={}", pane_id)
     });
 
+    // agents-drawer-global: this used to splice its own
+    // `agent_switch_drawer(true)` in here — now [`home_page`] (the only
+    // caller of this tab) renders the drawer once, through
+    // `layout_with_drawer`, wrapping every home tab alike. A second drawer
+    // here would duplicate `#agent-drawer-toggle`.
     format!(
         r#"{tab_style}
 <main class="fg-page fg-page--tight">
   {bar}
   {body}
-</main>
-{drawer}"#,
+</main>"#,
         tab_style = PROJECT_TAB_STYLE,
         bar = bar,
         body = body,
-        drawer = agent_switch_drawer(true),
     )
 }
 
@@ -1382,28 +1362,30 @@ fn terminal_create_controls(project_id: &str, presets: &[String], plain_shell: b
 }
 
 /// agent-switch-drawer-2: a right-edge slide-in panel that lists every
-/// agent-backed pane across every project (`GET /api/agents`), reachable
-/// from any terminal page without first navigating to that pane's own
-/// project. Terminal pages only — [`terminal_page`] renders both a
-/// project's own pane list and its `/pane/:pane_id` view through this one
-/// function, and both get the drawer; the read-only Transcript tab
-/// ([`transcript_page`]) and the Unassigned page
-/// ([`unassigned_terminal_page`]) do not, since there is no second place to
-/// jump *from* to make the drawer worth the screen space there. Checkbox-
+/// agent-backed pane across every project (`GET /api/agents`). Checkbox-
 /// driven the same way [`pane_bar`]'s own `.pane-menu__toggle` is — no
 /// script owns open/closed, only Escape/outside-click layers on top via
 /// the generic `.js-menu` handler `assets/app.js` already runs. Entirely
 /// static: `assets/app.js` fills `[data-agent-drawer-list]` in from JSON
 /// once the drawer opens, so there is nothing here to escape.
 ///
+/// agents-drawer-global: this used to render only on terminal pages and
+/// the homepage Terminals tab, each with its own floating right-edge
+/// `.agent-drawer__tab` pill as the sole affordance to open it. Now
+/// [`layout_with_drawer`] renders this on every page, and the topbar
+/// menu's own "Agents" entry ([`topbar_full`]) is the single affordance —
+/// the pill (and its CSS) is gone; only the checkbox and the `.fg-drawer`
+/// panel markup remain, and any `<label for="agent-drawer-toggle">`
+/// anywhere on the page (there is now exactly one, in the topbar menu)
+/// still opens it via the ordinary HTML `for` mechanism.
+///
 /// home-terminal-parity-2: `homepage` marks the drawer body with
-/// `data-agent-drawer-homepage` for the homepage Terminals tab's own
-/// instance (`terminals_tab`) — the one data attribute
-/// `assets/app.js`'s drawer block reads to tell the two instances apart,
-/// since their rows behave differently: the project page (`homepage:
-/// false`, unchanged) groups by status and links through `agent.url`;
-/// the homepage instance groups by project name (blocked, then working,
-/// then the rest, within each group) and links each row to
+/// `data-agent-drawer-homepage` for [`home_page`]'s own instance — the one
+/// data attribute `assets/app.js`'s drawer block reads to tell the two
+/// instances apart, since their rows behave differently: the project page
+/// (`homepage: false`, unchanged) groups by status and links through
+/// `agent.url`; the home page instance groups by project name (blocked,
+/// then working, then the rest, within each group) and links each row to
 /// `/?tab=terminals&pane=<pane_id>` built from the agent's own `pane_id`.
 fn agent_switch_drawer(homepage: bool) -> String {
     let homepage_attr = if homepage {
@@ -1414,7 +1396,6 @@ fn agent_switch_drawer(homepage: bool) -> String {
     format!(
         r#"<div class="agent-drawer js-menu">
   <input type="checkbox" id="agent-drawer-toggle" class="agent-drawer__check">
-  <label for="agent-drawer-toggle" class="agent-drawer__tab">Agents</label>
   <div class="fg-drawer">
     <div class="fg-drawer__head"><span class="fg-drawer__title">Agents</span></div>
     <div class="fg-drawer__body" data-agent-drawer-list{homepage_attr}></div>
@@ -1456,14 +1437,17 @@ pub fn terminal_page(
     // `data-project-id` lets `assets/app.js`'s screen poller build each
     // pane's `/p/:id/_terminal/:pane_id/screen` URL without threading the id
     // through every `.term-screen` element individually.
+    // agents-drawer-global: this used to splice its own
+    // `agent_switch_drawer(false)` in here — `layout_with_drawer` below now
+    // renders it once for every page. A second drawer here would duplicate
+    // `#agent-drawer-toggle`.
     let body = format!(
         r#"{topbar}
 {tab_style}
 <main class="fg-page fg-page--tight" data-project-id="{pid}">
   {bar}
   <div class="term-panes">{rows}</div>
-</main>
-{drawer}"#,
+</main>"#,
         topbar = topbar_full(
             "",
             &format!(
@@ -1477,9 +1461,8 @@ pub fn terminal_page(
         pid = esc(&project.id),
         bar = bar,
         rows = rows,
-        drawer = agent_switch_drawer(false),
     );
-    layout(&format!("{} · terminal", project.name), "", &body)
+    layout_with_drawer(&format!("{} · terminal", project.name), "", &body, false)
 }
 
 /// One pane's transcript card (agent-terminal-16, D9): headingless the way
@@ -1556,7 +1539,7 @@ pub fn transcript_page(
         bar = bar,
         rows = rows,
     );
-    layout(&format!("{} · transcript", project.name), "", &body)
+    layout_with_drawer(&format!("{} · transcript", project.name), "", &body, false)
 }
 
 /// `GET /_terminal/unassigned` up state (D5/D4/D6): every herdr pane whose
@@ -1595,7 +1578,7 @@ pub fn unassigned_terminal_page(panes: &[TerminalPaneView]) -> String {
         tab_style = PROJECT_TAB_STYLE,
         rows = rows,
     );
-    layout("Unassigned agents", "", &body)
+    layout_with_drawer("Unassigned agents", "", &body, false)
 }
 
 /// `GET /_terminal/unassigned` down state (D6): herdr's socket did not
@@ -1616,7 +1599,7 @@ pub fn unassigned_terminal_down_page() -> String {
         topbar = topbar("<span class=\"crumb\">Unassigned agents</span>"),
         tab_style = PROJECT_TAB_STYLE,
     );
-    layout("Unassigned agents", "", &body)
+    layout_with_drawer("Unassigned agents", "", &body, false)
 }
 
 /// `GET /p/:id/_terminal` down state (D6): herdr's socket did not answer.
@@ -1646,7 +1629,7 @@ pub fn terminal_down_page(project: &Project) -> String {
         tab_style = PROJECT_TAB_STYLE,
         name = esc(&project.name),
     );
-    layout(&format!("{} · terminal", project.name), "", &body)
+    layout_with_drawer(&format!("{} · terminal", project.name), "", &body, false)
 }
 
 /// The read-only bee cell board (D4/D5). feature-hub D1 replaces the
@@ -1727,7 +1710,7 @@ pub fn bee_board_page(
         finished = bee_finished_section(&project.id, &snapshot.shipped),
         panels = bee_panels_section(snapshot),
     );
-    layout(&format!("{} · bee", project.name), "", &body)
+    layout_with_drawer(&format!("{} · bee", project.name), "", &body, false)
 }
 
 /// D3's anthropic.com-inspired palette plus every `.bee-*` layout rule the
@@ -4615,7 +4598,7 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
         results = results,
         deviations = deviations,
     );
-    layout(&format!("{} · {}", cell.id, project.name), "", &body)
+    layout_with_drawer(&format!("{} · {}", cell.id, project.name), "", &body, false)
 }
 
 /// The read-only feature detail page (D2/D4, feature-hub-2): a header
@@ -4778,7 +4761,7 @@ pub fn bee_feature_page(
         chip_row = chip_row,
         tabs = tabs,
     );
-    layout(&format!("{} · {}", feature, project.name), "", &body)
+    layout_with_drawer(&format!("{} · {}", feature, project.name), "", &body, false)
 }
 
 /// (pbi-detail-1) A proposed backlog item's own detail page — the real
@@ -4843,7 +4826,12 @@ pub fn bee_pbi_page(
         status_chip = status_chip,
         board_href = bee_hub_project_bee_href(&project.id),
     );
-    layout(&format!("{} · {}", pbi.title, project.name), "", &body)
+    layout_with_drawer(
+        &format!("{} · {}", pbi.title, project.name),
+        "",
+        &body,
+        false,
+    )
 }
 
 /// D2's detail header docs row (feature-titles, extended by hub-fallbacks):
@@ -5282,7 +5270,7 @@ pub fn file_page(
         source_json = source_json,
         right = right,
     );
-    layout(&page.title, head_extra, &body)
+    layout_with_drawer(&page.title, head_extra, &body, false)
 }
 
 /// Escape `<` in an already-serialized JSON blob so a literal `</script>` in
@@ -5486,7 +5474,7 @@ pub fn code_page(
         breadcrumb = breadcrumb,
         main = main,
     );
-    layout(active, "", &body_html)
+    layout_with_drawer(active, "", &body_html, false)
 }
 
 /// A directory in the Code section: the same listing rendered both in the
@@ -5557,7 +5545,7 @@ pub fn code_dir_page(project: &Project, listing: &DirListing) -> String {
         breadcrumb = breadcrumb,
         rows = rows,
     );
-    layout(&title, "", &body_html)
+    layout_with_drawer(&title, "", &body_html, false)
 }
 
 /// Sidebar for the Code section: always exactly one directory's contents
@@ -5791,11 +5779,21 @@ fn topbar(center: &str) -> String {
 /// on these pages is "Waggle Dance" by a locked decision (`bee-cockpit.md`),
 /// never the identifier the command line uses.
 ///
-/// The nav slot and the Settings link share one menu. On a wide screen the
-/// stylesheet hides its control and lays the panel out inline, so the bar
-/// reads exactly as it did before this existed. On a narrow one the control
-/// becomes the only visible affordance and the panel drops full-width under
-/// the bar.
+/// The nav slot, the Agents entry and the Settings link share one menu. On
+/// a wide screen the stylesheet hides its control and lays the panel out
+/// inline, so the bar reads exactly as it did before this existed. On a
+/// narrow one the control becomes the only visible affordance and the panel
+/// drops full-width under the bar.
+///
+/// agents-drawer-global: the Agents entry is a plain `<label for=
+/// "agent-drawer-toggle">`, not a link — clicking it checks
+/// [`agent_switch_drawer`]'s own checkbox (that `id`, wherever the drawer's
+/// markup itself sits on the page) and opens the drawer, the same
+/// label-targets-a-foreign-checkbox trick the drawer's own now-removed
+/// floating pill used. `assets/app.js`'s generic `.js-menu` click handler
+/// resolves that cross-menu target so opening the drawer this way also
+/// closes this menu, rather than the drawer's own outside-click check
+/// immediately reclosing what the click just opened.
 ///
 /// The open state is a checkbox rather than a `<details>` — deliberately.
 /// `<details>` looked like the obvious fit, but a *closed* one has its
@@ -5822,6 +5820,7 @@ fn topbar_full(lead: &str, center: &str, actions: &str, nav: &str) -> String {
       <label class="topbar-menu__button" for="topbar-menu-toggle" title="Menu"><span class="menu-label">Menu</span><span aria-hidden="true">☰</span></label>
       <div class="topbar-menu__panel">
         {nav}
+        <label class="nav-link" for="agent-drawer-toggle">Agents</label>
         <a class="nav-link" href="/settings">Settings</a>
       </div>
     </div>
@@ -5873,7 +5872,7 @@ pub fn search_page(project: &Project, query: &str, results: &[SearchResult]) -> 
         q = esc(query),
         items = items,
     );
-    layout(&format!("search: {query}"), "", &body)
+    layout_with_drawer(&format!("search: {query}"), "", &body, false)
 }
 
 /// FTS snippets contain `<mark>…</mark>`. Escape everything, then restore marks.
@@ -6057,7 +6056,7 @@ pub fn settings_page(
         tr_stdio = sel(&cfg.mcp.transport, "stdio"),
         tr_http = sel(&cfg.mcp.transport, "http"),
     );
-    layout("Settings", "", &body)
+    layout_with_drawer("Settings", "", &body, false)
 }
 
 pub fn error_page(status: u16, msg: &str) -> String {
@@ -6068,7 +6067,7 @@ pub fn error_page(status: u16, msg: &str) -> String {
         status = status,
         msg = esc(msg)
     );
-    layout(&status.to_string(), "", &body)
+    layout_with_drawer(&status.to_string(), "", &body, false)
 }
 
 /// stale-index-refresh-2: `error_page`'s sibling for the one 404 that names a
@@ -6108,7 +6107,7 @@ pub fn error_page_with_refresh(
         project_id = esc(project_id),
         redirect = esc(requested_path),
     );
-    layout(&status.to_string(), "", &body)
+    layout_with_drawer(&status.to_string(), "", &body, false)
 }
 
 fn esc(s: &str) -> String {
@@ -6218,6 +6217,42 @@ mod tests {
         assert!(
             body.contains("fg-empty"),
             "the Kanban tab must show its own empty state instead of nothing: {body}"
+        );
+    }
+
+    /// home-terminal-parity-2, extended by agents-drawer-global: every home
+    /// tab (not just Terminals — `layout_with_drawer` wraps the whole page,
+    /// after the tab has already been chosen) carries the drawer marked
+    /// `data-agent-drawer-homepage`, so `assets/app.js` renders its rows
+    /// grouped by project with `/?tab=terminals&pane=<id>` links. Every
+    /// other page — a project page here, `settings_page` covers the
+    /// non-project case in
+    /// `every_page_renders_the_agent_switch_drawer_via_the_topbar_menu` —
+    /// gets the plain project-page drawer instead, with no such marker.
+    #[test]
+    fn only_the_home_page_drawer_carries_the_homepage_marker() {
+        let home_html = home_page(
+            &[],
+            false,
+            &[],
+            None,
+            "",
+            HomeTab::Kanban,
+            &[],
+            None,
+            true,
+            &[],
+        );
+        assert!(
+            home_html.contains("data-agent-drawer-homepage"),
+            "the home page's drawer must carry the homepage marker: {home_html}"
+        );
+
+        let project = sample_project();
+        let project_html = project_home_page(&project, None, false);
+        assert!(
+            !project_html.contains("data-agent-drawer-homepage"),
+            "a project page's drawer must not carry the homepage marker: {project_html}"
         );
     }
 
@@ -6632,11 +6667,15 @@ mod tests {
         );
     }
 
-    /// agent-switch-drawer-2: the terminal page — both a project's own pane
-    /// list and its `/pane/:pane_id` render, which share this one function —
-    /// carries the right-edge agent switcher drawer, and the checkbox that
+    /// agent-switch-drawer-2, moved by agents-drawer-global to the shared
+    /// `layout_with_drawer` seam: the terminal page — both a project's own
+    /// pane list and its `/pane/:pane_id` render, which share this one
+    /// function — carries the agent switcher drawer, and the checkbox that
     /// opens it is the hook `assets/app.js`'s poller and the generic
-    /// `.js-menu` handler both key off.
+    /// `.js-menu` handler both key off. See
+    /// `every_page_renders_the_agent_switch_drawer_via_the_topbar_menu`
+    /// below for the same coverage on a page that has no terminal
+    /// involvement at all.
     #[test]
     fn terminal_page_renders_the_agent_switch_drawer() {
         let project = sample_project();
@@ -6660,6 +6699,34 @@ mod tests {
         assert!(
             pane_html.contains(r#"id="agent-drawer-toggle""#),
             "the per-pane terminal page must render the agent switch drawer too: {pane_html}"
+        );
+    }
+
+    /// agents-drawer-global: `layout_with_drawer` renders the drawer on
+    /// every page, not just the terminal ones — the Settings page has no
+    /// terminal involvement at all, so it is the clean case that proves the
+    /// seam, not just the old terminal-only splice points. It must also
+    /// carry the topbar menu's "Agents" entry, the drawer's only remaining
+    /// affordance now that the floating right-edge pill is retired.
+    #[test]
+    fn every_page_renders_the_agent_switch_drawer_via_the_topbar_menu() {
+        let html = settings_page(
+            &Config::default(),
+            false,
+            false,
+            NotifyCredentialView::NotConfigured,
+        );
+        assert!(
+            html.contains(r#"id="agent-drawer-toggle""#) && html.contains("data-agent-drawer-list"),
+            "a non-terminal page must still render the agent switch drawer: {html}"
+        );
+        assert!(
+            html.contains(r#"<label class="nav-link" for="agent-drawer-toggle">Agents</label>"#),
+            "the topbar menu must carry an Agents entry that opens the drawer: {html}"
+        );
+        assert!(
+            !html.contains("agent-drawer__tab"),
+            "the floating agent-drawer pill is retired; the topbar menu is the only affordance now: {html}"
         );
     }
 
@@ -7176,11 +7243,16 @@ mod tests {
     /// homepage-terminal-full D1: the tab renders the standalone page's own
     /// controls — the `pane_bar` switcher (both its wide strip and its
     /// narrow-screen collapsed menu, since two panes are enough to prove
-    /// both markers render), the selected pane's card with its Older/Newer/
-    /// Live history controls, movement/action keys and reply form, and the
-    /// agent switch drawer.
+    /// both markers render), and the selected pane's card with its Older/
+    /// Newer/Live history controls, movement/action keys and reply form.
+    /// agents-drawer-global: the agent switch drawer used to be this tab's
+    /// own splice, asserted here — [`home_page`] (this tab's only caller)
+    /// now renders it once via `layout_with_drawer`, wrapping every home
+    /// tab alike, so that coverage moved to
+    /// `only_the_home_page_drawer_carries_the_homepage_marker`. A drawer
+    /// here too would duplicate `#agent-drawer-toggle`.
     #[test]
-    fn terminals_tab_renders_the_switcher_pane_card_history_controls_and_drawer() {
+    fn terminals_tab_renders_the_switcher_pane_card_and_history_controls() {
         let panes = vec![
             menu_pane("w1:p1", Some("proj-1"), "Proj One"),
             menu_pane("w1:p2", Some("proj-1"), "Proj One"),
@@ -7216,10 +7288,12 @@ mod tests {
             "the movement keys and reply form must render: {html}"
         );
 
-        // The agent switch drawer.
+        // agents-drawer-global: no drawer here — `home_page` (this tab's
+        // only caller) renders it once, wrapping the whole page. A second
+        // one here would duplicate `#agent-drawer-toggle`.
         assert!(
-            html.contains(r#"id="agent-drawer-toggle""#) && html.contains("data-agent-drawer-list"),
-            "the tab must render the agent switch drawer: {html}"
+            !html.contains(r#"id="agent-drawer-toggle""#),
+            "the tab itself must not splice its own drawer: {html}"
         );
     }
 

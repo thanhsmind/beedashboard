@@ -2044,6 +2044,25 @@
       menus.forEach(function (menu) {
         if (menu.contains(e.target)) inside = menu;
       });
+      // agents-drawer-global: a label can target a checkbox that lives in a
+      // DIFFERENT .js-menu — the topbar menu's own "Agents" entry
+      // (views.rs::topbar_full) is a <label for="agent-drawer-toggle">
+      // sitting inside the topbar menu, but that id belongs to the drawer's
+      // own .agent-drawer menu (views.rs::agent_switch_drawer). Clicking it
+      // checks the drawer's checkbox — opening the drawer — while `inside`
+      // above still reads the topbar menu, since that's where the click
+      // physically landed; closeAll(inside) would then immediately re-close
+      // the drawer it just opened. Resolve label -> checkbox -> that
+      // checkbox's OWN menu, and let it override `inside` when tracked, so
+      // the menu whose checkbox the click actually flipped is the one that
+      // stays open. Every other menu's label targets its own checkbox (same
+      // menu), so this is a no-op there.
+      var label = e.target.closest && e.target.closest("label[for]");
+      if (label) {
+        var targetCheckbox = document.getElementById(label.getAttribute("for"));
+        var targetMenu = targetCheckbox && targetCheckbox.closest(".js-menu");
+        if (targetMenu && menus.indexOf(targetMenu) !== -1) inside = targetMenu;
+      }
       closeAll(inside);
     });
     document.addEventListener("keydown", function (e) {
