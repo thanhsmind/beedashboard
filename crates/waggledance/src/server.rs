@@ -15438,6 +15438,59 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// D6 (review-p1-fixes): `assets/app.js`'s `shouldReload` predicate
+    /// (homepage-terminal-refresh) skips a forced reload whenever the
+    /// current document shows a live `.term-screen` element
+    /// (`document.querySelector(".term-screen")`) — that guard cannot run
+    /// under a node-free Rust test, but its only input is the server-served
+    /// markup, so this proves the boundary the guard actually assumes: the
+    /// Kanban and Projects tabs, which the guard must let reload, never
+    /// carry a `.term-screen`; a Terminals tab with a selected,
+    /// agent-backed pane — the exact live-session case the guard exists to
+    /// protect — always does.
+    #[tokio::test]
+    async fn only_terminals_tab_with_selected_pane_carries_the_term_screen_shouldreload_guards_on() {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("shouldreload-term-screen-guard");
+        enable_terminal(&dir);
+        let root = fresh_root("shouldreload-term-screen-guard-project");
+        write_bee_project_fixture(&root, "feat-a");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let kanban_body = body_string(get(app.clone(), "/?tab=kanban").await).await;
+        assert!(
+            !kanban_body.contains("class=\"term-screen\""),
+            "the Kanban tab must never carry a .term-screen — shouldReload would wrongly block its reload otherwise: {kanban_body}"
+        );
+
+        let projects_body = body_string(get(app.clone(), "/?tab=projects").await).await;
+        assert!(
+            !projects_body.contains("class=\"term-screen\""),
+            "the Projects tab must never carry a .term-screen — shouldReload would wrongly block its reload otherwise: {projects_body}"
+        );
+
+        let terminals_body =
+            body_string(get(app, &format!("/?tab=terminals&pane={}", agent.pane_id)).await).await;
+        assert!(
+            terminals_body.contains("class=\"term-screen\""),
+            "a Terminals tab with a selected agent pane must carry a .term-screen — this is the live session shouldReload must not reload out from under: {terminals_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (kanban-columns D2, edge) On the cross-project board, every
     /// project's feature Todo row must sit above every project's PBI Todo
     /// row within the merged column — a single accumulator appending each
