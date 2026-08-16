@@ -2485,6 +2485,10 @@ struct BeeHubCardData {
     reason: Option<String>,
     docs: Option<waggledance_core::bee::BeeFeatureDocs>,
     run_state: Option<String>,
+    /// Same `is_active` gating as `run_state` (waiting-on-badge decision) —
+    /// see [`bee_hub_run_state_badge`] for how this narrows the
+    /// awaiting-approval badge to a live human wait.
+    waiting_on_live: bool,
     last_tool_call: Option<String>,
     deferred: Vec<BeeDeferredEntry>,
 }
@@ -2627,6 +2631,18 @@ fn bee_classify_features(
             } else {
                 None
             };
+            // waiting-on-badge: the same `is_active` gating as `run_state`
+            // above -- a live waiting_on mark only ever belongs to the
+            // project's single currently-active feature.
+            let waiting_on_live = if is_active {
+                snapshot
+                    .state
+                    .as_ref()
+                    .map(|s| s.waiting_on_live)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
             let last_tool_call = if is_active {
                 snapshot.last_tool_call.clone()
             } else {
@@ -2659,6 +2675,7 @@ fn bee_classify_features(
                 reason,
                 docs,
                 run_state,
+                waiting_on_live,
                 last_tool_call,
                 deferred,
             }));
@@ -2844,6 +2861,7 @@ fn bee_render_hub_section(
                     project_color: None,
                     panes,
                     run_state: data.run_state.as_deref(),
+                    waiting_on_live: data.waiting_on_live,
                     last_tool_call: data.last_tool_call.as_deref(),
                     deferred: &data.deferred,
                 });
@@ -3133,6 +3151,7 @@ pub fn bee_cross_project_features_section(
                         project_color,
                         panes,
                         run_state: data.run_state.as_deref(),
+                        waiting_on_live: data.waiting_on_live,
                         last_tool_call: data.last_tool_call.as_deref(),
                         deferred: &data.deferred,
                     });
@@ -3518,6 +3537,10 @@ struct BeeHubCardArgs<'a> {
     project_color: Option<u8>,
     panes: &'a [TerminalPaneView],
     run_state: Option<&'a str>,
+    /// Same `is_active` gating as `run_state` (waiting-on-badge decision) —
+    /// see [`bee_hub_run_state_badge`] for how this narrows the
+    /// awaiting-approval badge to a live human wait.
+    waiting_on_live: bool,
     last_tool_call: Option<&'a str>,
     deferred: &'a [BeeDeferredEntry],
 }
@@ -3537,6 +3560,7 @@ fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
         project_color,
         panes,
         run_state,
+        waiting_on_live,
         last_tool_call,
         deferred,
     } = *args;
@@ -3641,7 +3665,7 @@ fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
     // (see this function's own doc comment) so the badge stays visible
     // without expanding the card.
     let run_state_html = match run_state {
-        Some(rs) if !rs.is_empty() => bee_hub_run_state_badge(rs),
+        Some(rs) if !rs.is_empty() => bee_hub_run_state_badge(rs, waiting_on_live),
         _ => String::new(),
     };
     // kanban-live-signals D3: in the card's own body, grouped with the
@@ -4034,16 +4058,23 @@ fn bee_hub_is_working_now(last_tool_call: Option<&str>, now: time::OffsetDateTim
 /// kanban-live-signals D2: `run_state`'s colored badge — `.fg-chip`'s
 /// existing five tone modifiers (`crates/waggledance/assets/atelier/components.css`,
 /// "CHIP / BADGE"), never a new palette of this feature's own. Every
-/// recognized state gets a distinct tone; `awaiting-approval` alone gets
-/// `--danger`, the highest-contrast tone the existing chip set carries, per
-/// CONTEXT.md D2's "visually prominent" requirement — every other state
-/// reads calmer. An unrecognized future state (bee writes whatever string
-/// it wants, verbatim — see `BeeState::run_state`) still renders, in the
+/// recognized state gets a distinct tone; every other state reads calmer.
+/// waiting-on-badge (narrowing kanban-live-signals D2): `awaiting-approval`
+/// alone gets `--danger`, the highest-contrast tone the existing chip set
+/// carries, per CONTEXT.md D2's "visually prominent" requirement — but only
+/// while `waiting_on_live` is true, i.e. a human is being waited on right
+/// now. bee derives `awaiting-approval` whenever any gate is pending with
+/// none later approved, and the user-invoked review gate routinely sits
+/// pending with nobody actually waiting, so `awaiting-approval` without a
+/// live mark renders the same neutral "Unreviewed" chip an unrecognized
+/// state would. An unrecognized future state (bee writes whatever string it
+/// wants, verbatim — see `BeeState::run_state`) still renders, in the
 /// neutral tone, with its own raw text rather than being swallowed.
-fn bee_hub_run_state_badge(run_state: &str) -> String {
+fn bee_hub_run_state_badge(run_state: &str, waiting_on_live: bool) -> String {
     let (class, label) = match run_state {
         "shaping" => ("fg-chip--neutral", "Shaping"),
-        "awaiting-approval" => ("fg-chip--danger", "Awaiting approval"),
+        "awaiting-approval" if waiting_on_live => ("fg-chip--danger", "Awaiting approval"),
+        "awaiting-approval" => ("fg-chip--neutral", "Unreviewed"),
         "running" => ("fg-chip--accent", "Running"),
         "blocked" => ("fg-chip--warning", "Blocked"),
         "done" => ("fg-chip--success", "Done"),
@@ -6390,6 +6421,7 @@ mod tests {
             reason: None,
             docs: None,
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: Vec::new(),
         })
@@ -9981,6 +10013,7 @@ mod tests {
             project_color: None,
             panes: &panes,
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10103,6 +10136,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10145,6 +10179,7 @@ mod tests {
             project_color: None,
             panes: &panes,
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10175,6 +10210,7 @@ mod tests {
             project_color: None,
             panes: &panes,
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10211,6 +10247,7 @@ mod tests {
             project_color: None,
             panes: &panes,
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10240,6 +10277,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10277,6 +10315,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10360,6 +10399,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: Some(&recent),
             deferred: &[],
         });
@@ -10390,6 +10430,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: Some(&old),
             deferred: &[],
         });
@@ -10418,6 +10459,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10446,12 +10488,13 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: Some("awaiting-approval"),
+            waiting_on_live: true,
             last_tool_call: None,
             deferred: &[],
         });
         assert!(
             card_html.contains(r#"<span class="fg-chip fg-chip--danger bee-hub__run-state">Awaiting approval</span>"#),
-            "awaiting-approval must render its own prominent danger-toned badge: {card_html}"
+            "awaiting-approval with a live waiting_on mark must render its own prominent danger-toned badge: {card_html}"
         );
         let summary_end = card_html.find("</summary>").expect("summary must close");
         let badge_at = card_html
@@ -10460,6 +10503,42 @@ mod tests {
         assert!(
             badge_at < summary_end,
             "the run_state badge must render inside the collapsed summary: {card_html}"
+        );
+    }
+
+    /// waiting-on-badge: `awaiting-approval` without a live `waiting_on`
+    /// mark reads as the neutral "Unreviewed" chip, never the danger tone —
+    /// this is the routine case (a pending, user-invoked review gate with
+    /// nobody actually waiting), not the exceptional one.
+    #[test]
+    fn bee_hub_card_awaiting_approval_without_live_waiting_on_renders_neutral_unreviewed() {
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: Some("awaiting-approval"),
+            waiting_on_live: false,
+            last_tool_call: None,
+            deferred: &[],
+        });
+        assert!(
+            card_html.contains(
+                r#"<span class="fg-chip fg-chip--neutral bee-hub__run-state">Unreviewed</span>"#
+            ),
+            "awaiting-approval without a live waiting_on mark must render the neutral Unreviewed chip: {card_html}"
+        );
+        assert!(
+            !card_html.contains("fg-chip--danger"),
+            "the danger chip must not render without a live waiting_on mark: {card_html}"
         );
     }
 
@@ -10481,6 +10560,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: Some("running"),
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10509,6 +10589,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10551,6 +10632,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &deferred,
         });
@@ -10586,6 +10668,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10621,7 +10704,7 @@ mod tests {
         write(
             ".bee/state.json",
             &format!(
-                r#"{{"feature": "active-feat", "phase": "swarming", "last_activity": "{now}", "run_state": "awaiting-approval"}}"#
+                r#"{{"feature": "active-feat", "phase": "swarming", "last_activity": "{now}", "run_state": "awaiting-approval", "waiting_on": {{"kind": "gate", "subject": "shape"}}}}"#
             ),
         );
         write(
@@ -10786,6 +10869,7 @@ mod tests {
             project_color: Some(3),
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10832,6 +10916,7 @@ mod tests {
             project_color: Some(3),
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10878,6 +10963,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10922,6 +11008,7 @@ mod tests {
             project_color: None,
             panes: &[],
             run_state: None,
+            waiting_on_live: false,
             last_tool_call: None,
             deferred: &[],
         });
@@ -10967,6 +11054,7 @@ mod tests {
                 project_color: None,
                 panes: &[],
                 run_state: None,
+                waiting_on_live: false,
                 last_tool_call: None,
                 deferred: &[],
             });
