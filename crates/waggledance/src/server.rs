@@ -2360,15 +2360,17 @@ fn herdr_down_response() -> Response {
 /// mirrors the read side's own check in `terminal_screen`: a pane id is only
 /// ever acted on if it is already present in this project's own D2
 /// containment-boundary-filtered pane list, never trusted from the URL
-/// alone. Returns the project on success; a `Response` (project-not-found,
-/// herdr-down, or pane-not-found) on any refusal, so callers `return` it
-/// unchanged via `?` in spirit — used as `match ... { Ok(p) => p, Err(r) =>
-/// return r }` at each call site.
+/// alone. Returns the verified pane's own view on success
+/// (shell-input-newline: `terminal_input` reads its `kind` to know whether
+/// the target is a plain shell; no caller wanted the project value — every
+/// call site was already `if let Err(refusal) = ... { return refusal; }`);
+/// a `Response` (project-not-found, herdr-down, or pane-not-found) on any
+/// refusal, so callers `return` it unchanged.
 async fn project_and_verify_pane_in_boundary(
     st: &AppState,
     id: &str,
     pane_id: &str,
-) -> std::result::Result<waggledance_core::domain::Project, Response> {
+) -> std::result::Result<views::TerminalPaneView, Response> {
     let Ok(Some(project)) = st.engine.get_project(id) else {
         return Err(not_found("project not found"));
     };
@@ -2376,16 +2378,12 @@ async fn project_and_verify_pane_in_boundary(
         Ok(s) => s,
         Err(_) => return Err(herdr_down_response()),
     };
-    let in_project =
-        waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
-            .map(|boundary| project_panes(&snapshot, &boundary))
-            .unwrap_or_default()
-            .iter()
-            .any(|p| p.pane_id == pane_id);
-    if !in_project {
-        return Err(not_found("pane not found"));
-    }
-    Ok(project)
+    waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+        .map(|boundary| project_panes(&snapshot, &boundary))
+        .unwrap_or_default()
+        .into_iter()
+        .find(|p| p.pane_id == pane_id)
+        .ok_or_else(|| not_found("pane not found"))
 }
 
 /// `project_and_verify_pane_in_boundary`'s sibling for routes that need the
@@ -2529,6 +2527,20 @@ struct ReplyBody {
     submit: bool,
 }
 
+/// shell-input-newline: one shell command out of newline-split reply text —
+/// lines trimmed, empties dropped, joined with a single space. Only
+/// `terminal_input` calls this, and only for a shell pane (`kind ==
+/// "shell"`); the Unassigned group never needs it because `unassigned_panes`
+/// builds from `snapshot.agents` alone, so a shell pane can never be a
+/// valid target there.
+fn join_lines_for_shell(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `POST /p/:id/_terminal/:pane_id/input` (D3/D4) — a free-text reply into
 /// a pane. Modeled on herdr-go's `ReplyBody { text, submit }`
 /// (`herdr-go/src/web/screen.rs`): staging text into the pane's composer and
@@ -2547,10 +2559,24 @@ async fn terminal_input(
     if !terminal_family_enabled(&st) {
         return terminal_disabled_json_404();
     }
-    if let Err(refusal) = project_and_verify_pane_in_boundary(&st, &id, &pane_id).await {
-        return refusal;
-    }
-    match st.herdr.send_input(&pane_id, &body.text, body.submit).await {
+    let pane = match project_and_verify_pane_in_boundary(&st, &id, &pane_id).await {
+        Ok(pane) => pane,
+        Err(refusal) => return refusal,
+    };
+    // shell-input-newline: herdr's `pane.send_input` delivers each `\n` as
+    // an Enter, so a shell pane executes every line fragment the moment it
+    // lands — a command wrapped across lines (a mobile paste, a soft-wrap
+    // copy) runs as two broken commands (reproduced: `cp` lost its
+    // destination operand). A shell target gets the text joined back into
+    // one line; an agent pane keeps its text verbatim — multi-line prompts
+    // are legitimate there, and its composer holds newlines instead of
+    // executing them.
+    let text = if pane.kind == "shell" {
+        join_lines_for_shell(&body.text)
+    } else {
+        body.text.clone()
+    };
+    match st.herdr.send_input(&pane_id, &text, body.submit).await {
         Ok(()) => Json(json!({ "ok": true })).into_response(),
         Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
         // Any other herdr failure collapses to the same D6 remedy the
@@ -13814,6 +13840,111 @@ mod bee_route_tests {
         assert!(
             text.ends_with("go ahead\n"),
             "submit=true must send the text then a separate Enter: {text:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// shell-input-newline: reply text carrying embedded newlines aimed at a
+    /// shell pane (no agent behind it) is joined into ONE line before herdr
+    /// sees it — herdr's `pane.send_input` delivers each `\n` as an Enter,
+    /// so unjoined text runs as broken command fragments (reproduced live:
+    /// `cp` lost its destination operand to a mobile line wrap). Pinned via
+    /// `FakeHerdr::send_input`'s verbatim echo: the screen must carry the
+    /// joined line and never a raw mid-command newline.
+    #[tokio::test]
+    async fn terminal_input_joins_newline_split_text_for_a_shell_pane() {
+        let dir = fresh_root("terminal-input-shell-join");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-input-shell-join-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let created = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "shell-join");
+        let app = router(st);
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_input_req(
+                &project.id,
+                &created.pane_id,
+                "cp /very/long/source/file.bin \n/dest/dir/",
+                Some(true),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let screen_resp = app
+            .oneshot(terminal_screen_req(&project.id, &created.pane_id, None))
+            .await
+            .unwrap();
+        let body = body_string(screen_resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let text = json["text"].as_str().unwrap();
+        assert!(
+            text.contains("cp /very/long/source/file.bin /dest/dir/"),
+            "a shell pane's newline-split reply must arrive as one joined line: {text:?}"
+        );
+        assert!(
+            !text.contains("file.bin \n"),
+            "no mid-command newline may reach a shell pane: {text:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// shell-input-newline's other half: an agent pane's reply text keeps
+    /// its newlines verbatim — a multi-line prompt is legitimate there, the
+    /// agent's composer holds newlines instead of executing them, and the
+    /// join must never rewrite it.
+    #[tokio::test]
+    async fn terminal_input_keeps_agent_pane_newlines_verbatim() {
+        let dir = fresh_root("terminal-input-agent-verbatim");
+        enable_terminal(&dir);
+        let root = fresh_root("terminal-input-agent-verbatim-project");
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let started = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "agent-verbatim");
+        let app = router(st);
+
+        let resp = app
+            .clone()
+            .oneshot(terminal_input_req(
+                &project.id,
+                &started.pane_id,
+                "first line\nsecond line",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let screen_resp = app
+            .oneshot(terminal_screen_req(&project.id, &started.pane_id, None))
+            .await
+            .unwrap();
+        let body = body_string(screen_resp).await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let text = json["text"].as_str().unwrap();
+        assert!(
+            text.contains("first line\nsecond line"),
+            "an agent pane's multi-line reply must stay verbatim: {text:?}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
