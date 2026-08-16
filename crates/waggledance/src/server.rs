@@ -5,12 +5,13 @@ use crate::runtime::{self, DaemonInfo};
 use crate::views;
 use anyhow::Result;
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         DefaultBodyLimit, Form, Path, Query, State,
     },
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, Request, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
@@ -513,7 +514,79 @@ fn router(state: AppState) -> Router {
         .route("/p/:id/_code/", get(code_root))
         .route("/p/:id/_code/*path", get(code_dir_or_file))
         .route("/p/:id/*path", get(project_path))
+        // review-p1-fixes D1: one layer wrapping every route above, closing
+        // three findings at once (DNS-rebinding control of the daemon, CSRF
+        // on `update_config`, CSRF on register/unregister/refresh) — a
+        // cross-origin or DNS-rebound page cannot forge a valid loopback
+        // `Host` header no matter which route it targets, so gating here
+        // once is equivalent to gating every handler individually. Applied
+        // as the outermost layer (added last, closest to `with_state`) so
+        // it runs before any handler body, including a POST's own body read.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_loopback_host,
+        ))
         .with_state(state)
+}
+
+/// review-p1-fixes D1: the router-wide `Host` guard. Rejects with HTTP 421
+/// (Misdirected Request) any request whose `Host` header does not name this
+/// daemon -- a loopback address or the operator's own configured display
+/// hostname -- before the request reaches any route handler. A missing
+/// `Host` header is rejected the same way: a real browser always sends one
+/// on HTTP/1.1, so its absence is never a legitimate local client, only a
+/// crafted request trying to dodge the check.
+async fn require_loopback_host(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if !host_is_allowed(req.headers(), &state.engine.config.server.hostname) {
+        return (
+            StatusCode::MISDIRECTED_REQUEST,
+            "misdirected request: unrecognized Host header\n",
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+/// The `Host` allowlist check itself, split out from `require_loopback_host`
+/// so a unit test can drive it directly against a bare `HeaderMap` rather
+/// than a full request/response round trip. Allows `127.0.0.1`, `localhost`,
+/// `::1`/`[::1]` (via `is_loopback_host`, minus any `:port`), and the
+/// operator's configured `server.hostname` when one is set.
+fn host_is_allowed(headers: &HeaderMap, configured_hostname: &Option<String>) -> bool {
+    let Some(host_value) = headers.get(header::HOST) else {
+        return false;
+    };
+    let Ok(host_str) = host_value.to_str() else {
+        return false;
+    };
+    let host = strip_host_port(host_str);
+    if is_loopback_host(host) {
+        return true;
+    }
+    configured_hostname
+        .as_deref()
+        .is_some_and(|configured| configured.eq_ignore_ascii_case(host))
+}
+
+/// Strips a trailing `:port` from a `Host` header value, respecting an
+/// IPv6 literal's own brackets -- `[::1]:7700` becomes `::1`, not a
+/// truncated fragment of the bracket contents -- since `is_loopback_host`
+/// expects the bracket-free form `std::net::IpAddr::parse` accepts.
+fn strip_host_port(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[') {
+        return match rest.find(']') {
+            Some(end) => &rest[..end],
+            None => rest,
+        };
+    }
+    match host.rsplit_once(':') {
+        Some((h, _port)) => h,
+        None => host,
+    }
 }
 
 /// D1/D6: the bound on `index_page`'s one herdr snapshot. `SocketHerdr::call`
@@ -4461,7 +4534,7 @@ mod bee_route_tests {
     }
 
     async fn get(app: Router, uri: &str) -> Response {
-        app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        app.oneshot(Request::builder().header(header::HOST, "127.0.0.1").uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap()
     }
@@ -8765,7 +8838,7 @@ mod bee_route_tests {
         let mut st = build_state();
         st.config_data_dir = Some(dir.clone());
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/config")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -8835,7 +8908,7 @@ mod bee_route_tests {
             let resp = app
                 .clone()
                 .oneshot(
-                    Request::builder()
+                    Request::builder().header(header::HOST, "127.0.0.1")
                         .method("POST")
                         .uri(uri)
                         .body(Body::empty())
@@ -8861,7 +8934,7 @@ mod bee_route_tests {
         let dir = fresh_root("terminal-switches-not-via-api-config");
         let st = build_state_with_dir(&dir);
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/config")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -8907,7 +8980,7 @@ mod bee_route_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                Request::builder().header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -8954,7 +9027,7 @@ mod bee_route_tests {
 
         let _resp = app
             .oneshot(
-                Request::builder()
+                Request::builder().header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
@@ -8993,7 +9066,7 @@ mod bee_route_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                Request::builder().header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -9044,7 +9117,7 @@ mod bee_route_tests {
         let first = app
             .clone()
             .oneshot(
-                Request::builder()
+                Request::builder().header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -9063,7 +9136,7 @@ mod bee_route_tests {
 
         let second = app
             .oneshot(
-                Request::builder()
+                Request::builder().header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -9102,7 +9175,7 @@ mod bee_route_tests {
         assert!(!st.terminal_background.supervisor_running());
         assert!(!st.terminal_background.notify_running());
 
-        let on_req = Request::builder()
+        let on_req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
@@ -9128,7 +9201,7 @@ mod bee_route_tests {
 
         // Leaving both switch fields off this submission (only `enabled` is
         // carried) must stop both live tasks — no restart needed.
-        let off_req = Request::builder()
+        let off_req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
@@ -9242,7 +9315,7 @@ mod bee_route_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                Request::builder().header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -9284,7 +9357,7 @@ mod bee_route_tests {
         let dir = fresh_root("terminal-notify-not-via-api-config");
         let st = build_state_with_dir(&dir);
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/config")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -9323,7 +9396,7 @@ mod bee_route_tests {
         let app = router(st.clone());
 
         let secret = "unique-telegram-secret-98765";
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
@@ -9355,7 +9428,7 @@ mod bee_route_tests {
         let app = router(st.clone());
 
         let secret = "never-shown-in-full-abcd";
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
@@ -9411,7 +9484,7 @@ mod bee_route_tests {
         std::fs::set_permissions(cred_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
         let secret = "should-never-reach-disk-or-response";
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
@@ -9497,7 +9570,7 @@ mod bee_route_tests {
     /// one), the parameter stays only so a future regression could still be
     /// probed by passing `Some`.
     fn terminal_req(id: &str, cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal"))
             .method("GET");
         if let Some(c) = cookie {
@@ -9510,7 +9583,7 @@ mod bee_route_tests {
     /// `/p/{id}/_terminal/pane/{pane_id}` — the pane-scoped sibling of
     /// `terminal_req` above.
     fn terminal_pane_req(id: &str, pane_id: &str, cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/pane/{pane_id}"))
             .method("GET");
         if let Some(c) = cookie {
@@ -9523,7 +9596,7 @@ mod bee_route_tests {
     /// carrying the given session cookie value — the screen sibling of
     /// `terminal_req` above.
     fn terminal_screen_req(id: &str, pane_id: &str, cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/{pane_id}/screen"))
             .method("GET");
         if let Some(c) = cookie {
@@ -9572,7 +9645,7 @@ mod bee_route_tests {
 
         let resp = app
             .oneshot(
-                Request::builder()
+                Request::builder().header(header::HOST, "127.0.0.1")
                     .method("GET")
                     .uri("/api/terminal-config?enabled=on&supervisor_enabled=on&notify_enabled=on")
                     .body(Body::empty())
@@ -10062,7 +10135,7 @@ mod bee_route_tests {
 
         let switch_resp = app
             .oneshot(
-                Request::builder()
+                Request::builder().header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -10712,7 +10785,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let resp = app
-            .oneshot(Request::builder()
+            .oneshot(Request::builder().header(header::HOST, "127.0.0.1")
                 .uri(format!("/p/{}/_terminal/{}/screen?history=2", project.id, started.pane_id))
                 .method("GET")
                 .body(Body::empty())
@@ -10771,7 +10844,7 @@ mod bee_route_tests {
         // First: a history request records this pane at depth 1.
         let history_resp = app
             .clone()
-            .oneshot(Request::builder()
+            .oneshot(Request::builder().header(header::HOST, "127.0.0.1")
                 .uri(format!("/p/{}/_terminal/{}/screen?history=1", project.id, started.pane_id))
                 .method("GET")
                 .body(Body::empty())
@@ -11023,7 +11096,7 @@ mod bee_route_tests {
         // First: a history request records this pane at depth 1.
         let history_resp = app
             .clone()
-            .oneshot(Request::builder()
+            .oneshot(Request::builder().header(header::HOST, "127.0.0.1")
                 .uri(format!("/p/{}/_terminal/{}/screen?history=1", project.id, started.pane_id))
                 .method("GET")
                 .body(Body::empty())
@@ -11034,7 +11107,7 @@ mod bee_route_tests {
 
         // Second: the Live button's own explicit `?history=0`.
         let live_resp = app
-            .oneshot(Request::builder()
+            .oneshot(Request::builder().header(header::HOST, "127.0.0.1")
                 .uri(format!("/p/{}/_terminal/{}/screen?history=0", project.id, started.pane_id))
                 .method("GET")
                 .body(Body::empty())
@@ -11107,7 +11180,7 @@ mod bee_route_tests {
         let app = router(st); // a fresh AppState -- no record for this pane exists
 
         let live_resp = app
-            .oneshot(Request::builder()
+            .oneshot(Request::builder().header(header::HOST, "127.0.0.1")
                 .uri(format!("/p/{}/_terminal/{}/screen?history=0", project.id, started.pane_id))
                 .method("GET")
                 .body(Body::empty())
@@ -11511,7 +11584,7 @@ mod bee_route_tests {
     /// A GET request to `/p/{id}/_transcript`, the Transcript tab's page
     /// route — the transcript sibling of `terminal_req`.
     fn transcript_page_req(id: &str, cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_transcript"))
             .method("GET");
         if let Some(c) = cookie {
@@ -11524,7 +11597,7 @@ mod bee_route_tests {
     /// `/p/{id}/_transcript/pane/{pane_id}` — the pane-scoped sibling of
     /// `transcript_page_req` above.
     fn transcript_pane_req(id: &str, pane_id: &str, cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_transcript/pane/{pane_id}"))
             .method("GET");
         if let Some(c) = cookie {
@@ -11547,7 +11620,7 @@ mod bee_route_tests {
             uri.push_str("?cursor=");
             uri.push_str(&urlencoding_lite(c));
         }
-        let mut b = Request::builder().uri(uri).method("GET");
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1").uri(uri).method("GET");
         if let Some(c) = cookie {
             b = b.header(header::COOKIE, c.to_string());
         }
@@ -12231,7 +12304,7 @@ mod bee_route_tests {
             Some(s) => serde_json::json!({ "text": text, "submit": s }),
             None => serde_json::json!({ "text": text }),
         };
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/{pane_id}/input"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -12251,7 +12324,7 @@ mod bee_route_tests {
         cookie: Option<&str>,
     ) -> Request<Body> {
         let body = serde_json::json!({ "keys": keys });
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/{pane_id}/keys"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -12542,7 +12615,7 @@ mod bee_route_tests {
     /// route's body is raw bytes, not the JSON `terminal_input_req` sends
     /// (plan.md's Approach: one request per file, no `multipart` feature).
     fn attach_req(id: &str, pane_id: &str, content_type: &str, body: Vec<u8>) -> Request<Body> {
-        Request::builder()
+        Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/{pane_id}/attach"))
             .method("POST")
             .header(header::CONTENT_TYPE, content_type)
@@ -14105,7 +14178,7 @@ mod bee_route_tests {
             "sanity: the stray folder must render as a suggestion first: {before_body}"
         );
 
-        let register_req = Request::builder()
+        let register_req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -14174,7 +14247,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let post_register = || {
-            Request::builder()
+            Request::builder().header(header::HOST, "127.0.0.1")
                 .method("POST")
                 .uri("/api/projects/register")
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -14246,7 +14319,7 @@ mod bee_route_tests {
             "suggestion computation must not pre-filter a deny-listed path: {body}"
         );
 
-        let register_req = Request::builder()
+        let register_req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -14324,7 +14397,7 @@ mod bee_route_tests {
     /// A GET request to `/_terminal/unassigned`, optionally carrying the
     /// given session cookie value — the group-wide sibling of `terminal_req`.
     fn unassigned_req(cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder().uri("/_terminal/unassigned").method("GET");
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1").uri("/_terminal/unassigned").method("GET");
         if let Some(c) = cookie {
             b = b.header(header::COOKIE, c.to_string());
         }
@@ -14333,7 +14406,7 @@ mod bee_route_tests {
 
     /// A GET request to `/_terminal/unassigned/{pane_id}/screen`.
     fn unassigned_screen_req(pane_id: &str, cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/_terminal/unassigned/{pane_id}/screen"))
             .method("GET");
         if let Some(c) = cookie {
@@ -14346,7 +14419,7 @@ mod bee_route_tests {
     /// JSON `{ "text": ..., "submit": ... }` body.
     fn unassigned_input_req(pane_id: &str, text: &str, submit: bool, cookie: Option<&str>) -> Request<Body> {
         let body = serde_json::json!({ "text": text, "submit": submit });
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/_terminal/unassigned/{pane_id}/input"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -14360,7 +14433,7 @@ mod bee_route_tests {
     /// JSON `{ "keys": [...] }` body.
     fn unassigned_keys_req(pane_id: &str, keys: &[&str], cookie: Option<&str>) -> Request<Body> {
         let body = serde_json::json!({ "keys": keys });
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/_terminal/unassigned/{pane_id}/keys"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -17263,7 +17336,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let resp = app
-            .oneshot(Request::builder()
+            .oneshot(Request::builder().header(header::HOST, "127.0.0.1")
                 .uri(format!("/_terminal/unassigned/{}/screen?history=2", stray.pane_id))
                 .method("GET")
                 .body(Body::empty())
@@ -18044,7 +18117,7 @@ mod bee_route_tests {
     }
 
     fn create_pane_req(id: &str, cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/create/pane"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -18055,7 +18128,7 @@ mod bee_route_tests {
     }
 
     fn create_agent_req(id: &str, body: &serde_json::Value, cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder()
+        let mut b = Request::builder().header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/create/agent"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -19845,7 +19918,7 @@ mod bee_route_tests {
         let engine = st.engine.clone();
         let app = router(st);
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -19900,7 +19973,7 @@ mod bee_route_tests {
         let engine = st.engine.clone();
         let app = router(st);
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -19939,7 +20012,7 @@ mod bee_route_tests {
         let app = router(st);
 
         for raw in ["", "relative/path", "/tmp/../tmp"] {
-            let req = Request::builder()
+            let req = Request::builder().header(header::HOST, "127.0.0.1")
                 .method("POST")
                 .uri("/api/projects/register")
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -19983,7 +20056,7 @@ mod bee_route_tests {
         let before = engine.list_projects().unwrap().len();
         let app = router(st);
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20017,7 +20090,7 @@ mod bee_route_tests {
         let before = engine.list_projects().unwrap().len();
         let app = router(st);
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20055,7 +20128,7 @@ mod bee_route_tests {
 
         // "/" contains /etc (and every other hard-deny-listed root) — refused
         // regardless of what $HOME happens to be in this environment.
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20071,7 +20144,7 @@ mod bee_route_tests {
         // $HOME contains $HOME/.ssh, $HOME/.aws, etc — refused even though
         // $HOME itself is never named on the deny list.
         if let Some(home) = std::env::var_os("HOME") {
-            let req = Request::builder()
+            let req = Request::builder().header(header::HOST, "127.0.0.1")
                 .method("POST")
                 .uri("/api/projects/register")
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -20116,7 +20189,7 @@ mod bee_route_tests {
         let engine = st.engine.clone();
         let app = router(st);
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20167,7 +20240,7 @@ mod bee_route_tests {
             root.to_string_lossy().into_owned(),
             format!("{}/", root.to_string_lossy()),
         ] {
-            let req = Request::builder()
+            let req = Request::builder().header(header::HOST, "127.0.0.1")
                 .method("POST")
                 .uri("/api/projects/register")
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -20210,7 +20283,7 @@ mod bee_route_tests {
         let before = engine.list_projects().unwrap().len();
         let app = router(st);
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20250,7 +20323,7 @@ mod bee_route_tests {
         let before = engine.list_projects().unwrap().len();
         let app = router(st);
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20287,7 +20360,7 @@ mod bee_route_tests {
 
         let marker = "UNIQUE-MARKER-should-never-render-4f8c";
         let raw = format!("/definitely/not/real/{marker}");
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20324,7 +20397,7 @@ mod bee_route_tests {
         let before = engine.list_projects().unwrap().len();
         let app = router(st);
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("GET")
             .uri("/api/projects/register?path=%2Ftmp")
             .body(Body::empty())
@@ -20527,7 +20600,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let redirect_path = format!("/p/{}/new-page.md", project.id);
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri(format!("/api/projects/{}/refresh", project.id))
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20581,7 +20654,7 @@ mod bee_route_tests {
             "/\\evil.com/",
             "evil.com/",
         ] {
-            let req = Request::builder()
+            let req = Request::builder().header(header::HOST, "127.0.0.1")
                 .method("POST")
                 .uri(format!("/api/projects/{}/refresh", project.id))
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -20626,5 +20699,327 @@ mod bee_route_tests {
             !body.contains("action=\"/api/projects/"),
             "an unknown project's 404 must carry no refresh form at all: {body}"
         );
+    }
+
+    // ── review-p1-fixes D1: router-wide Host guard ─────────────────────
+
+    /// `build_state()` plus a configured `server.hostname` — the D1
+    /// must-have that the allowlist includes the operator's own configured
+    /// display hostname, not just the loopback set. `Arc::get_mut` is safe
+    /// here because `build_state()` hands back a fresh `Arc<Engine>` with
+    /// refcount 1, nothing else holding a clone yet.
+    fn build_state_with_hostname(hostname: &str) -> AppState {
+        let mut st = build_state();
+        Arc::get_mut(&mut st.engine)
+            .expect("a freshly built AppState's Arc<Engine> has refcount 1")
+            .config
+            .server
+            .hostname = Some(hostname.to_string());
+        st
+    }
+
+    /// The allowlist check in isolation, driven directly against a bare
+    /// `HeaderMap`, so `strip_host_port`'s bracket/port handling is pinned
+    /// once here rather than re-proven through a full router round trip
+    /// for every spelling.
+    #[test]
+    fn host_is_allowed_accepts_every_loopback_spelling_with_or_without_a_port() {
+        let none: Option<String> = None;
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:7700",
+            "localhost",
+            "localhost:7700",
+            "[::1]",
+            "[::1]:7700",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, host.parse().unwrap());
+            assert!(
+                host_is_allowed(&headers, &none),
+                "loopback Host {host:?} must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn host_is_allowed_accepts_the_configured_hostname_case_insensitively() {
+        let configured = Some("mymachine.local".to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "MyMachine.Local:7700".parse().unwrap());
+        assert!(
+            host_is_allowed(&headers, &configured),
+            "the configured hostname must be allowed regardless of case"
+        );
+    }
+
+    #[test]
+    fn host_is_allowed_refuses_a_foreign_host_and_a_missing_one() {
+        let none: Option<String> = None;
+
+        let mut foreign = HeaderMap::new();
+        foreign.insert(header::HOST, "evil.tld".parse().unwrap());
+        assert!(
+            !host_is_allowed(&foreign, &none),
+            "a foreign Host must be refused"
+        );
+
+        let missing = HeaderMap::new();
+        assert!(
+            !host_is_allowed(&missing, &none),
+            "a request with no Host header must be refused"
+        );
+    }
+
+    /// D1 must-have 1: a loopback Host — in every spelling the decision
+    /// names — passes an ordinary GET route through unchanged.
+    #[tokio::test]
+    async fn loopback_host_reaches_a_plain_get_route_unchanged() {
+        for host in ["127.0.0.1:7700", "localhost:7700", "[::1]:7700"] {
+            let app = router(build_state());
+            let req = Request::builder()
+                .header(header::HOST, host)
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "loopback Host {host:?} must reach /health unchanged"
+            );
+        }
+    }
+
+    /// D1 must-have 1, on the state-changing route one of the closed CSRF
+    /// findings named: a loopback Host still reaches `update_config` and
+    /// the write it makes still lands.
+    #[tokio::test]
+    async fn loopback_host_reaches_post_api_config_and_writes_it() {
+        let dir = fresh_root("d1-loopback-api-config");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let req = Request::builder()
+            .header(header::HOST, "127.0.0.1:7700")
+            .method("POST")
+            .uri("/api/config")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("port=58312"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_redirection(),
+            "a loopback Host must still reach update_config, got {}",
+            resp.status()
+        );
+
+        let saved = Config::load_from(&dir.join("config.toml"));
+        assert_eq!(saved.server.port, 58312, "the loopback-Host write must land");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D1 must-have 3: the allowlist includes the operator's configured
+    /// display hostname, not just the fixed loopback set.
+    #[tokio::test]
+    async fn configured_hostname_reaches_a_plain_get_route() {
+        let app = router(build_state_with_hostname("mymachine.local"));
+        let req = Request::builder()
+            .header(header::HOST, "mymachine.local:7700")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the configured hostname must be allowed"
+        );
+    }
+
+    /// D1 must-have 2: a foreign Host is refused on an ordinary GET too,
+    /// not just on the state-changing routes below.
+    #[tokio::test]
+    async fn foreign_host_is_refused_with_421_on_a_plain_get() {
+        let app = router(build_state());
+        let req = Request::builder()
+            .header(header::HOST, "evil.tld")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    /// D1 must-have 2, the CSRF-on-`/api/config` finding itself: a foreign
+    /// Host is refused with 421, and — the assertion that actually proves
+    /// the CSRF is closed, per
+    /// `docs/history/learnings/20260805-toothless-security-assertions.md`
+    /// — the config on disk is untouched, not merely the response code.
+    #[tokio::test]
+    async fn foreign_host_to_post_api_config_is_refused_and_leaves_config_unchanged() {
+        let dir = fresh_root("d1-foreign-api-config");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let req = Request::builder()
+            .header(header::HOST, "evil.tld")
+            .method("POST")
+            .uri("/api/config")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("port=58313"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+
+        assert!(
+            !dir.join("config.toml").exists(),
+            "a foreign Host must never reach update_config's write at all"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D1 must-have 2, the CSRF-on-`/api/terminal-config` finding: a
+    /// foreign Host is refused with 421 and every switch stays off.
+    #[tokio::test]
+    async fn foreign_host_to_post_terminal_config_is_refused_and_leaves_switches_unchanged() {
+        let dir = fresh_root("d1-foreign-terminal-config");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let req = Request::builder()
+            .header(header::HOST, "evil.tld")
+            .method("POST")
+            .uri("/api/terminal-config")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "enabled": true,
+                    "supervisor_enabled": true,
+                    "notify_enabled": true,
+                    "unassigned_enabled": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+
+        assert!(
+            !dir.join("config.toml").exists(),
+            "a foreign Host must never reach update_terminal_config's write at all"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D1 must-have 2, the DNS-rebinding/CSRF finding on the register
+    /// route: a foreign Host is refused with 421 and nothing gets
+    /// registered.
+    #[tokio::test]
+    async fn foreign_host_to_register_project_is_refused_and_registers_nothing() {
+        let dir = fresh_root("d1-foreign-register");
+        let scratch = fresh_root("d1-foreign-register-scratch");
+        let root = scratch.join("newproj");
+        std::fs::create_dir_all(&root).unwrap();
+        write(&root, "README.md", "# New Project");
+
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let app = router(st);
+
+        let req = Request::builder()
+            .header(header::HOST, "evil.tld")
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "path={}",
+                urlencoding_lite(&root.to_string_lossy())
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+
+        let projects = engine.list_projects().unwrap();
+        assert!(
+            projects.is_empty(),
+            "a foreign Host must never reach register_project's write: {projects:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D1 must-have 2, the same finding's write-side mirror: a foreign
+    /// Host is refused with 421 and an already-registered project stays
+    /// registered.
+    #[tokio::test]
+    async fn foreign_host_to_unregister_project_is_refused_and_the_project_stays_registered() {
+        let dir = fresh_root("d1-foreign-unregister");
+        let root = fresh_root("d1-foreign-unregister-root");
+        write(&root, "README.md", "# Existing Project");
+
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "existing");
+        let app = router(st.clone());
+
+        let req = Request::builder()
+            .header(header::HOST, "evil.tld")
+            .method("POST")
+            .uri(format!("/api/projects/{}/unregister", project.id))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+
+        let still_there = st.engine.list_projects().unwrap();
+        assert!(
+            still_there.iter().any(|p| p.id == project.id),
+            "a foreign Host must never reach unregister_project's write"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// D1 must-have 2: no `Host` header at all is refused the same way a
+    /// foreign one is, on a plain GET.
+    #[tokio::test]
+    async fn missing_host_header_is_refused_with_421_on_a_plain_get() {
+        let app = router(build_state());
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    /// D1 must-have 2's state-changing mirror: no `Host` header at all
+    /// never reaches `update_config`'s write either.
+    #[tokio::test]
+    async fn missing_host_header_to_post_api_config_is_refused_and_leaves_config_unchanged() {
+        let dir = fresh_root("d1-missing-host-api-config");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("port=58314"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+
+        assert!(
+            !dir.join("config.toml").exists(),
+            "a Host-less request must never reach update_config's write at all"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
