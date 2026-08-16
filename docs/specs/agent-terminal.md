@@ -85,6 +85,13 @@ implementation. Code entry points are listed in `reading-map.md`.
   without naming one shows the session the operator is currently focused on
   when it belongs to this project, and otherwise the first in the strip, so
   the tab always opens on something.
+- **Which panes a page keeps polling and driving:** only the ones it can
+  address. A page polls a pane's screen, and sends its replies and keystrokes,
+  through the pane's own address — its project's, or the Unassigned page's own
+  route for a pane that belongs to no project. A pane a page cannot address
+  that way is left entirely alone by that page: its screen is not polled and no
+  reply reaches it from there, so an open page never spends requests on, nor
+  paints a false "reconnecting" state over, a pane that is not its own to drive.
 - **How the screen renders:** a path to one of the project's own markdown
   docs, wherever it appears in the screen or the transcript, is shown as a
   clickable link to that doc. The monospaced type used for the screen ships
