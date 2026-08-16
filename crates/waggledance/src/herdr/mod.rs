@@ -167,7 +167,18 @@ pub trait Herdr: Send + Sync {
     ) -> Result<ScreenRead>;
 
     /// Send a reply into a pane. `text` is typed in; `submit` then sends Enter
-    /// (handles herdr's send≠submit: text alone does not submit).
+    /// as a second, separate request (handles herdr's send≠submit: text
+    /// alone does not submit). When `text` is non-empty and `submit` is
+    /// true, the Enter is held back until the pane's screen settles (two
+    /// consecutive `Visible` reads report the same revision, or a bounded
+    /// cap elapses) — a slow composer redraw, e.g. an attachment path still
+    /// resolving into an image chip, can otherwise swallow an Enter that
+    /// lands mid-transition, leaving the whole reply sitting unsent in the
+    /// composer (terminal-attach-submit-race). The settle wait never blocks
+    /// the submit itself: on the cap, a read failure, or any error from the
+    /// poll, the Enter is still sent and this still returns `Ok`. Both
+    /// `submit: false` and an empty `text` with `submit: true` skip the
+    /// settle wait entirely — see `SocketHerdr::wait_for_pane_to_settle`.
     async fn send_input(&self, pane_id: &str, text: &str, submit: bool) -> Result<()>;
 
     /// Send raw bytes into a pane via herdr's `pane.send_text` channel — no
