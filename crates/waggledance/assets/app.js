@@ -1999,18 +1999,4 @@
       }, 0);
     });
   })();
-
-  // homepage-terminals-pane-select: the Terminals tab's own pane switcher
-  // is a single `<select>` (`views.rs::terminals_tab`), not a form and not
-  // a button — picking an option navigates straight to that pane's own
-  // address, the same `/?tab=terminals&pane=<id>` URL the old row of
-  // anchors already used.
-  (function () {
-    var select = document.querySelector(".terminals-pane-select");
-    if (!select) return;
-    select.addEventListener("change", function () {
-      if (!select.value) return;
-      window.location.href = "/?tab=terminals&pane=" + encodeURIComponent(select.value);
-    });
-  })();
 })();
