@@ -1679,6 +1679,10 @@ pre.mermaid.zoomable:focus-within .mermaid-controls {
   font-size: var(--type-caption-size);
   max-width: 100%;
 }
+.term-attach__chip--pending {
+  opacity: 0.55;
+  font-style: italic;
+}
 .term-attach__chip-label {
   overflow: hidden;
   text-overflow: ellipsis;

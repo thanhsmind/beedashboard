@@ -1569,13 +1569,25 @@
     // staged for that pane's next send.
     var chips = {};
 
+    // paneId -> running "Image N" counter, reset with clearChips so the
+    // next message's chips start over at Image 1. A failed upload still
+    // consumes its number — labels within one message stay unique even
+    // when a chip is removed or an upload dies mid-flight.
+    var chipSeq = {};
+
     function chipsFor(paneId) {
       if (!chips[paneId]) chips[paneId] = [];
       return chips[paneId];
     }
 
+    function nextChipLabel(paneId) {
+      chipSeq[paneId] = (chipSeq[paneId] || 0) + 1;
+      return "Image " + chipSeq[paneId];
+    }
+
     function clearChips(paneId, chipList) {
       chips[paneId] = [];
+      chipSeq[paneId] = 0;
       if (chipList) chipList.innerHTML = "";
     }
 
@@ -1591,32 +1603,49 @@
       errorEl.textContent = "";
     }
 
-    // One chip: the stored path plus a button that drops it from this
-    // pane's staged list — a removed chip's path never rides a later send
-    // because `composeMessage` only ever reads `chipsFor(paneId)`.
-    function addChip(paneId, chipList, path) {
-      chipsFor(paneId).push({ path: path });
+    // One chip per upload, appended the moment the upload starts so the
+    // user sees progress immediately: a dimmed "Image N (uploading…)"
+    // pending state that `resolve` turns into the staged, removable chip
+    // once the server answers with the stored path, and `reject` removes
+    // again on failure. The visible label stays the short "Image N" —
+    // the full path rides the label's `title` and the staged list, so
+    // `composeMessage` still sends real paths, and a removed chip's path
+    // never rides a later send because `composeMessage` only ever reads
+    // `chipsFor(paneId)`.
+    function addPendingChip(paneId, chipList) {
+      var name = nextChipLabel(paneId);
       var li = document.createElement("li");
-      li.className = "term-attach__chip";
+      li.className = "term-attach__chip term-attach__chip--pending";
       var label = document.createElement("span");
       label.className = "term-attach__chip-label";
-      label.textContent = path;
-      var remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "term-attach__chip-remove";
-      remove.setAttribute("aria-label", "Remove " + path);
-      remove.textContent = "×";
-      remove.addEventListener("click", function () {
-        var list = chipsFor(paneId);
-        var at = list.findIndex(function (c) {
-          return c.path === path;
-        });
-        if (at !== -1) list.splice(at, 1);
-        li.remove();
-      });
+      label.textContent = name + " (uploading…)";
       li.appendChild(label);
-      li.appendChild(remove);
       chipList.appendChild(li);
+      return {
+        resolve: function (path) {
+          chipsFor(paneId).push({ path: path });
+          li.className = "term-attach__chip";
+          label.textContent = name;
+          label.title = path;
+          var remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "term-attach__chip-remove";
+          remove.setAttribute("aria-label", "Remove " + name);
+          remove.textContent = "×";
+          remove.addEventListener("click", function () {
+            var list = chipsFor(paneId);
+            var at = list.findIndex(function (c) {
+              return c.path === path;
+            });
+            if (at !== -1) list.splice(at, 1);
+            li.remove();
+          });
+          li.appendChild(remove);
+        },
+        reject: function () {
+          li.remove();
+        },
+      };
     }
 
     // One raw-body upload per file (D1) — the endpoint this cell wires
@@ -1624,6 +1653,7 @@
     // file's own MIME type.
     function upload(paneId, file, chipList, errorEl, base) {
       clearAttachError(errorEl);
+      var chip = addPendingChip(paneId, chipList);
       return fetch(attachUrl(paneId, base), {
         method: "POST",
         credentials: "same-origin",
@@ -1638,13 +1668,16 @@
             })
             .then(function (body) {
               if (!res.ok) {
+                chip.reject();
                 showAttachError(errorEl, (body && body.error) || "upload failed");
                 return;
               }
-              if (body && body.path) addChip(paneId, chipList, body.path);
+              if (body && body.path) chip.resolve(body.path);
+              else chip.reject();
             });
         })
         .catch(function () {
+          chip.reject();
           showAttachError(errorEl, "upload failed");
         });
     }
