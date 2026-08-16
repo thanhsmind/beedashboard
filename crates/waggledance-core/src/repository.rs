@@ -1,7 +1,7 @@
 //! SQLite adapter: project registry + file index + FTS5 search.
 //! Behind a `Mutex<Connection>` so it is Send+Sync for the async daemon.
 
-use crate::domain::{IndexedFile, Project, SearchResult};
+use crate::domain::{IndexedFile, Project, Run, SearchResult};
 use crate::error::Result;
 use crate::short_link;
 use rusqlite::{params, Connection};
@@ -47,15 +47,16 @@ impl SqliteStore {
     pub fn upsert_project(&self, p: &Project) -> Result<()> {
         let c = self.conn.lock().unwrap();
         c.execute(
-            "INSERT INTO projects(id,name,root_path,created_at,last_seen_at)
-             VALUES(?1,?2,?3,?4,?5)
+            "INSERT INTO projects(id,name,root_path,created_at,last_seen_at,orchestration_enabled)
+             VALUES(?1,?2,?3,?4,?5,?6)
              ON CONFLICT(id) DO UPDATE SET name=?2, root_path=?3, last_seen_at=?5",
             params![
                 p.id,
                 p.name,
                 p.root_path.to_string_lossy(),
                 p.created_at,
-                p.last_seen_at
+                p.last_seen_at,
+                p.orchestration_enabled
             ],
         )?;
         Ok(())
@@ -64,7 +65,7 @@ impl SqliteStore {
     pub fn get_project(&self, id: &str) -> Result<Option<Project>> {
         let c = self.conn.lock().unwrap();
         let mut stmt = c.prepare(
-            "SELECT id,name,root_path,created_at,last_seen_at FROM projects WHERE id=?1",
+            "SELECT id,name,root_path,created_at,last_seen_at,orchestration_enabled FROM projects WHERE id=?1",
         )?;
         let mut rows = stmt.query(params![id])?;
         Ok(rows.next()?.map(row_to_project))
@@ -73,7 +74,7 @@ impl SqliteStore {
     pub fn find_project_by_root(&self, root: &Path) -> Result<Option<Project>> {
         let c = self.conn.lock().unwrap();
         let mut stmt = c.prepare(
-            "SELECT id,name,root_path,created_at,last_seen_at FROM projects WHERE root_path=?1",
+            "SELECT id,name,root_path,created_at,last_seen_at,orchestration_enabled FROM projects WHERE root_path=?1",
         )?;
         let mut rows = stmt.query(params![root.to_string_lossy()])?;
         Ok(rows.next()?.map(row_to_project))
@@ -81,7 +82,7 @@ impl SqliteStore {
 
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let c = self.conn.lock().unwrap();
-        let mut stmt = c.prepare("SELECT id,name,root_path,created_at,last_seen_at FROM projects ORDER BY last_seen_at DESC")?;
+        let mut stmt = c.prepare("SELECT id,name,root_path,created_at,last_seen_at,orchestration_enabled FROM projects ORDER BY last_seen_at DESC")?;
         let rows = stmt.query_map([], |r| Ok(row_to_project(r)))?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -91,8 +92,85 @@ impl SqliteStore {
         c.execute("DELETE FROM files WHERE project_id=?1", params![id])?;
         c.execute("DELETE FROM files_fts WHERE project_id=?1", params![id])?;
         c.execute("DELETE FROM links WHERE project_id=?1", params![id])?;
+        c.execute("DELETE FROM runs WHERE project_id=?1", params![id])?;
         c.execute("DELETE FROM projects WHERE id=?1", params![id])?;
         Ok(())
+    }
+
+    /// D6: flip a project's opt-in flag. Effective only alongside the global
+    /// `terminal.enabled` — the caller (`Engine::orchestration_allowed`)
+    /// combines the two.
+    pub fn set_orchestration_enabled(&self, project_id: &str, enabled: bool) -> Result<()> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "UPDATE projects SET orchestration_enabled=?2 WHERE id=?1",
+            params![project_id, enabled],
+        )?;
+        Ok(())
+    }
+
+    // ---- runs (D7) ----
+
+    pub fn insert_run(&self, r: &Run) -> Result<()> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "INSERT INTO runs(id,project_id,pane_id,preset_label,task,baseline,marker,status,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                r.id,
+                r.project_id,
+                r.pane_id,
+                r.preset_label,
+                r.task,
+                r.baseline,
+                r.marker,
+                r.status,
+                r.created_at,
+                r.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Update a run's status (and its `updated_at` stamp). `baseline`/`marker`
+    /// are optionally replaced too, for a re-send against the same run row.
+    pub fn update_run_status(
+        &self,
+        id: &str,
+        status: &str,
+        updated_at: &str,
+        baseline: Option<&str>,
+        marker: Option<&str>,
+    ) -> Result<()> {
+        let c = self.conn.lock().unwrap();
+        c.execute(
+            "UPDATE runs SET status=?2, updated_at=?3,
+               baseline=COALESCE(?4, baseline),
+               marker=COALESCE(?5, marker)
+             WHERE id=?1",
+            params![id, status, updated_at, baseline, marker],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_run(&self, id: &str) -> Result<Option<Run>> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt = c.prepare(
+            "SELECT id,project_id,pane_id,preset_label,task,baseline,marker,status,created_at,updated_at
+             FROM runs WHERE id=?1",
+        )?;
+        let mut rows = stmt.query(params![id])?;
+        Ok(rows.next()?.map(row_to_run))
+    }
+
+    pub fn list_runs(&self, project_id: &str, limit: usize) -> Result<Vec<Run>> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt = c.prepare(
+            "SELECT id,project_id,pane_id,preset_label,task,baseline,marker,status,created_at,updated_at
+             FROM runs WHERE project_id=?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![project_id, limit as i64], |r| Ok(row_to_run(r)))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
     // ---- files ----
@@ -351,10 +429,13 @@ type MigrationStep = (i64, fn(&Connection) -> Result<()>);
 // this fork deliberately did not take (its own reload rules differ) — so the
 // list stops at step 1 here. The alias comes across because it is what keeps
 // this line readable as more steps land.
-const MIGRATIONS: &[MigrationStep] = &[(1, migration_1_path_hash)];
+const MIGRATIONS: &[MigrationStep] = &[
+    (1, migration_1_path_hash),
+    (2, migration_2_orchestration_enabled),
+];
 
 /// Schema version this build expects — the last entry in [`MIGRATIONS`].
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Bring an existing database up to [`SCHEMA_VERSION`].
 ///
@@ -394,6 +475,20 @@ fn migration_1_path_hash(conn: &Connection) -> Result<()> {
         [],
     )?;
     backfill_path_hash(conn)
+}
+
+/// v2 (D6) — per-project orchestrator-dispatch opt-in. `runs` (D7) is a
+/// brand-new table, so `SCHEMA`'s `CREATE TABLE IF NOT EXISTS` already covers
+/// both fresh and legacy databases without a migration step; only the new
+/// `projects` column needs one, for the same reason `path_hash` did.
+fn migration_2_orchestration_enabled(conn: &Connection) -> Result<()> {
+    if !has_column(conn, "projects", "orchestration_enabled")? {
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN orchestration_enabled INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
@@ -443,7 +538,8 @@ CREATE TABLE IF NOT EXISTS projects (
     name TEXT NOT NULL,
     root_path TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    last_seen_at TEXT NOT NULL
+    last_seen_at TEXT NOT NULL,
+    orchestration_enabled INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS files (
     project_id TEXT NOT NULL,
@@ -469,6 +565,19 @@ CREATE TABLE IF NOT EXISTS links (
     PRIMARY KEY(project_id, source_rel, target_rel)
 );
 CREATE INDEX IF NOT EXISTS idx_links_target ON links(project_id, target_rel);
+CREATE TABLE IF NOT EXISTS runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    pane_id TEXT NOT NULL,
+    preset_label TEXT,
+    task TEXT NOT NULL,
+    baseline TEXT NOT NULL,
+    marker TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, created_at);
 "#;
 
 fn row_to_project(r: &rusqlite::Row) -> Project {
@@ -478,6 +587,22 @@ fn row_to_project(r: &rusqlite::Row) -> Project {
         root_path: PathBuf::from(r.get_unwrap::<_, String>(2)),
         created_at: r.get_unwrap(3),
         last_seen_at: r.get_unwrap(4),
+        orchestration_enabled: r.get_unwrap(5),
+    }
+}
+
+fn row_to_run(r: &rusqlite::Row) -> Run {
+    Run {
+        id: r.get_unwrap(0),
+        project_id: r.get_unwrap(1),
+        pane_id: r.get_unwrap(2),
+        preset_label: r.get_unwrap(3),
+        task: r.get_unwrap(4),
+        baseline: r.get_unwrap(5),
+        marker: r.get_unwrap(6),
+        status: r.get_unwrap(7),
+        created_at: r.get_unwrap(8),
+        updated_at: r.get_unwrap(9),
     }
 }
 
@@ -506,7 +631,7 @@ fn fts_sanitize(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{IndexedFile, Project};
+    use crate::domain::{IndexedFile, Project, Run};
 
     fn sample_project() -> Project {
         Project {
@@ -515,6 +640,22 @@ mod tests {
             root_path: PathBuf::from("/proj"),
             created_at: "2026-07-15T00:00:00Z".into(),
             last_seen_at: "2026-07-15T00:00:00Z".into(),
+            orchestration_enabled: false,
+        }
+    }
+
+    fn sample_run() -> Run {
+        Run {
+            id: "r1".into(),
+            project_id: "p1".into(),
+            pane_id: "pane-1".into(),
+            preset_label: Some("claude".into()),
+            task: "do the thing".into(),
+            baseline: "baseline text".into(),
+            marker: "HERDR_DONE_abc123".into(),
+            status: "pending".into(),
+            created_at: "2026-08-16T00:00:00Z".into(),
+            updated_at: "2026-08-16T00:00:00Z".into(),
         }
     }
 
@@ -789,5 +930,133 @@ mod tests {
             "excerpt should carry far more than the old 12-token window, got {token_count} tokens: {:?}",
             hits[0].excerpt
         );
+    }
+
+    #[test]
+    fn run_roundtrips_through_insert_get_list() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.upsert_project(&sample_project()).unwrap();
+        let run = sample_run();
+        s.insert_run(&run).unwrap();
+
+        let got = s.get_run("r1").unwrap().unwrap();
+        assert_eq!(got.id, run.id);
+        assert_eq!(got.project_id, run.project_id);
+        assert_eq!(got.pane_id, run.pane_id);
+        assert_eq!(got.preset_label, run.preset_label);
+        assert_eq!(got.task, run.task);
+        assert_eq!(got.baseline, run.baseline);
+        assert_eq!(got.marker, run.marker);
+        assert_eq!(got.status, run.status);
+        assert_eq!(got.created_at, run.created_at);
+        assert_eq!(got.updated_at, run.updated_at);
+
+        let listed = s.list_runs("p1", 10).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "r1");
+    }
+
+    #[test]
+    fn list_runs_respects_project_scope_and_limit() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.upsert_project(&sample_project()).unwrap();
+        let mut other = sample_project();
+        other.id = "p2".into();
+        s.upsert_project(&other).unwrap();
+
+        for i in 0..3 {
+            let mut r = sample_run();
+            r.id = format!("r{i}");
+            r.created_at = format!("2026-08-16T00:0{i}:00Z");
+            s.insert_run(&r).unwrap();
+        }
+        let mut other_run = sample_run();
+        other_run.id = "r-other".into();
+        other_run.project_id = "p2".into();
+        s.insert_run(&other_run).unwrap();
+
+        assert_eq!(s.list_runs("p1", 10).unwrap().len(), 3);
+        assert_eq!(s.list_runs("p1", 2).unwrap().len(), 2);
+        assert_eq!(s.list_runs("p2", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn update_run_status_bumps_status_and_timestamp_and_can_replace_baseline_marker() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.upsert_project(&sample_project()).unwrap();
+        s.insert_run(&sample_run()).unwrap();
+
+        s.update_run_status("r1", "working", "2026-08-16T00:05:00Z", None, None)
+            .unwrap();
+        let got = s.get_run("r1").unwrap().unwrap();
+        assert_eq!(got.status, "working");
+        assert_eq!(got.updated_at, "2026-08-16T00:05:00Z");
+        // Not passed — baseline/marker survive untouched.
+        assert_eq!(got.baseline, "baseline text");
+        assert_eq!(got.marker, "HERDR_DONE_abc123");
+
+        s.update_run_status(
+            "r1",
+            "pending",
+            "2026-08-16T00:10:00Z",
+            Some("new baseline"),
+            Some("HERDR_DONE_xyz789"),
+        )
+        .unwrap();
+        let got = s.get_run("r1").unwrap().unwrap();
+        assert_eq!(got.baseline, "new baseline");
+        assert_eq!(got.marker, "HERDR_DONE_xyz789");
+    }
+
+    #[test]
+    fn set_orchestration_enabled_flips_the_flag_on_get_project() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.upsert_project(&sample_project()).unwrap();
+        assert!(!s.get_project("p1").unwrap().unwrap().orchestration_enabled);
+
+        s.set_orchestration_enabled("p1", true).unwrap();
+        assert!(s.get_project("p1").unwrap().unwrap().orchestration_enabled);
+
+        s.set_orchestration_enabled("p1", false).unwrap();
+        assert!(!s.get_project("p1").unwrap().unwrap().orchestration_enabled);
+    }
+
+    /// A database as a pre-D6 build left it: `projects` exists but has no
+    /// `orchestration_enabled` column.
+    fn legacy_projects_conn() -> Connection {
+        let conn = legacy_conn();
+        conn.execute_batch(
+            "CREATE TABLE projects (
+                 id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 root_path TEXT NOT NULL,
+                 created_at TEXT NOT NULL,
+                 last_seen_at TEXT NOT NULL
+             );
+             INSERT INTO projects VALUES('p1','P1','/proj','2026-07-15T00:00:00Z','2026-07-15T00:00:00Z');",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn migration_applies_orchestration_enabled_column_to_a_legacy_database() {
+        let store = SqliteStore::from_conn(legacy_projects_conn()).unwrap();
+        let c = store.conn.lock().unwrap();
+
+        let version: i64 = c
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(has_column(&c, "projects", "orchestration_enabled").unwrap());
+
+        let flag: bool = c
+            .query_row(
+                "SELECT orchestration_enabled FROM projects WHERE id='p1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!flag, "existing rows must default the new column to off");
     }
 }

@@ -6404,6 +6404,7 @@ mod tests {
             root_path: std::path::PathBuf::from("/tmp/proj-1"),
             created_at: "2026-08-05T00:00:00Z".into(),
             last_seen_at: "2026-08-05T00:00:00Z".into(),
+            orchestration_enabled: false,
         }
     }
 
