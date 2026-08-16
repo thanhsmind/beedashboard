@@ -1174,6 +1174,224 @@ mod tests {
         }
     }
 
+    /// A mock `herdr.sock` server for the read-error fall-through test:
+    /// same shape and same terminate-on-submit-Enter loop as
+    /// `run_settle_mock_server`, but answers every `pane.read` with a
+    /// JSON-RPC error envelope instead of a `pane_read` result -- proving
+    /// `wait_for_pane_to_settle`'s `Err(_) => return` (socket.rs:302) bails
+    /// on the FIRST read failure rather than treating it as "not yet
+    /// settled" and polling on.
+    #[cfg(unix)]
+    async fn run_read_error_mock_server(listener: tokio::net::UnixListener) -> Vec<Value> {
+        let mut requests = Vec::new();
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                let n = stream.read(&mut byte).await.unwrap();
+                if n == 0 || byte[0] == b'\n' {
+                    break;
+                }
+                buf.push(byte[0]);
+            }
+            let value: Value = serde_json::from_slice(&buf).unwrap();
+            let is_submit_enter = value["params"]["keys"] == json!(["enter"]);
+            let reply = if value["method"] == "pane.read" {
+                json!({ "id": "gw-0", "error": { "code": "no_such_pane", "message": "gone" } })
+            } else {
+                json!({ "id": "gw-0", "result": {} })
+            };
+            requests.push(value);
+            let mut line = serde_json::to_vec(&reply).unwrap();
+            line.push(b'\n');
+            stream.write_all(&line).await.unwrap();
+            stream.flush().await.unwrap();
+            if is_submit_enter {
+                return requests;
+            }
+        }
+    }
+
+    /// A mock `herdr.sock` server that accepts exactly `count` requests and
+    /// then stops -- unlike `run_settle_mock_server`/
+    /// `run_read_error_mock_server`, which terminate on a submit Enter that
+    /// `submit: false` and empty-text calls never send. Used by the tests
+    /// that must prove NOTHING beyond a fixed, small request count ever
+    /// reaches the socket: if `send_input` issued one request more than
+    /// `count`, that extra `connect` would find nobody accepting and the
+    /// test's own outer timeout would fail it, so a passing test is itself
+    /// proof of the count, not just a filter over what happened to arrive.
+    #[cfg(unix)]
+    async fn run_fixed_count_mock_server(
+        listener: tokio::net::UnixListener,
+        count: usize,
+    ) -> Vec<Value> {
+        let mut requests = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                let n = stream.read(&mut byte).await.unwrap();
+                if n == 0 || byte[0] == b'\n' {
+                    break;
+                }
+                buf.push(byte[0]);
+            }
+            let value: Value = serde_json::from_slice(&buf).unwrap();
+            requests.push(value);
+            let mut line = serde_json::to_vec(&json!({ "id": "gw-0", "result": {} })).unwrap();
+            line.push(b'\n');
+            stream.write_all(&line).await.unwrap();
+            stream.flush().await.unwrap();
+        }
+        requests
+    }
+
+    /// terminal-attach-submit-race: a `pane.read` failure during the
+    /// settle wait (e.g. the pane closed mid-poll) must not become a
+    /// `send_input` failure -- `wait_for_pane_to_settle`'s `Err(_) =>
+    /// return` (socket.rs:302) bails on the first error and lets the
+    /// caller send the Enter anyway, the same "never withhold the submit"
+    /// contract `sendinput_still_sends_enter_when_screen_never_settles`
+    /// proves for a screen that never settles. Pins that the bail-out
+    /// happens on the FIRST error, not after retrying: exactly one
+    /// `pane.read` reaches the socket before the Enter follows.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sendinput_falls_through_to_enter_when_pane_read_errors() {
+        let (result, outcome) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("herdr.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let client = SocketHerdr::with_settle_durations_for_test(
+                path.clone(),
+                TEST_SETTLE_MIN_QUIET,
+                TEST_SETTLE_POLL_INTERVAL,
+                TEST_SETTLE_MAX_WAIT,
+            );
+
+            let server = tokio::spawn(run_read_error_mock_server(listener));
+            let result = client.send_input("w1:p1", "hello", true).await;
+            let requests = server.await.unwrap();
+            (result, requests)
+        })
+        .await
+        .expect("send_input must not hang on a pane.read error");
+
+        assert!(
+            result.is_ok(),
+            "a pane.read error during the settle wait must not fail send_input: {result:?}"
+        );
+
+        let last = outcome.last().expect("at least the enter request");
+        assert_eq!(last["method"], "pane.send_input");
+        assert_eq!(
+            last["params"]["keys"],
+            json!(["enter"]),
+            "the Enter must still reach the socket after the read error: {outcome:?}"
+        );
+
+        let read_count = outcome
+            .iter()
+            .filter(|r| r["method"] == "pane.read")
+            .count();
+        assert_eq!(
+            read_count, 1,
+            "the settle wait must bail on the FIRST read error, not retry: {outcome:?}"
+        );
+    }
+
+    /// terminal-attach-submit-race: `submit: false` writes the text and
+    /// stops there -- no settle wait, no Enter. Proven at the transport
+    /// layer (not just against `FakeHerdr`) that the settle wait, which
+    /// only exists to space the text write from the submit Enter, never
+    /// runs when there is no Enter to space it from.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sendinput_without_submit_issues_only_the_text_request() {
+        let (result, outcome) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("herdr.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let client = SocketHerdr::with_settle_durations_for_test(
+                path.clone(),
+                TEST_SETTLE_MIN_QUIET,
+                TEST_SETTLE_POLL_INTERVAL,
+                TEST_SETTLE_MAX_WAIT,
+            );
+
+            let server = tokio::spawn(run_fixed_count_mock_server(listener, 1));
+            let result = client.send_input("w1:p1", "hello", false).await;
+            let requests = server.await.unwrap();
+            (result, requests)
+        })
+        .await
+        .expect("send_input must not hang");
+
+        assert!(result.is_ok());
+        assert_eq!(
+            outcome.len(),
+            1,
+            "submit=false must issue exactly one socket request: {outcome:?}"
+        );
+        assert_eq!(outcome[0]["method"], "pane.send_input");
+        assert_eq!(outcome[0]["params"]["text"], "hello");
+        assert!(
+            outcome[0]["params"].get("keys").is_none(),
+            "submit=false must never send the enter keypress: {outcome:?}"
+        );
+        assert!(
+            !outcome.iter().any(|r| r["method"] == "pane.read"),
+            "submit=false must never run the settle wait: {outcome:?}"
+        );
+    }
+
+    /// terminal-attach-submit-race: empty text with `submit: true` sends
+    /// only the Enter -- `send_input`'s text branch is skipped entirely for
+    /// empty text (socket.rs:645), so the settle wait it would otherwise
+    /// gate never runs either.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sendinput_with_empty_text_issues_only_the_enter_request() {
+        let (result, outcome) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("herdr.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let client = SocketHerdr::with_settle_durations_for_test(
+                path.clone(),
+                TEST_SETTLE_MIN_QUIET,
+                TEST_SETTLE_POLL_INTERVAL,
+                TEST_SETTLE_MAX_WAIT,
+            );
+
+            let server = tokio::spawn(run_fixed_count_mock_server(listener, 1));
+            let result = client.send_input("w1:p1", "", true).await;
+            let requests = server.await.unwrap();
+            (result, requests)
+        })
+        .await
+        .expect("send_input must not hang");
+
+        assert!(result.is_ok());
+        assert_eq!(
+            outcome.len(),
+            1,
+            "empty text + submit=true must issue exactly one socket request: {outcome:?}"
+        );
+        assert_eq!(outcome[0]["method"], "pane.send_input");
+        assert_eq!(outcome[0]["params"]["keys"], json!(["enter"]));
+        assert!(
+            outcome[0]["params"].get("text").is_none(),
+            "empty text must never be sent as a text write: {outcome:?}"
+        );
+        assert!(
+            !outcome.iter().any(|r| r["method"] == "pane.read"),
+            "empty text must never trigger the settle wait: {outcome:?}"
+        );
+    }
+
     /// agent-terminal-11 / terminal-attach-submit-race: pins the send≠submit
     /// separation at the transport layer, not only against `FakeHerdr`
     /// (which fuses text+submit into one write by appending the newline
@@ -1237,12 +1455,14 @@ mod tests {
             "the last request must carry only the enter keypress, not the text: {last:?}"
         );
 
-        assert!(
-            outcome[1..outcome.len() - 1]
-                .iter()
-                .any(|r| r["method"] == "pane.read"),
-            "at least one pane.read must sit between the text write and the submit Enter, \
-             proving the settle wait ran: {outcome:?}"
+        let read_count = outcome
+            .iter()
+            .filter(|r| r["method"] == "pane.read")
+            .count();
+        assert_eq!(
+            read_count, 2,
+            "constant screen text means the settle wait needs exactly two looks -- \
+             the first stores the baseline text, the second matches it and stops: {outcome:?}"
         );
     }
 
@@ -1432,6 +1652,20 @@ mod tests {
             reads.len(),
             outcome.iter().map(|(value, _)| value).collect::<Vec<_>>()
         );
+
+        // Every between-write poll must ask for exactly the pane and
+        // shape `read_pane` sends for `ReadSource::Visible`
+        // (socket.rs:617) -- the caller's pane_id, "visible", and no
+        // `lines` key (herdr ignores `lines` for `visible`, so sending it
+        // anyway would be a wasted or misleading param).
+        for (value, _) in &reads {
+            assert_eq!(value["params"]["pane_id"], "w1:p1");
+            assert_eq!(value["params"]["source"], "visible");
+            assert!(
+                value["params"].get("lines").is_none(),
+                "a visible-source pane.read must never carry a lines param: {value:?}"
+            );
+        }
 
         let text_request = outcome
             .iter()

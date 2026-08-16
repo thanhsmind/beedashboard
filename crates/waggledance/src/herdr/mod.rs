@@ -170,8 +170,10 @@ pub trait Herdr: Send + Sync {
     /// as a second, separate request (handles herdr's send≠submit: text
     /// alone does not submit). When `text` is non-empty and `submit` is
     /// true, the Enter is held back until the pane's screen settles (two
-    /// consecutive `Visible` reads report the same revision, or a bounded
-    /// cap elapses) — a slow composer redraw, e.g. an attachment path still
+    /// consecutive `Visible` reads report the same screen TEXT, not
+    /// revision — see `SocketHerdr::wait_for_pane_to_settle`'s measurement
+    /// note on why `revision` is a dead field — or a bounded cap elapses) —
+    /// a slow composer redraw, e.g. an attachment path still
     /// resolving into an image chip, can otherwise swallow an Enter that
     /// lands mid-transition, leaving the whole reply sitting unsent in the
     /// composer (terminal-attach-submit-race). The settle wait never blocks
