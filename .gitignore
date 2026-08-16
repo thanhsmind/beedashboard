@@ -51,6 +51,7 @@
 *.bak
 .claude/skills/distill/
 .agents/skills/distill/
+.claude/worktrees/
 
 # Rust
 /target
