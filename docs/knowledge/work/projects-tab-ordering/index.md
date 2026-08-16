@@ -1,6 +1,3 @@
----
-okf_version: 0.1
----
 <!--
 GENERATED FILE — do not hand-edit.
 Rendered by `bee knowledge index` from concept frontmatter inside docs/knowledge/ (okf-foundation D21).
@@ -9,12 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# Knowledge Bundle
+# work/projects-tab-ordering/
 
-## Sections
+## Concepts
 
-- [work/](work/index.md) — 41 concept(s)
-
-## Critical patterns
-
-None.
+- [projects-tab-ordering — delivery](delivery.md) — Projects tab drops its page heading and floats agent-active project groups above idle ones.
