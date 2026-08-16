@@ -17,20 +17,16 @@
 //! `ansi::revision_of` reads as a settled-content proxy for completion.
 //!
 //! Every item here is exercised by this module's own `#[cfg(test)]` suite
-//! (against `FakeHerdr`) but has no production caller yet -- the MCP
-//! `dispatch`/`await` tools (this plan's phase 3, not yet built) are the
-//! actual consumer, per `docs/history/orchestrator-dispatch/plan.md`'s
-//! phase table and this cell's own `verify_owner: main (feature close)`.
-//! Mirrors `pane_scroller.rs`'s own "no consumer yet" precedent
-//! (`herdr/mod.rs`'s doc, cell `terminal-scroll-1`) -- the `dead_code`
-//! allow below is lifted once phase 3 wires these functions in.
-#![allow(dead_code)]
+//! (against `FakeHerdr`); its production caller is `mcp.rs`'s
+//! `waggledance_dispatch`/`waggledance_await` tools (phase 3, per
+//! `docs/history/orchestrator-dispatch/plan.md`'s phase table).
 
 use std::time::Duration;
 
 use waggledance_core::ansi;
 use waggledance_core::domain::Run;
 use waggledance_core::indexer::now_rfc3339;
+use waggledance_core::paths_boundary::Boundary;
 use waggledance_core::Engine;
 
 use crate::herdr::{self, AgentStatus, Herdr, HerdrError, ReadSource};
@@ -189,6 +185,35 @@ fn delta_from_baseline(baseline: &str, current: &str) -> String {
         Some(rest) => rest.to_string(),
         None => current.to_string(),
     }
+}
+
+/// Resolve the herdr workspace/cwd destination for spawning a fresh agent
+/// pane (D3's preset-spawn path): the first workspace in `snapshot` whose D2
+/// anchor (`Snapshot::anchor_cwd_for_workspace`) validates against
+/// `boundary`. Mirrors `server.rs`'s `project_creation_destination` exactly
+/// (same containment rule, same "first workspace that validates" scan) —
+/// that function is private and `AppState`-typed, so the MCP dispatch path
+/// (which has neither) gets its own copy here rather than a shared one.
+/// `None` when no workspace qualifies: the caller refuses with a named
+/// "destination unresolved" error rather than ever falling back to another
+/// directory, and in particular never reaches [`Herdr::agent_start`]'s own
+/// documented `cwd: None` fallback (herdr's own process directory) — every
+/// caller of this function passes the resolved `cwd` as `Some`, never
+/// `None`.
+pub fn resolve_spawn_destination(
+    snapshot: &herdr::Snapshot,
+    boundary: &Boundary,
+) -> Option<(String, String)> {
+    snapshot.workspaces.iter().find_map(|w| {
+        let anchor = snapshot.anchor_cwd_for_workspace(&w.workspace_id)?;
+        let resolved = boundary
+            .validate_existing(std::path::Path::new(&anchor))
+            .ok()?;
+        Some((
+            w.workspace_id.clone(),
+            resolved.to_string_lossy().into_owned(),
+        ))
+    })
 }
 
 /// Clamp a caller-requested await timeout to [`MAX_AWAIT_TIMEOUT`] (D4) — a
@@ -580,5 +605,92 @@ mod tests {
             Duration::from_secs(30),
             "a request under the cap passes through unchanged"
         );
+    }
+
+    fn workspace_with_anchor(
+        workspace_id: &str,
+        cwd: &std::path::Path,
+    ) -> (
+        herdr::wire::Workspace,
+        herdr::wire::PaneLayout,
+        herdr::wire::Pane,
+    ) {
+        let tab_id = format!("{workspace_id}-tab");
+        let pane_id = format!("{workspace_id}-pane");
+        (
+            herdr::wire::Workspace {
+                workspace_id: workspace_id.to_string(),
+                label: workspace_id.to_string(),
+                agent_status: AgentStatus::Idle,
+                active_tab_id: Some(tab_id.clone()),
+            },
+            herdr::wire::PaneLayout {
+                workspace_id: workspace_id.to_string(),
+                tab_id: tab_id.clone(),
+                focused_pane_id: Some(pane_id.clone()),
+            },
+            herdr::wire::Pane {
+                pane_id,
+                workspace_id: workspace_id.to_string(),
+                tab_id,
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                foreground_cwd: None,
+            },
+        )
+    }
+
+    #[test]
+    fn resolve_spawn_destination_picks_the_first_workspace_whose_anchor_is_contained() {
+        let pid = std::process::id();
+        let root =
+            std::env::temp_dir().join(format!("waggledance-orchestrate-destination-in-{pid}"));
+        let elsewhere =
+            std::env::temp_dir().join(format!("waggledance-orchestrate-destination-out-{pid}"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let boundary = Boundary::new(vec![root.clone()]).unwrap();
+
+        let (w_out, l_out, p_out) = workspace_with_anchor("w-outside", &elsewhere);
+        let (w_in, l_in, p_in) = workspace_with_anchor("w-inside", &root);
+        let snapshot = herdr::Snapshot {
+            workspaces: vec![w_out, w_in],
+            layouts: vec![l_out, l_in],
+            panes: vec![p_out, p_in],
+            ..Default::default()
+        };
+
+        let (workspace_id, cwd) = resolve_spawn_destination(&snapshot, &boundary)
+            .expect("the inside workspace's anchor must resolve");
+        assert_eq!(workspace_id, "w-inside");
+        assert_eq!(cwd, root.canonicalize().unwrap().to_string_lossy());
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    #[test]
+    fn resolve_spawn_destination_is_none_when_no_workspace_anchor_resolves() {
+        let pid = std::process::id();
+        let root =
+            std::env::temp_dir().join(format!("waggledance-orchestrate-destination-none-{pid}"));
+        let elsewhere = std::env::temp_dir().join(format!(
+            "waggledance-orchestrate-destination-none-out-{pid}"
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let boundary = Boundary::new(vec![root.clone()]).unwrap();
+
+        let (w_out, l_out, p_out) = workspace_with_anchor("w-only-outside", &elsewhere);
+        let snapshot = herdr::Snapshot {
+            workspaces: vec![w_out],
+            layouts: vec![l_out],
+            panes: vec![p_out],
+            ..Default::default()
+        };
+
+        assert!(resolve_spawn_destination(&snapshot, &boundary).is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
     }
 }
