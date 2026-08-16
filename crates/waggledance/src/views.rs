@@ -118,21 +118,6 @@ pub struct ProjectSuggestion {
     pub pane_count: usize,
 }
 
-pub fn project_list_page(
-    projects: &[(Project, usize, Vec<TerminalPaneView>)],
-    unassigned_visible: bool,
-    suggestions: &[ProjectSuggestion],
-    register_error: Option<&str>,
-) -> String {
-    let body = format!(
-        r#"{topbar}
-{main}"#,
-        topbar = topbar(""),
-        main = project_list_main(projects, unassigned_visible, suggestions, register_error),
-    );
-    layout("Projects", "", &body)
-}
-
 /// homepage-tabs: which of the home page's two sections `/` renders.
 /// `Default` is `Kanban` so that an absent, empty, unknown, or otherwise
 /// unparseable `tab` query value (`server.rs`'s `RegisterFlag` visitor)
@@ -184,14 +169,13 @@ fn home_tab_strip(selected: HomeTab) -> String {
 /// ([`bee_cross_project_features_section`]) is still the caller's own
 /// decision of what to show (`server.rs::index_page` applies D8's
 /// qualification and D9's empty rule before calling this); empty is treated
-/// as "nothing qualified" and this function returns exactly
-/// [`project_list_page`]'s own output, not a byte different, WITH NO TAB
-/// STRIP AT ALL -- D9's "the page is what it is today" holds for the whole
-/// page, including the strip, not only the section markup. A registration
-/// error forces the Projects tab regardless of `tab`: the banner
-/// [`project_list_main`] renders lives only there, and a user who just
-/// submitted the add-project form must see why it failed rather than land
-/// back on Kanban.
+/// as "nothing qualified" and the Kanban tab renders its own `fg-empty`
+/// state instead of `cross_features_html` (backlog-groom-2 D1) -- the tab
+/// strip, and the Terminals tab riding on it, always render regardless of
+/// whether any project carries a bee board. A registration error forces the
+/// Projects tab regardless of `tab`: the banner [`project_list_main`]
+/// renders lives only there, and a user who just submitted the add-project
+/// form must see why it failed rather than land back on Kanban.
 ///
 /// `bee_hub_style()` / `.bee-hub-theme` are scoped to Kanban only: every
 /// rule the style block declares is itself scoped under the
@@ -225,9 +209,6 @@ pub fn home_page(
     // same "New shell"/preset buttons the project terminal page offers.
     terminals_presets: &[String],
 ) -> String {
-    if cross_features_html.is_empty() {
-        return project_list_page(projects, unassigned_visible, suggestions, register_error);
-    }
     let tab = if register_error.is_some() {
         HomeTab::Projects
     } else {
@@ -242,7 +223,19 @@ pub fn home_page(
   {features}
 </main>"#,
                 style = bee_hub_style(),
-                features = cross_features_html,
+                // D1 (backlog-groom-2): an empty `cross_features_html`
+                // (D9 — no registered project carries a `.bee` board) used
+                // to make the whole page early-return the tabless plain
+                // project list, which dropped the tab strip and hid the
+                // Terminals tab along with it. The Kanban tab now renders
+                // its own honest empty state instead, so the strip — and
+                // Terminals — stay reachable no matter what the Kanban
+                // section has to show.
+                features = if cross_features_html.is_empty() {
+                    r#"<p class="fg-empty">No project here has a bee board yet.</p>"#.to_string()
+                } else {
+                    cross_features_html.to_string()
+                },
             ),
         ),
         HomeTab::Projects => (
@@ -270,8 +263,8 @@ pub fn home_page(
     layout(title, "", &body)
 }
 
-/// The project list itself — everything [`project_list_page`] used to build
-/// inline, factored out so [`home_page`] can render it unchanged beneath the
+/// The project list itself — everything the home page's own Projects tab
+/// needs, factored out so [`home_page`] can render it unchanged beneath the
 /// cross-project sections (cross-board D1) without duplicating a single line
 /// of this logic. Returns just the `<main>` element; topbar and `layout`
 /// wrapping stay each caller's own job.
@@ -1337,72 +1330,6 @@ fn pane_controls(pane_id: &str, name: &str, attach: bool, base: Option<&str>) ->
     )
 }
 
-/// Inline wiring for [`terminal_create_controls`]'s "New shell"/preset
-/// buttons — POSTs to `create/pane` or `create/agent` and reloads the page
-/// on success so the freshly created pane joins `assets/app.js`'s own
-/// poller on the next render.
-///
-/// agent-terminal-13: not folded into `assets/app.js` — that file is not
-/// among this cell's declared files (`crates/waggledance/src/server.rs`,
-/// `crates/waggledance/src/views.rs`, `crates/waggledance-core/src/config.rs`), so the
-/// creation controls' own click wiring lives here instead, the same
-/// deliberate duplication `UNASSIGNED_TERMINAL_SCRIPT` already documents for
-/// the same reason ("a later cell to fold both into one shared script once
-/// `assets/app.js` is in scope").
-const TERMINAL_CREATE_SCRIPT: &str = r#"<script>
-(function () {
-  function postJson(url, body) {
-    return fetch(url, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  }
-  function afterCreate(promise, failMsg) {
-    promise
-      .then(function (res) {
-        if (res.ok) {
-          location.reload();
-          return;
-        }
-        return res.json().then(function (b) {
-          alert((b && b.error) || failMsg);
-        });
-      })
-      .catch(function () {
-        alert(failMsg);
-      });
-  }
-  Array.prototype.slice
-    .call(document.querySelectorAll(".term-create[data-project-id]"))
-    .forEach(function (box) {
-      var pid = box.getAttribute("data-project-id");
-      var paneBtn = box.querySelector(".term-create__pane");
-      if (paneBtn) {
-        paneBtn.addEventListener("click", function () {
-          afterCreate(
-            postJson("/p/" + encodeURIComponent(pid) + "/_terminal/create/pane", {}),
-            "could not start a shell"
-          );
-        });
-      }
-      Array.prototype.slice
-        .call(box.querySelectorAll(".term-create__agent[data-preset]"))
-        .forEach(function (btn) {
-          btn.addEventListener("click", function () {
-            afterCreate(
-              postJson("/p/" + encodeURIComponent(pid) + "/_terminal/create/agent", {
-                preset: btn.getAttribute("data-preset"),
-              }),
-              "could not start an agent"
-            );
-          });
-        });
-    });
-})();
-</script>"#;
-
 /// D8's creation controls (agent-terminal-13): a "New shell" button is
 /// always offered — plain-shell creation needs no preset — plus one button
 /// per operator-configured preset **label**, never argv (P4): the argv
@@ -1447,12 +1374,10 @@ fn terminal_create_controls(project_id: &str, presets: &[String], plain_shell: b
     format!(
         r#"<div class="term-create" data-project-id="{pid}">
   {pane_button}{preset_buttons}
-</div>
-{script}"#,
+</div>"#,
         pid = esc(project_id),
         pane_button = pane_button,
         preset_buttons = preset_buttons,
-        script = TERMINAL_CREATE_SCRIPT,
     )
 }
 
@@ -1634,156 +1559,23 @@ pub fn transcript_page(
     layout(&format!("{} · transcript", project.name), "", &body)
 }
 
-/// Inline poller/reply/keys wiring for [`unassigned_terminal_page`], scoped
-/// to `.unassigned-panes` so it never touches a project page's own panes.
-/// `assets/app.js`'s existing terminal script is not reused here — it
-/// resolves every URL from a `data-project-id` attribute
-/// (`/p/:id/_terminal/...`), and this group belongs to no project id; that
-/// file is also not among this cell's declared files. This duplicates its
-/// shape deliberately rather than inventing a different wiring convention —
-/// flagged here for a later cell to fold both into one shared script once
-/// `assets/app.js` is in scope.
-const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
-(function () {
-  var POLL_MS = 1500;
-  var HERDR_DOWN_TEXT = "herdr is not running";
-  var lastRevision = {};
-
-  function screenUrl(paneId) {
-    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/screen";
-  }
-  function inputUrl(paneId) {
-    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/input";
-  }
-  function keysUrl(paneId) {
-    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/keys";
-  }
-
-  function pollOne(el) {
-    var paneId = el.getAttribute("data-pane-id");
-    fetch(screenUrl(paneId), { credentials: "same-origin" })
-      .then(function (res) {
-        // A 502 is the one status `herdr_down_response()` (server.rs) ever
-        // sends, and only when herdr itself is unreachable — but the body
-        // still has to say so, because a tunnel or proxy in front of this
-        // page can hand back its own unrelated 502 HTML on a blip. Every
-        // other failure (a thrown fetch below, any other status, a 502
-        // whose body isn't that exact JSON) is treated as transient: the
-        // pane keeps its last good screen and just gets marked stale, never
-        // overwritten with wording that says the agent is gone.
-        if (res.status === 502) {
-          return res.json().then(function (body) {
-            if (body && body.error === HERDR_DOWN_TEXT) {
-              el.textContent = HERDR_DOWN_TEXT;
-              el.classList.remove("term-screen--stale");
-              // The next successful poll must always repaint, even if its
-              // revision happens to match whatever was last drawn before
-              // the outage — otherwise this banner never clears.
-              delete lastRevision[paneId];
-              return null;
-            }
-            el.classList.add("term-screen--stale");
-            return null;
-          });
-        }
-        if (!res.ok) { el.classList.add("term-screen--stale"); return null; }
-        return res.json();
-      })
-      .then(function (body) {
-        if (!body) return;
-        el.classList.remove("term-screen--stale");
-        if (lastRevision[paneId] === body.revision) return;
-        lastRevision[paneId] = body.revision;
-        // `body.text` is safe, pre-escaped HTML from waggledance-core's ansi
-        // translator (agent-terminal-12) — never the raw pane text — so
-        // `innerHTML` here renders ANSI colour/attribute markup rather than
-        // showing literal escape characters.
-        el.innerHTML = body.text;
-      })
-      .catch(function () {
-        // Thrown fetch (network blip, phone waking from sleep) or an
-        // unparseable 502 body — none of these confirm herdr is actually
-        // down, so the pane keeps whatever it last showed.
-        el.classList.add("term-screen--stale");
-      });
-  }
-
-  function pollAll() {
-    Array.prototype.slice
-      .call(document.querySelectorAll(".unassigned-panes .term-screen[data-pane-id]"))
-      .forEach(pollOne);
-  }
-  pollAll();
-  setInterval(pollAll, POLL_MS);
-
-  function postJson(url, body) {
-    return fetch(url, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  }
-
-  function sendReply(paneId, text, submit, input) {
-    if (!text) return;
-    postJson(inputUrl(paneId), { text: text, submit: submit })
-      .then(function (res) { if (res.ok && input) input.value = ""; })
-      .catch(function () {});
-  }
-
-  Array.prototype.slice
-    .call(document.querySelectorAll(".unassigned-panes .term-reply[data-pane-id]"))
-    .forEach(function (form) {
-      var paneId = form.getAttribute("data-pane-id");
-      var input = form.querySelector(".term-reply__text");
-      var stageBtn = form.querySelector(".term-reply__stage");
-      var approveBtn = form.querySelector(".term-reply__approve");
-      form.addEventListener("submit", function (ev) {
-        ev.preventDefault();
-        sendReply(paneId, input.value, true, input);
-      });
-      if (input) {
-        input.addEventListener("keydown", function (ev) {
-          if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
-            ev.preventDefault();
-            sendReply(paneId, input.value, true, input);
-          }
-        });
-      }
-      if (stageBtn) {
-        stageBtn.addEventListener("click", function () {
-          sendReply(paneId, input.value, false, input);
-        });
-      }
-      if (approveBtn) {
-        approveBtn.addEventListener("click", function () {
-          postJson(inputUrl(paneId), { text: "Approve", submit: true }).catch(function () {});
-        });
-      }
-    });
-
-  Array.prototype.slice
-    .call(document.querySelectorAll(".unassigned-panes .term-keys[data-pane-id]"))
-    .forEach(function (group) {
-      var paneId = group.getAttribute("data-pane-id");
-      Array.prototype.slice.call(group.querySelectorAll("button[data-key]")).forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          var key = btn.getAttribute("data-key");
-          if (!key) return;
-          postJson(keysUrl(paneId), { keys: [key] }).catch(function () {});
-        });
-      });
-    });
-})();
-</script>"#;
-
 /// `GET /_terminal/unassigned` up state (D5/D4/D6): every herdr pane whose
 /// cwd sits under no registered project root, gated identically to
 /// [`terminal_page`] (session, D7 switch, method) — this view renders only
 /// what the route already decided to hand it, so it carries no gate logic
 /// of its own. Zero panes renders a named empty state distinct from both
 /// [`terminal_page`]'s own empty wording and [`unassigned_terminal_down_page`].
+///
+/// backlog-groom-2-4: the poller/reply/keys wiring for this page used to be
+/// its own inline `<script>` const here (`UNASSIGNED_TERMINAL_SCRIPT`),
+/// duplicating `assets/app.js`'s shape by hand. It now lives in `app.js`
+/// itself, scoped to `.unassigned-panes` exactly as before, and reads its
+/// route prefix from this `<main>`'s own `data-unassigned-base` rather than
+/// a hardcoded string — the one data attribute this page needed to carry to
+/// fold cleanly. `assets/app.js`'s *other* terminal poller/posters (the
+/// `data-project-id`/`data-term-base` ones) still skip this page entirely
+/// (`unassigned-poller-guard` D1, `hasTarget`) — this is a second, separate
+/// wiring, not a merge into that one.
 pub fn unassigned_terminal_page(panes: &[TerminalPaneView]) -> String {
     let rows = pane_cards(
         panes,
@@ -1794,16 +1586,14 @@ pub fn unassigned_terminal_page(panes: &[TerminalPaneView]) -> String {
     let body = format!(
         r#"{topbar}
 {tab_style}
-<main class="fg-page">
+<main class="fg-page" data-unassigned-base="/_terminal/unassigned">
   <h2 class="fg-pagehead__title">Unassigned agents</h2>
   <p class="term-pane__meta">Agents running outside every registered project. Registering a project here never happens automatically (D5) — <a href="/">register it from the project list</a> if you want it to have its own Terminal tab.</p>
   <div class="term-panes unassigned-panes">{rows}</div>
-</main>
-{script}"#,
+</main>"#,
         topbar = topbar("<span class=\"crumb\">Unassigned agents</span>"),
         tab_style = PROJECT_TAB_STYLE,
         rows = rows,
-        script = UNASSIGNED_TERMINAL_SCRIPT,
     );
     layout("Unassigned agents", "", &body)
 }
@@ -3036,23 +2826,23 @@ fn bee_render_hub_section(
                     data.last_activity.as_deref(),
                     panes,
                 );
-                let html = bee_hub_card(
-                    &project.id,
-                    &data.feature,
-                    "in-progress",
-                    data.done,
-                    data.total,
-                    data.last_activity.as_deref(),
-                    &data.worktree_label,
-                    data.reason.as_deref(),
-                    data.docs.as_ref(),
-                    None,
-                    None,
+                let html = bee_hub_card(&BeeHubCardArgs {
+                    project_id: &project.id,
+                    feature: &data.feature,
+                    group_key: "in-progress",
+                    done: data.done,
+                    total: data.total,
+                    last_activity: data.last_activity.as_deref(),
+                    worktree_label: &data.worktree_label,
+                    reason: data.reason.as_deref(),
+                    docs: data.docs.as_ref(),
+                    project_label: None,
+                    project_color: None,
                     panes,
-                    data.run_state.as_deref(),
-                    data.last_tool_call.as_deref(),
-                    &data.deferred,
-                );
+                    run_state: data.run_state.as_deref(),
+                    last_tool_call: data.last_tool_call.as_deref(),
+                    deferred: &data.deferred,
+                });
                 in_progress_entries.push((key, html));
             }
             BeeHubPlacement::Finished(data) => {
@@ -3227,6 +3017,30 @@ fn bee_render_hub_section(
 /// found would interleave one project's PBIs above another project's
 /// features and break D2's features-before-PBIs order for the merged
 /// column, not just within one project.
+/// D3 (backlog-groom-2): the one concise warning strip a corrupt `.bee`
+/// file earns on the cross-project board header — reusing the existing
+/// `fg-banner fg-banner--warning` styling ([`assets/atelier/components.css`])
+/// rather than any bespoke markup, and never the removed multi-item
+/// Needs-attention panel this replaces. Sums [`BeeSnapshot::read_errors`]
+/// across every rollup on the board (already computed by [`read_snapshot`],
+/// no additional I/O here) rather than reading `snapshot.attention`, since
+/// that list also folds in unrelated rules (blocked cells, a paused
+/// handoff, ...) this strip is not about. Zero unreadable files across
+/// every project renders nothing — no empty strip.
+fn bee_cross_project_read_errors_strip(rollups: &[(&Project, &BeeProjectRollup)]) -> String {
+    let count: usize = rollups
+        .iter()
+        .map(|(_, rollup)| rollup.snapshot.read_errors.len())
+        .sum();
+    if count == 0 {
+        return String::new();
+    }
+    format!(
+        r#"<div class="fg-banner fg-banner--warning" data-bee-read-errors="{count}"><span class="fg-banner__dot"></span><span class="fg-banner__body">{count} .bee file(s) could not be read; counts may be incomplete</span></div>"#,
+        count = count,
+    )
+}
+
 pub fn bee_cross_project_features_section(
     rollups: &[(&Project, &BeeProjectRollup)],
     feature_panes: &std::collections::HashMap<
@@ -3301,23 +3115,23 @@ pub fn bee_cross_project_features_section(
                         data.last_activity.as_deref(),
                         panes,
                     );
-                    let html = bee_hub_card(
-                        &project.id,
-                        &data.feature,
-                        "in-progress",
-                        data.done,
-                        data.total,
-                        data.last_activity.as_deref(),
-                        &data.worktree_label,
-                        data.reason.as_deref(),
-                        data.docs.as_ref(),
-                        Some(&project.name),
+                    let html = bee_hub_card(&BeeHubCardArgs {
+                        project_id: &project.id,
+                        feature: &data.feature,
+                        group_key: "in-progress",
+                        done: data.done,
+                        total: data.total,
+                        last_activity: data.last_activity.as_deref(),
+                        worktree_label: &data.worktree_label,
+                        reason: data.reason.as_deref(),
+                        docs: data.docs.as_ref(),
+                        project_label: Some(&project.name),
                         project_color,
                         panes,
-                        data.run_state.as_deref(),
-                        data.last_tool_call.as_deref(),
-                        &data.deferred,
-                    );
+                        run_state: data.run_state.as_deref(),
+                        last_tool_call: data.last_tool_call.as_deref(),
+                        deferred: &data.deferred,
+                    });
                     in_progress_entries.push((key, html));
                 }
                 BeeHubPlacement::Finished(data) => {
@@ -3428,10 +3242,12 @@ pub fn bee_cross_project_features_section(
     let review_cards = bee_hub_finished_rows(&review_rows);
     let compound_cards = bee_hub_finished_rows(&compound_rows);
     let finished_cards = bee_hub_finished_rows(&finished_rows);
+    let read_errors_strip = bee_cross_project_read_errors_strip(rollups);
 
     format!(
         r#"<section class="fg-card bee-hub" data-feature-hub="cross-project">
   <h3 class="bee-panel__head">Features</h3>
+  {read_errors_strip}
   <div class="bee-hub__groups">
     {todo_group}
     {in_progress_group}
@@ -3440,6 +3256,7 @@ pub fn bee_cross_project_features_section(
     {finished_group}
   </div>
 </section>"#,
+        read_errors_strip = read_errors_strip,
         todo_group = bee_hub_group("Todo", "todo", todo_count, &todo_cards, "Nothing in Todo."),
         in_progress_group = bee_hub_group(
             "In Progress",
@@ -3683,24 +3500,42 @@ fn bee_cross_project_board_project_colors<'a>(
 /// [`bee_hub_deferred_badge`] in the card's own body -- never the
 /// `<summary>`, whose content model cannot nest a `<details>` the way that
 /// badge's click-to-reveal detail needs.
-#[allow(clippy::too_many_arguments)]
-fn bee_hub_card(
-    project_id: &str,
-    feature: &str,
-    group_key: &str,
+struct BeeHubCardArgs<'a> {
+    project_id: &'a str,
+    feature: &'a str,
+    group_key: &'a str,
     done: usize,
     total: usize,
-    last_activity: Option<&str>,
-    worktree_label: &str,
-    reason: Option<&str>,
-    docs: Option<&waggledance_core::bee::BeeFeatureDocs>,
-    project_label: Option<&str>,
+    last_activity: Option<&'a str>,
+    worktree_label: &'a str,
+    reason: Option<&'a str>,
+    docs: Option<&'a waggledance_core::bee::BeeFeatureDocs>,
+    project_label: Option<&'a str>,
     project_color: Option<u8>,
-    panes: &[TerminalPaneView],
-    run_state: Option<&str>,
-    last_tool_call: Option<&str>,
-    deferred: &[BeeDeferredEntry],
-) -> String {
+    panes: &'a [TerminalPaneView],
+    run_state: Option<&'a str>,
+    last_tool_call: Option<&'a str>,
+    deferred: &'a [BeeDeferredEntry],
+}
+
+fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
+    let BeeHubCardArgs {
+        project_id,
+        feature,
+        group_key,
+        done,
+        total,
+        last_activity,
+        worktree_label,
+        reason,
+        docs,
+        project_label,
+        project_color,
+        panes,
+        run_state,
+        last_tool_call,
+        deferred,
+    } = *args;
     let title = docs
         .and_then(|d| d.title.as_deref())
         .filter(|t| !t.is_empty());
@@ -6354,6 +6189,67 @@ mod tests {
         );
     }
 
+    /// backlog-groom-2 D1 (#26): an empty cross-project board must not
+    /// swallow the tab strip — Terminals has nothing to do with whether any
+    /// project carries a bee board, so it must stay reachable even when
+    /// Kanban itself has nothing of its own to show.
+    #[test]
+    fn home_page_with_empty_board_still_renders_tab_strip_and_terminals_tab() {
+        let body = home_page(
+            &[],
+            false,
+            &[],
+            None,
+            "",
+            HomeTab::Kanban,
+            &[],
+            None,
+            true,
+            &[],
+        );
+        assert!(
+            body.contains("fg-tabs"),
+            "an empty bee board must still carry the tab strip: {body}"
+        );
+        assert!(
+            body.contains(r#"href="/?tab=terminals""#),
+            "the Terminals tab anchor must stay reachable: {body}"
+        );
+        assert!(
+            body.contains("fg-empty"),
+            "the Kanban tab must show its own empty state instead of nothing: {body}"
+        );
+    }
+
+    /// backlog-groom-2 D1: a populated board renders exactly as before — the
+    /// tab strip plus the cross-project section verbatim, never the empty
+    /// state.
+    #[test]
+    fn home_page_with_populated_board_renders_kanban_section_unchanged() {
+        let marker = r#"<div data-feature-hub="cross-project">MARKER-CONTENT</div>"#;
+        let body = home_page(
+            &[],
+            false,
+            &[],
+            None,
+            marker,
+            HomeTab::Kanban,
+            &[],
+            None,
+            true,
+            &[],
+        );
+        assert!(body.contains("fg-tabs"), "{body}");
+        assert!(
+            body.contains("MARKER-CONTENT"),
+            "a populated cross-project section must render verbatim: {body}"
+        );
+        assert!(
+            !body.contains("fg-empty"),
+            "a populated board must not show the Kanban empty state: {body}"
+        );
+    }
+
     #[test]
     fn relative_minutes_reads_as_plain_relative_language_not_a_timestamp() {
         assert_eq!(bee_relative_minutes(0.2), "just now");
@@ -6972,11 +6868,11 @@ mod tests {
     fn terminal_page_renders_no_preset_controls_when_none_configured() {
         let project = sample_project();
         let html = terminal_page(&project, &[], None, &[]);
-        // Checked as rendered HTML attribute shapes, not bare substrings:
-        // `TERMINAL_CREATE_SCRIPT` itself contains the literal selector
-        // `.term-create__agent[data-preset]` and `getAttribute("data-preset")`
-        // on every render regardless of preset count, so a plain
-        // `.contains("term-create__agent")` would false-negative here.
+        // Checked as rendered HTML attribute shapes, not bare substrings —
+        // `.term-create__agent`/`data-preset` never render at all with no
+        // presets configured, and views.rs ships no JS whose own literal
+        // text could false-positive a substring match (backlog-groom-2-4:
+        // the create control's click wiring now lives in `assets/app.js`).
         assert!(!html.contains("class=\"term-create__agent\""), "{html}");
         assert!(!html.contains("data-preset=\""), "{html}");
         assert!(html.contains("class=\"term-create__pane\""), "{html}");
@@ -7145,19 +7041,28 @@ mod tests {
     }
 
     /// D4: the Unassigned page has no `data-project-id` to key off, so it is
-    /// wired by its own inline `UNASSIGNED_TERMINAL_SCRIPT` rather than
-    /// `assets/app.js` — the Approve handler has to be duplicated here too,
-    /// or the button on that page would render inert.
+    /// wired by its own scoped IIFE in `assets/app.js` (backlog-groom-2-4,
+    /// keyed off `data-unassigned-base`) rather than the shared
+    /// `data-project-id`/`data-term-base` wiring above — the Approve handler
+    /// has to be duplicated in that IIFE too, or the button on that page
+    /// would render inert. Sliced from `main[data-unassigned-base]`'s own
+    /// offset in the file to pin it to that IIFE specifically, not the
+    /// shared one above (whose `postJson(inputUrl(paneId, base), ...)` call
+    /// takes a second `base` argument this one never does).
     #[test]
-    fn unassigned_terminal_script_wires_the_approve_button() {
+    fn unassigned_terminal_wiring_in_app_js_wires_the_approve_button() {
+        let script = include_str!("../assets/app.js");
+        let start = script.find("data-unassigned-base").unwrap_or_else(|| {
+            panic!("app.js must read the Unassigned page's own data-unassigned-base: {script}")
+        });
+        let section = &script[start..];
         assert!(
-            UNASSIGNED_TERMINAL_SCRIPT
-                .contains(r#"var approveBtn = form.querySelector(".term-reply__approve");"#),
-            "UNASSIGNED_TERMINAL_SCRIPT must read the Approve button: {UNASSIGNED_TERMINAL_SCRIPT}"
+            section.contains(r#"var approveBtn = form.querySelector(".term-reply__approve");"#),
+            "the Unassigned page's own wiring in app.js must read the Approve button: {section}"
         );
         assert!(
-            UNASSIGNED_TERMINAL_SCRIPT.contains(r#"postJson(inputUrl(paneId), { text: "Approve", submit: true })"#),
-            "UNASSIGNED_TERMINAL_SCRIPT's Approve handler must post the exact text Approve with submit true to that page's own input URL: {UNASSIGNED_TERMINAL_SCRIPT}"
+            section.contains(r#"postJson(inputUrl(paneId), { text: "Approve", submit: true })"#),
+            "the Unassigned page's own wiring must post the exact text Approve with submit true to that page's own input URL: {section}"
         );
     }
 
@@ -7184,10 +7089,14 @@ mod tests {
         // carries none), and its `.term-screen` panes (via `pane_cards`,
         // `attach: false`) carry no `data-term-base` either — the shared
         // poller/posters must find nothing to resolve a target from here.
+        // `data-unassigned-base` is a distinct attribute the shared
+        // `hasTarget` guard never reads (backlog-groom-2-4): it feeds only
+        // this page's own separate wiring in `assets/app.js`.
         let unassigned_html = unassigned_terminal_page(std::slice::from_ref(&pane));
         assert!(
-            unassigned_html.contains(r#"<main class="fg-page">"#),
-            "the Unassigned page's <main> must render with no data-project-id: {unassigned_html}"
+            unassigned_html
+                .contains(r#"<main class="fg-page" data-unassigned-base="/_terminal/unassigned">"#),
+            "the Unassigned page's <main> must render with no data-project-id, only its own scoped base: {unassigned_html}"
         );
         assert!(
             !unassigned_html.contains("data-project-id"),
@@ -9246,6 +9155,71 @@ mod tests {
         }
     }
 
+    /// backlog-groom-2 D3: a `.bee/state.json` that fails to parse lands in
+    /// [`BeeSnapshot::read_errors`] via [`waggledance_core::bee::read_snapshot`]
+    /// exactly as the module doc says, and the board header must surface it
+    /// as the one concise warning strip -- not silence, not the removed
+    /// multi-item Needs-attention panel.
+    #[test]
+    fn cross_project_board_with_read_errors_renders_the_warning_strip() {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-read-errors-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".bee")).unwrap();
+        std::fs::write(root.join(".bee/state.json"), "{ not json").unwrap();
+
+        let mut project = sample_project();
+        project.id = "proj-broken".into();
+        project.root_path = root.clone();
+
+        let rollups = waggledance_core::bee::read_rollup(std::slice::from_ref(&root));
+        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project, &rollups[0])];
+        let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
+
+        assert!(
+            html.contains("fg-banner--warning"),
+            "a snapshot with read_errors must render the warning strip: {html}"
+        );
+        assert!(
+            html.contains(r#"data-bee-read-errors="1">"#)
+                && html.contains("1 .bee file(s) could not be read; counts may be incomplete"),
+            "the strip must name the read_errors count: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// backlog-groom-2 D3: the mirror of
+    /// `cross_project_board_with_read_errors_renders_the_warning_strip` --
+    /// a clean `.bee/` (no `read_errors`) renders no strip at all, not an
+    /// empty one.
+    #[test]
+    fn cross_project_board_with_no_read_errors_renders_no_warning_strip() {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-clean-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".bee")).unwrap();
+
+        let mut project = sample_project();
+        project.id = "proj-clean".into();
+        project.root_path = root.clone();
+
+        let rollups = waggledance_core::bee::read_rollup(std::slice::from_ref(&root));
+        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project, &rollups[0])];
+        let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
+
+        assert!(
+            !html.contains("fg-banner--warning") && !html.contains("could not be read"),
+            "a clean snapshot must render no warning strip at all: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// inprogress-priority-order-2 (D4/D6/D7): two projects, each
     /// contributing one In Progress feature and one Todo feature. The In
     /// Progress column must merge into ONE list ordered by the shared D7
@@ -9840,23 +9814,23 @@ mod tests {
             workspace: "w1".into(),
             tab: "t1".into(),
         }];
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &panes,
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &panes,
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         // project_badges' own markup, with only its aria-label swapped for
         // the checkout-naming one this card must carry and its own
         // `bee-hub__badges` class layered onto the shared container class
@@ -9922,23 +9896,23 @@ mod tests {
     /// feature -- no empty container is left behind.
     #[test]
     fn bee_hub_card_with_no_panes_renders_no_badge_container() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("proj-row__badges"),
             "an empty pane list must render no badge container: {card_html}"
@@ -9964,23 +9938,23 @@ mod tests {
     #[test]
     fn bee_hub_card_with_a_blocked_pane_carries_its_own_waiting_on_you_line() {
         let panes = vec![pane_with_status("blocked")];
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &panes,
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &panes,
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(r#"<p class="bee-cell__meta bee-hub__reason">Waiting on you — a terminal is blocked</p>"#),
             "a blocked pane must add its own exact reason line: {card_html}"
@@ -9994,23 +9968,23 @@ mod tests {
     fn bee_hub_card_with_a_gate_reason_and_a_blocked_pane_carries_both_lines_gate_first() {
         let panes = vec![pane_with_status("blocked")];
         let gate_reason = "Waiting on you — Shape gate awaiting your decision";
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            Some(gate_reason),
-            None,
-            None,
-            None,
-            &panes,
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: Some(gate_reason),
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &panes,
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         let gate_at = card_html.find(gate_reason).unwrap_or_else(|| {
             panic!("the existing gate reason line must still render: {card_html}")
         });
@@ -10030,23 +10004,23 @@ mod tests {
     #[test]
     fn bee_hub_card_with_no_blocked_pane_and_no_gate_reason_carries_neither_line() {
         let panes = vec![pane_with_status("working")];
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &panes,
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &panes,
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("bee-hub__reason"),
             "with no gate reason and no blocked pane, neither reason line may render: {card_html}"
@@ -10059,23 +10033,23 @@ mod tests {
     /// nothing else in this file would ever notice.
     #[test]
     fn bee_hub_card_renders_collapsed_with_no_open_attribute() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(r#"<details class="bee-hub__card" data-hub-group="in-progress">"#),
             "the card must render as a details element carrying its own group key: {card_html}"
@@ -10096,23 +10070,23 @@ mod tests {
     /// the `<details>`/`<summary>` pair can no longer be that link itself.
     #[test]
     fn bee_hub_card_body_opens_with_the_feature_detail_link() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(
                 r#"<div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/proj-a/_bee/feature/feat-a">Feature detail"#
@@ -10179,23 +10153,23 @@ mod tests {
         let recent = (time::OffsetDateTime::now_utc() - time::Duration::seconds(30))
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap();
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            Some("2026-08-15T15:48:08.674Z"),
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            Some(&recent),
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: Some("2026-08-15T15:48:08.674Z"),
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: Some(&recent),
+            deferred: &[],
+        });
         assert!(
             card_html.contains(r#"<span class="bee-hub__pulse""#),
             "a tool call landed 30 seconds ago must render the pulse dot: {card_html}"
@@ -10209,23 +10183,23 @@ mod tests {
         let old = (time::OffsetDateTime::now_utc() - time::Duration::minutes(20))
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap();
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            Some("2026-08-15T15:48:08.674Z"),
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            Some(&old),
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: Some("2026-08-15T15:48:08.674Z"),
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: Some(&old),
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("bee-hub__pulse"),
             "a tool call 20 minutes old must render no pulse dot: {card_html}"
@@ -10237,23 +10211,23 @@ mod tests {
     /// here follows.
     #[test]
     fn bee_hub_card_with_no_tool_call_renders_no_pulse_dot() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("bee-hub__pulse"),
             "no last_tool_call must render no pulse dot: {card_html}"
@@ -10265,23 +10239,23 @@ mod tests {
     /// `<summary>` so it stays visible without expanding the card.
     #[test]
     fn bee_hub_card_awaiting_approval_run_state_renders_prominent_badge() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            Some("awaiting-approval"),
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: Some("awaiting-approval"),
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(r#"<span class="fg-chip fg-chip--danger bee-hub__run-state">Awaiting approval</span>"#),
             "awaiting-approval must render its own prominent danger-toned badge: {card_html}"
@@ -10300,23 +10274,23 @@ mod tests {
     /// tones, never sharing awaiting-approval's own prominent one.
     #[test]
     fn bee_hub_card_running_run_state_renders_its_own_distinct_tone() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            Some("running"),
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: Some("running"),
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(r#"<span class="fg-chip fg-chip--accent bee-hub__run-state">Running</span>"#),
             "running must render its own accent-toned badge, distinct from awaiting-approval's danger tone: {card_html}"
@@ -10328,23 +10302,23 @@ mod tests {
     /// doc comment) renders no badge.
     #[test]
     fn bee_hub_card_with_no_run_state_renders_no_badge() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("bee-hub__run-state"),
             "absent run_state must render no badge at all: {card_html}"
@@ -10370,23 +10344,23 @@ mod tests {
                 reason: Some("dead code left behind".to_string()),
             },
         ];
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &deferred,
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &deferred,
+        });
         assert!(
             card_html.contains(r#"<summary class="fg-badge">2 deferred</summary>"#),
             "two unresolved entries must render a '2 deferred' count badge: {card_html}"
@@ -10405,23 +10379,23 @@ mod tests {
     /// -- no empty badge, no empty detail container.
     #[test]
     fn bee_hub_card_with_zero_deferred_debt_renders_nothing() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("bee-hub__deferred") && !card_html.contains("deferred"),
             "zero unresolved debt must render no badge and no detail container: {card_html}"
@@ -10605,23 +10579,23 @@ mod tests {
     /// caller handed it.
     #[test]
     fn bee_hub_card_with_project_label_shows_project_worktree_subtitle_and_shell_modifier() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "wt/hold-holder-attribution",
-            None,
-            None,
-            Some("Project A"),
-            Some(3),
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "wt/hold-holder-attribution",
+            reason: None,
+            docs: None,
+            project_label: Some("Project A"),
+            project_color: Some(3),
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(
                 r#"<div class="bee-hub__project">Project A<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div>"#
@@ -10651,23 +10625,23 @@ mod tests {
     /// feature itself has no CONTEXT.md title.
     #[test]
     fn bee_hub_card_with_project_label_and_no_title_still_shows_project_subtitle() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            Some("Project A"),
-            Some(3),
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: Some("Project A"),
+            project_color: Some(3),
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         // card-collapse-inprogress: the title (now in the collapsed
         // `<summary>`) and the subtitle (now in the expandable body) are no
         // longer adjacent in the rendered markup, so each is checked on its
@@ -10697,23 +10671,23 @@ mod tests {
             description: None,
             docs: vec![],
         };
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "wt/hold-holder-attribution",
-            None,
-            Some(&docs),
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "wt/hold-holder-attribution",
+            reason: None,
+            docs: Some(&docs),
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert_eq!(
             card_html,
             r#"<div class="fg-card bee-hub__shell"><details class="bee-hub__card" data-hub-group="in-progress"><summary class="bee-hub__summary"><div class="fg-card__title">Human Title</div><span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/proj-a/_bee/feature/feat-a">Feature detail<span aria-hidden="true"> →</span></a><div class="bee-hub__slug">feat-a<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></div></details></div>"#,
@@ -10741,23 +10715,23 @@ mod tests {
     /// so no separator.
     #[test]
     fn bee_hub_card_with_no_project_label_and_no_title_names_its_worktree_alone() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "merged",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "merged",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(
                 r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">merged</span></div>"#
@@ -10786,23 +10760,23 @@ mod tests {
             docs: vec![],
         };
         for worktree_label in ["hold-holder-attribution", "worktree", "merged", "Main"] {
-            let card_html = bee_hub_card(
-                "proj-a",
-                "feat-a",
-                "in-progress",
-                1,
-                2,
-                None,
+            let card_html = bee_hub_card(&BeeHubCardArgs {
+                project_id: "proj-a",
+                feature: "feat-a",
+                group_key: "in-progress",
+                done: 1,
+                total: 2,
+                last_activity: None,
                 worktree_label,
-                None,
-                Some(&docs),
-                None,
-                None,
-                &[],
-                None,
-                None,
-                &[],
-            );
+                reason: None,
+                docs: Some(&docs),
+                project_label: None,
+                project_color: None,
+                panes: &[],
+                run_state: None,
+                last_tool_call: None,
+                deferred: &[],
+            });
             let expected =
                 format!(r#"<span class="bee-hub__project-worktree"> / {worktree_label}</span>"#);
             assert!(

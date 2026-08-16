@@ -35,10 +35,10 @@
   // `projectId`, is there ANY usable target at all? A page with neither
   // (the Unassigned page: no `data-project-id` on `<main>`, no
   // `data-term-base` on its panes — it is wired instead by its own scoped
-  // `UNASSIGNED_TERMINAL_SCRIPT`, `views.rs`) must never fall through to
-  // building a `/p/null/...` URL from that pair. Shared by the screen
-  // poller and all three posters (input/keys/attach) below so the OR lives
-  // in exactly one place, not reimplemented at each call site.
+  // IIFE further down, keyed off `data-unassigned-base`) must never fall
+  // through to building a `/p/null/...` URL from that pair. Shared by the
+  // screen poller and all three posters (input/keys/attach) below so the OR
+  // lives in exactly one place, not reimplemented at each call site.
   function hasTarget(base, projectId) {
     return base != null || projectId != null;
   }
@@ -1079,8 +1079,8 @@
       var base = validTermBase(el.getAttribute("data-term-base"));
       // unassigned-poller-guard D1: neither a valid own base nor a page
       // projectId to fall back on — bail before the fetch ever builds
-      // `/p/null/...` (the Unassigned page, wired by its own scoped
-      // script instead).
+      // `/p/null/...` (the Unassigned page, wired by its own scoped IIFE
+      // further down instead).
       if (!hasTarget(base, projectId)) return;
       if (inFlightScreen[paneId]) return; // a slow predecessor is still out; never stack a second fetch on it
       inFlightScreen[paneId] = true;
@@ -1186,9 +1186,9 @@
       var base = validTermBase(screenEl.getAttribute("data-term-base"));
       // unassigned-poller-guard D1: same bail-out the reply form and key
       // group blocks already carry — no resolvable target for this pane's
-      // history controls (the Unassigned page's own scoped script owns its
-      // panes instead), so Older/Newer/Live are never wired to post
-      // `/p/null/...`.
+      // history controls (the Unassigned page's own scoped IIFE further
+      // down owns its panes instead), so Older/Newer/Live are never wired
+      // to post `/p/null/...`.
       if (!hasTarget(base, projectId)) return;
       var olderBtn = group.querySelector('[data-scroll="older"]');
       var newerBtn = group.querySelector('[data-scroll="newer"]');
@@ -1696,8 +1696,9 @@
       // unassigned-poller-guard D1: no resolvable target for this form —
       // skip wiring it entirely (covers input AND, when rendered, attach:
       // both post through this same base). The Unassigned page's own
-      // scoped script already owns this form; this only stops the second,
-      // unscoped copy from double-posting into `/p/null/...` alongside it.
+      // scoped IIFE further down already owns this form; this only stops
+      // the second, unscoped copy from double-posting into `/p/null/...`
+      // alongside it.
       if (!hasTarget(base, projectId)) return;
       var input = form.querySelector(".term-reply__text");
       var stageBtn = form.querySelector(".term-reply__stage");
@@ -1797,6 +1798,220 @@
       });
     });
   })();
+
+  // Unassigned-page terminal poll/reply/keys (D4/D5/D6; folded into this
+  // file from views.rs's own `UNASSIGNED_TERMINAL_SCRIPT` const by
+  // backlog-groom-2-4). Scoped to `.unassigned-panes` so it never touches a
+  // project page's own panes, same as before the fold. The shared screen
+  // poller and reply/keys wiring above deliberately skip this page
+  // (`hasTarget` above finds neither a `data-project-id` nor a
+  // `data-term-base` here, `unassigned-poller-guard` D1) — this pane group
+  // belongs to no project id, so every route below is built from this
+  // page's own `data-unassigned-base` on `<main>`
+  // (`views.rs::unassigned_terminal_page`) rather than the shared
+  // `/p/:id/...` shape. Bails immediately on every other page, where that
+  // attribute is absent.
+  (function () {
+    var main = document.querySelector("main[data-unassigned-base]");
+    if (!main) return;
+    var BASE = main.getAttribute("data-unassigned-base");
+    var POLL_MS = 1500;
+    var HERDR_DOWN_TEXT = "herdr is not running";
+    var lastRevision = {};
+
+    function screenUrl(paneId) {
+      return BASE + "/" + encodeURIComponent(paneId) + "/screen";
+    }
+    function inputUrl(paneId) {
+      return BASE + "/" + encodeURIComponent(paneId) + "/input";
+    }
+    function keysUrl(paneId) {
+      return BASE + "/" + encodeURIComponent(paneId) + "/keys";
+    }
+
+    function pollOne(el) {
+      var paneId = el.getAttribute("data-pane-id");
+      fetch(screenUrl(paneId), { credentials: "same-origin" })
+        .then(function (res) {
+          // A 502 is the one status `herdr_down_response()` (server.rs) ever
+          // sends, and only when herdr itself is unreachable — but the body
+          // still has to say so, because a tunnel or proxy in front of this
+          // page can hand back its own unrelated 502 HTML on a blip. Every
+          // other failure (a thrown fetch below, any other status, a 502
+          // whose body isn't that exact JSON) is treated as transient: the
+          // pane keeps its last good screen and just gets marked stale, never
+          // overwritten with wording that says the agent is gone.
+          if (res.status === 502) {
+            return res.json().then(function (body) {
+              if (body && body.error === HERDR_DOWN_TEXT) {
+                el.textContent = HERDR_DOWN_TEXT;
+                el.classList.remove("term-screen--stale");
+                // The next successful poll must always repaint, even if its
+                // revision happens to match whatever was last drawn before
+                // the outage — otherwise this banner never clears.
+                delete lastRevision[paneId];
+                return null;
+              }
+              el.classList.add("term-screen--stale");
+              return null;
+            });
+          }
+          if (!res.ok) { el.classList.add("term-screen--stale"); return null; }
+          return res.json();
+        })
+        .then(function (body) {
+          if (!body) return;
+          el.classList.remove("term-screen--stale");
+          if (lastRevision[paneId] === body.revision) return;
+          lastRevision[paneId] = body.revision;
+          // `body.text` is safe, pre-escaped HTML from waggledance-core's ansi
+          // translator (agent-terminal-12) — never the raw pane text — so
+          // `innerHTML` here renders ANSI colour/attribute markup rather than
+          // showing literal escape characters.
+          el.innerHTML = body.text;
+        })
+        .catch(function () {
+          // Thrown fetch (network blip, phone waking from sleep) or an
+          // unparseable 502 body — none of these confirm herdr is actually
+          // down, so the pane keeps whatever it last showed.
+          el.classList.add("term-screen--stale");
+        });
+    }
+
+    function pollAll() {
+      Array.prototype.slice
+        .call(document.querySelectorAll(".unassigned-panes .term-screen[data-pane-id]"))
+        .forEach(pollOne);
+    }
+    pollAll();
+    setInterval(pollAll, POLL_MS);
+
+    function postJson(url, body) {
+      return fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+
+    function sendReply(paneId, text, submit, input) {
+      if (!text) return;
+      postJson(inputUrl(paneId), { text: text, submit: submit })
+        .then(function (res) { if (res.ok && input) input.value = ""; })
+        .catch(function () {});
+    }
+
+    Array.prototype.slice
+      .call(document.querySelectorAll(".unassigned-panes .term-reply[data-pane-id]"))
+      .forEach(function (form) {
+        var paneId = form.getAttribute("data-pane-id");
+        var input = form.querySelector(".term-reply__text");
+        var stageBtn = form.querySelector(".term-reply__stage");
+        var approveBtn = form.querySelector(".term-reply__approve");
+        form.addEventListener("submit", function (ev) {
+          ev.preventDefault();
+          sendReply(paneId, input.value, true, input);
+        });
+        if (input) {
+          input.addEventListener("keydown", function (ev) {
+            if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+              ev.preventDefault();
+              sendReply(paneId, input.value, true, input);
+            }
+          });
+        }
+        if (stageBtn) {
+          stageBtn.addEventListener("click", function () {
+            sendReply(paneId, input.value, false, input);
+          });
+        }
+        if (approveBtn) {
+          approveBtn.addEventListener("click", function () {
+            postJson(inputUrl(paneId), { text: "Approve", submit: true }).catch(function () {});
+          });
+        }
+      });
+
+    Array.prototype.slice
+      .call(document.querySelectorAll(".unassigned-panes .term-keys[data-pane-id]"))
+      .forEach(function (group) {
+        var paneId = group.getAttribute("data-pane-id");
+        Array.prototype.slice.call(group.querySelectorAll("button[data-key]")).forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var key = btn.getAttribute("data-key");
+            if (!key) return;
+            postJson(keysUrl(paneId), { keys: [key] }).catch(function () {});
+          });
+        });
+      });
+  })();
+
+  // Terminal creation controls (agent-terminal-13; folded into this file
+  // from views.rs's own `TERMINAL_CREATE_SCRIPT` const by
+  // backlog-groom-2-4): POSTs "New shell"/preset clicks to
+  // `create/pane`/`create/agent` and reloads the page on success so the
+  // freshly created pane joins the screen poller above on the next render.
+  // Scoped to `.term-create[data-project-id]`, which `views.rs`
+  // (`terminal_create_controls`) renders at most once per page — the
+  // project terminal page's own control, or the homepage Terminals tab's,
+  // keyed to the selected pane's project — never both on the same page, so
+  // this never double-binds a listener.
+  (function () {
+    var boxes = document.querySelectorAll(".term-create[data-project-id]");
+    if (!boxes.length) return;
+
+    function postJson(url, body) {
+      return fetch(url, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+    function afterCreate(promise, failMsg) {
+      promise
+        .then(function (res) {
+          if (res.ok) {
+            location.reload();
+            return;
+          }
+          return res.json().then(function (b) {
+            alert((b && b.error) || failMsg);
+          });
+        })
+        .catch(function () {
+          alert(failMsg);
+        });
+    }
+    Array.prototype.slice
+      .call(boxes)
+      .forEach(function (box) {
+        var pid = box.getAttribute("data-project-id");
+        var paneBtn = box.querySelector(".term-create__pane");
+        if (paneBtn) {
+          paneBtn.addEventListener("click", function () {
+            afterCreate(
+              postJson("/p/" + encodeURIComponent(pid) + "/_terminal/create/pane", {}),
+              "could not start a shell"
+            );
+          });
+        }
+        Array.prototype.slice
+          .call(box.querySelectorAll(".term-create__agent[data-preset]"))
+          .forEach(function (btn) {
+            btn.addEventListener("click", function () {
+              afterCreate(
+                postJson("/p/" + encodeURIComponent(pid) + "/_terminal/create/agent", {
+                  preset: btn.getAttribute("data-preset"),
+                }),
+                "could not start an agent"
+              );
+            });
+          });
+      });
+  })();
+
   // Collapsible menus (the top bar's navigation, a terminal page's pane
   // bar): the checkbox already owns open/closed, so this only adds the two
   // things the markup has no opinion about — Escape, and a press outside the

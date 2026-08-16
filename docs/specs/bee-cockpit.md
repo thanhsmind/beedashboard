@@ -67,9 +67,18 @@ single project's own board, where it answers who is at work in *this* project.
 
 Qualification is the same rule stated above, and it decides only what feeds the
 Features section: a registered project without a `.bee/` store still appears in
-the list below, exactly as before. When no project qualifies at all, the section
-is not built and the front page is precisely the page it was — a person with no
-bee projects is never shown an empty frame.
+the list below, exactly as before. When no project qualifies at all, the Features
+section renders its own empty state rather than vanishing — the front page keeps
+its tab strip (Kanban, Projects, Terminals), so the Terminals tab stays reachable
+whether or not any project carries bee metadata; the Kanban tab simply shows it
+has nothing yet, and the project list still reads exactly as before under the
+Projects tab.
+
+If any `.bee` file could not be read while rolling up the board, the front page
+carries one concise warning strip in its header — naming how many files failed and
+that the counts below may be incomplete — so a corrupt store degrades loudly
+instead of silently skewing every number. When every file read cleanly, no strip
+appears; the strip never grows back into the removed multi-item panel.
 
 The rolled-up board reads the same way its per-project counterpart does, with
 three differences that follow from having more than one project in view:
