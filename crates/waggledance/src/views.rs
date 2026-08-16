@@ -3256,6 +3256,30 @@ fn bee_render_hub_section(
 /// found would interleave one project's PBIs above another project's
 /// features and break D2's features-before-PBIs order for the merged
 /// column, not just within one project.
+/// D3 (backlog-groom-2): the one concise warning strip a corrupt `.bee`
+/// file earns on the cross-project board header — reusing the existing
+/// `fg-banner fg-banner--warning` styling ([`assets/atelier/components.css`])
+/// rather than any bespoke markup, and never the removed multi-item
+/// Needs-attention panel this replaces. Sums [`BeeSnapshot::read_errors`]
+/// across every rollup on the board (already computed by [`read_snapshot`],
+/// no additional I/O here) rather than reading `snapshot.attention`, since
+/// that list also folds in unrelated rules (blocked cells, a paused
+/// handoff, ...) this strip is not about. Zero unreadable files across
+/// every project renders nothing — no empty strip.
+fn bee_cross_project_read_errors_strip(rollups: &[(&Project, &BeeProjectRollup)]) -> String {
+    let count: usize = rollups
+        .iter()
+        .map(|(_, rollup)| rollup.snapshot.read_errors.len())
+        .sum();
+    if count == 0 {
+        return String::new();
+    }
+    format!(
+        r#"<div class="fg-banner fg-banner--warning" data-bee-read-errors="{count}"><span class="fg-banner__dot"></span><span class="fg-banner__body">{count} .bee file(s) could not be read; counts may be incomplete</span></div>"#,
+        count = count,
+    )
+}
+
 pub fn bee_cross_project_features_section(
     rollups: &[(&Project, &BeeProjectRollup)],
     feature_panes: &std::collections::HashMap<
@@ -3457,10 +3481,12 @@ pub fn bee_cross_project_features_section(
     let review_cards = bee_hub_finished_rows(&review_rows);
     let compound_cards = bee_hub_finished_rows(&compound_rows);
     let finished_cards = bee_hub_finished_rows(&finished_rows);
+    let read_errors_strip = bee_cross_project_read_errors_strip(rollups);
 
     format!(
         r#"<section class="fg-card bee-hub" data-feature-hub="cross-project">
   <h3 class="bee-panel__head">Features</h3>
+  {read_errors_strip}
   <div class="bee-hub__groups">
     {todo_group}
     {in_progress_group}
@@ -3469,6 +3495,7 @@ pub fn bee_cross_project_features_section(
     {finished_group}
   </div>
 </section>"#,
+        read_errors_strip = read_errors_strip,
         todo_group = bee_hub_group("Todo", "todo", todo_count, &todo_cards, "Nothing in Todo."),
         in_progress_group = bee_hub_group(
             "In Progress",
@@ -9343,6 +9370,71 @@ mod tests {
         for r in [&root_a, &root_b, &root_c] {
             let _ = std::fs::remove_dir_all(r);
         }
+    }
+
+    /// backlog-groom-2 D3: a `.bee/state.json` that fails to parse lands in
+    /// [`BeeSnapshot::read_errors`] via [`waggledance_core::bee::read_snapshot`]
+    /// exactly as the module doc says, and the board header must surface it
+    /// as the one concise warning strip -- not silence, not the removed
+    /// multi-item Needs-attention panel.
+    #[test]
+    fn cross_project_board_with_read_errors_renders_the_warning_strip() {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-read-errors-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".bee")).unwrap();
+        std::fs::write(root.join(".bee/state.json"), "{ not json").unwrap();
+
+        let mut project = sample_project();
+        project.id = "proj-broken".into();
+        project.root_path = root.clone();
+
+        let rollups = waggledance_core::bee::read_rollup(std::slice::from_ref(&root));
+        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project, &rollups[0])];
+        let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
+
+        assert!(
+            html.contains("fg-banner--warning"),
+            "a snapshot with read_errors must render the warning strip: {html}"
+        );
+        assert!(
+            html.contains(r#"data-bee-read-errors="1">"#)
+                && html.contains("1 .bee file(s) could not be read; counts may be incomplete"),
+            "the strip must name the read_errors count: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// backlog-groom-2 D3: the mirror of
+    /// `cross_project_board_with_read_errors_renders_the_warning_strip` --
+    /// a clean `.bee/` (no `read_errors`) renders no strip at all, not an
+    /// empty one.
+    #[test]
+    fn cross_project_board_with_no_read_errors_renders_no_warning_strip() {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-clean-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".bee")).unwrap();
+
+        let mut project = sample_project();
+        project.id = "proj-clean".into();
+        project.root_path = root.clone();
+
+        let rollups = waggledance_core::bee::read_rollup(std::slice::from_ref(&root));
+        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project, &rollups[0])];
+        let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
+
+        assert!(
+            !html.contains("fg-banner--warning") && !html.contains("could not be read"),
+            "a clean snapshot must render no warning strip at all: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// inprogress-priority-order-2 (D4/D6/D7): two projects, each
