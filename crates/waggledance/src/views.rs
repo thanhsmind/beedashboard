@@ -10,7 +10,7 @@ use waggledance_core::bee::{
 };
 use waggledance_core::code_source::DirListing;
 use waggledance_core::config::Config;
-use waggledance_core::domain::{IndexedFile, Project, RenderedPage, SearchResult};
+use waggledance_core::domain::{IndexedFile, Project, RenderedPage, Run, SearchResult};
 use waggledance_core::render::HighlightedSource;
 
 pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
@@ -943,10 +943,12 @@ fn project_tabs(project_id: &str, active: &str) -> String {
   <a class="{overview_cls}" href="/p/{id}/">Overview</a>
   <a class="{terminal_cls}" href="/p/{id}/_terminal">Terminal</a>
   <a class="{transcript_cls}" href="/p/{id}/_transcript">Transcript</a>
+  <a class="{runs_cls}" href="/p/{id}/_runs">Runs</a>
 </nav>"#,
         overview_cls = cls("overview"),
         terminal_cls = cls("terminal"),
         transcript_cls = cls("transcript"),
+        runs_cls = cls("runs"),
         id = id,
     )
 }
@@ -1561,6 +1563,57 @@ pub fn transcript_page(
         rows = rows,
     );
     layout_with_drawer(&format!("{} · transcript", project.name), "", &body, false)
+}
+
+/// `GET /p/:id/_runs` (D8) — the read-only Runs view: one row per persisted
+/// [`Run`], task/worker-pane/status/marker/timestamps, projected straight
+/// from run state. This page renders no form, no button, and no endpoint
+/// call anywhere in its markup — D8's "the view never mutates" is a literal
+/// prohibition on this function's own output, not just on the route that
+/// calls it, so the emptiness of any mutating control here is part of the
+/// contract, not an oversight to fill in later.
+pub fn runs_page(project: &Project, runs: &[Run]) -> String {
+    let rows = if runs.is_empty() {
+        r#"<p class="fg-empty">No orchestrator runs recorded for this project yet.</p>"#.to_string()
+    } else {
+        let mut out = String::from(
+            r#"<table class="fg-table">
+  <thead><tr><th>Task</th><th>Worker pane</th><th>Status</th><th>Marker</th><th>Created</th><th>Updated</th></tr></thead>
+  <tbody>"#,
+        );
+        for r in runs {
+            out.push_str(&format!(
+                r#"<tr><td>{task}</td><td>{pane}</td><td>{status}</td><td style="font-family: var(--font-mono, monospace)">{marker}</td><td>{created}</td><td>{updated}</td></tr>"#,
+                task = esc(&r.task),
+                pane = esc(&r.pane_id),
+                status = status_pill(&r.status),
+                marker = esc(&r.marker),
+                created = esc(&r.created_at),
+                updated = esc(&r.updated_at),
+            ));
+        }
+        out.push_str("</tbody></table>");
+        out
+    };
+    let body = format!(
+        r#"{topbar}
+{tab_style}
+<main class="fg-page">
+  {rows}
+</main>"#,
+        topbar = topbar_full(
+            "",
+            &format!(
+                "<span class=\"crumb\">{name} · runs</span>",
+                name = esc(&project.name)
+            ),
+            "",
+            &project_tabs(&project.id, "runs"),
+        ),
+        tab_style = PROJECT_TAB_STYLE,
+        rows = rows,
+    );
+    layout_with_drawer(&format!("{} · runs", project.name), "", &body, false)
 }
 
 /// `GET /_terminal/unassigned` up state (D5/D4/D6): every herdr pane whose
@@ -5965,6 +6018,7 @@ pub fn settings_page(
     saved: bool,
     notify_credential_save_failed: bool,
     notify_credential_view: NotifyCredentialView,
+    projects: &[Project],
 ) -> String {
     // agent-terminal-24: checked first, so a failed credential save is never
     // shadowed by `saved=1` also being set on the same redirect — a user
@@ -5982,6 +6036,30 @@ pub fn settings_page(
     let checked = |b: bool| if b { "checked" } else { "" };
     let sel = |v: &str, opt: &str| if v == opt { "selected" } else { "" };
     let excludes = cfg.indexing.exclude_patterns.join("\n");
+
+    // D6: one row per registered project, each its own tiny form posting to
+    // that project's own toggle endpoint — a plain checkbox + Save, no
+    // JavaScript, the same no-script-required posture every other form on
+    // this page already keeps. `checked` here is the row's own boolean
+    // reflecting `Project::orchestration_enabled`, not the outer `checked`
+    // closure's `saved` flag.
+    let orchestration_rows = if projects.is_empty() {
+        r#"<p class="fg-empty">No projects registered yet.</p>"#.to_string()
+    } else {
+        let mut out = String::new();
+        for p in projects {
+            out.push_str(&format!(
+                r#"<form class="fg-orch-row" method="post" action="/api/projects/{id}/orchestration">
+      <label class="fg-check"><input type="checkbox" name="enabled" {checked}><span class="fg-check__text">{name}</span></label>
+      <button type="submit" class="fg-btn fg-btn--ghost">Save</button>
+    </form>"#,
+                id = esc(&p.id),
+                checked = checked(p.orchestration_enabled),
+                name = esc(&p.name),
+            ));
+        }
+        out
+    };
 
     // D7/D9: the notification credential is never rendered back in full —
     // see `NotifyCredentialView`'s own doc comment for why there is no
@@ -6095,6 +6173,13 @@ pub fn settings_page(
     </fieldset>
     <button type="submit" class="fg-btn fg-btn--primary">Save terminal settings</button>
   </form>
+  <style>.fg-orch-row {{ display: flex; align-items: center; gap: var(--space-3); margin-bottom: var(--space-2); }}</style>
+  <section class="fg-settings">
+    <fieldset><legend>Orchestration</legend>
+      <span class="fg-field__hint">Per-project opt-in for orchestrator dispatch (the MCP dispatch/await tools). Flags below only take effect while Terminal, above, is enabled.</span>
+      {orchestration_rows}
+    </fieldset>
+  </section>
 </main>"#,
         topbar = topbar("<span class=\"crumb\">Settings</span>"),
         banner = banner,
@@ -6120,6 +6205,7 @@ pub fn settings_page(
         notify_credential_placeholder = esc(&notify_credential_placeholder),
         tr_stdio = sel(&cfg.mcp.transport, "stdio"),
         tr_http = sel(&cfg.mcp.transport, "http"),
+        orchestration_rows = orchestration_rows,
     );
     layout_with_drawer("Settings", "", &body, false)
 }
@@ -6822,6 +6908,7 @@ mod tests {
             false,
             false,
             NotifyCredentialView::NotConfigured,
+            &[],
         );
         assert!(
             html.contains(r#"id="agent-drawer-toggle""#) && html.contains("data-agent-drawer-list"),
@@ -7701,7 +7788,13 @@ mod tests {
     #[test]
     fn settings_page_offers_the_unassigned_switch_with_plain_wording_and_reflects_its_value() {
         let cfg_off = Config::default();
-        let html_off = settings_page(&cfg_off, false, false, NotifyCredentialView::NotConfigured);
+        let html_off = settings_page(
+            &cfg_off,
+            false,
+            false,
+            NotifyCredentialView::NotConfigured,
+            &[],
+        );
         assert!(
             html_off.contains(r#"name="unassigned_enabled""#),
             "the settings page must offer the Unassigned group's own switch: {html_off}"
@@ -7717,10 +7810,151 @@ mod tests {
 
         let mut cfg_on = Config::default();
         cfg_on.terminal.unassigned_enabled = true;
-        let html_on = settings_page(&cfg_on, false, false, NotifyCredentialView::NotConfigured);
+        let html_on = settings_page(
+            &cfg_on,
+            false,
+            false,
+            NotifyCredentialView::NotConfigured,
+            &[],
+        );
         assert!(
             html_on.contains(r#"name="unassigned_enabled" checked"#),
             "the switch must render checked once the stored config is on: {html_on}"
+        );
+    }
+
+    /// D6: the settings page's Orchestration section renders one row per
+    /// registered project, each posting to that project's own toggle
+    /// endpoint, checked exactly when `Project::orchestration_enabled` is
+    /// true — never the other project's value.
+    #[test]
+    fn settings_page_orchestration_section_reflects_each_projects_own_flag() {
+        let mut on = sample_project();
+        on.id = "proj-on".into();
+        on.name = "Proj On".into();
+        on.orchestration_enabled = true;
+        let mut off = sample_project();
+        off.id = "proj-off".into();
+        off.name = "Proj Off".into();
+        off.orchestration_enabled = false;
+
+        let html = settings_page(
+            &Config::default(),
+            false,
+            false,
+            NotifyCredentialView::NotConfigured,
+            &[on, off],
+        );
+        assert!(
+            html.contains("Orchestration"),
+            "the settings page must carry an Orchestration section: {html}"
+        );
+        assert!(
+            html.contains(r#"action="/api/projects/proj-on/orchestration""#),
+            "each project row must post to its own toggle endpoint: {html}"
+        );
+        assert!(
+            html.contains(r#"action="/api/projects/proj-off/orchestration""#),
+            "each project row must post to its own toggle endpoint: {html}"
+        );
+
+        let on_row_start = html
+            .find(r#"action="/api/projects/proj-on/orchestration""#)
+            .expect("the on project's row must exist");
+        let on_row = &html[on_row_start..on_row_start + 200];
+        assert!(
+            on_row.contains(r#"name="enabled" checked"#),
+            "the opted-in project's checkbox must render checked: {on_row}"
+        );
+
+        let off_row_start = html
+            .find(r#"action="/api/projects/proj-off/orchestration""#)
+            .expect("the off project's row must exist");
+        let off_row = &html[off_row_start..off_row_start + 200];
+        assert!(
+            !off_row.contains(r#"name="enabled" checked"#),
+            "the opted-out project's checkbox must render unchecked: {off_row}"
+        );
+    }
+
+    /// D8: with no projects registered the Orchestration section renders an
+    /// honest empty state, never a blank list.
+    #[test]
+    fn settings_page_orchestration_section_is_honest_when_empty() {
+        let html = settings_page(
+            &Config::default(),
+            false,
+            false,
+            NotifyCredentialView::NotConfigured,
+            &[],
+        );
+        assert!(
+            html.contains("No projects registered yet."),
+            "an empty Orchestration section must say so plainly: {html}"
+        );
+    }
+
+    /// D8: `/p/:id/_runs` renders every persisted run's task, worker pane,
+    /// status, marker and both timestamps — and carries no mutating form or
+    /// endpoint call anywhere on the page (the view never mutates).
+    #[test]
+    fn runs_page_renders_run_rows_with_no_mutating_control() {
+        let project = sample_project();
+        let runs = vec![Run {
+            id: "run-1".into(),
+            project_id: project.id.clone(),
+            pane_id: "w1:p1".into(),
+            preset_label: Some("claude".into()),
+            task: "fix the flaky test".into(),
+            baseline: "".into(),
+            marker: "HERDR_DONE_abc123".into(),
+            status: "done".into(),
+            created_at: "2026-08-16T00:00:00Z".into(),
+            updated_at: "2026-08-16T00:05:00Z".into(),
+        }];
+        let html = runs_page(&project, &runs);
+        for needle in [
+            "fix the flaky test",
+            "w1:p1",
+            "HERDR_DONE_abc123",
+            "2026-08-16T00:00:00Z",
+            "2026-08-16T00:05:00Z",
+        ] {
+            assert!(
+                html.contains(needle),
+                "the runs page must render {needle:?}: {html}"
+            );
+        }
+        assert!(
+            !html.contains("<form"),
+            "the runs page must never carry a mutating form (D8): {html}"
+        );
+    }
+
+    /// D8: zero runs renders an honest empty state, never a blank page.
+    #[test]
+    fn runs_page_is_honest_when_empty() {
+        let project = sample_project();
+        let html = runs_page(&project, &[]);
+        assert!(
+            html.contains("No orchestrator runs recorded for this project yet."),
+            "an empty runs page must say so plainly: {html}"
+        );
+        assert!(!html.contains("<form"), "still no mutating form: {html}");
+    }
+
+    /// D8: the Runs tab sits beside Overview/Terminal/Transcript in the
+    /// project navigation, the same way every sibling tab is linked.
+    #[test]
+    fn project_tabs_carries_a_runs_link() {
+        let nav = project_tabs("proj-1", "runs");
+        assert!(
+            nav.contains(r#"href="/p/proj-1/_runs""#),
+            "the project nav must link the Runs page: {nav}"
+        );
+        assert!(
+            nav.contains("proj-tab proj-tab--active") && nav.contains(">Runs<"),
+            "the Runs tab must render active when selected: {nav}"
         );
     }
 
