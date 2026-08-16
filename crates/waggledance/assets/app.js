@@ -28,6 +28,21 @@
     return base;
   }
 
+  // unassigned-poller-guard D1: `validTermBase` above already collapses an
+  // unusable/hostile `data-term-base` down to `null`; this answers the
+  // other half of the question every screen poll and pane post below has
+  // to ask first — given that already-validated `base` and the page's own
+  // `projectId`, is there ANY usable target at all? A page with neither
+  // (the Unassigned page: no `data-project-id` on `<main>`, no
+  // `data-term-base` on its panes — it is wired instead by its own scoped
+  // `UNASSIGNED_TERMINAL_SCRIPT`, `views.rs`) must never fall through to
+  // building a `/p/null/...` URL from that pair. Shared by the screen
+  // poller and all three posters (input/keys/attach) below so the OR lives
+  // in exactly one place, not reimplemented at each call site.
+  function hasTarget(base, projectId) {
+    return base != null || projectId != null;
+  }
+
   // One-shot storage-key migration (D5 of the waggledance rename): the old
   // "mdview-theme" / "mdview-folders-open" key is read exactly once, copied
   // to its new "waggledance-*" key, then deleted — so neither the user's
@@ -1057,6 +1072,11 @@
       var paneId = el.getAttribute("data-pane-id");
       if (viewingHistory[paneId]) return; // the operator is reading history; leave it alone
       var base = validTermBase(el.getAttribute("data-term-base"));
+      // unassigned-poller-guard D1: neither a valid own base nor a page
+      // projectId to fall back on — bail before the fetch ever builds
+      // `/p/null/...` (the Unassigned page, wired by its own scoped
+      // script instead).
+      if (!hasTarget(base, projectId)) return;
       fetch(screenUrl(paneId, null, base), { credentials: "same-origin" })
         .then(function (res) {
           // A 502 is the one status `herdr_down_response()` (server.rs) ever
@@ -1652,6 +1672,12 @@
     Array.prototype.slice.call(forms).forEach(function (form) {
       var paneId = form.getAttribute("data-pane-id");
       var base = validTermBase(form.getAttribute("data-term-base"));
+      // unassigned-poller-guard D1: no resolvable target for this form —
+      // skip wiring it entirely (covers input AND, when rendered, attach:
+      // both post through this same base). The Unassigned page's own
+      // scoped script already owns this form; this only stops the second,
+      // unscoped copy from double-posting into `/p/null/...` alongside it.
+      if (!hasTarget(base, projectId)) return;
       var input = form.querySelector(".term-reply__text");
       var stageBtn = form.querySelector(".term-reply__stage");
       var approveBtn = form.querySelector(".term-reply__approve");
@@ -1738,6 +1764,9 @@
     Array.prototype.slice.call(keyGroups).forEach(function (group) {
       var paneId = group.getAttribute("data-pane-id");
       var base = validTermBase(group.getAttribute("data-term-base"));
+      // unassigned-poller-guard D1: same bail-out as the reply form above —
+      // no target, no key posts wired for this group.
+      if (!hasTarget(base, projectId)) return;
       Array.prototype.slice.call(group.querySelectorAll("button[data-key]")).forEach(function (btn) {
         btn.addEventListener("click", function () {
           var key = btn.getAttribute("data-key");

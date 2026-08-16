@@ -7067,6 +7067,77 @@ mod tests {
         );
     }
 
+    /// unassigned-poller-guard D1: `assets/app.js`'s shared screen poller
+    /// and its three posters (input/keys/attach) skip any element that
+    /// resolves to NEITHER a valid `data-term-base` NOR the page's own
+    /// `data-project-id` — otherwise both build a `/p/null/...` URL and
+    /// poll/post there forever. That guard lives entirely in JS with no
+    /// repo harness to run it directly (the same JS-only shape
+    /// `home-terminal-header-2` recorded); what this pins instead is the
+    /// markup contract the guard's premise depends on: the Unassigned page
+    /// truly offers neither signal, while the project terminal page and the
+    /// homepage Terminals tab each offer one. Manual browser check
+    /// (unautomatable, recorded here per that same precedent): open
+    /// `/_terminal/unassigned` with a live pane, confirm the network panel
+    /// shows no `/p/null/...` request over several poll ticks, and that
+    /// pressing Send posts to `/_terminal/unassigned/<pane>/input` exactly
+    /// once (not twice).
+    #[test]
+    fn unassigned_page_offers_neither_project_id_nor_term_base_while_other_pages_offer_one() {
+        let pane = pane_with_status("working");
+
+        // The Unassigned page: no `data-project-id` anywhere (its `<main>`
+        // carries none), and its `.term-screen` panes (via `pane_cards`,
+        // `attach: false`) carry no `data-term-base` either — the shared
+        // poller/posters must find nothing to resolve a target from here.
+        let unassigned_html = unassigned_terminal_page(std::slice::from_ref(&pane));
+        assert!(
+            unassigned_html.contains(r#"<main class="fg-page">"#),
+            "the Unassigned page's <main> must render with no data-project-id: {unassigned_html}"
+        );
+        assert!(
+            !unassigned_html.contains("data-project-id"),
+            "the Unassigned page must carry no data-project-id anywhere: {unassigned_html}"
+        );
+        assert!(
+            !unassigned_html.contains("data-term-base"),
+            "the Unassigned page's panes must carry no data-term-base: {unassigned_html}"
+        );
+
+        // The project terminal page: `<main>` DOES carry `data-project-id`
+        // — one of the two signals the guard accepts.
+        let project = sample_project();
+        let project_html = terminal_page(&project, std::slice::from_ref(&pane), None, &[]);
+        assert!(
+            project_html.contains(&format!(
+                r#"<main class="fg-page fg-page--tight" data-project-id="{}">"#,
+                project.id
+            )),
+            "the project terminal page's <main> must carry data-project-id: {project_html}"
+        );
+
+        // The homepage Terminals tab: its own `<main>` carries no
+        // `data-project-id` (D3 — its panes can belong to any project or
+        // none), but the selected pane's `.term-screen` DOES carry
+        // `data-term-base` — the other signal the guard accepts.
+        let menu_pane = TerminalsMenuPane {
+            view: pane.clone(),
+            base: format!("/p/{}/_terminal/{}", project.id, pane.pane_id),
+            project_label: "Proj One".into(),
+            is_project_pane: true,
+            project_id: Some(project.id.clone()),
+        };
+        let tab_html = terminals_tab(std::slice::from_ref(&menu_pane), None, true, &[]);
+        assert!(
+            tab_html.contains(r#"<main class="fg-page fg-page--tight">"#),
+            "the homepage Terminals tab's own <main> must render with no data-project-id: {tab_html}"
+        );
+        assert!(
+            tab_html.contains(&format!(r#"data-term-base="{}""#, menu_pane.base)),
+            "the homepage Terminals tab's pane must carry data-term-base: {tab_html}"
+        );
+    }
+
     /// The Older/Newer/Live column is bounded by the screen it moves: the
     /// rail it lives in is positioned against `.term-screen-wrap`, which is
     /// the only ancestor that establishes a containing block, so every one of
