@@ -314,8 +314,14 @@ fn project_list_main(
         // in, and each one is immediately followed by its own branches, in
         // their own arrival order. A branch is never emitted twice and never
         // emitted before its parent, whatever order the registry hands them in.
+        // On top of that grouping, a group whose parent or branches carry any
+        // agent pane (kind != "shell" — the same filter the row badges use)
+        // floats above the groups with none, so the projects with agents
+        // running are the first thing the eye lands on; the sort is stable,
+        // so within each partition arrival order still holds, and a group
+        // moves as one unit — a branch never separates from its parent.
         type OrderedProjectRow<'a> = (&'a (Project, usize, Vec<TerminalPaneView>), Option<&'a str>);
-        let mut ordered: Vec<OrderedProjectRow> = Vec::new();
+        let mut groups: Vec<Vec<OrderedProjectRow>> = Vec::new();
         for entry in projects {
             if worktree_branch(&entry.0.id)
                 .map(|(parent, _)| registered.contains(parent))
@@ -323,15 +329,22 @@ fn project_list_main(
             {
                 continue;
             }
-            ordered.push((entry, None));
+            let mut group: Vec<OrderedProjectRow> = vec![(entry, None)];
             for child in projects {
                 if let Some((parent, branch)) = worktree_branch(&child.0.id) {
                     if parent == entry.0.id {
-                        ordered.push((child, Some(branch)));
+                        group.push((child, Some(branch)));
                     }
                 }
             }
+            groups.push(group);
         }
+        groups.sort_by_key(|group| {
+            !group
+                .iter()
+                .any(|((_, _, panes), _)| panes.iter().any(|p| p.kind != "shell"))
+        });
+        let ordered: Vec<OrderedProjectRow> = groups.into_iter().flatten().collect();
         let mut rows = String::new();
         for ((p, count, panes), branch) in ordered {
             // A worktree whose parent is not registered has nothing to nest
@@ -437,7 +450,7 @@ fn project_list_main(
         None => String::new(),
     };
     format!(
-        r#"<main class="fg-page"><h2 class="fg-pagehead__title">Projects</h2>{register_banner}{add_form}{listing}{suggestions_block}{unassigned_card}</main>"#,
+        r#"<main class="fg-page">{register_banner}{add_form}{listing}{suggestions_block}{unassigned_card}</main>"#,
         register_banner = register_banner,
         add_form = project_add_form(),
         listing = listing,
@@ -6394,6 +6407,45 @@ mod tests {
             workspace: "w1".into(),
             tab: "t1".into(),
         }
+    }
+
+    /// projects-list-tidy: the Projects tab spends no line on a page
+    /// heading (the tab strip already says where you are), and a project
+    /// with agents running renders above one without — using the same
+    /// kind != "shell" filter as the row badges, so a shell-only project
+    /// stays in the idle partition.
+    #[test]
+    fn project_list_drops_heading_and_floats_agent_active_projects_first() {
+        let idle = sample_project();
+        let mut active = sample_project();
+        active.id = "proj-2".into();
+        active.name = "Proj Two".into();
+        let shell_pane = TerminalPaneView {
+            pane_id: "w1:sh".into(),
+            kind: "shell".into(),
+            name: "shell".into(),
+            status: "idle".into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+        };
+        let projects = vec![
+            (idle, 3, vec![shell_pane]),
+            (active, 5, vec![pane_with_status("working")]),
+        ];
+        let html = project_list_main(&projects, false, &[], None);
+        assert!(
+            !html.contains("fg-pagehead__title"),
+            "the Projects tab must render no page heading: {html}"
+        );
+        let two = html
+            .find("Proj Two")
+            .expect("agent-active project must render");
+        let one = html.find("Proj One").expect("idle project must render");
+        assert!(
+            two < one,
+            "the agent-active project must render above the shell-only one: {html}"
+        );
     }
 
     /// inprogress-priority-order-2 (D7, must-have): three cards -- one
