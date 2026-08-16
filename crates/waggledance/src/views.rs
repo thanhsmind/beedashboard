@@ -491,14 +491,18 @@ fn register_error_message(code: &str) -> Option<&'static str> {
 /// D2 containment boundary (`server.rs::project_panes`, the same query
 /// `pane_strip` above draws from at pane-page scope). Each badge is a link
 /// to that pane's own terminal view carrying the same [`status_pill`] and
-/// program (`kind` — the herdr agent kind, or the literal `shell` for an
-/// agent-less pane) `pane_strip` prints; the pane's `name` field — the
-/// agent's own name — never reaches this markup (D1a). An empty `panes`
-/// list (the switch off, the snapshot unavailable, an unconstructable
-/// boundary, or simply no pane inside this project) renders no container at
-/// all, so an unbadged row is byte-identical to how every row rendered
-/// before this feature (D6) — not an empty `<nav>` that would say the same
-/// thing twice.
+/// program (`kind` — the herdr agent kind) `pane_strip` prints; the pane's
+/// `name` field — the agent's own name — never reaches this markup (D1a).
+/// board-badges-agents-only supersedes D2's every-pane-badges rule: an
+/// agent-less shell pane (`kind == "shell"`) is skipped here — the board is
+/// a fleet overview of running agents, and a plain shell stays reachable
+/// through the Terminals tab and its own pane page instead of crowding the
+/// board with idle terminals. An empty `panes` list (the switch off, the
+/// snapshot unavailable, an unconstructable boundary, or simply no pane
+/// inside this project) renders no container at all, so an unbadged row is
+/// byte-identical to how every row rendered before this feature (D6) — not
+/// an empty `<nav>` that would say the same thing twice; a list of nothing
+/// but shell panes renders no container either, for the same reason.
 fn project_badges(project_id: &str, panes: &[TerminalPaneView]) -> String {
     terminal_badges_nav(project_id, panes, "Terminal panes", "")
 }
@@ -512,14 +516,17 @@ fn project_badges(project_id: &str, panes: &[TerminalPaneView]) -> String {
 /// panes are the terminals running in that feature's own *checkout*, not
 /// panes that belong to the feature itself (a Main feature's checkout is
 /// shared with every other Main feature of that project, so a label
-/// claiming otherwise would be false for every one of them). An empty
-/// `panes` renders no container at all, for either caller.
+/// claiming otherwise would be false for every one of them). Plain shell
+/// panes (`kind == "shell"`) are filtered out first (board-badges-agents-only)
+/// before the emptiness check, so an all-shell `panes` renders no container
+/// at all, exactly like an empty list, for either caller.
 fn terminal_badges_nav(
     project_id: &str,
     panes: &[TerminalPaneView],
     aria_label: &str,
     extra_class: &str,
 ) -> String {
+    let panes: Vec<&TerminalPaneView> = panes.iter().filter(|p| p.kind != "shell").collect();
     if panes.is_empty() {
         return String::new();
     }
@@ -9978,6 +9985,46 @@ mod tests {
         assert!(
             badge_nav_start > details_end,
             "the badge nav must be a sibling after the card's own </details>, not nested inside it: {card_html}"
+        );
+    }
+
+    /// board-badges-agents-only: plain-shell panes (kind == "shell") never
+    /// badge on the board — a mixed list badges only its agent panes, and a
+    /// list of nothing but shells renders no container at all, exactly like
+    /// an empty list.
+    #[test]
+    fn board_badges_skip_plain_shell_panes() {
+        let shell = |id: &str| TerminalPaneView {
+            pane_id: id.into(),
+            kind: "shell".into(),
+            name: String::new(),
+            status: "shell".into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+        };
+        let agent = TerminalPaneView {
+            pane_id: "w1:p2".into(),
+            kind: "claude".into(),
+            name: "n".into(),
+            status: "working".into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t2".into(),
+        };
+        let mixed = project_badges("proj-a", &[shell("w1:p1"), agent.clone()]);
+        assert!(
+            mixed.contains("pane/w1:p2") && !mixed.contains("pane/w1:p1"),
+            "a mixed list must badge only the agent pane, never the shell pane: {mixed}"
+        );
+        assert!(
+            !mixed.contains(">shell</span>"),
+            "the shell pane's program text must never appear once its badge is skipped: {mixed}"
+        );
+        let only_shells = project_badges("proj-a", &[shell("w1:p1"), shell("w1:p3")]);
+        assert!(
+            only_shells.is_empty(),
+            "a list of nothing but shell panes must render no container at all, exactly like an empty list: {only_shells}"
         );
     }
 
