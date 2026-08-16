@@ -1118,7 +1118,27 @@ fn terminals_tab(
     // `pane_bar` takes the flat `TerminalPaneView` list `pane_strip`/
     // `pane_tab` already know how to render — cloning is a handful of
     // small structs per render, never a hot path.
-    let strip_panes: Vec<TerminalPaneView> = panes.iter().map(|p| p.view.clone()).collect();
+    // terminals-tab-project-scope-1: the switcher lists only the panes that
+    // share the *effective* pane's own project, not every pane across every
+    // project as before — matched on `project_id` (the routable identity
+    // `create` above already keys off), never the display-only
+    // `project_label`, so a pane with no project (`project_id: None`) lists
+    // only the other project-less panes via `Option<String>`'s own equality.
+    // Selection resolution above (`effective`, D4's fallback and D7's
+    // vanished-pane check) still runs over the *full*, unfiltered `panes`
+    // inventory — only the strip handed to `pane_bar` is scoped. When
+    // `effective` is `None` (the named pane vanished, D7) there is no
+    // project left to scope to, so the switcher falls back to the full
+    // list — the cleanest reading available once the pane it would have
+    // scoped to no longer exists.
+    let strip_panes: Vec<TerminalPaneView> = match effective {
+        Some(pane) => panes
+            .iter()
+            .filter(|p| p.project_id == pane.project_id)
+            .map(|p| p.view.clone())
+            .collect(),
+        None => panes.iter().map(|p| p.view.clone()).collect(),
+    };
     // The switcher highlights whichever pane the body actually shows
     // (`effective`, D4's own first-pane fallback included), not the raw,
     // possibly-`None` or possibly-vanished `selected_pane` query value —
@@ -7491,6 +7511,73 @@ mod tests {
             html.contains(r#"href="/?tab=terminals&amp;pane=w1:p1""#)
                 && html.contains(r#"href="/?tab=terminals&amp;pane=w1:p2""#),
             "the switcher's links must stay on the tab's own address (D7): {html}"
+        );
+    }
+
+    /// terminals-tab-project-scope-1: the switcher used to list every pane
+    /// across every project; it now lists only the ones sharing the
+    /// *effective* pane's own project, matched on `project_id` — a
+    /// cross-project pane (`w1:p3`, `proj-2`) neither the selected pane
+    /// (`w1:p1`, `proj-1`) nor its project-mate (`w1:p2`) belongs with must
+    /// not appear anywhere in the render.
+    #[test]
+    fn terminals_tab_switcher_omits_panes_from_another_project() {
+        let panes = vec![
+            menu_pane("w1:p1", Some("proj-1"), "Proj One"),
+            menu_pane("w1:p2", Some("proj-1"), "Proj One"),
+            menu_pane("w1:p3", Some("proj-2"), "Proj Two"),
+        ];
+        let html = terminals_tab(&panes, Some("w1:p1"), true, &[]);
+        assert!(
+            html.contains("w1:p2"),
+            "the switcher must still list the selected pane's own project-mate: {html}"
+        );
+        assert!(
+            !html.contains("w1:p3"),
+            "the switcher must not list a pane from another project: {html}"
+        );
+    }
+
+    /// terminals-tab-project-scope-1: a selected pane belonging to no
+    /// project at all (`project_id: None`, `unassigned_panes`' own shape)
+    /// lists only the *other* project-less panes — a registered project's
+    /// pane must not leak into that switcher either.
+    #[test]
+    fn terminals_tab_no_project_selection_lists_only_project_less_panes() {
+        let panes = vec![
+            menu_pane("w1:u1", None, "Unassigned"),
+            menu_pane("w1:u2", None, "Unassigned"),
+            menu_pane("w1:p1", Some("proj-1"), "Proj One"),
+        ];
+        let html = terminals_tab(&panes, Some("w1:u1"), true, &[]);
+        assert!(
+            html.contains("w1:u2"),
+            "the switcher must still list the other project-less pane: {html}"
+        );
+        assert!(
+            !html.contains("w1:p1"),
+            "the switcher must not list a pane that belongs to a registered project: {html}"
+        );
+    }
+
+    /// terminals-tab-project-scope-1: an absent `?pane` still takes D4's own
+    /// first entry of the *full* inventory, even when that first entry's
+    /// project differs from another pane later in the same list — selection
+    /// resolution is never scoped, only the switcher it feeds is.
+    #[test]
+    fn terminals_tab_absent_pane_fallback_ignores_project_scope() {
+        let panes = vec![
+            menu_pane("w1:p2", Some("proj-2"), "Proj Two"),
+            menu_pane("w1:p1", Some("proj-1"), "Proj One"),
+        ];
+        let html = terminals_tab(&panes, None, true, &[]);
+        assert!(
+            html.contains(r#"data-pane-id="w1:p2""#),
+            "an absent ?pane must still select the first pane of the full inventory: {html}"
+        );
+        assert!(
+            !html.contains("w1:p1"),
+            "the switcher must scope to the selected (first) pane's own project, proj-2: {html}"
         );
     }
 
