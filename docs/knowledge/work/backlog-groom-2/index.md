@@ -1,6 +1,3 @@
----
-okf_version: 0.1
----
 <!--
 GENERATED FILE — do not hand-edit.
 Rendered by `bee knowledge index` from concept frontmatter inside docs/knowledge/ (okf-foundation D21).
@@ -9,12 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# Knowledge Bundle
+# work/backlog-groom-2/
 
-## Sections
+## Concepts
 
-- [work/](work/index.md) — 38 concept(s)
-
-## Critical patterns
-
-None.
+- [backlog-groom-2 — delivery](delivery.md) — Delivery record for work item backlog-groom-2: 5 capped cell(s), 0 recorded deviation(s).
