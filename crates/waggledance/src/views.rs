@@ -2862,23 +2862,23 @@ fn bee_render_hub_section(
                     data.last_activity.as_deref(),
                     panes,
                 );
-                let html = bee_hub_card(
-                    &project.id,
-                    &data.feature,
-                    "in-progress",
-                    data.done,
-                    data.total,
-                    data.last_activity.as_deref(),
-                    &data.worktree_label,
-                    data.reason.as_deref(),
-                    data.docs.as_ref(),
-                    None,
-                    None,
+                let html = bee_hub_card(&BeeHubCardArgs {
+                    project_id: &project.id,
+                    feature: &data.feature,
+                    group_key: "in-progress",
+                    done: data.done,
+                    total: data.total,
+                    last_activity: data.last_activity.as_deref(),
+                    worktree_label: &data.worktree_label,
+                    reason: data.reason.as_deref(),
+                    docs: data.docs.as_ref(),
+                    project_label: None,
+                    project_color: None,
                     panes,
-                    data.run_state.as_deref(),
-                    data.last_tool_call.as_deref(),
-                    &data.deferred,
-                );
+                    run_state: data.run_state.as_deref(),
+                    last_tool_call: data.last_tool_call.as_deref(),
+                    deferred: &data.deferred,
+                });
                 in_progress_entries.push((key, html));
             }
             BeeHubPlacement::Finished(data) => {
@@ -3151,23 +3151,23 @@ pub fn bee_cross_project_features_section(
                         data.last_activity.as_deref(),
                         panes,
                     );
-                    let html = bee_hub_card(
-                        &project.id,
-                        &data.feature,
-                        "in-progress",
-                        data.done,
-                        data.total,
-                        data.last_activity.as_deref(),
-                        &data.worktree_label,
-                        data.reason.as_deref(),
-                        data.docs.as_ref(),
-                        Some(&project.name),
+                    let html = bee_hub_card(&BeeHubCardArgs {
+                        project_id: &project.id,
+                        feature: &data.feature,
+                        group_key: "in-progress",
+                        done: data.done,
+                        total: data.total,
+                        last_activity: data.last_activity.as_deref(),
+                        worktree_label: &data.worktree_label,
+                        reason: data.reason.as_deref(),
+                        docs: data.docs.as_ref(),
+                        project_label: Some(&project.name),
                         project_color,
                         panes,
-                        data.run_state.as_deref(),
-                        data.last_tool_call.as_deref(),
-                        &data.deferred,
-                    );
+                        run_state: data.run_state.as_deref(),
+                        last_tool_call: data.last_tool_call.as_deref(),
+                        deferred: &data.deferred,
+                    });
                     in_progress_entries.push((key, html));
                 }
                 BeeHubPlacement::Finished(data) => {
@@ -3536,24 +3536,42 @@ fn bee_cross_project_board_project_colors<'a>(
 /// [`bee_hub_deferred_badge`] in the card's own body -- never the
 /// `<summary>`, whose content model cannot nest a `<details>` the way that
 /// badge's click-to-reveal detail needs.
-#[allow(clippy::too_many_arguments)]
-fn bee_hub_card(
-    project_id: &str,
-    feature: &str,
-    group_key: &str,
+struct BeeHubCardArgs<'a> {
+    project_id: &'a str,
+    feature: &'a str,
+    group_key: &'a str,
     done: usize,
     total: usize,
-    last_activity: Option<&str>,
-    worktree_label: &str,
-    reason: Option<&str>,
-    docs: Option<&waggledance_core::bee::BeeFeatureDocs>,
-    project_label: Option<&str>,
+    last_activity: Option<&'a str>,
+    worktree_label: &'a str,
+    reason: Option<&'a str>,
+    docs: Option<&'a waggledance_core::bee::BeeFeatureDocs>,
+    project_label: Option<&'a str>,
     project_color: Option<u8>,
-    panes: &[TerminalPaneView],
-    run_state: Option<&str>,
-    last_tool_call: Option<&str>,
-    deferred: &[BeeDeferredEntry],
-) -> String {
+    panes: &'a [TerminalPaneView],
+    run_state: Option<&'a str>,
+    last_tool_call: Option<&'a str>,
+    deferred: &'a [BeeDeferredEntry],
+}
+
+fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
+    let BeeHubCardArgs {
+        project_id,
+        feature,
+        group_key,
+        done,
+        total,
+        last_activity,
+        worktree_label,
+        reason,
+        docs,
+        project_label,
+        project_color,
+        panes,
+        run_state,
+        last_tool_call,
+        deferred,
+    } = *args;
     let title = docs
         .and_then(|d| d.title.as_deref())
         .filter(|t| !t.is_empty());
@@ -9843,23 +9861,23 @@ mod tests {
             workspace: "w1".into(),
             tab: "t1".into(),
         }];
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &panes,
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &panes,
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         // project_badges' own markup, with only its aria-label swapped for
         // the checkout-naming one this card must carry and its own
         // `bee-hub__badges` class layered onto the shared container class
@@ -9925,23 +9943,23 @@ mod tests {
     /// feature -- no empty container is left behind.
     #[test]
     fn bee_hub_card_with_no_panes_renders_no_badge_container() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("proj-row__badges"),
             "an empty pane list must render no badge container: {card_html}"
@@ -9967,23 +9985,23 @@ mod tests {
     #[test]
     fn bee_hub_card_with_a_blocked_pane_carries_its_own_waiting_on_you_line() {
         let panes = vec![pane_with_status("blocked")];
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &panes,
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &panes,
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(r#"<p class="bee-cell__meta bee-hub__reason">Waiting on you — a terminal is blocked</p>"#),
             "a blocked pane must add its own exact reason line: {card_html}"
@@ -9997,23 +10015,23 @@ mod tests {
     fn bee_hub_card_with_a_gate_reason_and_a_blocked_pane_carries_both_lines_gate_first() {
         let panes = vec![pane_with_status("blocked")];
         let gate_reason = "Waiting on you — Shape gate awaiting your decision";
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            Some(gate_reason),
-            None,
-            None,
-            None,
-            &panes,
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: Some(gate_reason),
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &panes,
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         let gate_at = card_html.find(gate_reason).unwrap_or_else(|| {
             panic!("the existing gate reason line must still render: {card_html}")
         });
@@ -10033,23 +10051,23 @@ mod tests {
     #[test]
     fn bee_hub_card_with_no_blocked_pane_and_no_gate_reason_carries_neither_line() {
         let panes = vec![pane_with_status("working")];
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &panes,
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &panes,
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("bee-hub__reason"),
             "with no gate reason and no blocked pane, neither reason line may render: {card_html}"
@@ -10062,23 +10080,23 @@ mod tests {
     /// nothing else in this file would ever notice.
     #[test]
     fn bee_hub_card_renders_collapsed_with_no_open_attribute() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(r#"<details class="bee-hub__card" data-hub-group="in-progress">"#),
             "the card must render as a details element carrying its own group key: {card_html}"
@@ -10099,23 +10117,23 @@ mod tests {
     /// the `<details>`/`<summary>` pair can no longer be that link itself.
     #[test]
     fn bee_hub_card_body_opens_with_the_feature_detail_link() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(
                 r#"<div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/proj-a/_bee/feature/feat-a">Feature detail"#
@@ -10182,23 +10200,23 @@ mod tests {
         let recent = (time::OffsetDateTime::now_utc() - time::Duration::seconds(30))
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap();
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            Some("2026-08-15T15:48:08.674Z"),
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            Some(&recent),
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: Some("2026-08-15T15:48:08.674Z"),
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: Some(&recent),
+            deferred: &[],
+        });
         assert!(
             card_html.contains(r#"<span class="bee-hub__pulse""#),
             "a tool call landed 30 seconds ago must render the pulse dot: {card_html}"
@@ -10212,23 +10230,23 @@ mod tests {
         let old = (time::OffsetDateTime::now_utc() - time::Duration::minutes(20))
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap();
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            Some("2026-08-15T15:48:08.674Z"),
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            Some(&old),
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: Some("2026-08-15T15:48:08.674Z"),
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: Some(&old),
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("bee-hub__pulse"),
             "a tool call 20 minutes old must render no pulse dot: {card_html}"
@@ -10240,23 +10258,23 @@ mod tests {
     /// here follows.
     #[test]
     fn bee_hub_card_with_no_tool_call_renders_no_pulse_dot() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("bee-hub__pulse"),
             "no last_tool_call must render no pulse dot: {card_html}"
@@ -10268,23 +10286,23 @@ mod tests {
     /// `<summary>` so it stays visible without expanding the card.
     #[test]
     fn bee_hub_card_awaiting_approval_run_state_renders_prominent_badge() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            Some("awaiting-approval"),
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: Some("awaiting-approval"),
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(r#"<span class="fg-chip fg-chip--danger bee-hub__run-state">Awaiting approval</span>"#),
             "awaiting-approval must render its own prominent danger-toned badge: {card_html}"
@@ -10303,23 +10321,23 @@ mod tests {
     /// tones, never sharing awaiting-approval's own prominent one.
     #[test]
     fn bee_hub_card_running_run_state_renders_its_own_distinct_tone() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            Some("running"),
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: Some("running"),
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(r#"<span class="fg-chip fg-chip--accent bee-hub__run-state">Running</span>"#),
             "running must render its own accent-toned badge, distinct from awaiting-approval's danger tone: {card_html}"
@@ -10331,23 +10349,23 @@ mod tests {
     /// doc comment) renders no badge.
     #[test]
     fn bee_hub_card_with_no_run_state_renders_no_badge() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("bee-hub__run-state"),
             "absent run_state must render no badge at all: {card_html}"
@@ -10373,23 +10391,23 @@ mod tests {
                 reason: Some("dead code left behind".to_string()),
             },
         ];
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &deferred,
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &deferred,
+        });
         assert!(
             card_html.contains(r#"<summary class="fg-badge">2 deferred</summary>"#),
             "two unresolved entries must render a '2 deferred' count badge: {card_html}"
@@ -10408,23 +10426,23 @@ mod tests {
     /// -- no empty badge, no empty detail container.
     #[test]
     fn bee_hub_card_with_zero_deferred_debt_renders_nothing() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             !card_html.contains("bee-hub__deferred") && !card_html.contains("deferred"),
             "zero unresolved debt must render no badge and no detail container: {card_html}"
@@ -10608,23 +10626,23 @@ mod tests {
     /// caller handed it.
     #[test]
     fn bee_hub_card_with_project_label_shows_project_worktree_subtitle_and_shell_modifier() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "wt/hold-holder-attribution",
-            None,
-            None,
-            Some("Project A"),
-            Some(3),
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "wt/hold-holder-attribution",
+            reason: None,
+            docs: None,
+            project_label: Some("Project A"),
+            project_color: Some(3),
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(
                 r#"<div class="bee-hub__project">Project A<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div>"#
@@ -10654,23 +10672,23 @@ mod tests {
     /// feature itself has no CONTEXT.md title.
     #[test]
     fn bee_hub_card_with_project_label_and_no_title_still_shows_project_subtitle() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "Main",
-            None,
-            None,
-            Some("Project A"),
-            Some(3),
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: Some("Project A"),
+            project_color: Some(3),
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         // card-collapse-inprogress: the title (now in the collapsed
         // `<summary>`) and the subtitle (now in the expandable body) are no
         // longer adjacent in the rendered markup, so each is checked on its
@@ -10700,23 +10718,23 @@ mod tests {
             description: None,
             docs: vec![],
         };
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "wt/hold-holder-attribution",
-            None,
-            Some(&docs),
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "wt/hold-holder-attribution",
+            reason: None,
+            docs: Some(&docs),
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert_eq!(
             card_html,
             r#"<div class="fg-card bee-hub__shell"><details class="bee-hub__card" data-hub-group="in-progress"><summary class="bee-hub__summary"><div class="fg-card__title">Human Title</div><span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/proj-a/_bee/feature/feat-a">Feature detail<span aria-hidden="true"> →</span></a><div class="bee-hub__slug">feat-a<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></div></details></div>"#,
@@ -10744,23 +10762,23 @@ mod tests {
     /// so no separator.
     #[test]
     fn bee_hub_card_with_no_project_label_and_no_title_names_its_worktree_alone() {
-        let card_html = bee_hub_card(
-            "proj-a",
-            "feat-a",
-            "in-progress",
-            1,
-            2,
-            None,
-            "merged",
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            None,
-            &[],
-        );
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "merged",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
             card_html.contains(
                 r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">merged</span></div>"#
@@ -10789,23 +10807,23 @@ mod tests {
             docs: vec![],
         };
         for worktree_label in ["hold-holder-attribution", "worktree", "merged", "Main"] {
-            let card_html = bee_hub_card(
-                "proj-a",
-                "feat-a",
-                "in-progress",
-                1,
-                2,
-                None,
+            let card_html = bee_hub_card(&BeeHubCardArgs {
+                project_id: "proj-a",
+                feature: "feat-a",
+                group_key: "in-progress",
+                done: 1,
+                total: 2,
+                last_activity: None,
                 worktree_label,
-                None,
-                Some(&docs),
-                None,
-                None,
-                &[],
-                None,
-                None,
-                &[],
-            );
+                reason: None,
+                docs: Some(&docs),
+                project_label: None,
+                project_color: None,
+                panes: &[],
+                run_state: None,
+                last_tool_call: None,
+                deferred: &[],
+            });
             let expected =
                 format!(r#"<span class="bee-hub__project-worktree"> / {worktree_label}</span>"#);
             assert!(
