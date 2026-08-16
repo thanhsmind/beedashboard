@@ -2180,9 +2180,11 @@
         item.appendChild(title);
       }
 
+      // Rows already sit under their project's section heading
+      // (`renderByProject`), so the suffix carries only the pane address.
       var suffix = document.createElement("span");
       suffix.className = "agent-drawer__suffix";
-      suffix.textContent = agent.project_name + " · " + agent.workspace + ":" + agent.tab;
+      suffix.textContent = agent.workspace + ":" + agent.tab;
       item.appendChild(suffix);
 
       return item;
