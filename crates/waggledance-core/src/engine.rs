@@ -142,9 +142,35 @@ impl Engine {
 
     /// Index a single file and (re)compute its outgoing links. Used by view_file
     /// and the filesystem watcher.
-    pub fn index_file_incremental(&self, project: &Project, abs: &Path) -> Result<()> {
-        IndexService::index_file(&self.store, project, abs, self.max_bytes())?;
-        self.compute_file_links(project, abs)
+    ///
+    /// Returns whether the file's content actually changed relative to what was
+    /// previously stored (D2, `backlog-groom-1`): the live-reload watcher uses
+    /// this to skip broadcasting a reload for a touch / byte-identical rewrite.
+    /// A path with no prior stored content (brand-new, or unreadable before)
+    /// always counts as changed. The compare happens against the content read
+    /// just before this call overwrites it — no extra hashing pass, a plain
+    /// blob compare against the `files_fts.content` column the indexer already
+    /// writes.
+    pub fn index_file_incremental(&self, project: &Project, abs: &Path) -> Result<bool> {
+        let rel = indexer::rel_path_str(&project.root_path, abs);
+        let previous = if rel.is_empty() {
+            None
+        } else {
+            self.store.file_content(&project.id, &rel)?
+        };
+        let new_content = std::fs::read_to_string(abs).ok();
+        let indexed = IndexService::index_file(&self.store, project, abs, self.max_bytes())?;
+        self.compute_file_links(project, abs)?;
+        let changed = match (&indexed, &new_content) {
+            (Some(_), Some(c)) => previous.as_deref() != Some(c.as_str()),
+            // Indexed despite our own read failing (a race with the writer) —
+            // treat conservatively as changed so a real edit is never dropped.
+            (Some(_), None) => true,
+            // Skipped by IndexService (too big / unreadable) — nothing in the
+            // index moved, so there is nothing to reload for.
+            (None, _) => false,
+        };
+        Ok(changed)
     }
 
     /// Drop a file from the index (and its outgoing links).
@@ -397,6 +423,42 @@ mod tests {
         assert!(
             back.iter().any(|(rel, _)| rel == "docs/architecture.md"),
             "backlinks: {back:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn index_file_incremental_reports_changed_only_when_content_differs() {
+        let dir = std::env::temp_dir().join(format!("waggledance-incr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Register against an empty directory so the initial full scan indexes
+        // nothing — docs/a.md is written only afterward, so the store has no
+        // prior row for it when index_file_incremental first sees it.
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let project = engine.register(&dir, None).unwrap();
+        write(&dir, "docs/a.md", "# A\nfirst");
+        let abs = dir.join("docs/a.md");
+
+        // A brand-new path (no prior stored content) counts as changed.
+        assert!(
+            engine.index_file_incremental(&project, &abs).unwrap(),
+            "first index of a new path must report changed"
+        );
+
+        // Re-indexing identical content reports no change.
+        assert!(
+            !engine.index_file_incremental(&project, &abs).unwrap(),
+            "byte-identical reindex must report not-changed"
+        );
+
+        // Editing the content reports changed again.
+        std::fs::write(&abs, "# A\nsecond").unwrap();
+        assert!(
+            engine.index_file_incremental(&project, &abs).unwrap(),
+            "differing content must report changed"
         );
 
         std::fs::remove_dir_all(&dir).ok();

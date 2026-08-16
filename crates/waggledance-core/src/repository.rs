@@ -191,6 +191,18 @@ impl SqliteStore {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// The currently indexed content for a file, or `None` when the path is not
+    /// indexed yet. The read side of the change-detection compare in
+    /// `Engine::index_file_incremental` (D2): a brand-new path has no row here,
+    /// which the caller treats as "changed".
+    pub fn file_content(&self, project_id: &str, rel_path: &str) -> Result<Option<String>> {
+        let c = self.conn.lock().unwrap();
+        let mut stmt =
+            c.prepare("SELECT content FROM files_fts WHERE project_id=?1 AND rel_path=?2")?;
+        let mut rows = stmt.query(params![project_id, rel_path])?;
+        Ok(rows.next()?.map(|r| r.get_unwrap::<_, String>(0)))
+    }
+
     /// Absolute paths of every indexed file in a project — the link resolver index.
     pub fn file_abs_paths(&self, project_id: &str) -> Result<HashSet<PathBuf>> {
         let c = self.conn.lock().unwrap();
@@ -693,6 +705,30 @@ mod tests {
         assert_eq!(
             s.search("unique_token_xyz", Some("p1"), 10).unwrap().len(),
             0
+        );
+    }
+
+    #[test]
+    fn file_content_reads_back_the_stored_blob_and_none_when_absent() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.upsert_project(&sample_project()).unwrap();
+
+        // Not indexed yet — no row to read.
+        assert_eq!(s.file_content("p1", "docs/a.md").unwrap(), None);
+
+        s.upsert_file(&file("docs/a.md", "Alpha"), "first body")
+            .unwrap();
+        assert_eq!(
+            s.file_content("p1", "docs/a.md").unwrap(),
+            Some("first body".to_string())
+        );
+
+        // Re-indexing with new content replaces the stored blob.
+        s.upsert_file(&file("docs/a.md", "Alpha"), "second body")
+            .unwrap();
+        assert_eq!(
+            s.file_content("p1", "docs/a.md").unwrap(),
+            Some("second body".to_string())
         );
     }
 

@@ -57,7 +57,10 @@ launcher — CLI, MCP, future desktop — coordinates through `~/.waggledance/da
   is on top of the existing path-traversal guard (a request can never resolve
   outside the project root, symlinks included).
 - **Live reload** — a filesystem watcher (debounced) updates the index on change
-  and pushes a reload signal over WebSocket; the browser reloads the page.
+  and pushes a reload signal over WebSocket; the browser reloads the page. The
+  signal fires only when a reindexed file's content actually changed: a touch or
+  a re-save with identical bytes updates nothing and reloads no one, so an editor
+  that rewrites a file on save never floods every open page with reloads.
   A page currently showing a live terminal screen never reloads on that
   signal — the homepage's Terminals tab and the standalone terminal page both
   stay put, so an edit anywhere can never reset a running terminal — while the

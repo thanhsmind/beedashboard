@@ -22895,6 +22895,53 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// finding #9: the only existing unregister-route test above
+    /// (`foreign_host_to_unregister_project_is_refused_and_the_project_stays_registered`)
+    /// proves the Host-header refusal, never the happy path — this proves a
+    /// same-origin unregister actually makes `Engine::unregister`
+    /// (`engine.rs:123`) take effect: the project is gone from the registry
+    /// afterward, not merely redirected away from.
+    #[tokio::test]
+    async fn unregister_project_removes_a_registered_project_from_the_registry() {
+        let dir = fresh_root("unregister-happy-path");
+        let root = fresh_root("unregister-happy-path-root");
+        write(&root, "README.md", "# Existing Project");
+
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "existing");
+        let engine = st.engine.clone();
+        assert!(
+            engine
+                .list_projects()
+                .unwrap()
+                .iter()
+                .any(|p| p.id == project.id),
+            "the project must be registered before this test proves its removal"
+        );
+        let app = router(st);
+
+        let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
+            .method("POST")
+            .uri(format!("/api/projects/{}/unregister", project.id))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/");
+
+        assert!(
+            engine
+                .list_projects()
+                .unwrap()
+                .iter()
+                .all(|p| p.id != project.id),
+            "unregister must remove the project from the registry"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// D1 must-have 2: no `Host` header at all is refused the same way a
     /// foreign one is, on a plain GET.
     #[tokio::test]
