@@ -1,15 +1,21 @@
 //! Minimal MCP server over stdio (newline-delimited JSON-RPC 2.0).
-//! Exposes the single tool `waggledance_view_file` (PRD §5.5). Hand-rolled to
-//! avoid a heavy SDK dependency; the protocol surface here is intentionally
-//! small.
+//! Exposes the agent-facing query surface (PRD §5.5): the original write-side
+//! `waggledance_view_file`, plus three read-only query tools —
+//! `waggledance_search`, `waggledance_projects`, `waggledance_ask_state`
+//! (mcp-query-surface D3). Hand-rolled to avoid a heavy SDK dependency; the
+//! protocol surface here is intentionally small.
 
 use crate::runtime;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::Path;
+use waggledance_core::bee;
 use waggledance_core::config::registry_db_path;
 use waggledance_core::{Config, Engine, SqliteStore};
+
+/// Default `waggledance_search` hit cap when the caller does not pass `limit`.
+const DEFAULT_SEARCH_LIMIT: usize = 10;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
@@ -40,7 +46,17 @@ pub fn run() -> Result<()> {
                     "serverInfo": { "name": "waggledance", "version": env!("CARGO_PKG_VERSION") }
                 }),
             )),
-            "tools/list" => Some(ok(id, json!({ "tools": [tool_schema()] }))),
+            "tools/list" => Some(ok(
+                id,
+                json!({
+                    "tools": [
+                        view_file_schema(),
+                        search_schema(),
+                        projects_schema(),
+                        ask_state_schema()
+                    ]
+                }),
+            )),
             "tools/call" => Some(handle_tool_call(id, &engine, &req)),
             "ping" => Some(ok(id, json!({}))),
             _ if id.is_some() => Some(err(id, -32601, "method not found")),
@@ -55,7 +71,7 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn tool_schema() -> Value {
+fn view_file_schema() -> Value {
     json!({
         "name": "waggledance_view_file",
         "description": "Make a markdown file viewable in the browser and return its URL. \
@@ -72,6 +88,54 @@ fn tool_schema() -> Value {
     })
 }
 
+fn search_schema() -> Value {
+    json!({
+        "name": "waggledance_search",
+        "description": "Full-text search across every registered project's indexed markdown \
+    (or one project, when `project` is given). Re-indexes changed files in the \
+    searched project(s) before answering, so results never lag disk. Each hit \
+    carries a rich, <mark>-highlighted excerpt — enough to answer without a \
+    follow-up read, never a bare path list or a whole file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Full-text query" },
+                "project": { "type": "string", "description": "Optional project id to narrow the search to" },
+                "limit": { "type": "integer", "description": "Max hits to return (default 10)" }
+            },
+            "required": ["query"]
+        }
+    })
+}
+
+fn projects_schema() -> Value {
+    json!({
+        "name": "waggledance_projects",
+        "description": "List every registered project: id, name, root path, indexed file \
+    count, and when it was last seen.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
+    })
+}
+
+fn ask_state_schema() -> Value {
+    json!({
+        "name": "waggledance_ask_state",
+        "description": "Ask waggledance for a project's parsed bee state (active feature, \
+    phase, open/blocked cells, recent decisions, sessions, handoff, attention) \
+    without reading any .bee file yourself. Omit `project` to get a rollup across \
+    every registered project.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": { "type": "string", "description": "Optional project id to narrow to a single project's full snapshot" }
+            }
+        }
+    })
+}
+
 fn handle_tool_call(id: Option<Value>, engine: &Engine, req: &Value) -> Value {
     let args = req
         .get("params")
@@ -83,9 +147,16 @@ fn handle_tool_call(id: Option<Value>, engine: &Engine, req: &Value) -> Value {
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
         .unwrap_or("");
-    if name != "waggledance_view_file" {
-        return err(id, -32602, "unknown tool");
+    match name {
+        "waggledance_view_file" => handle_view_file(id, engine, &args),
+        "waggledance_search" => handle_search(id, engine, &args),
+        "waggledance_projects" => handle_projects(id, engine),
+        "waggledance_ask_state" => handle_ask_state(id, engine, &args),
+        _ => err(id, -32602, "unknown tool"),
     }
+}
+
+fn handle_view_file(id: Option<Value>, engine: &Engine, args: &Value) -> Value {
     let root = args
         .get("project_root")
         .and_then(|v| v.as_str())
@@ -134,6 +205,226 @@ fn handle_tool_call(id: Option<Value>, engine: &Engine, req: &Value) -> Value {
         }
         Err(e) => tool_error(id, &format!("view_file failed: {e}")),
     }
+}
+
+/// `waggledance_search`: FTS5 hits over one or every registered project.
+///
+/// D4 (never stale): re-indexes the searched project(s) before querying —
+/// just the filtered project, or every registered project when unfiltered
+/// (D1). D2 (rich, not bare): each hit carries `project_id`, `rel_path`,
+/// `title`, a `<mark>`-highlighted `excerpt`, and `score` — no whole-file
+/// content, no bare path list.
+fn handle_search(id: Option<Value>, engine: &Engine, args: &Value) -> Value {
+    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    if query.trim().is_empty() {
+        return tool_error(id, "query is required");
+    }
+    let project = args
+        .get("project")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_SEARCH_LIMIT);
+
+    match project {
+        Some(project_id) => {
+            if engine.get_project(project_id).ok().flatten().is_none() {
+                return tool_error(id, &format!("no such project: {project_id}"));
+            }
+            // Best-effort: a refresh failure must not sink the search itself
+            // (results just stay as fresh as the last successful index).
+            let _ = engine.refresh_stale(project_id);
+        }
+        None => {
+            let Ok(projects) = engine.list_projects() else {
+                return tool_error(id, "could not list registered projects");
+            };
+            for p in &projects {
+                let _ = engine.refresh_stale(&p.id);
+            }
+        }
+    }
+
+    match engine.search(query, project, limit) {
+        Ok(hits) => {
+            let text = if hits.is_empty() {
+                format!("No hits for {query:?}.")
+            } else {
+                format!("{} hit(s) for {query:?}.", hits.len())
+            };
+            let structured_hits: Vec<Value> = hits
+                .iter()
+                .map(|h| {
+                    json!({
+                        "project_id": h.project_id,
+                        "rel_path": h.rel_path,
+                        "title": h.title,
+                        "excerpt": h.excerpt,
+                        "score": h.score
+                    })
+                })
+                .collect();
+            ok(
+                id,
+                json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "structuredContent": { "hits": structured_hits }
+                }),
+            )
+        }
+        Err(e) => tool_error(id, &format!("search failed: {e}")),
+    }
+}
+
+/// `waggledance_projects`: the registry, as-is. `file_count` reflects the
+/// index as it stands and may lag until the next search touches a project
+/// (recorded narrowing of D4 — plan.md Approach 3).
+fn handle_projects(id: Option<Value>, engine: &Engine) -> Value {
+    let projects = match engine.list_projects() {
+        Ok(p) => p,
+        Err(e) => return tool_error(id, &format!("could not list registered projects: {e}")),
+    };
+    let entries: Vec<Value> = projects
+        .iter()
+        .map(|p| {
+            json!({
+                "id": p.id,
+                "name": p.name,
+                "root_path": p.root_path.display().to_string(),
+                "file_count": engine.file_count(&p.id).unwrap_or(0),
+                "last_seen_at": p.last_seen_at
+            })
+        })
+        .collect();
+    let text = format!("{} registered project(s).", entries.len());
+    ok(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": { "projects": entries }
+        }),
+    )
+}
+
+/// `waggledance_ask_state`: parsed bee state, so the caller never opens a
+/// `.bee/` file itself. With `project`: the full digest for that project
+/// (`bee::read_snapshot`), including a project with no `.bee/` at all —
+/// reported absent, never an error. Without `project`: a rollup across every
+/// registered project (D1), via `bee::read_rollup`; `BeeProjectRollup` carries
+/// no root/id of its own, so results are labeled by zipping the input roots'
+/// projects back in by index (plan.md Approach 4).
+fn handle_ask_state(id: Option<Value>, engine: &Engine, args: &Value) -> Value {
+    let project = args
+        .get("project")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    match project {
+        Some(project_id) => {
+            let Some(p) = engine.get_project(project_id).ok().flatten() else {
+                return tool_error(id, &format!("no such project: {project_id}"));
+            };
+            let snapshot = bee::read_snapshot(&p.root_path);
+            let digest = ask_state_digest(&p.id, &snapshot);
+            let text = if !snapshot.present {
+                format!("{}: no .bee/ directory (absent)", p.id)
+            } else {
+                let state = snapshot.state.as_ref();
+                format!(
+                    "{}: feature={:?} phase={:?} mode={:?} waiting_on_live={} \
+                     doing={} waiting={} stuck={} done={}",
+                    p.id,
+                    state.and_then(|s| s.feature.as_deref()),
+                    state.and_then(|s| s.phase.as_deref()),
+                    state.and_then(|s| s.mode.as_deref()),
+                    state.map(|s| s.waiting_on_live).unwrap_or(false),
+                    snapshot.buckets.doing.len(),
+                    snapshot.buckets.waiting.len(),
+                    snapshot.buckets.stuck.len(),
+                    snapshot.buckets.done.len(),
+                )
+            };
+            ok(
+                id,
+                json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "structuredContent": { "project": digest }
+                }),
+            )
+        }
+        None => {
+            let Ok(projects) = engine.list_projects() else {
+                return tool_error(id, "could not list registered projects");
+            };
+            let roots: Vec<std::path::PathBuf> =
+                projects.iter().map(|p| p.root_path.clone()).collect();
+            let rollups = bee::read_rollup(&roots);
+            let digests: Vec<Value> = projects
+                .iter()
+                .zip(rollups.iter())
+                .map(|(p, rollup)| ask_state_digest(&p.id, &rollup.snapshot))
+                .collect();
+            let text = format!("bee state rollup across {} project(s).", digests.len());
+            ok(
+                id,
+                json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "structuredContent": { "projects": digests }
+                }),
+            )
+        }
+    }
+}
+
+/// One project's `waggledance_ask_state` answer, built from a
+/// [`bee::BeeSnapshot`]: feature/phase/mode, whether a human is currently
+/// being waited on, cell bucket counts with doing/stuck detail, recent
+/// decisions, sessions, handoff, and attention items. A project whose
+/// `.bee/` is absent still gets this shape — every field just reads empty.
+fn ask_state_digest(project_id: &str, snapshot: &bee::BeeSnapshot) -> Value {
+    let state = snapshot.state.as_ref();
+    let cell_line = |c: &bee::BeeCell| json!({ "id": c.id, "title": c.title });
+    json!({
+        "project_id": project_id,
+        "present": snapshot.present,
+        "feature": state.and_then(|s| s.feature.clone()),
+        "phase": state.and_then(|s| s.phase.clone()),
+        "mode": state.and_then(|s| s.mode.clone()),
+        "waiting_on_live": state.map(|s| s.waiting_on_live).unwrap_or(false),
+        "active": snapshot.active,
+        "cell_counts": {
+            "doing": snapshot.buckets.doing.len(),
+            "waiting": snapshot.buckets.waiting.len(),
+            "stuck": snapshot.buckets.stuck.len(),
+            "done": snapshot.buckets.done.len()
+        },
+        "doing": snapshot.buckets.doing.iter().map(cell_line).collect::<Vec<_>>(),
+        "stuck": snapshot.buckets.stuck.iter().map(cell_line).collect::<Vec<_>>(),
+        "recent_decisions": snapshot.decisions.recent.iter().map(|d| json!({
+            "id": d.id,
+            "date": d.date,
+            "decision": d.decision
+        })).collect::<Vec<_>>(),
+        "sessions": snapshot.sessions.iter().map(|s| json!({
+            "id": s.id,
+            "live": s.live,
+            "heartbeat_age_minutes": s.heartbeat_age_minutes
+        })).collect::<Vec<_>>(),
+        "handoff": snapshot.handoff.as_ref().map(|h| json!({
+            "kind": h.kind,
+            "written_at": h.written_at,
+            "next_action": h.next_action
+        })),
+        "attention": snapshot.attention.iter().map(|a| json!({
+            "severity": format!("{:?}", a.severity),
+            "title": a.title,
+            "detail": a.detail
+        })).collect::<Vec<_>>()
+    })
 }
 
 /// The human-readable half of the tool result.
@@ -221,5 +512,294 @@ mod tests {
         let url_line = text.lines().next().unwrap();
         let url = url_line.split(" → ").nth(1).unwrap();
         assert!(url.len() <= 40, "short url grew to {}: {url}", url.len());
+    }
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    fn call_tool(engine: &Engine, name: &str, args: Value) -> Value {
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        });
+        handle_tool_call(Some(json!(1)), engine, &req)
+    }
+
+    /// Two registered projects, each with one markdown file sharing a word
+    /// ("grapefruit") that appears nowhere else — a search unfiltered must
+    /// span both (D1); a filtered search must narrow to one.
+    fn two_project_engine(
+        tag: &str,
+    ) -> (
+        Engine,
+        waggledance_core::domain::Project,
+        waggledance_core::domain::Project,
+    ) {
+        let dir_a =
+            std::env::temp_dir().join(format!("waggledance-mcp-{tag}-a-{}", std::process::id()));
+        let dir_b =
+            std::env::temp_dir().join(format!("waggledance-mcp-{tag}-b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
+        write(
+            &dir_a,
+            "docs/a.md",
+            "# Project A\nThe grapefruit orchard thrives in spring.",
+        );
+        write(
+            &dir_b,
+            "docs/b.md",
+            "# Project B\nA grapefruit smoothie recipe for summer.",
+        );
+
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let pa = engine.register(&dir_a, None).unwrap();
+        let pb = engine.register(&dir_b, None).unwrap();
+        (engine, pa, pb)
+    }
+
+    #[test]
+    fn tools_list_has_four_schemas() {
+        let tools = [
+            view_file_schema(),
+            search_schema(),
+            projects_schema(),
+            ask_state_schema(),
+        ];
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "waggledance_view_file",
+                "waggledance_search",
+                "waggledance_projects",
+                "waggledance_ask_state"
+            ]
+        );
+    }
+
+    #[test]
+    fn search_unfiltered_spans_multiple_projects_with_marked_excerpts() {
+        let (engine, pa, pb) = two_project_engine("search-multi");
+        let resp = call_tool(
+            &engine,
+            "waggledance_search",
+            json!({ "query": "grapefruit" }),
+        );
+        let hits = resp["result"]["structuredContent"]["hits"]
+            .as_array()
+            .unwrap();
+        assert_eq!(hits.len(), 2, "expected a hit from each project: {resp}");
+        let ids: Vec<&str> = hits
+            .iter()
+            .map(|h| h["project_id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&pa.id.as_str()));
+        assert!(ids.contains(&pb.id.as_str()));
+        for h in hits {
+            assert!(h["excerpt"].as_str().unwrap().contains("<mark>"));
+        }
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    #[test]
+    fn search_project_filter_narrows_to_one() {
+        let (engine, pa, pb) = two_project_engine("search-filter");
+        let resp = call_tool(
+            &engine,
+            "waggledance_search",
+            json!({ "query": "grapefruit", "project": pa.id }),
+        );
+        let hits = resp["result"]["structuredContent"]["hits"]
+            .as_array()
+            .unwrap();
+        assert_eq!(hits.len(), 1, "expected only project a's hit: {resp}");
+        assert_eq!(hits[0]["project_id"], pa.id);
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    #[test]
+    fn search_reflects_a_file_edited_on_disk_since_last_index() {
+        let (engine, pa, pb) = two_project_engine("search-stale");
+        // Edit project a's file after registration (which already indexed
+        // it once) — D4: the next search must see the new content without a
+        // separate refresh call.
+        write(
+            &pa.root_path,
+            "docs/a.md",
+            "# Project A\nNow mentions pineapple instead.",
+        );
+        let resp = call_tool(
+            &engine,
+            "waggledance_search",
+            json!({ "query": "pineapple" }),
+        );
+        let hits = resp["result"]["structuredContent"]["hits"]
+            .as_array()
+            .unwrap();
+        assert_eq!(hits.len(), 1, "edited content must be searchable: {resp}");
+        assert_eq!(hits[0]["project_id"], pa.id);
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    #[test]
+    fn fts_hostile_query_returns_empty_not_error() {
+        let (engine, pa, pb) = two_project_engine("search-hostile");
+        let resp = call_tool(&engine, "waggledance_search", json!({ "query": "*)(" }));
+        assert!(
+            resp["result"]["isError"].is_null(),
+            "unexpected error: {resp}"
+        );
+        let hits = resp["result"]["structuredContent"]["hits"]
+            .as_array()
+            .unwrap();
+        assert!(
+            hits.is_empty(),
+            "hostile query must not error, and must not match: {resp}"
+        );
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    #[test]
+    fn search_missing_query_is_a_tool_error() {
+        let (engine, pa, pb) = two_project_engine("search-missing-query");
+        let resp = call_tool(&engine, "waggledance_search", json!({}));
+        assert_eq!(resp["result"]["isError"], true, "{resp}");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    #[test]
+    fn search_nonexistent_project_is_a_tool_error_naming_it() {
+        let (engine, pa, pb) = two_project_engine("search-no-project");
+        let resp = call_tool(
+            &engine,
+            "waggledance_search",
+            json!({ "query": "grapefruit", "project": "does-not-exist" }),
+        );
+        assert_eq!(resp["result"]["isError"], true, "{resp}");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("does-not-exist"), "{text}");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    #[test]
+    fn projects_lists_both_with_counts_and_root() {
+        let (engine, pa, pb) = two_project_engine("projects-list");
+        let resp = call_tool(&engine, "waggledance_projects", json!({}));
+        let entries = resp["result"]["structuredContent"]["projects"]
+            .as_array()
+            .unwrap();
+        assert_eq!(entries.len(), 2, "{resp}");
+        let a = entries.iter().find(|e| e["id"] == pa.id).unwrap();
+        assert_eq!(a["file_count"], 1);
+        assert_eq!(a["root_path"], pa.root_path.display().to_string());
+        assert!(a["last_seen_at"].as_str().is_some());
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    #[test]
+    fn ask_state_filtered_reads_feature_phase_and_buckets_without_a_direct_read() {
+        let (engine, pa, pb) = two_project_engine("ask-state-filtered");
+        write(
+            &pa.root_path,
+            ".bee/state.json",
+            r#"{"feature": "widget-polish", "phase": "execution", "mode": "standard"}"#,
+        );
+        let resp = call_tool(
+            &engine,
+            "waggledance_ask_state",
+            json!({ "project": pa.id }),
+        );
+        let digest = &resp["result"]["structuredContent"]["project"];
+        assert_eq!(digest["present"], true, "{resp}");
+        assert_eq!(digest["feature"], "widget-polish");
+        assert_eq!(digest["phase"], "execution");
+        assert_eq!(digest["mode"], "standard");
+        assert_eq!(digest["cell_counts"]["doing"], 0);
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    #[test]
+    fn ask_state_unfiltered_rolls_up_every_project_including_one_with_no_bee_dir() {
+        let (engine, pa, pb) = two_project_engine("ask-state-rollup");
+        write(
+            &pa.root_path,
+            ".bee/state.json",
+            r#"{"feature": "widget-polish", "phase": "execution", "mode": "standard"}"#,
+        );
+        // project b deliberately has no .bee/ at all.
+        let resp = call_tool(&engine, "waggledance_ask_state", json!({}));
+        let entries = resp["result"]["structuredContent"]["projects"]
+            .as_array()
+            .unwrap();
+        assert_eq!(entries.len(), 2, "{resp}");
+        let a = entries.iter().find(|e| e["project_id"] == pa.id).unwrap();
+        assert_eq!(a["present"], true);
+        assert_eq!(a["feature"], "widget-polish");
+        let b = entries.iter().find(|e| e["project_id"] == pb.id).unwrap();
+        assert_eq!(
+            b["present"], false,
+            "absent .bee/ must report absent, not error: {b}"
+        );
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    #[test]
+    fn ask_state_nonexistent_project_is_a_tool_error_naming_it() {
+        let (engine, pa, pb) = two_project_engine("ask-state-no-project");
+        let resp = call_tool(
+            &engine,
+            "waggledance_ask_state",
+            json!({ "project": "does-not-exist" }),
+        );
+        assert_eq!(resp["result"]["isError"], true, "{resp}");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("does-not-exist"), "{text}");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    #[test]
+    fn unknown_tool_stays_on_the_json_rpc_error_path() {
+        let (engine, pa, pb) = two_project_engine("unknown-tool");
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "not_a_real_tool", "arguments": {} }
+        });
+        let resp = handle_tool_call(Some(json!(1)), &engine, &req);
+        assert_eq!(resp["error"]["code"], -32602, "{resp}");
+        assert!(
+            resp["result"].is_null(),
+            "unknown tool must not be a tool_error: {resp}"
+        );
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
     }
 }

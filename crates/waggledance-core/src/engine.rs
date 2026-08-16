@@ -180,8 +180,10 @@ impl Engine {
         }
 
         let max_bytes = self.max_bytes();
-        let found =
-            indexer::scan_markdown_files(&project.root_path, &self.config.indexing.exclude_patterns);
+        let found = indexer::scan_markdown_files(
+            &project.root_path,
+            &self.config.indexing.exclude_patterns,
+        );
         let existing = self.store.list_files(&project.id)?;
 
         let mut seen: HashSet<String> = HashSet::new();
@@ -624,7 +626,8 @@ mod tests {
 
     #[test]
     fn refresh_stale_reindexes_a_modified_file() {
-        let dir = std::env::temp_dir().join(format!("waggledance-stale-mod-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-stale-mod-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write(&dir, "docs/a.md", "# A\noriginal body");
 
@@ -651,8 +654,10 @@ mod tests {
 
     #[test]
     fn refresh_stale_leaves_an_untouched_file_content_unread() {
-        let dir =
-            std::env::temp_dir().join(format!("waggledance-stale-untouched-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "waggledance-stale-untouched-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         write(&dir, "docs/a.md", "# A\nbody");
 
@@ -688,7 +693,8 @@ mod tests {
 
     #[test]
     fn refresh_stale_indexes_a_new_file() {
-        let dir = std::env::temp_dir().join(format!("waggledance-stale-new-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-stale-new-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write(&dir, "docs/a.md", "# A\nbody");
 
