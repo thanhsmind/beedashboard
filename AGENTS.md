@@ -121,6 +121,13 @@ never by browsing for open cells. On a hold or reservation deny, pick
 other work and report the conflict — the guard is never worked around
 or waited out in silence.
 
+File overlap with an in-flight cell or live worktree is triage data,
+never a user question: take disjoint items first, split scope to the
+disjoint files when the split is natural, and defer the overlapped
+remainder with a recorded reason ("likely swallowed by <cell>;
+re-triage after its merge") — one report line, then keep working. Ask
+the user only when the deferred set is the entire explicit ask.
+
 ## Capture what settles
 
 Lanes scale ceremony, never memory. The moment a rule, behavior, or
@@ -141,6 +148,14 @@ default — `▸` started, `✓` green, `⚡` auto-approved, `✗` red — and a
 red or refusal line is never silenced, composited, or delayed by any
 switch or bypass level. The work is the subject of every line; ids and
 counts trail it, never lead.
+
+A turn that ends waiting on the human — a gate question or a freeform
+one — marks the wait before it ends: `bee state waiting-on set
+--kind <gate|question> --subject "<what>"`. The mark is what lets a
+dashboard or a sibling session read "waiting on you" instead of
+"idle"; the user's next message clears it on its own, and a dead
+session's mark expires with its heartbeat. Never leave a question
+pending without its mark.
 
 **Pre-send check**: reading only the first and last line of the
 message must answer what happened and what's next; then strip every
