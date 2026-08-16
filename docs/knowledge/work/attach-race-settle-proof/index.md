@@ -1,6 +1,3 @@
----
-okf_version: 0.1
----
 <!--
 GENERATED FILE — do not hand-edit.
 Rendered by `bee knowledge index` from concept frontmatter inside docs/knowledge/ (okf-foundation D21).
@@ -9,12 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# Knowledge Bundle
+# work/attach-race-settle-proof/
 
-## Sections
+## Concepts
 
-- [work/](work/index.md) — 33 concept(s)
-
-## Critical patterns
-
-None.
+- [attach-race-settle-proof — delivery](delivery.md) — Delivery record for work item attach-race-settle-proof: the settle wait's three mechanisms are now mutation-caught — deleting any of them turns the suite red.
