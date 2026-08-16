@@ -160,6 +160,17 @@ impl Engine {
     /// skips the delete pass entirely (a permissions glitch or unmounted
     /// root must never empty the index).
     ///
+    /// Delete criterion (review finding P1-1): a row not seen by the walk is
+    /// deleted only when `fs::metadata` on its `abs_path` fails with
+    /// `NotFound`, never merely because the walk didn't see it. The walk
+    /// respects `.gitignore` and `exclude_patterns` while `view_file`
+    /// indexes a single file without that filter, so a gitignored/excluded
+    /// file that got indexed via `view_file` must survive this pass; and the
+    /// walk silently drops per-entry errors, so an unreadable subtree must
+    /// not be mistaken for a deleted one. Any stat outcome other than
+    /// `NotFound` (the file exists, or the stat itself errored for another
+    /// reason such as permission-denied) keeps the row.
+    ///
     /// Skip rule for files `index_file` would decline to store (finding 9):
     /// an oversize file is skipped by the same `size > max_bytes` metadata
     /// check `index_file` itself gates on, so its content is never read here
@@ -226,10 +237,30 @@ impl Engine {
             }
         }
 
+        // Delete criterion: stat-confirmed missing, never walk-absence. The
+        // walk (`scan_markdown_files`) honors .gitignore and
+        // `exclude_patterns`, but `view_file` indexes a single file WITHOUT
+        // that filter (`index_file_incremental`) — so a gitignored or
+        // excluded file can be indexed and then show up here as merely
+        // "not walked", not "gone". And `walker.flatten()` in the scan
+        // silently drops per-entry walk errors, so an unreadable subtree
+        // would otherwise look identical to a deleted one. A row is removed
+        // only when `fs::symlink_metadata` on its `abs_path` fails with
+        // `NotFound`; any other outcome — the file exists (gitignored /
+        // excluded / just outside this walk) or the stat itself failed for
+        // some other reason (permission denied, transient IO) — keeps the
+        // row, erring toward "still there" rather than un-publishing it.
         let vanished_root_scan = found.is_empty() && !existing.is_empty();
         if !vanished_root_scan {
             for f in &existing {
-                if !seen.contains(&f.rel_path) {
+                if seen.contains(&f.rel_path) {
+                    continue;
+                }
+                let truly_missing = matches!(
+                    std::fs::metadata(&f.abs_path),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                );
+                if truly_missing {
                     self.remove_file(&project, &f.abs_path)?;
                 }
             }
@@ -741,6 +772,103 @@ mod tests {
             .get_file(&project.id, "docs/a.md")
             .unwrap()
             .is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_stale_keeps_a_gitignored_indexed_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "waggledance-stale-gitignore-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "docs/a.md", "# A\nbody");
+
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let project = engine.register(&dir, None).unwrap();
+        assert_eq!(engine.file_count(&project.id).unwrap(), 1);
+
+        // A file under an excluded dir ("target" — Config::default's
+        // exclude_patterns): scan_markdown_files (the walk) will never see
+        // it, mirroring a .gitignore'd file. But view_file's
+        // index_file_incremental has no such filter, so a file like this can
+        // land in the index anyway — index it the same way IndexService
+        // does directly (bypassing the walk), the way view_file would.
+        write(&dir, "target/notes.md", "# Notes\nkept alive");
+        let abs = dir.join("target/notes.md");
+        IndexService::index_file(&engine.store, &project, &abs, engine.max_bytes())
+            .unwrap()
+            .expect("an excluded-but-readable file must still index directly");
+        assert_eq!(engine.file_count(&project.id).unwrap(), 2);
+
+        let n = engine.refresh_stale(&project.id).unwrap();
+        assert_eq!(n, 0, "the excluded file is untouched, not re-read");
+        assert_eq!(
+            engine.file_count(&project.id).unwrap(),
+            2,
+            "walk-absence alone must never delete a row"
+        );
+        assert!(
+            engine
+                .store
+                .get_file(&project.id, "target/notes.md")
+                .unwrap()
+                .is_some(),
+            "gitignored/excluded-but-indexed file must survive refresh_stale"
+        );
+        assert_eq!(
+            engine
+                .store
+                .file_content(&project.id, "target/notes.md")
+                .unwrap(),
+            Some("# Notes\nkept alive".to_string()),
+            "the row's content/searchability must remain intact"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refresh_stale_keeps_a_row_when_stat_is_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-stale-denied-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "docs/a.md", "# A\nbody");
+        write(&dir, "locked/b.md", "# B\nbody");
+
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let project = engine.register(&dir, None).unwrap();
+        assert_eq!(engine.file_count(&project.id).unwrap(), 2);
+
+        let locked_dir = dir.join("locked");
+        // Strip the parent dir's permissions so stat-ing the child fails
+        // with PermissionDenied, not NotFound — the row must be kept.
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = engine.refresh_stale(&project.id);
+
+        // Restore permissions before any assertion (which could panic and
+        // skip cleanup) so a locked-down temp dir is never left behind.
+        std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        result.unwrap();
+        assert_eq!(
+            engine.file_count(&project.id).unwrap(),
+            2,
+            "a stat failure other than NotFound must never delete the row"
+        );
+        assert!(
+            engine
+                .store
+                .get_file(&project.id, "locked/b.md")
+                .unwrap()
+                .is_some(),
+            "permission-denied stat must keep the row"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

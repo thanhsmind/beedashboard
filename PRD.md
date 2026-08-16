@@ -236,13 +236,18 @@ Input:
   - query:   string, required (full-text query)
   - project: string, optional (project id để thu hẹp search)
   - limit:   integer, optional (số hit tối đa, mặc định 10)
-Output (structuredContent.hits[]):
-  - project_id, rel_path, title, excerpt (có <mark>), score
+Output:
+  - structuredContent.hits[]: project_id, rel_path, title, excerpt (có <mark>), score
+  - structuredContent.refresh: { refreshed: <số project refresh thành công>,
+    failed: [{ project_id, error }] } — luôn có mặt, kể cả khi failed rỗng
 ```
 Trước khi search, server re-index các file đã đổi trên đĩa của (các) project bị đụng tới —
-lọc theo `project` nếu có, ngược lại mọi project đã đăng ký — nên kết quả không bao giờ lag so
-với đĩa (mcp-query-surface D4). Mỗi hit mang một excerpt đủ ngữ cảnh để trả lời tại chỗ, không
-phải danh sách path trơn, không phải nguyên file (mcp-query-surface D2).
+lọc theo `project` nếu có, ngược lại mọi project đã đăng ký — và báo cáo project nào refresh
+thất bại qua `refresh.failed` (mcp-query-surface D4, review P1-2); search vẫn trả hit ở cả hai
+trường hợp — chỉ gắn cờ, không im lặng phục vụ dữ liệu cũ. Khi `failed` khác rỗng, phần text
+của response có thêm một dòng cảnh báo nêu tên các project đó. Mỗi hit mang một excerpt đủ ngữ
+cảnh để trả lời tại chỗ, không phải danh sách path trơn, không phải nguyên file
+(mcp-query-surface D2).
 
 **FR-26.** `waggledance_projects` — liệt kê registry.
 ```
