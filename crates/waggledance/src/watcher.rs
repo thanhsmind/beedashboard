@@ -88,6 +88,11 @@ impl PollWatcher {
     }
 
     /// Run the poll loop forever, invoking `on_change` for each fresh change.
+    /// Superseded in production by [`run_async`](Self::run_async), which
+    /// also threads a tick counter for observability — kept as the simpler
+    /// public entry point this type's own doc promises, not test-exercised
+    /// today.
+    #[allow(dead_code)]
     pub async fn run<F>(self, mut on_change: F)
     where
         F: FnMut(StatusChange) + Send,

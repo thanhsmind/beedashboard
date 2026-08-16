@@ -219,7 +219,9 @@ pub fn linkify_urls(html: &str) -> String {
             // Peek the whole tag to see whether it opens or closes an
             // anchor, so text inside one is never linked a second time.
             let tag_end = html[i..].find('>').map(|p| i + p + 1).unwrap_or(html.len());
-            let tag_lower = html[i..tag_end].trim_start_matches('<').to_ascii_lowercase();
+            let tag_lower = html[i..tag_end]
+                .trim_start_matches('<')
+                .to_ascii_lowercase();
             if tag_lower.starts_with("a ") || tag_lower.starts_with("a>") {
                 anchor_depth += 1;
             } else if tag_lower.starts_with("/a>") {
@@ -325,7 +327,10 @@ mod tests {
         let html = r#"<span class="ansi-fg-red">docs/specs/x.md</span>"#;
         let out = linkify_docs(html, "/p/bee/");
         assert!(out.starts_with(r#"<span class="ansi-fg-red">"#), "{out}");
-        assert!(out.contains(r#"<a class="term-doc-link" href="/p/bee/docs/specs/x.md""#), "{out}");
+        assert!(
+            out.contains(r#"<a class="term-doc-link" href="/p/bee/docs/specs/x.md""#),
+            "{out}"
+        );
         assert!(out.ends_with("</span>"), "{out}");
         // The span's own attribute text is untouched — one `<a>` only.
         assert_eq!(out.matches("<a ").count(), 1, "{out}");
@@ -383,10 +388,7 @@ mod tests {
     #[test]
     fn keeps_the_full_stop_outside_a_url_ending_a_sentence() {
         let out = linkify_urls("check https://example.dev/foo.");
-        assert!(
-            out.contains(r#"href="https://example.dev/foo""#),
-            "{out}"
-        );
+        assert!(out.contains(r#"href="https://example.dev/foo""#), "{out}");
         assert!(out.ends_with("foo</a>."), "{out}");
     }
 
@@ -396,10 +398,7 @@ mod tests {
     #[test]
     fn stops_a_url_at_a_quote_entity() {
         let out = linkify_urls("curl &quot;https://example.dev/a&quot; now");
-        assert!(
-            out.contains(r#"href="https://example.dev/a""#),
-            "{out}"
-        );
+        assert!(out.contains(r#"href="https://example.dev/a""#), "{out}");
         assert!(out.contains("/a</a>&quot; now"), "{out}");
     }
 

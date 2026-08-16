@@ -602,7 +602,12 @@ pub struct BeeWorktree {
 }
 
 impl BeeWorktree {
-    fn unresolved(id: &str, reason: &str, branch: Option<String>, created_at: Option<String>) -> Self {
+    fn unresolved(
+        id: &str,
+        reason: &str,
+        branch: Option<String>,
+        created_at: Option<String>,
+    ) -> Self {
         BeeWorktree {
             id: id.to_string(),
             resolved: false,
@@ -1122,7 +1127,8 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
     // still live already has its fallback in `all_cells`, and reading
     // every archive dir on every snapshot would put a whole closed
     // history behind each page load.
-    let live_features: std::collections::BTreeSet<&str> = all_cells.iter().map(|c| c.feature.as_str()).collect();
+    let live_features: std::collections::BTreeSet<&str> =
+        all_cells.iter().map(|c| c.feature.as_str()).collect();
     let mut fallback_cells: Vec<BeeCell> = Vec::new();
     for name in &archived_feature_names {
         if live_features.contains(name.as_str()) {
@@ -1133,7 +1139,12 @@ pub fn read_snapshot(root: &Path) -> BeeSnapshot {
         }
     }
     let docs_cells: Vec<BeeCell> = all_cells.iter().cloned().chain(fallback_cells).collect();
-    let feature_docs = read_feature_docs_all(root, feature_names.iter().copied(), &decision_scopes, &docs_cells);
+    let feature_docs = read_feature_docs_all(
+        root,
+        feature_names.iter().copied(),
+        &decision_scopes,
+        &docs_cells,
+    );
     let promote_proposals = read_promote_proposals(root, feature_names.into_iter());
 
     // bbp-13: review join, capture queue, scribing debt — see the
@@ -1263,7 +1274,10 @@ fn read_archived_features(root: &Path) -> Vec<BeeArchivedFeature> {
         .map(|feature| {
             let cells = read_archived_cells(root, &feature);
             let shipped_at = archived_ship_time(&cells);
-            BeeArchivedFeature { feature, shipped_at }
+            BeeArchivedFeature {
+                feature,
+                shipped_at,
+            }
         })
         .collect()
 }
@@ -1409,7 +1423,15 @@ fn compute_phase_board(
                 }
             };
             let cell_counts = compute_feature_cell_counts(&feature, all_cells);
-            BeeFeaturePhase { feature, phase, mode, approved_gates, next_action, created_at, cell_counts }
+            BeeFeaturePhase {
+                feature,
+                phase,
+                mode,
+                approved_gates,
+                next_action,
+                created_at,
+                cell_counts,
+            }
         })
         .collect()
 }
@@ -1431,7 +1453,11 @@ fn compute_feature_cell_counts(feature: &str, all_cells: &[BeeCell]) -> BeeFeatu
         }
     }
     counts.total = counts.doing + counts.waiting + counts.stuck + counts.done;
-    counts.done_fraction = if counts.total > 0 { Some(counts.done as f64 / counts.total as f64) } else { None };
+    counts.done_fraction = if counts.total > 0 {
+        Some(counts.done as f64 / counts.total as f64)
+    } else {
+        None
+    };
     counts
 }
 
@@ -1484,6 +1510,7 @@ fn compute_feature_cell_counts(feature: &str, all_cells: &[BeeCell]) -> BeeFeatu
 ///
 /// Adding a rule later means adding another `if` below and letting it fall
 /// into the sort — the ones here are never touched to make room for it.
+#[allow(clippy::too_many_arguments)] // each param is an independently-sourced attention input; a wrapper struct would just move the same 8 fields without adding meaning
 fn compute_attention_items(
     blocked_cells: &[BeeCell],
     read_errors: &[String],
@@ -1508,7 +1535,9 @@ fn compute_attention_items(
             severity: BeeAttentionSeverity::Critical,
             title: format!("{n} {noun} blocked"),
             detail,
-            suggested_action: "Every blocked cell is a fix-first cell — clear it before starting new work.".to_string(),
+            suggested_action:
+                "Every blocked cell is a fix-first cell — clear it before starting new work."
+                    .to_string(),
         });
     }
 
@@ -1529,7 +1558,10 @@ fn compute_attention_items(
         let is_pause = !matches!(h.kind.as_deref(), Some("planned-next"));
         if is_pause {
             let when = h.written_at.as_deref().unwrap_or("an unknown time");
-            let note = h.next_action.as_deref().unwrap_or("(no note text was recorded)");
+            let note = h
+                .next_action
+                .as_deref()
+                .unwrap_or("(no note text was recorded)");
             items.push(BeeAttentionItem {
                 severity: BeeAttentionSeverity::Critical,
                 title: "Work is parked, waiting on a person".to_string(),
@@ -1566,7 +1598,9 @@ fn compute_attention_items(
     let unreviewed_high_risk = review
         .candidates
         .iter()
-        .filter(|c| c.status == BeeReviewStatus::Unreviewed && c.mode.as_deref() == Some("high-risk"))
+        .filter(|c| {
+            c.status == BeeReviewStatus::Unreviewed && c.mode.as_deref() == Some("high-risk")
+        })
         .count();
     if unreviewed_high_risk > 0 {
         let n = unreviewed_high_risk;
@@ -1581,7 +1615,10 @@ fn compute_attention_items(
         });
     }
 
-    let promote_unapplied = promote_proposals.values().filter(|present| **present).count();
+    let promote_unapplied = promote_proposals
+        .values()
+        .filter(|present| **present)
+        .count();
     let knowledge_debt = scribing_debt.len() + capture_queue.waiting + promote_unapplied;
     if knowledge_debt > 0 {
         let noun = if knowledge_debt == 1 { "item" } else { "items" };
@@ -1598,7 +1635,7 @@ fn compute_attention_items(
         });
     }
 
-    items.sort_by(|a, b| b.severity.cmp(&a.severity));
+    items.sort_by_key(|item| std::cmp::Reverse(item.severity));
     items
 }
 
@@ -1627,16 +1664,25 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
                 .map(|arr| arr.iter().filter_map(parse_worker).collect())
                 .unwrap_or_default(),
             approved_gates: parse_approved_gates(&v),
-            gate_revoked_at: v.get("gate_revoked_at").and_then(Value::as_object).map(|g| BeeGateRevocations {
-                context: g.get("context").and_then(Value::as_str).map(String::from),
-                shape: g.get("shape").and_then(Value::as_str).map(String::from),
-                execution: g.get("execution").and_then(Value::as_str).map(String::from),
-                review: g.get("review").and_then(Value::as_str).map(String::from),
-            }),
+            gate_revoked_at: v
+                .get("gate_revoked_at")
+                .and_then(Value::as_object)
+                .map(|g| BeeGateRevocations {
+                    context: g.get("context").and_then(Value::as_str).map(String::from),
+                    shape: g.get("shape").and_then(Value::as_str).map(String::from),
+                    execution: g.get("execution").and_then(Value::as_str).map(String::from),
+                    review: g.get("review").and_then(Value::as_str).map(String::from),
+                }),
             route: parse_route(&v, root),
-            next_action: v.get("next_action").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
+            next_action: v
+                .get("next_action")
+                .and_then(Value::as_str)
+                .map(|s| scrub_paths(s, root)),
             last_scribing_run: parse_last_scribing_run(&v),
-            last_activity: v.get("last_activity").and_then(Value::as_str).map(String::from),
+            last_activity: v
+                .get("last_activity")
+                .and_then(Value::as_str)
+                .map(String::from),
             run_state: v.get("run_state").and_then(Value::as_str).map(String::from),
         }),
         Err(e) => {
@@ -1652,12 +1698,14 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
 /// absent. Factored out so `read_state` and `parse_lane` never drift apart
 /// on this shape.
 fn parse_approved_gates(v: &Value) -> Option<BeeApprovedGates> {
-    v.get("approved_gates").and_then(Value::as_object).map(|g| BeeApprovedGates {
-        context: g.get("context").and_then(Value::as_bool),
-        shape: g.get("shape").and_then(Value::as_bool),
-        execution: g.get("execution").and_then(Value::as_bool),
-        review: g.get("review").and_then(Value::as_bool),
-    })
+    v.get("approved_gates")
+        .and_then(Value::as_object)
+        .map(|g| BeeApprovedGates {
+            context: g.get("context").and_then(Value::as_bool),
+            shape: g.get("shape").and_then(Value::as_bool),
+            execution: g.get("execution").and_then(Value::as_bool),
+            review: g.get("review").and_then(Value::as_bool),
+        })
 }
 
 /// Parse a `route` object shared by `.bee/state.json` and every
@@ -1672,11 +1720,21 @@ fn parse_route(v: &Value, root: &Path) -> Option<BeeRoute> {
         flags: r
             .get("flags")
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(|f| f.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|f| f.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default(),
         product_files: r.get("product_files").and_then(Value::as_u64),
-        rationale: r.get("rationale").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
-        updated_at: r.get("updated_at").and_then(Value::as_str).map(String::from),
+        rationale: r
+            .get("rationale")
+            .and_then(Value::as_str)
+            .map(|s| scrub_paths(s, root)),
+        updated_at: r
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .map(String::from),
     })
 }
 
@@ -1687,7 +1745,9 @@ fn parse_route(v: &Value, root: &Path) -> Option<BeeRoute> {
 fn parse_last_scribing_run(v: &Value) -> Option<BeeLastScribingRun> {
     v.get("last_scribing_run")
         .and_then(Value::as_object)
-        .map(|l| BeeLastScribingRun { feature: l.get("feature").and_then(Value::as_str).map(String::from) })
+        .map(|l| BeeLastScribingRun {
+            feature: l.get("feature").and_then(Value::as_str).map(String::from),
+        })
 }
 
 /// Read `.bee/HANDOFF.json` (bbp-8), following [`read_state`]'s convention
@@ -1710,8 +1770,14 @@ fn read_handoff(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> O
     };
     match serde_json::from_str::<Value>(&raw) {
         Ok(v) => Some(BeeHandoff {
-            written_at: v.get("written_at").and_then(Value::as_str).map(String::from),
-            next_action: v.get("next_action").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
+            written_at: v
+                .get("written_at")
+                .and_then(Value::as_str)
+                .map(String::from),
+            next_action: v
+                .get("next_action")
+                .and_then(Value::as_str)
+                .map(|s| scrub_paths(s, root)),
             kind: v.get("kind").and_then(Value::as_str).map(String::from),
         }),
         Err(e) => {
@@ -1782,7 +1848,11 @@ fn normalize_gate_bypass(v: Option<&Value>) -> Option<String> {
 /// it was verified against — the reservation list reads as empty rather
 /// than as an error, exactly like [`read_state`]'s handling of
 /// `workers[]`.
-fn read_reservations(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Vec<BeeReservation> {
+fn read_reservations(
+    bee_dir: &Path,
+    root: &Path,
+    read_errors: &mut Vec<String>,
+) -> Vec<BeeReservation> {
     let path = bee_dir.join("reservations.json");
     if !path.is_file() {
         // No reservations.json is the normal, expected shape (both live
@@ -1823,8 +1893,14 @@ fn parse_reservation(v: &Value) -> Option<BeeReservation> {
         path: v.get("path").and_then(Value::as_str).map(String::from),
         kind: v.get("kind").and_then(Value::as_str).map(String::from),
         session: v.get("session").and_then(Value::as_str).map(String::from),
-        reserved_at: v.get("reserved_at").and_then(Value::as_str).map(String::from),
-        released_at: v.get("released_at").and_then(Value::as_str).map(String::from),
+        reserved_at: v
+            .get("reserved_at")
+            .and_then(Value::as_str)
+            .map(String::from),
+        released_at: v
+            .get("released_at")
+            .and_then(Value::as_str)
+            .map(String::from),
     })
 }
 
@@ -1836,7 +1912,12 @@ fn parse_worker(v: &Value) -> Option<BeeWorker> {
     let cell = v.get("cell").and_then(Value::as_str).map(String::from);
     let tier = v.get("tier").and_then(Value::as_str).map(String::from);
     let status = v.get("status").and_then(Value::as_str).map(String::from);
-    Some(BeeWorker { nickname, cell, tier, status })
+    Some(BeeWorker {
+        nickname,
+        cell,
+        tier,
+        status,
+    })
 }
 
 /// Parse one `.bee/cells/<id>.json` file into a [`BeeCell`], relativizing
@@ -1860,10 +1941,7 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string();
-    let title = v
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let title = v.get("title").and_then(Value::as_str).unwrap_or_default();
     let title = scrub_paths(title, root);
     let lane = v
         .get("lane")
@@ -1896,12 +1974,18 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
         .and_then(|t| t.get("capped_at"))
         .and_then(Value::as_str)
         .map(String::from);
-    let behavior_change = v.get("behavior_change").and_then(Value::as_bool).unwrap_or(false);
+    let behavior_change = v
+        .get("behavior_change")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let outcome = trace
         .and_then(|t| t.get("outcome"))
         .and_then(Value::as_str)
         .map(|s| scrub_paths(s, root));
-    let tests = trace.and_then(|t| t.get("tests")).and_then(Value::as_str).map(String::from);
+    let tests = trace
+        .and_then(|t| t.get("tests"))
+        .and_then(Value::as_str)
+        .map(String::from);
 
     Ok(BeeCell {
         id,
@@ -1928,8 +2012,23 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
 /// descends into `archive/` (`archived_cells_contribute_to_no_count`), and
 /// this function does not change that — the main board's snapshot-wide
 /// buckets and KPIs stay archive-free.
+///
+/// `feature` is gated through [`validate_feature_name`] (review-p1-fixes
+/// D4) before it is ever joined onto `dir`: `bee_feature_detail` passes
+/// this route's `:feature` URL segment straight through, and axum
+/// percent-decodes a path param after routing, so a segment can arrive
+/// containing a decoded `/`, `\`, or a `..`/`.` component. A name the gate
+/// rejects returns an empty `Vec` here — no [`PathBuf`] is built and no
+/// read is attempted, matching [`promote_proposals_path`]'s own guard.
 pub fn read_archived_cells(root: &Path, feature: &str) -> Vec<BeeCell> {
-    let dir = root.join(".bee").join("cells").join("archive").join(feature);
+    if !validate_feature_name(feature) {
+        return Vec::new();
+    }
+    let dir = root
+        .join(".bee")
+        .join("cells")
+        .join("archive")
+        .join(feature);
     if !dir.is_dir() {
         return Vec::new();
     }
@@ -2038,14 +2137,35 @@ fn read_backlog(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> B
             };
             let title = v.get("title").and_then(Value::as_str).unwrap_or_default();
             let title = scrub_paths(title, root);
-            let status = v.get("status").and_then(Value::as_str).unwrap_or_default().to_string();
-            let feature = v.get("feature").and_then(Value::as_str).unwrap_or_default().to_string();
+            let status = v
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let feature = v
+                .get("feature")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             let cos = v.get("cos").and_then(Value::as_str).unwrap_or_default();
             let cos = scrub_paths(cos, root);
-            pbis.insert(id.clone(), BeePbi { id, title, status, feature, cos });
+            pbis.insert(
+                id.clone(),
+                BeePbi {
+                    id,
+                    title,
+                    status,
+                    feature,
+                    cos,
+                },
+            );
         } else {
             finding_total += 1;
-            let severity = v.get("severity").and_then(Value::as_str).unwrap_or_default().to_string();
+            let severity = v
+                .get("severity")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
             match severity.as_str() {
                 "P1" => by_severity.p1 += 1,
                 "P2" => by_severity.p2 += 1,
@@ -2053,13 +2173,35 @@ fn read_backlog(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> B
                 _ => {}
             }
             findings.push(BeeFinding {
-                ts: v.get("ts").and_then(Value::as_str).unwrap_or_default().to_string(),
-                kind: v.get("type").and_then(Value::as_str).unwrap_or_default().to_string(),
-                title: scrub_paths(v.get("title").and_then(Value::as_str).unwrap_or_default(), root),
-                detail: scrub_paths(v.get("detail").and_then(Value::as_str).unwrap_or_default(), root),
+                ts: v
+                    .get("ts")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                kind: v
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                title: scrub_paths(
+                    v.get("title").and_then(Value::as_str).unwrap_or_default(),
+                    root,
+                ),
+                detail: scrub_paths(
+                    v.get("detail").and_then(Value::as_str).unwrap_or_default(),
+                    root,
+                ),
                 severity,
-                layer: v.get("layer").and_then(Value::as_str).unwrap_or_default().to_string(),
-                feature: v.get("feature").and_then(Value::as_str).unwrap_or_default().to_string(),
+                layer: v
+                    .get("layer")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                feature: v
+                    .get("feature")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             });
         }
     }
@@ -2123,15 +2265,25 @@ fn parse_session(path: &Path, now: time::OffsetDateTime) -> Result<BeeSession, S
     let raw = fs::read_to_string(path).map_err(|e| format!("could not read ({e})"))?;
     let v: Value = serde_json::from_str(&raw).map_err(|e| format!("could not parse ({e})"))?;
 
-    let id = v.get("id").and_then(Value::as_str).ok_or("missing \"id\"")?.to_string();
+    let id = v
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("missing \"id\"")?
+        .to_string();
     let heartbeat_str = v
         .get("last_heartbeat")
         .and_then(Value::as_str)
         .ok_or("missing \"last_heartbeat\"")?;
     let heartbeat = parse_rfc3339(heartbeat_str).ok_or("unparseable \"last_heartbeat\"")?;
 
-    let started_at = v.get("started_at").and_then(Value::as_str).map(String::from);
-    let workspace_id = v.get("workspace_id").and_then(Value::as_str).map(String::from);
+    let started_at = v
+        .get("started_at")
+        .and_then(Value::as_str)
+        .map(String::from);
+    let workspace_id = v
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .map(String::from);
     let source = v.get("source").and_then(Value::as_str).map(String::from);
     let lane = v.get("lane").and_then(Value::as_str).map(String::from);
 
@@ -2196,15 +2348,31 @@ fn parse_lane(path: &Path, root: &Path) -> Result<BeeLane, String> {
         .and_then(Value::as_str)
         .map(|s| scrub_paths(s, root));
     let approved_gates = parse_approved_gates(&v);
-    let created_at = v.get("created_at").and_then(Value::as_str).map(String::from);
+    let created_at = v
+        .get("created_at")
+        .and_then(Value::as_str)
+        .map(String::from);
     let last_scribing_run = parse_last_scribing_run(&v);
     let route = parse_route(&v, root);
 
-    Ok(BeeLane { feature, phase, mode, next_action, approved_gates, created_at, last_scribing_run, route })
+    Ok(BeeLane {
+        feature,
+        phase,
+        mode,
+        next_action,
+        approved_gates,
+        created_at,
+        last_scribing_run,
+        route,
+    })
 }
 
 /// Read `.bee/runtime/workspaces/*.json` (D4). Absent yields an empty list.
-fn read_workspaces(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Vec<BeeWorkspace> {
+fn read_workspaces(
+    bee_dir: &Path,
+    root: &Path,
+    read_errors: &mut Vec<String>,
+) -> Vec<BeeWorkspace> {
     let dir = bee_dir.join("runtime").join("workspaces");
     if !dir.is_dir() {
         return Vec::new();
@@ -2237,8 +2405,16 @@ fn parse_workspace(path: &Path, root: &Path) -> Result<BeeWorkspace, String> {
     let raw = fs::read_to_string(path).map_err(|e| format!("could not read ({e})"))?;
     let v: Value = serde_json::from_str(&raw).map_err(|e| format!("could not parse ({e})"))?;
 
-    let id = v.get("id").and_then(Value::as_str).ok_or("missing \"id\"")?.to_string();
-    let kind = v.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+    let id = v
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("missing \"id\"")?
+        .to_string();
+    let kind = v
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     let root_field = v
         .get("root")
         .and_then(Value::as_str)
@@ -2250,7 +2426,10 @@ fn parse_workspace(path: &Path, root: &Path) -> Result<BeeWorkspace, String> {
         .and_then(Value::as_array)
         .map(|a| a.len())
         .unwrap_or(0);
-    let created_at = v.get("created_at").and_then(Value::as_str).map(String::from);
+    let created_at = v
+        .get("created_at")
+        .and_then(Value::as_str)
+        .map(String::from);
 
     Ok(BeeWorkspace {
         id,
@@ -2276,7 +2455,10 @@ fn read_worktrees(
     now: time::OffsetDateTime,
     read_errors: &mut Vec<String>,
 ) -> Vec<BeeWorktree> {
-    let path = root.join(".bee").join("runtime").join("worktree-grants.json");
+    let path = root
+        .join(".bee")
+        .join("runtime")
+        .join("worktree-grants.json");
     if !path.is_file() {
         return Vec::new();
     }
@@ -2331,7 +2513,12 @@ fn resolve_worktree(
     let created_at = workspace.and_then(|w| w.created_at.clone());
 
     let Some(sibling_root) = project_root.parent().map(|p| p.join(id)) else {
-        return BeeWorktree::unresolved(id, "project root has no parent directory", branch, created_at);
+        return BeeWorktree::unresolved(
+            id,
+            "project root has no parent directory",
+            branch,
+            created_at,
+        );
     };
     if !sibling_root.is_dir() {
         return BeeWorktree::unresolved(id, "worktree directory not found", branch, created_at);
@@ -2341,12 +2528,24 @@ fn resolve_worktree(
     let raw = match fs::read_to_string(&state_path) {
         Ok(raw) => raw,
         Err(_) => {
-            return BeeWorktree::unresolved(id, "state.json missing or unreadable", branch, created_at)
+            return BeeWorktree::unresolved(
+                id,
+                "state.json missing or unreadable",
+                branch,
+                created_at,
+            )
         }
     };
     let v: Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
-        Err(_) => return BeeWorktree::unresolved(id, "state.json could not be parsed", branch, created_at),
+        Err(_) => {
+            return BeeWorktree::unresolved(
+                id,
+                "state.json could not be parsed",
+                branch,
+                created_at,
+            )
+        }
     };
 
     let feature = v.get("feature").and_then(Value::as_str).map(String::from);
@@ -2440,9 +2639,22 @@ fn read_decisions(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) ->
         total += 1;
         if v.get("type").and_then(Value::as_str) == Some("decide") {
             recent_decides.push(BeeDecisionSummary {
-                id: v.get("id").and_then(Value::as_str).unwrap_or_default().to_string(),
-                date: v.get("date").and_then(Value::as_str).unwrap_or_default().to_string(),
-                decision: scrub_paths(v.get("decision").and_then(Value::as_str).unwrap_or_default(), root),
+                id: v
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                date: v
+                    .get("date")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                decision: scrub_paths(
+                    v.get("decision")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    root,
+                ),
                 scope: v.get("scope").and_then(Value::as_str).map(String::from),
             });
             // The file is append-ordered, so the tail is always the most
@@ -2455,7 +2667,10 @@ fn read_decisions(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) ->
         }
     }
 
-    BeeDecisions { total, recent: recent_decides }
+    BeeDecisions {
+        total,
+        recent: recent_decides,
+    }
 }
 
 /// Group `cells` by `feature` and derive the D10/D11 shipped-feature view.
@@ -2468,12 +2683,18 @@ fn compute_shipped_features(cells: &[BeeCell]) -> Vec<BeeShippedFeature> {
     let mut by_feature: std::collections::BTreeMap<&str, Vec<&BeeCell>> =
         std::collections::BTreeMap::new();
     for cell in cells {
-        by_feature.entry(cell.feature.as_str()).or_default().push(cell);
+        by_feature
+            .entry(cell.feature.as_str())
+            .or_default()
+            .push(cell);
     }
 
     let mut shipped = Vec::new();
     for (name, group) in by_feature {
-        let live: Vec<&BeeCell> = group.into_iter().filter(|c| c.status != "dropped").collect();
+        let live: Vec<&BeeCell> = group
+            .into_iter()
+            .filter(|c| c.status != "dropped")
+            .collect();
         if live.is_empty() {
             // All-dropped feature: not shipped, not counted.
             continue;
@@ -2518,7 +2739,9 @@ fn compute_cycle_time(live: &[&BeeCell]) -> Option<BeeCycleSpan> {
         .filter_map(|s| parse_rfc3339(s).map(|t| (s, t)))
         .collect();
 
-    let (start_str, start_t) = starts.iter().min_by_key(|(_, t)| t.unix_timestamp_nanos())?;
+    let (start_str, start_t) = starts
+        .iter()
+        .min_by_key(|(_, t)| t.unix_timestamp_nanos())?;
     let (end_str, end_t) = ends.iter().max_by_key(|(_, t)| t.unix_timestamp_nanos())?;
 
     let hours = (*end_t - *start_t).as_seconds_f64() / 3600.0;
@@ -2538,7 +2761,12 @@ fn parse_rfc3339(s: &str) -> Option<time::OffsetDateTime> {
 /// The `YYYY-MM-DD` UTC calendar day of `dt`.
 fn ymd_utc(dt: time::OffsetDateTime) -> String {
     let utc = dt.to_offset(time::UtcOffset::UTC);
-    format!("{:04}-{:02}-{:02}", utc.year(), utc.month() as u8, utc.day())
+    format!(
+        "{:04}-{:02}-{:02}",
+        utc.year(),
+        utc.month() as u8,
+        utc.day()
+    )
 }
 
 /// Ship-rate aggregates over the shipped features that report a cycle time
@@ -2546,7 +2774,8 @@ fn ymd_utc(dt: time::OffsetDateTime) -> String {
 /// calendar day, so it contributes to `shipped` but not to any of these
 /// numbers; every division here is guarded against an empty denominator.
 fn compute_velocity(shipped: &[BeeShippedFeature]) -> BeeVelocity {
-    let timed: Vec<&BeeShippedFeature> = shipped.iter().filter(|f| f.cycle_time.is_some()).collect();
+    let timed: Vec<&BeeShippedFeature> =
+        shipped.iter().filter(|f| f.cycle_time.is_some()).collect();
     if timed.is_empty() {
         return BeeVelocity::default();
     }
@@ -2588,7 +2817,10 @@ fn compute_velocity(shipped: &[BeeShippedFeature]) -> BeeVelocity {
     };
 
     BeeVelocity {
-        per_day: per_day.into_iter().map(|(day, count)| BeeDayCount { day, count }).collect(),
+        per_day: per_day
+            .into_iter()
+            .map(|(day, count)| BeeDayCount { day, count })
+            .collect(),
         active_days,
         features_per_active_day,
         features_per_week,
@@ -2612,7 +2844,10 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
     if values.is_empty() {
         return None;
     }
-    values.sort_by(|a, b| a.partial_cmp(b).expect("cycle-time hours are always finite"));
+    values.sort_by(|a, b| {
+        a.partial_cmp(b)
+            .expect("cycle-time hours are always finite")
+    });
     let n = values.len();
     if n % 2 == 1 {
         Some(values[n / 2])
@@ -2751,7 +2986,9 @@ const PATH_WRAP_CLOSERS: &[char] = &[')', '"', '\'', '`', ']', '>', ',', '.', ';
 /// `(absolute path redacted)` for exactly this reason before this check
 /// existed.
 fn is_route_shaped(s: &str) -> bool {
-    s.starts_with('/') && s.split('/').any(|seg| seg.starts_with(':') && seg.len() > 1)
+    s.starts_with('/')
+        && s.split('/')
+            .any(|seg| seg.starts_with(':') && seg.len() > 1)
 }
 
 /// Whether `s` is an absolute path — POSIX (`Path::is_absolute`, which also
@@ -2814,12 +3051,15 @@ fn reduce_embedded_path(path: &str, root: &Path) -> String {
 }
 
 /// The only gate a `feature` name passes through before it is ever joined
-/// onto a filesystem path — see [`promote_proposals_path`], the sole call
-/// site. `feature` is unvalidated free text everywhere this module reads
-/// it — `.bee/state.json`'s active feature, a `.bee/lanes/*.json` record,
-/// a `.bee/cells/*.json` record — and none of those three sources is under
-/// this code's control, so this check runs the same way regardless of
-/// which one a name came from.
+/// onto a filesystem path — every call site ([`promote_proposals_path`],
+/// [`feature_docs_dir`], and [`read_archived_cells`], the last added for
+/// review-p1-fixes D4) runs this same check first. `feature` is
+/// unvalidated free text everywhere this module reads it — `.bee/state.json`'s
+/// active feature, a `.bee/lanes/*.json` record, a `.bee/cells/*.json`
+/// record, and (for `read_archived_cells`) a percent-decoded `:feature`
+/// URL segment `bee_feature_detail` passes straight through — and none of
+/// those sources is under this code's control, so this check runs the
+/// same way regardless of which one a name came from.
 ///
 /// Rejected: an empty string; a leading `.` (this alone covers a bare `.`
 /// or `..` component, since both start with `.`, as well as any
@@ -2861,7 +3101,12 @@ fn promote_proposals_path(root: &Path, feature: &str) -> Option<PathBuf> {
     if !validate_feature_name(feature) {
         return None;
     }
-    Some(root.join("docs").join("history").join(feature).join("promote-proposals.md"))
+    Some(
+        root.join("docs")
+            .join("history")
+            .join(feature)
+            .join("promote-proposals.md"),
+    )
 }
 
 /// Whether `feature`'s `docs/history/<feature>/promote-proposals.md`
@@ -2996,7 +3241,7 @@ fn list_feature_doc_files(dir: &Path) -> Vec<String> {
             .collect(),
         Err(_) => Vec::new(),
     };
-    files.sort_by(|a, b| feature_doc_sort_key(a).cmp(&feature_doc_sort_key(b)));
+    files.sort_by_key(|a| feature_doc_sort_key(a));
     files
 }
 
@@ -3020,14 +3265,21 @@ fn read_feature_docs(
     let docs = list_feature_doc_files(&dir);
 
     let context_text = fs::read_to_string(dir.join("CONTEXT.md")).ok();
-    let context_title = context_text.as_deref().and_then(extract_context_title).map(|t| scrub_paths(&t, root));
-    let context_description =
-        context_text.as_deref().and_then(extract_feature_boundary_paragraph).map(|d| scrub_paths(&d, root));
+    let context_title = context_text
+        .as_deref()
+        .and_then(extract_context_title)
+        .map(|t| scrub_paths(&t, root));
+    let context_description = context_text
+        .as_deref()
+        .and_then(extract_feature_boundary_paragraph)
+        .map(|d| scrub_paths(&d, root));
 
-    let fallback_description = decision_scopes
-        .get(feature)
-        .cloned()
-        .or_else(|| all_cells.iter().find(|c| c.feature == feature).map(|c| c.title.clone()));
+    let fallback_description = decision_scopes.get(feature).cloned().or_else(|| {
+        all_cells
+            .iter()
+            .find(|c| c.feature == feature)
+            .map(|c| c.title.clone())
+    });
 
     let description = context_description.or(fallback_description);
     let title = context_title.or_else(|| {
@@ -3037,7 +3289,11 @@ fn read_feature_docs(
     if title.is_none() && description.is_none() && docs.is_empty() {
         return None;
     }
-    Some(BeeFeatureDocs { title, description, docs })
+    Some(BeeFeatureDocs {
+        title,
+        description,
+        docs,
+    })
 }
 
 /// [`read_feature_docs`] for every distinct `feature` name in `features` —
@@ -3073,7 +3329,10 @@ fn read_feature_docs_all<'a>(
 /// malformed line is skipped, matching every other best-effort fallback
 /// this module reads (never pushed to `read_errors` — a missing decision
 /// is not a store defect).
-fn latest_decisions_by_scope(bee_dir: &Path, root: &Path) -> std::collections::BTreeMap<String, String> {
+fn latest_decisions_by_scope(
+    bee_dir: &Path,
+    root: &Path,
+) -> std::collections::BTreeMap<String, String> {
     let path = bee_dir.join("decisions.jsonl");
     let mut out = std::collections::BTreeMap::new();
     let Ok(raw) = fs::read_to_string(&path) else {
@@ -3128,7 +3387,9 @@ fn extract_context_title(text: &str) -> Option<String> {
 /// is absent, or nothing but blank lines/another heading follows it.
 fn extract_feature_boundary_paragraph(text: &str) -> Option<String> {
     let mut lines = text.lines();
-    let found = lines.by_ref().any(|line| line.trim() == "## Feature Boundary");
+    let found = lines
+        .by_ref()
+        .any(|line| line.trim() == "## Feature Boundary");
     if !found {
         return None;
     }
@@ -3171,7 +3432,11 @@ struct RawReviewCandidate {
 /// module. A malformed line, or one missing its own `id`, costs one
 /// `read_errors` note and the read continues with whatever else could be
 /// parsed.
-fn read_review_candidates(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Vec<RawReviewCandidate> {
+fn read_review_candidates(
+    bee_dir: &Path,
+    root: &Path,
+    read_errors: &mut Vec<String>,
+) -> Vec<RawReviewCandidate> {
     let path = bee_dir.join("review-candidates.jsonl");
     if !path.is_file() {
         return Vec::new();
@@ -3202,10 +3467,18 @@ fn read_review_candidates(bee_dir: &Path, root: &Path, read_errors: &mut Vec<Str
             }
         };
         let Some(id) = v.get("id").and_then(Value::as_str) else {
-            read_errors.push(format!("{}: line {} candidate missing \"id\"", rel_str(&path, root), i + 1));
+            read_errors.push(format!(
+                "{}: line {} candidate missing \"id\"",
+                rel_str(&path, root),
+                i + 1
+            ));
             continue;
         };
-        let feature = v.get("feature").and_then(Value::as_str).unwrap_or_default().to_string();
+        let feature = v
+            .get("feature")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let mode = v.get("mode").and_then(Value::as_str).map(String::from);
         // A candidate naming zero cells (`cells: []`) is the shape live in
         // this repo's own store — read exactly like any other array, empty
@@ -3214,9 +3487,18 @@ fn read_review_candidates(bee_dir: &Path, root: &Path, read_errors: &mut Vec<Str
         let cells = v
             .get("cells")
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(|c| c.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| c.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        out.push(RawReviewCandidate { id: id.to_string(), feature, mode, cells });
+        out.push(RawReviewCandidate {
+            id: id.to_string(),
+            feature,
+            mode,
+            cells,
+        });
     }
     out
 }
@@ -3246,7 +3528,11 @@ struct RawReviewSession {
 /// [`read_lanes`] already establishes: absent directory yields an empty
 /// list, not an error; a malformed file costs one `read_errors` note and
 /// the read continues with whatever else could be parsed.
-fn read_review_sessions(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Vec<RawReviewSession> {
+fn read_review_sessions(
+    bee_dir: &Path,
+    root: &Path,
+    read_errors: &mut Vec<String>,
+) -> Vec<RawReviewSession> {
     let dir = bee_dir.join("reviews");
     if !dir.is_dir() {
         return Vec::new();
@@ -3304,12 +3590,24 @@ fn parse_review_session(path: &Path) -> Result<RawReviewSession, String> {
     let p1_findings = v
         .get("findings")
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter(|f| f.get("severity").and_then(Value::as_str) == Some("P1")).count())
+        .map(|arr| {
+            arr.iter()
+                .filter(|f| f.get("severity").and_then(Value::as_str) == Some("P1"))
+                .count()
+        })
         .unwrap_or(0);
 
-    let decision_status = v.get("decision").and_then(|d| d.get("status")).and_then(Value::as_str).map(String::from);
+    let decision_status = v
+        .get("decision")
+        .and_then(|d| d.get("status"))
+        .and_then(Value::as_str)
+        .map(String::from);
 
-    Ok(RawReviewSession { included, p1_findings, decision_status })
+    Ok(RawReviewSession {
+        included,
+        p1_findings,
+        decision_status,
+    })
 }
 
 /// Join `.bee/review-candidates.jsonl` rows against `.bee/reviews/*.json`
@@ -3318,13 +3616,20 @@ fn parse_review_session(path: &Path) -> Result<RawReviewSession, String> {
 /// candidate, and [`BeeReview::open_p1_findings`] for the independent P1
 /// count.
 fn compute_review(candidates: &[RawReviewCandidate], sessions: &[RawReviewSession]) -> BeeReview {
-    let is_settled = |s: &&RawReviewSession| matches!(s.decision_status.as_deref(), Some("approved") | Some("blocked"));
+    let is_settled = |s: &&RawReviewSession| {
+        matches!(
+            s.decision_status.as_deref(),
+            Some("approved") | Some("blocked")
+        )
+    };
 
     let out_candidates = candidates
         .iter()
         .map(|c| {
-            let matching: Vec<&RawReviewSession> =
-                sessions.iter().filter(|s| c.cells.iter().any(|cell| s.included.contains(cell))).collect();
+            let matching: Vec<&RawReviewSession> = sessions
+                .iter()
+                .filter(|s| c.cells.iter().any(|cell| s.included.contains(cell)))
+                .collect();
             let status = if matching.is_empty() {
                 BeeReviewStatus::Unreviewed
             } else if matching.iter().any(|s| !is_settled(s)) {
@@ -3332,13 +3637,25 @@ fn compute_review(candidates: &[RawReviewCandidate], sessions: &[RawReviewSessio
             } else {
                 BeeReviewStatus::Settled
             };
-            BeeReviewCandidate { id: c.id.clone(), feature: c.feature.clone(), mode: c.mode.clone(), status }
+            BeeReviewCandidate {
+                id: c.id.clone(),
+                feature: c.feature.clone(),
+                mode: c.mode.clone(),
+                status,
+            }
         })
         .collect();
 
-    let open_p1_findings = sessions.iter().filter(|s| !is_settled(s)).map(|s| s.p1_findings).sum();
+    let open_p1_findings = sessions
+        .iter()
+        .filter(|s| !is_settled(s))
+        .map(|s| s.p1_findings)
+        .sum();
 
-    BeeReview { candidates: out_candidates, open_p1_findings }
+    BeeReview {
+        candidates: out_candidates,
+        open_p1_findings,
+    }
 }
 
 /// Read `.bee/capture-queue.jsonl` (bbp-13, D4). Lines of `kind: "stub"` (a
@@ -3352,7 +3669,11 @@ fn compute_review(candidates: &[RawReviewCandidate], sessions: &[RawReviewSessio
 /// parsed. A row of any other `kind` (or none at all) is ignored, matching
 /// this module's unknown-status convention elsewhere — an unrecognised
 /// kind is not a store error.
-fn read_capture_queue(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> BeeCaptureQueue {
+fn read_capture_queue(
+    bee_dir: &Path,
+    root: &Path,
+    read_errors: &mut Vec<String>,
+) -> BeeCaptureQueue {
     let path = bee_dir.join("capture-queue.jsonl");
     if !path.is_file() {
         return BeeCaptureQueue::default();
@@ -3406,7 +3727,9 @@ fn read_capture_queue(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>
         }
     }
 
-    BeeCaptureQueue { waiting: stub_ids.difference(&flushed_ids).count() }
+    BeeCaptureQueue {
+        waiting: stub_ids.difference(&flushed_ids).count(),
+    }
 }
 
 /// Read the newest `ts` out of `.bee/logs/tools.jsonl`'s last
@@ -3445,10 +3768,20 @@ fn read_last_tool_call(bee_dir: &Path) -> Option<String> {
         if line.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        let Some(ts_str) = v.get("ts").and_then(Value::as_str) else { continue };
-        let Some(ts) = parse_rfc3339(ts_str) else { continue };
-        if newest.as_ref().map(|(newest_ts, _)| ts > *newest_ts).unwrap_or(true) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(ts_str) = v.get("ts").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(ts) = parse_rfc3339(ts_str) else {
+            continue;
+        };
+        if newest
+            .as_ref()
+            .map(|(newest_ts, _)| ts > *newest_ts)
+            .unwrap_or(true)
+        {
             newest = Some((ts, ts_str.to_string()));
         }
     }
@@ -3463,7 +3796,11 @@ fn read_last_tool_call(bee_dir: &Path) -> Option<String> {
 /// debt; any later event for that same id — a future kind this reader has
 /// never seen included — closes it. Absent file yields zero debt, the same
 /// silent-not-an-error convention every other reader here follows.
-fn read_deferred_queue(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> BeeDeferredQueue {
+fn read_deferred_queue(
+    bee_dir: &Path,
+    root: &Path,
+    read_errors: &mut Vec<String>,
+) -> BeeDeferredQueue {
     let path = bee_dir.join("deferred-queue.jsonl");
     if !path.is_file() {
         return BeeDeferredQueue::default();
@@ -3487,7 +3824,8 @@ fn read_deferred_queue(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String
     // deterministic and stable across runs; `latest` is folded to the last
     // event seen for that id as the lines are walked in file order.
     let mut order: Vec<String> = Vec::new();
-    let mut latest: std::collections::HashMap<String, LatestEvent> = std::collections::HashMap::new();
+    let mut latest: std::collections::HashMap<String, LatestEvent> =
+        std::collections::HashMap::new();
 
     for (i, line) in raw.lines().enumerate() {
         let line = line.trim();
@@ -3506,11 +3844,19 @@ fn read_deferred_queue(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String
             }
         };
         let Some(id) = v.get("id").and_then(Value::as_str) else {
-            read_errors.push(format!("{}: line {} missing \"id\"", rel_str(&path, root), i + 1));
+            read_errors.push(format!(
+                "{}: line {} missing \"id\"",
+                rel_str(&path, root),
+                i + 1
+            ));
             continue;
         };
         let Some(event) = v.get("event").and_then(Value::as_str) else {
-            read_errors.push(format!("{}: line {} missing \"event\"", rel_str(&path, root), i + 1));
+            read_errors.push(format!(
+                "{}: line {} missing \"event\"",
+                rel_str(&path, root),
+                i + 1
+            ));
             continue;
         };
         if !latest.contains_key(id) {
@@ -3522,7 +3868,10 @@ fn read_deferred_queue(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String
                 event: event.to_string(),
                 kind: v.get("kind").and_then(Value::as_str).map(String::from),
                 feature: v.get("feature").and_then(Value::as_str).map(String::from),
-                reason: v.get("reason").and_then(Value::as_str).map(|s| scrub_paths(s, root)),
+                reason: v
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(|s| scrub_paths(s, root)),
             },
         );
     }
@@ -3543,7 +3892,10 @@ fn read_deferred_queue(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String
         })
         .collect();
 
-    BeeDeferredQueue { unresolved_count: unresolved.len(), unresolved }
+    BeeDeferredQueue {
+        unresolved_count: unresolved.len(),
+        unresolved,
+    }
 }
 
 /// Per-feature scribing debt (bbp-13, Terms: "Knowledge debt"): a feature
@@ -3568,17 +3920,19 @@ fn compute_scribing_debt(
     let mut debt = Vec::new();
     for placement in phase_board {
         let feature = placement.feature.as_str();
-        let has_capped_behavior_change =
-            all_cells.iter().any(|c| c.feature == feature && c.status == "capped" && c.behavior_change);
+        let has_capped_behavior_change = all_cells
+            .iter()
+            .any(|c| c.feature == feature && c.status == "capped" && c.behavior_change);
         if !has_capped_behavior_change {
             continue;
         }
-        let last_scribing_run: Option<&BeeLastScribingRun> = match lanes.iter().find(|l| l.feature == feature) {
-            Some(l) => l.last_scribing_run.as_ref(),
-            None => state
-                .filter(|s| s.feature.as_deref() == Some(feature))
-                .and_then(|s| s.last_scribing_run.as_ref()),
-        };
+        let last_scribing_run: Option<&BeeLastScribingRun> =
+            match lanes.iter().find(|l| l.feature == feature) {
+                Some(l) => l.last_scribing_run.as_ref(),
+                None => state
+                    .filter(|s| s.feature.as_deref() == Some(feature))
+                    .and_then(|s| s.last_scribing_run.as_ref()),
+            };
         let names_it = last_scribing_run.and_then(|l| l.feature.as_deref()) == Some(feature);
         if !names_it {
             debt.push(feature.to_string());
@@ -3609,7 +3963,11 @@ fn compute_tier_mix(all_cells: &[BeeCell]) -> Option<BeeTierMix> {
         let expensive = counts.get("ceiling").copied().unwrap_or(0);
         Some(expensive as f64 / tiered_total as f64)
     };
-    Some(BeeTierMix { counts, untiered, expensive_tier_share })
+    Some(BeeTierMix {
+        counts,
+        untiered,
+        expensive_tier_share,
+    })
 }
 
 #[cfg(test)]
@@ -3667,7 +4025,11 @@ mod tests {
                 if path.is_dir() {
                     walk(base, &path, out);
                 } else {
-                    let rel = path.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                    let rel = path
+                        .strip_prefix(base)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
                     let content = std::fs::read(&path).unwrap();
                     out.push((rel, content));
                 }
@@ -3682,12 +4044,36 @@ mod tests {
     #[test]
     fn buckets_all_five_statuses_dropped_absent() {
         let root = fresh_root("all-statuses");
-        write(&root, ".bee/state.json", r#"{"phase":"swarming","feature":"demo","mode":"standard"}"#);
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
-        write(&root, ".bee/cells/c-claimed.json", &cell_json("c-claimed", "claimed"));
-        write(&root, ".bee/cells/c-blocked.json", &cell_json("c-blocked", "blocked"));
-        write(&root, ".bee/cells/c-capped.json", &cell_json("c-capped", "capped"));
-        write(&root, ".bee/cells/c-dropped.json", &cell_json("c-dropped", "dropped"));
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"demo","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-claimed.json",
+            &cell_json("c-claimed", "claimed"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-blocked.json",
+            &cell_json("c-blocked", "blocked"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-capped.json",
+            &cell_json("c-capped", "capped"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-dropped.json",
+            &cell_json("c-dropped", "dropped"),
+        );
 
         let snap = read_snapshot(&root);
         assert!(snap.present);
@@ -3695,7 +4081,10 @@ mod tests {
         assert_eq!(snap.buckets.waiting.len(), 1);
         assert_eq!(snap.buckets.stuck.len(), 1);
         assert_eq!(snap.buckets.done.len(), 1);
-        assert_eq!(snap.state.as_ref().unwrap().phase.as_deref(), Some("swarming"));
+        assert_eq!(
+            snap.state.as_ref().unwrap().phase.as_deref(),
+            Some("swarming")
+        );
 
         let all_ids: Vec<&str> = snap
             .buckets
@@ -3706,7 +4095,10 @@ mod tests {
             .chain(&snap.buckets.done)
             .map(|c| c.id.as_str())
             .collect();
-        assert!(!all_ids.contains(&"c-dropped"), "dropped cell leaked into a bucket: {all_ids:?}");
+        assert!(
+            !all_ids.contains(&"c-dropped"),
+            "dropped cell leaked into a bucket: {all_ids:?}"
+        );
         assert_eq!(all_ids.len(), 4);
 
         std::fs::remove_dir_all(&root).ok();
@@ -3720,8 +4112,16 @@ mod tests {
         std::fs::remove_dir_all(&active_root).ok();
 
         let inactive_root = fresh_root("active-no");
-        write(&inactive_root, ".bee/cells/a.json", &cell_json("a", "capped"));
-        write(&inactive_root, ".bee/cells/b.json", &cell_json("b", "dropped"));
+        write(
+            &inactive_root,
+            ".bee/cells/a.json",
+            &cell_json("a", "capped"),
+        );
+        write(
+            &inactive_root,
+            ".bee/cells/b.json",
+            &cell_json("b", "dropped"),
+        );
         assert!(!read_snapshot(&inactive_root).active);
         std::fs::remove_dir_all(&inactive_root).ok();
     }
@@ -3756,10 +4156,18 @@ mod tests {
     #[test]
     fn unknown_status_counted_nowhere_read_still_succeeds() {
         let root = fresh_root("unknown-status");
-        write(&root, ".bee/cells/weird.json", &cell_json("weird", "quarantined"));
+        write(
+            &root,
+            ".bee/cells/weird.json",
+            &cell_json("weird", "quarantined"),
+        );
         let snap = read_snapshot(&root);
         assert!(snap.present);
-        assert!(snap.read_errors.is_empty(), "unknown status should not be a read error: {:?}", snap.read_errors);
+        assert!(
+            snap.read_errors.is_empty(),
+            "unknown status should not be a read error: {:?}",
+            snap.read_errors
+        );
         assert_eq!(snap.buckets.doing.len(), 0);
         assert_eq!(snap.buckets.waiting.len(), 0);
         assert_eq!(snap.buckets.stuck.len(), 0);
@@ -3784,7 +4192,11 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.buckets.done.len(), 1, "only the live capped cell should count");
+        assert_eq!(
+            snap.buckets.done.len(),
+            1,
+            "only the live capped cell should count"
+        );
         assert_eq!(snap.buckets.doing.len(), 0);
         assert_eq!(snap.buckets.waiting.len(), 0);
         assert!(!snap.active, "the archived open cell must not flip active");
@@ -3794,23 +4206,90 @@ mod tests {
     }
 
     #[test]
+    fn read_archived_cells_rejects_traversal_and_separators() {
+        let root = fresh_root("archive-traversal");
+
+        // A normal feature slug still reads its own archived cells.
+        write(
+            &root,
+            ".bee/cells/archive/demo/archived-1.json",
+            &cell_json("archived-1", "capped"),
+        );
+        let normal = read_archived_cells(&root, "demo");
+        assert_eq!(
+            normal.len(),
+            1,
+            "a normal feature slug must still read its archived cells"
+        );
+        assert_eq!(normal[0].id, "archived-1");
+
+        // A trap cell sits at every location an unguarded join would land
+        // on for each rejected feature below — proof the guard runs before
+        // the join and the read, not merely that the fixture happens to
+        // miss the resolved path.
+        write(
+            &root,
+            ".bee/etc/trap.json",
+            &cell_json("trap-etc", "capped"),
+        ); // '../../etc'
+        write(&root, ".bee/trap.json", &cell_json("trap-bee", "capped")); // '../..'
+        write(
+            &root,
+            ".bee/cells/archive/a/b/trap.json",
+            &cell_json("trap-ab", "capped"),
+        ); // 'a/b'
+        write(
+            &root,
+            ".bee/cells/archive/trap-empty.json",
+            &cell_json("trap-empty", "capped"),
+        ); // ''
+
+        for feature in ["../../etc", "../..", "a/b", ""] {
+            let cells = read_archived_cells(&root, feature);
+            assert!(
+                cells.is_empty(),
+                "feature {feature:?} must return an empty Vec and read nothing, got {:?}",
+                cells.iter().map(|c| &c.id).collect::<Vec<_>>()
+            );
+        }
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn malformed_state_and_truncated_cell_degrade_to_partial_snapshot() {
         let root = fresh_root("malformed");
         write(&root, ".bee/state.json", "{ this is not valid json");
         write(&root, ".bee/cells/good.json", &cell_json("good", "open"));
-        write(&root, ".bee/cells/bad.json", "{\"id\": \"bad\", \"status\": \"open\"");
+        write(
+            &root,
+            ".bee/cells/bad.json",
+            "{\"id\": \"bad\", \"status\": \"open\"",
+        );
 
         let snap = read_snapshot(&root);
         assert!(snap.present);
         assert!(snap.state.is_none());
-        assert_eq!(snap.buckets.waiting.len(), 1, "the well-formed cell must still parse");
+        assert_eq!(
+            snap.buckets.waiting.len(),
+            1,
+            "the well-formed cell must still parse"
+        );
         assert_eq!(snap.buckets.waiting[0].id, "good");
-        assert_eq!(snap.read_errors.len(), 2, "expected notes for state.json and bad.json: {:?}", snap.read_errors);
+        assert_eq!(
+            snap.read_errors.len(),
+            2,
+            "expected notes for state.json and bad.json: {:?}",
+            snap.read_errors
+        );
         assert!(snap.read_errors.iter().any(|e| e.contains("state.json")));
         assert!(snap.read_errors.iter().any(|e| e.contains("bad.json")));
         // every read_errors entry must itself be relative
         for e in &snap.read_errors {
-            assert!(!e.contains(&root.to_string_lossy().into_owned()), "read_errors leaked the fixture root: {e}");
+            assert!(
+                !e.contains(&root.to_string_lossy().into_owned()),
+                "read_errors leaked the fixture root: {e}"
+            );
         }
 
         std::fs::remove_dir_all(&root).ok();
@@ -3858,15 +4337,31 @@ mod tests {
         let cell = &snap.buckets.waiting[0];
 
         for f in &cell.files {
-            assert!(!Path::new(f).is_absolute(), "leaked absolute path in files[]: {f}");
-            assert!(!f.contains(&root_str), "leaked fixture root in files[]: {f}");
+            assert!(
+                !Path::new(f).is_absolute(),
+                "leaked absolute path in files[]: {f}"
+            );
+            assert!(
+                !f.contains(&root_str),
+                "leaked fixture root in files[]: {f}"
+            );
         }
         let worker = cell.worker.as_deref().unwrap_or_default();
-        assert!(!Path::new(worker).is_absolute(), "leaked absolute path in worker: {worker}");
-        assert!(!worker.contains(&root_str), "leaked fixture root in worker: {worker}");
+        assert!(
+            !Path::new(worker).is_absolute(),
+            "leaked absolute path in worker: {worker}"
+        );
+        assert!(
+            !worker.contains(&root_str),
+            "leaked fixture root in worker: {worker}"
+        );
 
         // the in-root file must have relativized cleanly (not just filename-reduced)
-        assert!(cell.files.iter().any(|f| f == "src/inside.rs"), "files: {:?}", cell.files);
+        assert!(
+            cell.files.iter().any(|f| f == "src/inside.rs"),
+            "files: {:?}",
+            cell.files
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3911,14 +4406,26 @@ mod tests {
         assert_eq!(snap.buckets.done.len(), 1);
         let cell = &snap.buckets.done[0];
 
-        let outcome = cell.outcome.as_deref().expect("outcome must be read from trace");
-        assert!(!outcome.contains(&root_str), "leaked fixture root in outcome: {outcome}");
+        let outcome = cell
+            .outcome
+            .as_deref()
+            .expect("outcome must be read from trace");
+        assert!(
+            !outcome.contains(&root_str),
+            "leaked fixture root in outcome: {outcome}"
+        );
         assert!(
             outcome.contains("src/leaky.rs"),
             "an in-root path must relativize cleanly, not vanish or reduce to a bare filename: {outcome}"
         );
-        assert!(outcome.starts_with("Fixed the bug in "), "surrounding prose must survive byte-for-byte: {outcome}");
-        assert!(outcome.ends_with(", tests green."), "surrounding prose must survive byte-for-byte: {outcome}");
+        assert!(
+            outcome.starts_with("Fixed the bug in "),
+            "surrounding prose must survive byte-for-byte: {outcome}"
+        );
+        assert!(
+            outcome.ends_with(", tests green."),
+            "surrounding prose must survive byte-for-byte: {outcome}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -3928,7 +4435,11 @@ mod tests {
         let root = fresh_root("read-only");
         write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
         write(&root, ".bee/cells/a.json", &cell_json("a", "open"));
-        write(&root, ".bee/cells/archive/demo/z.json", &cell_json("z", "capped"));
+        write(
+            &root,
+            ".bee/cells/archive/demo/z.json",
+            &cell_json("z", "capped"),
+        );
 
         let before = snapshot_tree(&root);
         let _ = read_snapshot(&root);
@@ -3941,10 +4452,13 @@ mod tests {
 
     #[test]
     fn no_web_framework_dependency_declared() {
-        let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
+        let manifest =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")).unwrap();
         for forbidden in ["axum", "tokio", "hyper"] {
             assert!(
-                !manifest.lines().any(|l| l.trim_start().starts_with(forbidden)),
+                !manifest
+                    .lines()
+                    .any(|l| l.trim_start().starts_with(forbidden)),
                 "waggledance-core/Cargo.toml must not depend on {forbidden}"
             );
         }
@@ -3959,8 +4473,12 @@ mod tests {
         claimed_at: Option<&str>,
         capped_at: Option<&str>,
     ) -> String {
-        let claimed_json = claimed_at.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".to_string());
-        let capped_json = capped_at.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".to_string());
+        let claimed_json = claimed_at
+            .map(|s| format!("\"{s}\""))
+            .unwrap_or_else(|| "null".to_string());
+        let capped_json = capped_at
+            .map(|s| format!("\"{s}\""))
+            .unwrap_or_else(|| "null".to_string());
         format!(
             r#"{{
                 "id": "{id}",
@@ -4015,9 +4533,18 @@ mod tests {
         let f = &snap.shipped[0];
         assert_eq!(f.feature, "feat-a");
         assert_eq!(f.cell_count, 2);
-        let ct = f.cycle_time.as_ref().expect("both timestamps present, cycle time expected");
-        assert_eq!(ct.started_at, "2026-08-01T00:00:00.000Z", "must be the earliest claim");
-        assert_eq!(ct.ended_at, "2026-08-01T04:00:00.000Z", "must be the latest cap");
+        let ct = f
+            .cycle_time
+            .as_ref()
+            .expect("both timestamps present, cycle time expected");
+        assert_eq!(
+            ct.started_at, "2026-08-01T00:00:00.000Z",
+            "must be the earliest claim"
+        );
+        assert_eq!(
+            ct.ended_at, "2026-08-01T04:00:00.000Z",
+            "must be the latest cap"
+        );
         assert!((ct.hours - 4.0).abs() < 1e-9, "hours: {}", ct.hours);
 
         std::fs::remove_dir_all(&root).ok();
@@ -4042,16 +4569,36 @@ mod tests {
         write(
             &root,
             ".bee/cells/f-2.json",
-            &feature_cell_json("f-2", "feat-b", "dropped", Some("2025-01-01T00:00:00.000Z"), None),
+            &feature_cell_json(
+                "f-2",
+                "feat-b",
+                "dropped",
+                Some("2025-01-01T00:00:00.000Z"),
+                None,
+            ),
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.shipped.len(), 1, "feature with capped+dropped cells must be shipped: {:?}", snap.shipped);
+        assert_eq!(
+            snap.shipped.len(),
+            1,
+            "feature with capped+dropped cells must be shipped: {:?}",
+            snap.shipped
+        );
         let f = &snap.shipped[0];
         assert_eq!(f.feature, "feat-b");
-        assert_eq!(f.cell_count, 1, "the dropped cell must not count toward cell_count");
-        let ct = f.cycle_time.as_ref().expect("cycle time expected from the one live cell");
-        assert_eq!(ct.started_at, "2026-08-01T00:00:00.000Z", "dropped cell's timestamp must not be used");
+        assert_eq!(
+            f.cell_count, 1,
+            "the dropped cell must not count toward cell_count"
+        );
+        let ct = f
+            .cycle_time
+            .as_ref()
+            .expect("cycle time expected from the one live cell");
+        assert_eq!(
+            ct.started_at, "2026-08-01T00:00:00.000Z",
+            "dropped cell's timestamp must not be used"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4128,7 +4675,11 @@ mod tests {
                 Some("2026-08-01T01:00:00.000Z"),
             ),
         );
-        write(&root, ".bee/cells/b.json", &feature_cell_json("b", "feat-open", "open", None, None));
+        write(
+            &root,
+            ".bee/cells/b.json",
+            &feature_cell_json("b", "feat-open", "open", None, None),
+        );
 
         let snap = read_snapshot(&root);
         assert!(
@@ -4146,9 +4697,19 @@ mod tests {
         write(
             &root,
             ".bee/cells/a.json",
-            &feature_cell_json("a", "feat-dead", "dropped", Some("2026-08-01T00:00:00.000Z"), None),
+            &feature_cell_json(
+                "a",
+                "feat-dead",
+                "dropped",
+                Some("2026-08-01T00:00:00.000Z"),
+                None,
+            ),
         );
-        write(&root, ".bee/cells/b.json", &feature_cell_json("b", "feat-dead", "dropped", None, None));
+        write(
+            &root,
+            ".bee/cells/b.json",
+            &feature_cell_json("b", "feat-dead", "dropped", None, None),
+        );
 
         let snap = read_snapshot(&root);
         assert!(
@@ -4168,12 +4729,24 @@ mod tests {
         write(
             &root,
             ".bee/cells/a.json",
-            &feature_cell_json("a", "feat-notime", "capped", None, Some("2026-08-01T01:00:00.000Z")),
+            &feature_cell_json(
+                "a",
+                "feat-notime",
+                "capped",
+                None,
+                Some("2026-08-01T01:00:00.000Z"),
+            ),
         );
         write(
             &root,
             ".bee/cells/b.json",
-            &feature_cell_json("b", "feat-notime", "capped", None, Some("2026-08-01T02:00:00.000Z")),
+            &feature_cell_json(
+                "b",
+                "feat-notime",
+                "capped",
+                None,
+                Some("2026-08-01T02:00:00.000Z"),
+            ),
         );
 
         let snap = read_snapshot(&root);
@@ -4215,18 +4788,41 @@ mod tests {
         // Regression: adding the feature/shipped view must not perturb the
         // bee-cockpit-1 bucket/active behavior it builds on top of.
         let root = fresh_root("regression-buckets");
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
-        write(&root, ".bee/cells/c-claimed.json", &cell_json("c-claimed", "claimed"));
-        write(&root, ".bee/cells/c-blocked.json", &cell_json("c-blocked", "blocked"));
-        write(&root, ".bee/cells/c-capped.json", &cell_json("c-capped", "capped"));
-        write(&root, ".bee/cells/c-dropped.json", &cell_json("c-dropped", "dropped"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-claimed.json",
+            &cell_json("c-claimed", "claimed"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-blocked.json",
+            &cell_json("c-blocked", "blocked"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-capped.json",
+            &cell_json("c-capped", "capped"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-dropped.json",
+            &cell_json("c-dropped", "dropped"),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.buckets.doing.len(), 1);
         assert_eq!(snap.buckets.waiting.len(), 1);
         assert_eq!(snap.buckets.stuck.len(), 1);
         assert_eq!(snap.buckets.done.len(), 1);
-        assert!(snap.active, "an open and a claimed cell must still flip active (D8)");
+        assert!(
+            snap.active,
+            "an open and a claimed cell must still flip active (D8)"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4250,8 +4846,14 @@ mod tests {
             "repeated events for one id must fold to a single PBI: {:?}",
             snap.backlog.pbis
         );
-        assert_eq!(snap.backlog.pbis[0].status, "done", "must fold to the LAST status, not the first");
-        assert_eq!(snap.backlog.pbis[0].cos, "final cut", "cos must fold to the LAST event too, not the first");
+        assert_eq!(
+            snap.backlog.pbis[0].status, "done",
+            "must fold to the LAST status, not the first"
+        );
+        assert_eq!(
+            snap.backlog.pbis[0].cos, "final cut",
+            "cos must fold to the LAST event too, not the first"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4259,12 +4861,16 @@ mod tests {
     #[test]
     fn pbi_missing_cos_folds_to_empty_string() {
         let root = fresh_root("pbi-cos-missing");
-        let lines = [r#"{"kind":"pbi","id":"P1","title":"Widget","status":"proposed","feature":"demo"}"#];
+        let lines =
+            [r#"{"kind":"pbi","id":"P1","title":"Widget","status":"proposed","feature":"demo"}"#];
         write(&root, ".bee/backlog.jsonl", &lines.join("\n"));
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.backlog.pbis.len(), 1);
-        assert_eq!(snap.backlog.pbis[0].cos, "", "a missing cos field must fold to an empty string, like title");
+        assert_eq!(
+            snap.backlog.pbis[0].cos, "",
+            "a missing cos field must fold to an empty string, like title"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4316,9 +4922,17 @@ mod tests {
         assert_eq!(snap.sessions.len(), 2);
         let live = snap.sessions.iter().find(|s| s.id == "live").unwrap();
         let stale = snap.sessions.iter().find(|s| s.id == "stale").unwrap();
-        assert!(live.live, "a 5-minute-old heartbeat must be live: age={}", live.heartbeat_age_minutes);
+        assert!(
+            live.live,
+            "a 5-minute-old heartbeat must be live: age={}",
+            live.heartbeat_age_minutes
+        );
         assert!(live.heartbeat_age_minutes < 30.0);
-        assert!(!stale.live, "a 1-hour-old heartbeat must be stale: age={}", stale.heartbeat_age_minutes);
+        assert!(
+            !stale.live,
+            "a 1-hour-old heartbeat must be stale: age={}",
+            stale.heartbeat_age_minutes
+        );
         assert!(stale.heartbeat_age_minutes > 30.0);
 
         std::fs::remove_dir_all(&root).ok();
@@ -4332,7 +4946,9 @@ mod tests {
         let hb = (now - time::Duration::minutes(minutes_ago))
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap();
-        format!(r#"{{"id":"{id}","started_at":"{hb}","last_heartbeat":"{hb}","workspace_id":"main","source":"startup"}}"#)
+        format!(
+            r#"{{"id":"{id}","started_at":"{hb}","last_heartbeat":"{hb}","workspace_id":"main","source":"startup"}}"#
+        )
     }
 
     #[test]
@@ -4344,7 +4960,11 @@ mod tests {
             ".bee/state.json",
             r#"{"phase":"exploring","workers":[{"nickname":"kf1-worker","cell":"kf-1","tier":"generation","status":"running"}]}"#,
         );
-        write(&root, ".bee/sessions/kf1-worker.json", &session_json_with_age("kf1-worker", 1));
+        write(
+            &root,
+            ".bee/sessions/kf1-worker.json",
+            &session_json_with_age("kf1-worker", 1),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.running_workers.len(), 1, "{:?}", snap.running_workers);
@@ -4353,7 +4973,10 @@ mod tests {
         assert_eq!(w.cell.as_deref(), Some("kf-1"));
         assert!(w.cell_found);
         assert_eq!(w.cell_status.as_deref(), Some("claimed"));
-        assert!(!w.discrepancy, "a claimed cell backing a live worker must not be a discrepancy");
+        assert!(
+            !w.discrepancy,
+            "a claimed cell backing a live worker must not be a discrepancy"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4370,14 +4993,21 @@ mod tests {
             ".bee/state.json",
             r#"{"workers":[{"nickname":"kf1-worker","cell":"kf-1","tier":null,"status":null}]}"#,
         );
-        write(&root, ".bee/sessions/kf1-worker.json", &session_json_with_age("kf1-worker", 1));
+        write(
+            &root,
+            ".bee/sessions/kf1-worker.json",
+            &session_json_with_age("kf1-worker", 1),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.running_workers.len(), 1, "{:?}", snap.running_workers);
         let w = &snap.running_workers[0];
         assert!(w.cell_found);
         assert_eq!(w.cell_status.as_deref(), Some("open"));
-        assert!(w.discrepancy, "a worker naming a still-open cell must be flagged");
+        assert!(
+            w.discrepancy,
+            "a worker naming a still-open cell must be flagged"
+        );
 
         // D7: the cell must still land in Waiting, never moved to Doing by
         // the presence of a worker naming it.
@@ -4395,14 +5025,26 @@ mod tests {
             ".bee/state.json",
             r#"{"workers":[{"nickname":"ghost-worker","cell":"does-not-exist","tier":"generation","status":"running"}]}"#,
         );
-        write(&root, ".bee/sessions/ghost-worker.json", &session_json_with_age("ghost-worker", 1));
+        write(
+            &root,
+            ".bee/sessions/ghost-worker.json",
+            &session_json_with_age("ghost-worker", 1),
+        );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.running_workers.len(), 1, "a worker naming an unknown cell must not be dropped: {:?}", snap.running_workers);
+        assert_eq!(
+            snap.running_workers.len(),
+            1,
+            "a worker naming an unknown cell must not be dropped: {:?}",
+            snap.running_workers
+        );
         let w = &snap.running_workers[0];
         assert!(!w.cell_found);
         assert!(w.cell_status.is_none());
-        assert!(w.discrepancy, "a worker naming a nonexistent cell must be a discrepancy");
+        assert!(
+            w.discrepancy,
+            "a worker naming a nonexistent cell must be a discrepancy"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4417,7 +5059,11 @@ mod tests {
             r#"{"workers":[{"nickname":"kl1-worker","cell":"kl-1","tier":"generation","status":"running"}]}"#,
         );
         // 1 hour old: stale per SESSION_LIVE_MINUTES (30).
-        write(&root, ".bee/sessions/kl1-worker.json", &session_json_with_age("kl1-worker", 60));
+        write(
+            &root,
+            ".bee/sessions/kl1-worker.json",
+            &session_json_with_age("kl1-worker", 60),
+        );
 
         let snap = read_snapshot(&root);
         assert!(
@@ -4483,8 +5129,16 @@ mod tests {
         write(&root, ".bee/backlog.jsonl", &lines.join("\n"));
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.backlog.pbis.len(), 1, "the good pbi row must survive: {:?}", snap.backlog.pbis);
-        assert_eq!(snap.backlog.findings.total, 1, "the good finding row must survive");
+        assert_eq!(
+            snap.backlog.pbis.len(),
+            1,
+            "the good pbi row must survive: {:?}",
+            snap.backlog.pbis
+        );
+        assert_eq!(
+            snap.backlog.findings.total, 1,
+            "the good finding row must survive"
+        );
         assert!(
             snap.read_errors.iter().any(|e| e.contains("backlog.jsonl")),
             "the malformed line must be noted: {:?}",
@@ -4510,8 +5164,16 @@ mod tests {
         write(&root, ".bee/backlog.jsonl", &lines.join("\n"));
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.backlog.findings.total, n, "the true total must be reported: {}", snap.backlog.findings.total);
-        assert_eq!(snap.backlog.findings.recent.len(), RECENT_DETAIL_CAP, "recent findings must be capped");
+        assert_eq!(
+            snap.backlog.findings.total, n,
+            "the true total must be reported: {}",
+            snap.backlog.findings.total
+        );
+        assert_eq!(
+            snap.backlog.findings.recent.len(),
+            RECENT_DETAIL_CAP,
+            "recent findings must be capped"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4533,8 +5195,16 @@ mod tests {
         write(&root, ".bee/decisions.jsonl", &lines.join("\n"));
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.decisions.total, n + 1, "the true total (every event type) must be reported");
-        assert_eq!(snap.decisions.recent.len(), RECENT_DETAIL_CAP, "recent decide events must be capped");
+        assert_eq!(
+            snap.decisions.total,
+            n + 1,
+            "the true total (every event type) must be reported"
+        );
+        assert_eq!(
+            snap.decisions.recent.len(),
+            RECENT_DETAIL_CAP,
+            "recent decide events must be capped"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4588,7 +5258,11 @@ mod tests {
         let snap = read_snapshot(&root);
         assert_eq!(snap.workspaces.len(), 1);
         let w = &snap.workspaces[0];
-        assert!(!Path::new(&w.root).is_absolute(), "workspace root leaked absolute: {}", w.root);
+        assert!(
+            !Path::new(&w.root).is_absolute(),
+            "workspace root leaked absolute: {}",
+            w.root
+        );
         assert!(
             !w.root.contains(&root.to_string_lossy().into_owned()),
             "workspace root leaked the fixture root: {}",
@@ -4604,7 +5278,10 @@ mod tests {
     fn no_transcript_path_and_no_absolute_workspace_root_survive_into_snapshot() {
         let root = fresh_root("security-slice2");
         let root_str = root.to_string_lossy().into_owned();
-        let transcript = root.join("transcripts/should-not-leak.jsonl").to_string_lossy().into_owned();
+        let transcript = root
+            .join("transcripts/should-not-leak.jsonl")
+            .to_string_lossy()
+            .into_owned();
         write(
             &root,
             ".bee/sessions/s1.json",
@@ -4629,18 +5306,28 @@ mod tests {
         let snap = read_snapshot(&root);
         let serialized = serde_json::to_string(&snap).unwrap();
 
-        assert!(!serialized.contains(&transcript), "the session's own transcript_path leaked into the snapshot");
+        assert!(
+            !serialized.contains(&transcript),
+            "the session's own transcript_path leaked into the snapshot"
+        );
         assert!(
             !serialized.contains("transcript_path"),
             "the field name itself must not appear - BeeSession never carries it"
         );
-        assert!(!serialized.contains(&root_str), "the fixture root leaked into the snapshot");
+        assert!(
+            !serialized.contains(&root_str),
+            "the fixture root leaked into the snapshot"
+        );
         assert!(
             !serialized.contains(&outside_abs),
             "the outside-root absolute workspace path leaked into the snapshot"
         );
         for w in &snap.workspaces {
-            assert!(!Path::new(&w.root).is_absolute(), "workspace.root must never be absolute: {}", w.root);
+            assert!(
+                !Path::new(&w.root).is_absolute(),
+                "workspace.root must never be absolute: {}",
+                w.root
+            );
         }
 
         std::fs::remove_dir_all(&root).ok();
@@ -4664,7 +5351,11 @@ mod tests {
             ".bee/sessions/s1.json",
             r#"{"id":"s1","started_at":"2026-08-01T00:00:00.000Z","last_heartbeat":"2026-08-01T00:00:00.000Z","transcript_path":"/x","workspace_id":"main","source":"startup"}"#,
         );
-        write(&root, ".bee/lanes/demo.json", r#"{"feature":"demo","phase":"swarming"}"#);
+        write(
+            &root,
+            ".bee/lanes/demo.json",
+            r#"{"feature":"demo","phase":"swarming"}"#,
+        );
         write(
             &root,
             ".bee/runtime/workspaces/w1.json",
@@ -4675,7 +5366,10 @@ mod tests {
         let _ = read_snapshot(&root);
         let after = snapshot_tree(&root);
 
-        assert_eq!(before, after, ".bee/ tree changed after reading the Slice 2 files");
+        assert_eq!(
+            before, after,
+            ".bee/ tree changed after reading the Slice 2 files"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4686,7 +5380,11 @@ mod tests {
         // be unaffected by backlog/session/lane/workspace data coexisting
         // in the same store.
         let root = fresh_root("regression-slice2-mix");
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
         write(
             &root,
             ".bee/cells/f-1.json",
@@ -4739,7 +5437,11 @@ mod tests {
     }
 
     fn grants_json(ids: &[&str]) -> String {
-        let entries: String = ids.iter().map(|id| format!("\"{id}\": true")).collect::<Vec<_>>().join(",");
+        let entries: String = ids
+            .iter()
+            .map(|id| format!("\"{id}\": true"))
+            .collect::<Vec<_>>()
+            .join(",");
         format!("{{{entries}}}")
     }
 
@@ -4755,8 +5457,16 @@ mod tests {
         let root = fresh_root("worktree-two");
         let alpha = make_worktree_sibling("bee-board-ux-4-wt-alpha");
         let beta = make_worktree_sibling("bee-board-ux-4-wt-beta");
-        write(&alpha, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-alpha","mode":"standard"}"#);
-        write(&beta, ".bee/state.json", r#"{"phase":"planning","feature":"feat-beta","mode":"small"}"#);
+        write(
+            &alpha,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"feat-alpha","mode":"standard"}"#,
+        );
+        write(
+            &beta,
+            ".bee/state.json",
+            r#"{"phase":"planning","feature":"feat-beta","mode":"small"}"#,
+        );
 
         write(
             &root,
@@ -4766,22 +5476,40 @@ mod tests {
         write(
             &root,
             ".bee/runtime/workspaces/alpha.json",
-            &workspace_json("bee-board-ux-4-wt-alpha", &alpha, "wt/alpha", "2026-08-01T00:00:00.000Z"),
+            &workspace_json(
+                "bee-board-ux-4-wt-alpha",
+                &alpha,
+                "wt/alpha",
+                "2026-08-01T00:00:00.000Z",
+            ),
         );
         write(
             &root,
             ".bee/runtime/workspaces/beta.json",
-            &workspace_json("bee-board-ux-4-wt-beta", &beta, "wt/beta", "2026-08-02T00:00:00.000Z"),
+            &workspace_json(
+                "bee-board-ux-4-wt-beta",
+                &beta,
+                "wt/beta",
+                "2026-08-02T00:00:00.000Z",
+            ),
         );
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.worktrees.len(), 2, "{:?}", snap.worktrees);
-        let a = snap.worktrees.iter().find(|w| w.id == "bee-board-ux-4-wt-alpha").unwrap();
+        let a = snap
+            .worktrees
+            .iter()
+            .find(|w| w.id == "bee-board-ux-4-wt-alpha")
+            .unwrap();
         assert!(a.resolved);
         assert_eq!(a.feature.as_deref(), Some("feat-alpha"));
         assert_eq!(a.phase.as_deref(), Some("swarming"));
         assert_eq!(a.branch.as_deref(), Some("wt/alpha"));
-        let b = snap.worktrees.iter().find(|w| w.id == "bee-board-ux-4-wt-beta").unwrap();
+        let b = snap
+            .worktrees
+            .iter()
+            .find(|w| w.id == "bee-board-ux-4-wt-beta")
+            .unwrap();
         assert!(b.resolved);
         assert_eq!(b.feature.as_deref(), Some("feat-beta"));
         assert_eq!(b.phase.as_deref(), Some("planning"));
@@ -4797,9 +5525,21 @@ mod tests {
         let root = fresh_root("worktree-liveness");
         let live = make_worktree_sibling("bee-board-ux-4-wt-live");
         let quiet = make_worktree_sibling("bee-board-ux-4-wt-quiet");
-        write(&live, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-live","mode":"standard"}"#);
-        write(&quiet, ".bee/state.json", r#"{"phase":"idle","feature":"feat-quiet","mode":"standard"}"#);
-        write(&live, ".bee/sessions/s1.json", &session_json_with_age("s1", 2));
+        write(
+            &live,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"feat-live","mode":"standard"}"#,
+        );
+        write(
+            &quiet,
+            ".bee/state.json",
+            r#"{"phase":"idle","feature":"feat-quiet","mode":"standard"}"#,
+        );
+        write(
+            &live,
+            ".bee/sessions/s1.json",
+            &session_json_with_age("s1", 2),
+        );
 
         write(
             &root,
@@ -4811,7 +5551,11 @@ mod tests {
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.worktrees.len(), 2, "{:?}", snap.worktrees);
-        assert_eq!(snap.worktrees[0].id, "bee-board-ux-4-wt-live", "live worktree must sort first: {:?}", snap.worktrees);
+        assert_eq!(
+            snap.worktrees[0].id, "bee-board-ux-4-wt-live",
+            "live worktree must sort first: {:?}",
+            snap.worktrees
+        );
         assert!(snap.worktrees[0].live);
         let age = snap.worktrees[0]
             .heartbeat_age_minutes
@@ -4835,7 +5579,11 @@ mod tests {
     #[test]
     fn worktree_cell_files_never_perturb_buckets_or_shipped_set() {
         let root = fresh_root("worktree-no-cell-merge");
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
         write(
             &root,
             ".bee/cells/f-1.json",
@@ -4849,7 +5597,11 @@ mod tests {
         );
 
         let sibling = make_worktree_sibling("bee-board-ux-4-wt-cells");
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"ghost-feature","mode":"standard"}"#);
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"ghost-feature","mode":"standard"}"#,
+        );
         // A "claimed" cell for a feature this project's own store has never
         // heard of. If this ever got merged into the main snapshot it would
         // show up in `buckets.doing` and possibly `shipped` — neither may
@@ -4857,14 +5609,29 @@ mod tests {
         write(
             &sibling,
             ".bee/cells/ghost.json",
-            &feature_cell_json("ghost-1", "ghost-feature", "claimed", Some("2026-08-01T00:00:00.000Z"), None),
+            &feature_cell_json(
+                "ghost-1",
+                "ghost-feature",
+                "claimed",
+                Some("2026-08-01T00:00:00.000Z"),
+                None,
+            ),
         );
 
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-wt-cells"]));
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-wt-cells"]),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.buckets.waiting.len(), 1, "{:?}", snap.buckets.waiting);
-        assert_eq!(snap.buckets.doing.len(), 0, "a worktree's own claimed cell must never enter this project's Doing bucket: {:?}", snap.buckets.doing);
+        assert_eq!(
+            snap.buckets.doing.len(),
+            0,
+            "a worktree's own claimed cell must never enter this project's Doing bucket: {:?}",
+            snap.buckets.doing
+        );
         assert_eq!(snap.shipped.len(), 1);
         assert_eq!(snap.shipped[0].feature, "feat-a");
         assert!(
@@ -4885,13 +5652,25 @@ mod tests {
         let root = fresh_root("worktree-dir-missing");
         // No sibling directory is ever created for this id.
         std::fs::remove_dir_all(worktree_sibling_root("bee-board-ux-4-wt-ghost-dir")).ok();
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-wt-ghost-dir"]));
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-wt-ghost-dir"]),
+        );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.worktrees.len(), 1, "a dangling grant must still be reported: {:?}", snap.worktrees);
+        assert_eq!(
+            snap.worktrees.len(),
+            1,
+            "a dangling grant must still be reported: {:?}",
+            snap.worktrees
+        );
         let w = &snap.worktrees[0];
         assert!(!w.resolved);
-        assert!(w.unresolved_reason.is_some(), "an unresolved worktree must name what could not be read");
+        assert!(
+            w.unresolved_reason.is_some(),
+            "an unresolved worktree must name what could not be read"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4901,10 +5680,17 @@ mod tests {
         let root = fresh_root("worktree-state-malformed");
         let sibling = make_worktree_sibling("bee-board-ux-4-wt-malformed");
         write(&sibling, ".bee/state.json", "{ not valid json");
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-wt-malformed"]));
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-wt-malformed"]),
+        );
 
         let snap = read_snapshot(&root);
-        assert!(snap.present, "a malformed worktree state.json must not take down the whole read");
+        assert!(
+            snap.present,
+            "a malformed worktree state.json must not take down the whole read"
+        );
         assert_eq!(snap.worktrees.len(), 1);
         let w = &snap.worktrees[0];
         assert!(!w.resolved);
@@ -4922,7 +5708,9 @@ mod tests {
         let snap = read_snapshot(&root);
         assert!(snap.worktrees.is_empty());
         assert!(
-            snap.read_errors.iter().all(|e| !e.contains("worktree-grants")),
+            snap.read_errors
+                .iter()
+                .all(|e| !e.contains("worktree-grants")),
             "an absent grants file must not be a read error: {:?}",
             snap.read_errors
         );
@@ -4936,25 +5724,48 @@ mod tests {
         let root_str = root.to_string_lossy().into_owned();
         let sibling = make_worktree_sibling("bee-board-ux-4-wt-security");
         let sibling_str = sibling.to_string_lossy().into_owned();
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-sec","mode":"standard"}"#);
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"feat-sec","mode":"standard"}"#,
+        );
 
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-wt-security"]));
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-wt-security"]),
+        );
         write(
             &root,
             ".bee/runtime/workspaces/w1.json",
-            &workspace_json("bee-board-ux-4-wt-security", &sibling, "wt/security", "2026-08-01T00:00:00.000Z"),
+            &workspace_json(
+                "bee-board-ux-4-wt-security",
+                &sibling,
+                "wt/security",
+                "2026-08-01T00:00:00.000Z",
+            ),
         );
 
         let snap = read_snapshot(&root);
         let serialized = serde_json::to_string(&snap).unwrap();
 
-        assert!(!serialized.contains(&root_str), "the fixture root leaked into the snapshot");
-        assert!(!serialized.contains(&sibling_str), "the worktree's own absolute sibling root leaked into the snapshot");
+        assert!(
+            !serialized.contains(&root_str),
+            "the fixture root leaked into the snapshot"
+        );
+        assert!(
+            !serialized.contains(&sibling_str),
+            "the worktree's own absolute sibling root leaked into the snapshot"
+        );
         // BeeWorktree carries no `root` field at all - id (a safe name) is
         // the only identifier - so this also holds by construction; assert
         // the general shape too, not just the fixture-specific literal.
         for w in &snap.worktrees {
-            assert!(!Path::new(&w.id).is_absolute(), "worktree id must never be an absolute path: {}", w.id);
+            assert!(
+                !Path::new(&w.id).is_absolute(),
+                "worktree id must never be an absolute path: {}",
+                w.id
+            );
         }
 
         std::fs::remove_dir_all(&root).ok();
@@ -4965,9 +5776,21 @@ mod tests {
     fn worktree_read_never_writes_the_project_or_sibling_bee_tree() {
         let root = fresh_root("worktree-read-only");
         let sibling = make_worktree_sibling("bee-board-ux-4-wt-read-only");
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-ro","mode":"standard"}"#);
-        write(&sibling, ".bee/sessions/s1.json", &session_json_with_age("s1", 2));
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-wt-read-only"]));
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"feat-ro","mode":"standard"}"#,
+        );
+        write(
+            &sibling,
+            ".bee/sessions/s1.json",
+            &session_json_with_age("s1", 2),
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-wt-read-only"]),
+        );
 
         let before_root = snapshot_tree(&root);
         let before_sibling = snapshot_tree(&sibling);
@@ -4975,8 +5798,14 @@ mod tests {
         let after_root = snapshot_tree(&root);
         let after_sibling = snapshot_tree(&sibling);
 
-        assert_eq!(before_root, after_root, "reading worktrees must not write the project's own .bee/ tree");
-        assert_eq!(before_sibling, after_sibling, "reading a worktree's own .bee/ must never write to it either");
+        assert_eq!(
+            before_root, after_root,
+            "reading worktrees must not write the project's own .bee/ tree"
+        );
+        assert_eq!(
+            before_sibling, after_sibling,
+            "reading a worktree's own .bee/ must never write to it either"
+        );
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&sibling).ok();
@@ -4987,15 +5816,31 @@ mod tests {
     #[test]
     fn scrub_paths_reduces_a_path_embedded_mid_sentence_words_survive() {
         let root = fresh_root("scrub-mid-sentence");
-        let file = root.join("src").join("bee.rs").to_string_lossy().into_owned();
+        let file = root
+            .join("src")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         let text = format!("Please look at {file} before you continue.");
 
         let scrubbed = scrub_paths(&text, &root);
 
-        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
-        assert!(scrubbed.starts_with("Please look at "), "leading words dropped: {scrubbed}");
-        assert!(scrubbed.ends_with(" before you continue."), "trailing words dropped: {scrubbed}");
-        assert!(scrubbed.contains("src/bee.rs"), "path was not reduced relative to root: {scrubbed}");
+        assert!(
+            !scrubbed.contains(&file),
+            "absolute path survived scrubbing: {scrubbed}"
+        );
+        assert!(
+            scrubbed.starts_with("Please look at "),
+            "leading words dropped: {scrubbed}"
+        );
+        assert!(
+            scrubbed.ends_with(" before you continue."),
+            "trailing words dropped: {scrubbed}"
+        );
+        assert!(
+            scrubbed.contains("src/bee.rs"),
+            "path was not reduced relative to root: {scrubbed}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5011,10 +5856,22 @@ mod tests {
 
         assert!(!scrubbed.contains(&a), "first path survived: {scrubbed}");
         assert!(!scrubbed.contains(&b), "second path survived: {scrubbed}");
-        assert!(scrubbed.contains("a.md"), "first path was not reduced: {scrubbed}");
-        assert!(scrubbed.contains("sub/b.md"), "second path was not reduced: {scrubbed}");
-        assert!(scrubbed.contains(" and also "), "middle words dropped: {scrubbed}");
-        assert!(scrubbed.ends_with(" both matter."), "trailing words dropped: {scrubbed}");
+        assert!(
+            scrubbed.contains("a.md"),
+            "first path was not reduced: {scrubbed}"
+        );
+        assert!(
+            scrubbed.contains("sub/b.md"),
+            "second path was not reduced: {scrubbed}"
+        );
+        assert!(
+            scrubbed.contains(" and also "),
+            "middle words dropped: {scrubbed}"
+        );
+        assert!(
+            scrubbed.ends_with(" both matter."),
+            "trailing words dropped: {scrubbed}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5042,7 +5899,11 @@ mod tests {
     fn scrub_paths_on_a_string_that_is_wholly_a_path_matches_relativize_exactly() {
         let root = fresh_root("scrub-wholly-path");
 
-        let inside = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let inside = root
+            .join("crates")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(scrub_paths(&inside, &root), relativize(&inside, &root));
 
         let outside = std::env::temp_dir()
@@ -5066,14 +5927,26 @@ mod tests {
 
         let scrubbed = scrub_paths(&text, &root);
 
-        assert!(!scrubbed.contains(&outside), "absolute path outside root survived: {scrubbed}");
+        assert!(
+            !scrubbed.contains(&outside),
+            "absolute path outside root survived: {scrubbed}"
+        );
         assert!(
             !scrubbed.contains("secret.txt"),
             "an outside-root path must be redacted, not reduced to a bare filename: {scrubbed}"
         );
-        assert!(scrubbed.contains(ABSOLUTE_PATH_REDACTED), "expected the shared redaction text: {scrubbed}");
-        assert!(scrubbed.starts_with("See "), "leading words dropped: {scrubbed}");
-        assert!(scrubbed.ends_with(" for details."), "trailing words dropped: {scrubbed}");
+        assert!(
+            scrubbed.contains(ABSOLUTE_PATH_REDACTED),
+            "expected the shared redaction text: {scrubbed}"
+        );
+        assert!(
+            scrubbed.starts_with("See "),
+            "leading words dropped: {scrubbed}"
+        );
+        assert!(
+            scrubbed.ends_with(" for details."),
+            "trailing words dropped: {scrubbed}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5083,13 +5956,23 @@ mod tests {
     #[test]
     fn scrub_paths_reduces_a_path_wrapped_in_parentheses_wrap_survives() {
         let root = fresh_root("scrub-wrap-parens");
-        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let file = root
+            .join("crates")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         let text = format!("see ({file}) for details.");
 
         let scrubbed = scrub_paths(&text, &root);
 
-        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
-        assert!(scrubbed.contains("(crates/bee.rs)"), "wrapping parens were not preserved: {scrubbed}");
+        assert!(
+            !scrubbed.contains(&file),
+            "absolute path survived scrubbing: {scrubbed}"
+        );
+        assert!(
+            scrubbed.contains("(crates/bee.rs)"),
+            "wrapping parens were not preserved: {scrubbed}"
+        );
         assert_eq!(scrubbed, "see (crates/bee.rs) for details.");
 
         std::fs::remove_dir_all(&root).ok();
@@ -5098,12 +5981,19 @@ mod tests {
     #[test]
     fn scrub_paths_reduces_a_path_wrapped_in_double_quotes_wrap_survives() {
         let root = fresh_root("scrub-wrap-dquote");
-        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let file = root
+            .join("crates")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         let text = format!("path was \"{file}\" at the time.");
 
         let scrubbed = scrub_paths(&text, &root);
 
-        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert!(
+            !scrubbed.contains(&file),
+            "absolute path survived scrubbing: {scrubbed}"
+        );
         assert_eq!(scrubbed, "path was \"crates/bee.rs\" at the time.");
 
         std::fs::remove_dir_all(&root).ok();
@@ -5112,13 +6002,23 @@ mod tests {
     #[test]
     fn scrub_paths_reduces_a_path_wrapped_in_backticks_wrap_survives() {
         let root = fresh_root("scrub-wrap-backtick");
-        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let file = root
+            .join("crates")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         let text = format!("review found `{file}` reads the whole tree.");
 
         let scrubbed = scrub_paths(&text, &root);
 
-        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
-        assert_eq!(scrubbed, "review found `crates/bee.rs` reads the whole tree.");
+        assert!(
+            !scrubbed.contains(&file),
+            "absolute path survived scrubbing: {scrubbed}"
+        );
+        assert_eq!(
+            scrubbed,
+            "review found `crates/bee.rs` reads the whole tree."
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5126,12 +6026,19 @@ mod tests {
     #[test]
     fn scrub_paths_reduces_a_path_wrapped_in_square_brackets_wrap_survives() {
         let root = fresh_root("scrub-wrap-brackets");
-        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let file = root
+            .join("crates")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         let text = format!("see [{file}] for the source.");
 
         let scrubbed = scrub_paths(&text, &root);
 
-        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert!(
+            !scrubbed.contains(&file),
+            "absolute path survived scrubbing: {scrubbed}"
+        );
         assert_eq!(scrubbed, "see [crates/bee.rs] for the source.");
 
         std::fs::remove_dir_all(&root).ok();
@@ -5140,12 +6047,19 @@ mod tests {
     #[test]
     fn scrub_paths_reduces_a_path_wrapped_in_angle_brackets_wrap_survives() {
         let root = fresh_root("scrub-wrap-angle");
-        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let file = root
+            .join("crates")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         let text = format!("open <{file}> in the editor.");
 
         let scrubbed = scrub_paths(&text, &root);
 
-        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert!(
+            !scrubbed.contains(&file),
+            "absolute path survived scrubbing: {scrubbed}"
+        );
         assert_eq!(scrubbed, "open <crates/bee.rs> in the editor.");
 
         std::fs::remove_dir_all(&root).ok();
@@ -5154,12 +6068,19 @@ mod tests {
     #[test]
     fn scrub_paths_reduces_a_path_trailed_by_a_comma_punctuation_survives() {
         let root = fresh_root("scrub-trail-comma");
-        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let file = root
+            .join("crates")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         let text = format!("{file}, then re-run the tests.");
 
         let scrubbed = scrub_paths(&text, &root);
 
-        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert!(
+            !scrubbed.contains(&file),
+            "absolute path survived scrubbing: {scrubbed}"
+        );
         assert_eq!(scrubbed, "crates/bee.rs, then re-run the tests.");
 
         std::fs::remove_dir_all(&root).ok();
@@ -5168,12 +6089,19 @@ mod tests {
     #[test]
     fn scrub_paths_reduces_a_path_trailed_by_a_period_punctuation_survives() {
         let root = fresh_root("scrub-trail-period");
-        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let file = root
+            .join("crates")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         let text = format!("Read {file}.");
 
         let scrubbed = scrub_paths(&text, &root);
 
-        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert!(
+            !scrubbed.contains(&file),
+            "absolute path survived scrubbing: {scrubbed}"
+        );
         assert_eq!(scrubbed, "Read crates/bee.rs.");
 
         std::fs::remove_dir_all(&root).ok();
@@ -5182,12 +6110,19 @@ mod tests {
     #[test]
     fn scrub_paths_reduces_a_path_trailed_by_a_semicolon_punctuation_survives() {
         let root = fresh_root("scrub-trail-semicolon");
-        let file = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let file = root
+            .join("crates")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         let text = format!("{file}; check it next.");
 
         let scrubbed = scrub_paths(&text, &root);
 
-        assert!(!scrubbed.contains(&file), "absolute path survived scrubbing: {scrubbed}");
+        assert!(
+            !scrubbed.contains(&file),
+            "absolute path survived scrubbing: {scrubbed}"
+        );
         assert_eq!(scrubbed, "crates/bee.rs; check it next.");
 
         std::fs::remove_dir_all(&root).ok();
@@ -5205,12 +6140,18 @@ mod tests {
 
         let scrubbed = scrub_paths(&text, &root);
 
-        assert!(!scrubbed.contains(&outside), "absolute path outside root survived: {scrubbed}");
+        assert!(
+            !scrubbed.contains(&outside),
+            "absolute path outside root survived: {scrubbed}"
+        );
         assert!(
             !scrubbed.contains("secret.txt"),
             "an outside-root path must be redacted, not reduced to a bare filename: {scrubbed}"
         );
-        assert_eq!(scrubbed, format!("see (`{ABSOLUTE_PATH_REDACTED}`) for the leak."));
+        assert_eq!(
+            scrubbed,
+            format!("see (`{ABSOLUTE_PATH_REDACTED}`) for the leak.")
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5222,8 +6163,14 @@ mod tests {
 
         let scrubbed = scrub_paths(text, &root);
 
-        assert!(!scrubbed.contains("C:\\Users\\alice"), "windows-shaped absolute path survived: {scrubbed}");
-        assert_eq!(scrubbed, format!("see `{ABSOLUTE_PATH_REDACTED}` before you continue."));
+        assert!(
+            !scrubbed.contains("C:\\Users\\alice"),
+            "windows-shaped absolute path survived: {scrubbed}"
+        );
+        assert_eq!(
+            scrubbed,
+            format!("see `{ABSOLUTE_PATH_REDACTED}` before you continue.")
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5266,7 +6213,8 @@ mod tests {
     #[test]
     fn scrub_paths_leaves_a_url_route_placeholder_unredacted() {
         let root = fresh_root("scrub-route-placeholder");
-        let text = "Replace the by-phase board section on `/p/:id/_bee` with a Kanban-style agent board.";
+        let text =
+            "Replace the by-phase board section on `/p/:id/_bee` with a Kanban-style agent board.";
 
         assert_eq!(scrub_paths(text, &root), text);
         assert!(
@@ -5315,9 +6263,15 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        let state = snap.state.as_ref().expect("state.json should have been read");
+        let state = snap
+            .state
+            .as_ref()
+            .expect("state.json should have been read");
 
-        let gates = state.approved_gates.as_ref().expect("approved_gates should be Some");
+        let gates = state
+            .approved_gates
+            .as_ref()
+            .expect("approved_gates should be Some");
         assert_eq!(gates.context, Some(true));
         assert_eq!(gates.shape, Some(true));
         assert_eq!(gates.execution, Some(true));
@@ -5328,11 +6282,21 @@ mod tests {
         assert_eq!(route.lane.as_deref(), Some("standard"));
         assert_eq!(route.flags, vec!["cross-platform".to_string()]);
         assert_eq!(route.product_files, Some(3));
-        assert_eq!(route.rationale.as_deref(), Some("Small, well-scoped change."));
-        assert_eq!(route.updated_at.as_deref(), Some("2026-08-01T00:00:00.000Z"));
+        assert_eq!(
+            route.rationale.as_deref(),
+            Some("Small, well-scoped change.")
+        );
+        assert_eq!(
+            route.updated_at.as_deref(),
+            Some("2026-08-01T00:00:00.000Z")
+        );
 
         assert_eq!(state.next_action.as_deref(), Some("Invoke bee-swarming."));
-        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        assert!(
+            snap.read_errors.is_empty(),
+            "no read error expected: {:?}",
+            snap.read_errors
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5340,15 +6304,34 @@ mod tests {
     #[test]
     fn state_missing_gates_route_and_next_action_degrades_silently() {
         let root = fresh_root("state-missing-new-fields");
-        write(&root, ".bee/state.json", r#"{"phase": "swarming", "feature": "demo", "mode": "standard"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"phase": "swarming", "feature": "demo", "mode": "standard"}"#,
+        );
 
         let snap = read_snapshot(&root);
-        let state = snap.state.as_ref().expect("state.json should have been read");
+        let state = snap
+            .state
+            .as_ref()
+            .expect("state.json should have been read");
 
-        assert!(state.approved_gates.is_none(), "approved_gates must be None, never fabricated");
-        assert!(state.gate_revoked_at.is_none(), "gate_revoked_at must be None, never fabricated");
-        assert!(state.route.is_none(), "route must be None, never fabricated");
-        assert!(state.next_action.is_none(), "next_action must be None, never fabricated");
+        assert!(
+            state.approved_gates.is_none(),
+            "approved_gates must be None, never fabricated"
+        );
+        assert!(
+            state.gate_revoked_at.is_none(),
+            "gate_revoked_at must be None, never fabricated"
+        );
+        assert!(
+            state.route.is_none(),
+            "route must be None, never fabricated"
+        );
+        assert!(
+            state.next_action.is_none(),
+            "next_action must be None, never fabricated"
+        );
         assert!(
             snap.read_errors.is_empty(),
             "missing optional keys must not be a read error: {:?}",
@@ -5381,11 +6364,21 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        let state = snap.state.as_ref().expect("state.json should have been read");
-        let route = state.route.as_ref().expect("route should be Some despite the unknown keys");
+        let state = snap
+            .state
+            .as_ref()
+            .expect("state.json should have been read");
+        let route = state
+            .route
+            .as_ref()
+            .expect("route should be Some despite the unknown keys");
         assert_eq!(route.class.as_deref(), Some("feature"));
         assert_eq!(route.lane.as_deref(), Some("small"));
-        assert!(snap.read_errors.is_empty(), "an unknown route key must not be a read error: {:?}", snap.read_errors);
+        assert!(
+            snap.read_errors.is_empty(),
+            "an unknown route key must not be a read error: {:?}",
+            snap.read_errors
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5403,12 +6396,25 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        let state = snap.state.as_ref().expect("state.json should have been read");
+        let state = snap
+            .state
+            .as_ref()
+            .expect("state.json should have been read");
 
-        let gates = state.approved_gates.as_ref().expect("approved_gates should be Some");
-        assert_eq!(gates.execution, Some(true), "the store still marks execution approved");
+        let gates = state
+            .approved_gates
+            .as_ref()
+            .expect("approved_gates should be Some");
+        assert_eq!(
+            gates.execution,
+            Some(true),
+            "the store still marks execution approved"
+        );
 
-        let revoked = state.gate_revoked_at.as_ref().expect("gate_revoked_at should be Some");
+        let revoked = state
+            .gate_revoked_at
+            .as_ref()
+            .expect("gate_revoked_at should be Some");
         assert_eq!(
             revoked.execution.as_deref(),
             Some("2026-08-05T09:51:47.038Z"),
@@ -5422,7 +6428,11 @@ mod tests {
     #[test]
     fn state_absolute_path_embedded_in_rationale_and_next_action_does_not_survive() {
         let root = fresh_root("state-security-scrub");
-        let secret = root.join("src").join("bee.rs").to_string_lossy().into_owned();
+        let secret = root
+            .join("src")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         let body = format!(
             r#"{{
                 "route": {{
@@ -5443,17 +6453,31 @@ mod tests {
         let snap = read_snapshot(&root);
         let serialized = serde_json::to_string(&snap).unwrap();
 
-        assert!(!serialized.contains(&secret), "an absolute path embedded in free text leaked into the snapshot");
+        assert!(
+            !serialized.contains(&secret),
+            "an absolute path embedded in free text leaked into the snapshot"
+        );
 
-        let state = snap.state.as_ref().expect("state.json should have been read");
+        let state = snap
+            .state
+            .as_ref()
+            .expect("state.json should have been read");
         let route = state.route.as_ref().expect("route should be Some");
         assert!(
-            route.rationale.as_deref().unwrap_or_default().contains("src/bee.rs"),
+            route
+                .rationale
+                .as_deref()
+                .unwrap_or_default()
+                .contains("src/bee.rs"),
             "rationale should still carry the reduced relative path: {:?}",
             route.rationale
         );
         assert!(
-            state.next_action.as_deref().unwrap_or_default().contains("src/bee.rs"),
+            state
+                .next_action
+                .as_deref()
+                .unwrap_or_default()
+                .contains("src/bee.rs"),
             "next_action should still carry the reduced relative path: {:?}",
             state.next_action
         );
@@ -5477,10 +6501,23 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
-        let handoff = snap.handoff.as_ref().expect("handoff should have been read");
-        assert_eq!(handoff.written_at.as_deref(), Some("2026-08-06T12:45:21.418Z"));
-        assert_eq!(handoff.next_action.as_deref(), Some("Resume the next slice."));
+        assert!(
+            snap.read_errors.is_empty(),
+            "no read error expected: {:?}",
+            snap.read_errors
+        );
+        let handoff = snap
+            .handoff
+            .as_ref()
+            .expect("handoff should have been read");
+        assert_eq!(
+            handoff.written_at.as_deref(),
+            Some("2026-08-06T12:45:21.418Z")
+        );
+        assert_eq!(
+            handoff.next_action.as_deref(),
+            Some("Resume the next slice.")
+        );
         assert_eq!(handoff.kind.as_deref(), Some("pause"));
 
         std::fs::remove_dir_all(&root).ok();
@@ -5490,11 +6527,22 @@ mod tests {
     fn no_handoff_json_at_all_is_silent_no_read_error() {
         let root = fresh_root("handoff-absent");
         // No .bee/HANDOFF.json written — most stores have none.
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
 
         let snap = read_snapshot(&root);
-        assert!(snap.handoff.is_none(), "no handoff file should mean no handoff on the snapshot");
-        assert!(snap.read_errors.is_empty(), "an absent handoff must never be a read error: {:?}", snap.read_errors);
+        assert!(
+            snap.handoff.is_none(),
+            "no handoff file should mean no handoff on the snapshot"
+        );
+        assert!(
+            snap.read_errors.is_empty(),
+            "an absent handoff must never be a read error: {:?}",
+            snap.read_errors
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5508,8 +6556,17 @@ mod tests {
         let snap = read_snapshot(&root);
         assert!(snap.present);
         assert!(snap.handoff.is_none());
-        assert_eq!(snap.buckets.waiting.len(), 1, "the well-formed cell must still parse");
-        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
+        assert_eq!(
+            snap.buckets.waiting.len(),
+            1,
+            "the well-formed cell must still parse"
+        );
+        assert_eq!(
+            snap.read_errors.len(),
+            1,
+            "expected exactly one read error: {:?}",
+            snap.read_errors
+        );
         assert!(snap.read_errors.iter().any(|e| e.contains("HANDOFF.json")));
 
         std::fs::remove_dir_all(&root).ok();
@@ -5525,8 +6582,15 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert!(snap.read_errors.is_empty(), "a missing key is not a parse error: {:?}", snap.read_errors);
-        let handoff = snap.handoff.as_ref().expect("handoff should have been read");
+        assert!(
+            snap.read_errors.is_empty(),
+            "a missing key is not a parse error: {:?}",
+            snap.read_errors
+        );
+        let handoff = snap
+            .handoff
+            .as_ref()
+            .expect("handoff should have been read");
         assert!(handoff.kind.is_none());
         assert_eq!(handoff.next_action.as_deref(), Some("Do the thing."));
 
@@ -5536,8 +6600,16 @@ mod tests {
     #[test]
     fn handoff_absolute_path_embedded_mid_sentence_and_backtick_wrapped_does_not_survive() {
         let root = fresh_root("handoff-security-scrub");
-        let bare = root.join("src").join("bee.rs").to_string_lossy().into_owned();
-        let wrapped = root.join("crates").join("bee.rs").to_string_lossy().into_owned();
+        let bare = root
+            .join("src")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
+        let wrapped = root
+            .join("crates")
+            .join("bee.rs")
+            .to_string_lossy()
+            .into_owned();
         let body = format!(
             r#"{{
                 "written_at": "2026-08-06T00:00:00.000Z",
@@ -5551,13 +6623,28 @@ mod tests {
 
         let snap = read_snapshot(&root);
         let serialized = serde_json::to_string(&snap).unwrap();
-        assert!(!serialized.contains(&bare), "a bare absolute path embedded mid-sentence leaked onto the snapshot");
-        assert!(!serialized.contains(&wrapped), "a backtick-wrapped absolute path leaked onto the snapshot");
+        assert!(
+            !serialized.contains(&bare),
+            "a bare absolute path embedded mid-sentence leaked onto the snapshot"
+        );
+        assert!(
+            !serialized.contains(&wrapped),
+            "a backtick-wrapped absolute path leaked onto the snapshot"
+        );
 
-        let handoff = snap.handoff.as_ref().expect("handoff should have been read");
+        let handoff = snap
+            .handoff
+            .as_ref()
+            .expect("handoff should have been read");
         let note = handoff.next_action.as_deref().unwrap_or_default();
-        assert!(note.contains("src/bee.rs"), "bare path should still carry its reduced relative form: {note}");
-        assert!(note.contains("`crates/bee.rs`"), "backtick wrap should survive around the reduced path: {note}");
+        assert!(
+            note.contains("src/bee.rs"),
+            "bare path should still carry its reduced relative form: {note}"
+        );
+        assert!(
+            note.contains("`crates/bee.rs`"),
+            "backtick wrap should survive around the reduced path: {note}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5567,19 +6654,52 @@ mod tests {
     #[test]
     fn blocked_cells_yield_one_critical_attention_item_naming_a_suggested_action() {
         let root = fresh_root("attention-blocked");
-        write(&root, ".bee/cells/c-blocked-1.json", &cell_json("c-blocked-1", "blocked"));
-        write(&root, ".bee/cells/c-blocked-2.json", &cell_json("c-blocked-2", "blocked"));
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-blocked-1.json",
+            &cell_json("c-blocked-1", "blocked"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-blocked-2.json",
+            &cell_json("c-blocked-2", "blocked"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.buckets.stuck.len(), 2, "both blocked cells should be in the stuck bucket");
-        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+        assert_eq!(
+            snap.buckets.stuck.len(),
+            2,
+            "both blocked cells should be in the stuck bucket"
+        );
+        assert_eq!(
+            snap.attention.len(),
+            1,
+            "one rule fired, exactly one item: {:?}",
+            snap.attention
+        );
 
         let item = &snap.attention[0];
         assert_eq!(item.severity, BeeAttentionSeverity::Critical);
-        assert!(item.title.contains('2') && item.title.contains("cells"), "title: {}", item.title);
-        assert!(item.detail.contains("c-blocked-1"), "detail: {}", item.detail);
-        assert!(item.detail.contains("c-blocked-2"), "detail: {}", item.detail);
+        assert!(
+            item.title.contains('2') && item.title.contains("cells"),
+            "title: {}",
+            item.title
+        );
+        assert!(
+            item.detail.contains("c-blocked-1"),
+            "detail: {}",
+            item.detail
+        );
+        assert!(
+            item.detail.contains("c-blocked-2"),
+            "detail: {}",
+            item.detail
+        );
         assert!(!item.suggested_action.trim().is_empty());
 
         std::fs::remove_dir_all(&root).ok();
@@ -5592,16 +6712,37 @@ mod tests {
         // A genuinely truncated file, parsed through the real code path —
         // the same shape `malformed_state_and_truncated_cell_degrade_to_partial_snapshot`
         // already proves produces one `read_errors` entry.
-        write(&root, ".bee/cells/bad.json", "{\"id\": \"bad\", \"status\": \"open\"");
+        write(
+            &root,
+            ".bee/cells/bad.json",
+            "{\"id\": \"bad\", \"status\": \"open\"",
+        );
 
         let snap = read_snapshot(&root);
-        assert!(snap.buckets.stuck.is_empty(), "no blocked cell in this fixture");
-        assert_eq!(snap.read_errors.len(), 1, "expected one read error: {:?}", snap.read_errors);
-        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+        assert!(
+            snap.buckets.stuck.is_empty(),
+            "no blocked cell in this fixture"
+        );
+        assert_eq!(
+            snap.read_errors.len(),
+            1,
+            "expected one read error: {:?}",
+            snap.read_errors
+        );
+        assert_eq!(
+            snap.attention.len(),
+            1,
+            "one rule fired, exactly one item: {:?}",
+            snap.attention
+        );
 
         let item = &snap.attention[0];
         assert_eq!(item.severity, BeeAttentionSeverity::Critical);
-        assert!(item.title.contains('1') && item.title.contains("file"), "title: {}", item.title);
+        assert!(
+            item.title.contains('1') && item.title.contains("file"),
+            "title: {}",
+            item.title
+        );
         assert!(item.detail.contains("bad.json"), "detail: {}", item.detail);
         assert!(!item.suggested_action.trim().is_empty());
 
@@ -5611,11 +6752,24 @@ mod tests {
     #[test]
     fn blocked_cells_and_read_errors_together_yield_both_items_heaviest_first_in_a_stable_order() {
         let root = fresh_root("attention-both");
-        write(&root, ".bee/cells/c-blocked.json", &cell_json("c-blocked", "blocked"));
-        write(&root, ".bee/cells/bad.json", "{\"id\": \"bad\", \"status\": \"open\"");
+        write(
+            &root,
+            ".bee/cells/c-blocked.json",
+            &cell_json("c-blocked", "blocked"),
+        );
+        write(
+            &root,
+            ".bee/cells/bad.json",
+            "{\"id\": \"bad\", \"status\": \"open\"",
+        );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.attention.len(), 2, "both rules should fire: {:?}", snap.attention);
+        assert_eq!(
+            snap.attention.len(),
+            2,
+            "both rules should fire: {:?}",
+            snap.attention
+        );
 
         // Both rules in this slice carry equal (Critical) severity — the
         // real-store shape that proves the stable, rule-registration order
@@ -5639,11 +6793,23 @@ mod tests {
     #[test]
     fn clean_snapshot_yields_no_attention_items() {
         let root = fresh_root("attention-clean");
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
-        write(&root, ".bee/cells/c-done.json", &cell_json("c-done", "capped"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-done.json",
+            &cell_json("c-done", "capped"),
+        );
 
         let snap = read_snapshot(&root);
-        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        assert!(
+            snap.read_errors.is_empty(),
+            "no read error expected: {:?}",
+            snap.read_errors
+        );
         assert!(
             snap.attention.is_empty(),
             "nothing wrong should yield an empty list, not a placeholder item: {:?}",
@@ -5656,8 +6822,16 @@ mod tests {
     #[test]
     fn same_severity_items_return_in_a_deterministic_order_across_repeated_calls() {
         let root = fresh_root("attention-determinism");
-        write(&root, ".bee/cells/c-blocked.json", &cell_json("c-blocked", "blocked"));
-        write(&root, ".bee/cells/bad.json", "{\"id\": \"bad\", \"status\": \"open\"");
+        write(
+            &root,
+            ".bee/cells/c-blocked.json",
+            &cell_json("c-blocked", "blocked"),
+        );
+        write(
+            &root,
+            ".bee/cells/bad.json",
+            "{\"id\": \"bad\", \"status\": \"open\"",
+        );
 
         // Real-shaped input, read once; the pure computation is then
         // called twice over that same input, standing in for two
@@ -5686,7 +6860,10 @@ mod tests {
         );
 
         assert_eq!(first.len(), 2);
-        assert_eq!(first, second, "repeated calls over unchanged data must return the same order");
+        assert_eq!(
+            first, second,
+            "repeated calls over unchanged data must return the same order"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5694,24 +6871,61 @@ mod tests {
     #[test]
     fn computing_attention_perturbs_no_other_snapshot_field() {
         let root = fresh_root("attention-no-side-effect");
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
-        write(&root, ".bee/cells/c-claimed.json", &cell_json("c-claimed", "claimed"));
-        write(&root, ".bee/cells/c-blocked.json", &cell_json("c-blocked", "blocked"));
-        write(&root, ".bee/cells/c-capped.json", &cell_json("c-capped", "capped"));
-        write(&root, ".bee/cells/c-dropped.json", &cell_json("c-dropped", "dropped"));
-        write(&root, ".bee/cells/bad.json", "{\"id\": \"bad\", \"status\": \"open\"");
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-claimed.json",
+            &cell_json("c-claimed", "claimed"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-blocked.json",
+            &cell_json("c-blocked", "blocked"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-capped.json",
+            &cell_json("c-capped", "capped"),
+        );
+        write(
+            &root,
+            ".bee/cells/c-dropped.json",
+            &cell_json("c-dropped", "dropped"),
+        );
+        write(
+            &root,
+            ".bee/cells/bad.json",
+            "{\"id\": \"bad\", \"status\": \"open\"",
+        );
 
         let snap = read_snapshot(&root);
 
         // The attention rules fired (both, since a blocked cell and a read
         // error are both present) without changing anything they read from.
-        assert_eq!(snap.attention.len(), 2, "both rules should fire: {:?}", snap.attention);
+        assert_eq!(
+            snap.attention.len(),
+            2,
+            "both rules should fire: {:?}",
+            snap.attention
+        );
         assert_eq!(snap.buckets.doing.len(), 1, "claimed bucket unperturbed");
         assert_eq!(snap.buckets.waiting.len(), 1, "open bucket unperturbed");
         assert_eq!(snap.buckets.stuck.len(), 1, "blocked bucket unperturbed");
         assert_eq!(snap.buckets.done.len(), 1, "capped bucket unperturbed");
-        assert!(snap.active, "an open/claimed cell should still mark the snapshot active");
-        assert_eq!(snap.read_errors.len(), 1, "read_errors unperturbed: {:?}", snap.read_errors);
+        assert!(
+            snap.active,
+            "an open/claimed cell should still mark the snapshot active"
+        );
+        assert_eq!(
+            snap.read_errors.len(),
+            1,
+            "read_errors unperturbed: {:?}",
+            snap.read_errors
+        );
         assert!(
             snap.read_errors.iter().any(|e| e.contains("bad.json")),
             "the original read error should still be present: {:?}",
@@ -5737,11 +6951,20 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+        assert_eq!(
+            snap.attention.len(),
+            1,
+            "one rule fired, exactly one item: {:?}",
+            snap.attention
+        );
 
         let item = &snap.attention[0];
         assert_eq!(item.severity, BeeAttentionSeverity::Critical);
-        assert!(item.detail.contains("Resume the next slice."), "detail should carry the note's own text: {}", item.detail);
+        assert!(
+            item.detail.contains("Resume the next slice."),
+            "detail should carry the note's own text: {}",
+            item.detail
+        );
         assert!(
             item.detail.contains("2026-08-06T12:45:21.418Z"),
             "detail should carry the note's written_at: {}",
@@ -5777,10 +7000,18 @@ mod tests {
     #[test]
     fn no_handoff_yields_no_pause_item() {
         let root = fresh_root("attention-handoff-absent");
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
 
         let snap = read_snapshot(&root);
-        assert!(snap.attention.is_empty(), "no handoff, nothing to report: {:?}", snap.attention);
+        assert!(
+            snap.attention.is_empty(),
+            "no handoff, nothing to report: {:?}",
+            snap.attention
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5788,7 +7019,11 @@ mod tests {
     #[test]
     fn handoff_alongside_blocked_cells_yields_both_ordered_heaviest_first() {
         let root = fresh_root("attention-handoff-and-blocked");
-        write(&root, ".bee/cells/c-blocked.json", &cell_json("c-blocked", "blocked"));
+        write(
+            &root,
+            ".bee/cells/c-blocked.json",
+            &cell_json("c-blocked", "blocked"),
+        );
         write(
             &root,
             ".bee/HANDOFF.json",
@@ -5800,7 +7035,12 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.attention.len(), 2, "both rules should fire: {:?}", snap.attention);
+        assert_eq!(
+            snap.attention.len(),
+            2,
+            "both rules should fire: {:?}",
+            snap.attention
+        );
         // Both rules in this slice carry Critical severity — a stable sort
         // keeps the fixed rule-registration order, blocked cells first.
         assert_eq!(snap.attention[0].severity, BeeAttentionSeverity::Critical);
@@ -5827,7 +7067,11 @@ mod tests {
         write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
 
         let snap = read_snapshot(&root);
-        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        assert!(
+            snap.read_errors.is_empty(),
+            "no read error expected: {:?}",
+            snap.read_errors
+        );
         let config = snap.config.as_ref().expect("config should have been read");
         assert_eq!(config.gate_bypass.as_deref(), Some("total"));
 
@@ -5840,9 +7084,17 @@ mod tests {
         write(&root, ".bee/config.json", r#"{"gate_bypass": false}"#);
 
         let snap = read_snapshot(&root);
-        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        assert!(
+            snap.read_errors.is_empty(),
+            "no read error expected: {:?}",
+            snap.read_errors
+        );
         let config = snap.config.as_ref().expect("config should have been read");
-        assert!(config.gate_bypass.is_none(), "false must normalize to off: {:?}", config.gate_bypass);
+        assert!(
+            config.gate_bypass.is_none(),
+            "false must normalize to off: {:?}",
+            config.gate_bypass
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5853,9 +7105,17 @@ mod tests {
         write(&root, ".bee/config.json", r#"{"some_other_key": true}"#);
 
         let snap = read_snapshot(&root);
-        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        assert!(
+            snap.read_errors.is_empty(),
+            "no read error expected: {:?}",
+            snap.read_errors
+        );
         let config = snap.config.as_ref().expect("config should have been read");
-        assert!(config.gate_bypass.is_none(), "a missing key must normalize to off: {:?}", config.gate_bypass);
+        assert!(
+            config.gate_bypass.is_none(),
+            "a missing key must normalize to off: {:?}",
+            config.gate_bypass
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5863,12 +7123,23 @@ mod tests {
     #[test]
     fn no_config_json_at_all_reads_as_off_and_pushes_no_read_error() {
         let root = fresh_root("config-absent");
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
         // No .bee/config.json written at all.
 
         let snap = read_snapshot(&root);
-        assert!(snap.config.is_none(), "no config file should mean no config on the snapshot");
-        assert!(snap.read_errors.is_empty(), "an absent config.json must never be a read error: {:?}", snap.read_errors);
+        assert!(
+            snap.config.is_none(),
+            "no config file should mean no config on the snapshot"
+        );
+        assert!(
+            snap.read_errors.is_empty(),
+            "an absent config.json must never be a read error: {:?}",
+            snap.read_errors
+        );
         assert!(
             snap.attention.is_empty(),
             "an absent config.json must read as off, no attention item: {:?}",
@@ -5887,8 +7158,17 @@ mod tests {
         let snap = read_snapshot(&root);
         assert!(snap.present);
         assert!(snap.config.is_none());
-        assert_eq!(snap.buckets.waiting.len(), 1, "the well-formed cell must still parse");
-        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
+        assert_eq!(
+            snap.buckets.waiting.len(),
+            1,
+            "the well-formed cell must still parse"
+        );
+        assert_eq!(
+            snap.read_errors.len(),
+            1,
+            "expected exactly one read error: {:?}",
+            snap.read_errors
+        );
         assert!(snap.read_errors.iter().any(|e| e.contains("config.json")));
 
         std::fs::remove_dir_all(&root).ok();
@@ -5900,7 +7180,11 @@ mod tests {
         write(&root, ".bee/config.json", r#"{"gate_bypass": true}"#);
 
         let snap = read_snapshot(&root);
-        assert!(snap.read_errors.is_empty(), "no read error expected: {:?}", snap.read_errors);
+        assert!(
+            snap.read_errors.is_empty(),
+            "no read error expected: {:?}",
+            snap.read_errors
+        );
         let config = snap.config.as_ref().expect("config should have been read");
         assert!(
             config.gate_bypass.is_some(),
@@ -5918,7 +7202,12 @@ mod tests {
         write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+        assert_eq!(
+            snap.attention.len(),
+            1,
+            "one rule fired, exactly one item: {:?}",
+            snap.attention
+        );
 
         let item = &snap.attention[0];
         assert!(
@@ -5934,7 +7223,11 @@ mod tests {
     fn recorded_bypass_off_yields_no_item() {
         let root = fresh_root("attention-bypass-off");
         write(&root, ".bee/config.json", r#"{"gate_bypass": false}"#);
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
 
         let snap = read_snapshot(&root);
         assert!(
@@ -5952,7 +7245,12 @@ mod tests {
         write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+        assert_eq!(
+            snap.attention.len(),
+            1,
+            "one rule fired, exactly one item: {:?}",
+            snap.attention
+        );
 
         let item = &snap.attention[0];
         let rendered = format!("{} {} {}", item.title, item.detail, item.suggested_action);
@@ -5989,7 +7287,10 @@ mod tests {
         let snap = read_snapshot(&root);
         assert_eq!(snap.lanes.len(), 1);
         let lane = &snap.lanes[0];
-        let gates = lane.approved_gates.as_ref().expect("a lane's own approved_gates should be Some");
+        let gates = lane
+            .approved_gates
+            .as_ref()
+            .expect("a lane's own approved_gates should be Some");
         assert_eq!(gates.context, Some(true));
         assert_eq!(gates.shape, Some(true));
         assert_eq!(gates.execution, Some(false));
@@ -6002,11 +7303,18 @@ mod tests {
     #[test]
     fn lane_with_no_gates_or_created_at_reads_as_none_not_fabricated() {
         let root = fresh_root("phase-board-lane-no-gates");
-        write(&root, ".bee/lanes/demo.json", r#"{"feature":"demo","phase":"swarming","mode":"standard"}"#);
+        write(
+            &root,
+            ".bee/lanes/demo.json",
+            r#"{"feature":"demo","phase":"swarming","mode":"standard"}"#,
+        );
 
         let snap = read_snapshot(&root);
         let lane = &snap.lanes[0];
-        assert!(lane.approved_gates.is_none(), "absent approved_gates must be None, never fabricated");
+        assert!(
+            lane.approved_gates.is_none(),
+            "absent approved_gates must be None, never fabricated"
+        );
         assert!(lane.created_at.is_none());
 
         std::fs::remove_dir_all(&root).ok();
@@ -6015,8 +7323,16 @@ mod tests {
     #[test]
     fn phase_board_is_the_union_of_lanes_and_the_distinct_active_feature() {
         let root = fresh_root("phase-board-union");
-        write(&root, ".bee/state.json", r#"{"phase":"exploring","feature":"active-feature","mode":"standard"}"#);
-        write(&root, ".bee/lanes/alpha.json", r#"{"feature":"alpha","phase":"swarming","mode":"standard"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"phase":"exploring","feature":"active-feature","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/lanes/alpha.json",
+            r#"{"feature":"alpha","phase":"swarming","mode":"standard"}"#,
+        );
         write(
             &root,
             ".bee/lanes/beta.json",
@@ -6030,20 +7346,34 @@ mod tests {
             "the union of two lanes plus a distinct active feature is three: {:?}",
             snap.phase_board
         );
-        let active_count = snap.phase_board.iter().filter(|p| p.feature == "active-feature").count();
-        assert_eq!(active_count, 1, "the active feature must appear exactly once: {:?}", snap.phase_board);
-        let active = snap.phase_board.iter().find(|p| p.feature == "active-feature").unwrap();
+        let active_count = snap
+            .phase_board
+            .iter()
+            .filter(|p| p.feature == "active-feature")
+            .count();
+        assert_eq!(
+            active_count, 1,
+            "the active feature must appear exactly once: {:?}",
+            snap.phase_board
+        );
+        let active = snap
+            .phase_board
+            .iter()
+            .find(|p| p.feature == "active-feature")
+            .unwrap();
         assert_eq!(
             active.phase.as_deref(),
             Some("exploring"),
             "the active feature with no lane record must take its phase from state.json"
         );
-        assert!(snap.phase_board.iter().any(|p| p.feature == "alpha" && p.phase.as_deref() == Some("swarming")));
-        assert!(
-            snap.phase_board
-                .iter()
-                .any(|p| p.feature == "beta" && p.phase.as_deref() == Some("compounding-complete"))
-        );
+        assert!(snap
+            .phase_board
+            .iter()
+            .any(|p| p.feature == "alpha" && p.phase.as_deref() == Some("swarming")));
+        assert!(snap
+            .phase_board
+            .iter()
+            .any(|p| p.feature == "beta" && p.phase.as_deref() == Some("compounding-complete")));
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6079,8 +7409,15 @@ mod tests {
             "the lane record must win for phase, not state.json's \"exploring\""
         );
         let gates = entry.approved_gates.as_ref().expect("gates should be Some");
-        assert_eq!(gates.shape, Some(true), "the lane record must win for its own gates too");
-        assert_eq!(entry.created_at.as_deref(), Some("2026-08-01T00:00:00.000Z"));
+        assert_eq!(
+            gates.shape,
+            Some(true),
+            "the lane record must win for its own gates too"
+        );
+        assert_eq!(
+            entry.created_at.as_deref(),
+            Some("2026-08-01T00:00:00.000Z")
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6088,10 +7425,18 @@ mod tests {
     #[test]
     fn phase_board_with_no_lanes_directory_places_the_one_active_feature() {
         let root = fresh_root("phase-board-no-lanes-dir");
-        write(&root, ".bee/state.json", r#"{"phase":"swarming","feature":"solo","mode":"standard"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"solo","mode":"standard"}"#,
+        );
 
         let snap = read_snapshot(&root);
-        assert!(snap.lanes.is_empty(), "no .bee/lanes/ directory at all: {:?}", snap.lanes);
+        assert!(
+            snap.lanes.is_empty(),
+            "no .bee/lanes/ directory at all: {:?}",
+            snap.lanes
+        );
         assert_eq!(
             snap.phase_board.len(),
             1,
@@ -6107,10 +7452,18 @@ mod tests {
     #[test]
     fn phase_board_lane_with_no_cells_reports_zero_counts_no_division_by_zero() {
         let root = fresh_root("phase-board-empty-cells");
-        write(&root, ".bee/lanes/idle.json", r#"{"feature":"idle","phase":"swarming","mode":"standard"}"#);
+        write(
+            &root,
+            ".bee/lanes/idle.json",
+            r#"{"feature":"idle","phase":"swarming","mode":"standard"}"#,
+        );
 
         let snap = read_snapshot(&root);
-        let entry = snap.phase_board.iter().find(|p| p.feature == "idle").unwrap();
+        let entry = snap
+            .phase_board
+            .iter()
+            .find(|p| p.feature == "idle")
+            .unwrap();
         assert_eq!(entry.cell_counts.total, 0);
         assert_eq!(entry.cell_counts.done, 0);
         assert!(
@@ -6125,14 +7478,38 @@ mod tests {
     #[test]
     fn phase_board_feature_with_only_dropped_cells_reports_no_completion_no_division_artifact() {
         let root = fresh_root("phase-board-all-dropped");
-        write(&root, ".bee/lanes/gone.json", r#"{"feature":"gone","phase":"swarming","mode":"standard"}"#);
-        write(&root, ".bee/cells/c1.json", &feature_cell_json("c1", "gone", "dropped", None, None));
-        write(&root, ".bee/cells/c2.json", &feature_cell_json("c2", "gone", "dropped", None, None));
+        write(
+            &root,
+            ".bee/lanes/gone.json",
+            r#"{"feature":"gone","phase":"swarming","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/c1.json",
+            &feature_cell_json("c1", "gone", "dropped", None, None),
+        );
+        write(
+            &root,
+            ".bee/cells/c2.json",
+            &feature_cell_json("c2", "gone", "dropped", None, None),
+        );
 
         let snap = read_snapshot(&root);
-        let entry = snap.phase_board.iter().find(|p| p.feature == "gone").unwrap();
-        assert_eq!(entry.cell_counts.total, 0, "all-dropped cells count toward no total (D8): {:?}", entry.cell_counts);
-        assert_eq!(entry.cell_counts.done, 0, "all-dropped must not read as completed work: {:?}", entry.cell_counts);
+        let entry = snap
+            .phase_board
+            .iter()
+            .find(|p| p.feature == "gone")
+            .unwrap();
+        assert_eq!(
+            entry.cell_counts.total, 0,
+            "all-dropped cells count toward no total (D8): {:?}",
+            entry.cell_counts
+        );
+        assert_eq!(
+            entry.cell_counts.done, 0,
+            "all-dropped must not read as completed work: {:?}",
+            entry.cell_counts
+        );
         assert!(
             entry.cell_counts.done_fraction.is_none(),
             "an all-dropped feature must not read as complete, and must not divide by zero (D8): {:?}",
@@ -6145,25 +7522,61 @@ mod tests {
     #[test]
     fn phase_board_counts_mixed_statuses_correctly_excluding_dropped() {
         let root = fresh_root("phase-board-mixed");
-        write(&root, ".bee/lanes/mixed.json", r#"{"feature":"mixed","phase":"swarming","mode":"standard"}"#);
-        write(&root, ".bee/cells/c1.json", &feature_cell_json("c1", "mixed", "claimed", None, None));
-        write(&root, ".bee/cells/c2.json", &feature_cell_json("c2", "mixed", "open", None, None));
-        write(&root, ".bee/cells/c3.json", &feature_cell_json("c3", "mixed", "blocked", None, None));
+        write(
+            &root,
+            ".bee/lanes/mixed.json",
+            r#"{"feature":"mixed","phase":"swarming","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/c1.json",
+            &feature_cell_json("c1", "mixed", "claimed", None, None),
+        );
+        write(
+            &root,
+            ".bee/cells/c2.json",
+            &feature_cell_json("c2", "mixed", "open", None, None),
+        );
+        write(
+            &root,
+            ".bee/cells/c3.json",
+            &feature_cell_json("c3", "mixed", "blocked", None, None),
+        );
         write(
             &root,
             ".bee/cells/c4.json",
-            &feature_cell_json("c4", "mixed", "capped", Some("2026-08-01T00:00:00.000Z"), Some("2026-08-01T01:00:00.000Z")),
+            &feature_cell_json(
+                "c4",
+                "mixed",
+                "capped",
+                Some("2026-08-01T00:00:00.000Z"),
+                Some("2026-08-01T01:00:00.000Z"),
+            ),
         );
-        write(&root, ".bee/cells/c5.json", &feature_cell_json("c5", "mixed", "dropped", None, None));
+        write(
+            &root,
+            ".bee/cells/c5.json",
+            &feature_cell_json("c5", "mixed", "dropped", None, None),
+        );
 
         let snap = read_snapshot(&root);
-        let entry = snap.phase_board.iter().find(|p| p.feature == "mixed").unwrap();
+        let entry = snap
+            .phase_board
+            .iter()
+            .find(|p| p.feature == "mixed")
+            .unwrap();
         assert_eq!(entry.cell_counts.doing, 1);
         assert_eq!(entry.cell_counts.waiting, 1);
         assert_eq!(entry.cell_counts.stuck, 1);
         assert_eq!(entry.cell_counts.done, 1);
-        assert_eq!(entry.cell_counts.total, 4, "the dropped cell must not count toward the total (D8)");
-        let frac = entry.cell_counts.done_fraction.expect("total > 0 should yield Some fraction");
+        assert_eq!(
+            entry.cell_counts.total, 4,
+            "the dropped cell must not count toward the total (D8)"
+        );
+        let frac = entry
+            .cell_counts
+            .done_fraction
+            .expect("total > 0 should yield Some fraction");
         assert!((frac - 0.25).abs() < 1e-9, "done_fraction: {frac}");
 
         std::fs::remove_dir_all(&root).ok();
@@ -6173,7 +7586,11 @@ mod tests {
     fn phase_board_malformed_lane_pushes_one_read_error_other_lanes_still_read() {
         let root = fresh_root("phase-board-malformed-lane");
         write(&root, ".bee/lanes/bad.json", "{ this is not valid json");
-        write(&root, ".bee/lanes/good.json", r#"{"feature":"good","phase":"swarming","mode":"standard"}"#);
+        write(
+            &root,
+            ".bee/lanes/good.json",
+            r#"{"feature":"good","phase":"swarming","mode":"standard"}"#,
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(
@@ -6183,9 +7600,18 @@ mod tests {
             snap.lanes
         );
         assert_eq!(snap.lanes[0].feature, "good");
-        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
+        assert_eq!(
+            snap.read_errors.len(),
+            1,
+            "expected exactly one read error: {:?}",
+            snap.read_errors
+        );
         assert!(snap.read_errors.iter().any(|e| e.contains("bad.json")));
-        let features: Vec<&str> = snap.phase_board.iter().map(|p| p.feature.as_str()).collect();
+        let features: Vec<&str> = snap
+            .phase_board
+            .iter()
+            .map(|p| p.feature.as_str())
+            .collect();
         assert_eq!(
             features,
             vec!["good"],
@@ -6205,20 +7631,32 @@ mod tests {
         write(
             &root,
             ".bee/lanes/leaky.json",
-            &format!(r#"{{"feature":"leaky","phase":"swarming","mode":"standard","next_action":"{next_action}"}}"#),
+            &format!(
+                r#"{{"feature":"leaky","phase":"swarming","mode":"standard","next_action":"{next_action}"}}"#
+            ),
         );
 
         let snap = read_snapshot(&root);
-        let entry = snap.phase_board.iter().find(|p| p.feature == "leaky").unwrap();
+        let entry = snap
+            .phase_board
+            .iter()
+            .find(|p| p.feature == "leaky")
+            .unwrap();
         let rendered_next_action = entry.next_action.as_deref().unwrap_or("");
         assert!(
             !rendered_next_action.contains(&root_str),
             "absolute path leaked into the phase board's next_action: {rendered_next_action}"
         );
-        assert!(rendered_next_action.contains("next step"), "surrounding words must survive: {rendered_next_action}");
+        assert!(
+            rendered_next_action.contains("next step"),
+            "surrounding words must survive: {rendered_next_action}"
+        );
 
         let serialized = serde_json::to_string(&snap).unwrap();
-        assert!(!serialized.contains(&root_str), "absolute path leaked into the snapshot: {serialized}");
+        assert!(
+            !serialized.contains(&root_str),
+            "absolute path leaked into the snapshot: {serialized}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6234,29 +7672,44 @@ mod tests {
     #[test]
     fn validate_feature_name_rejects_dot_dot_traversal_shapes() {
         let root = fresh_root("promote-guard-traversal");
-        assert!(promote_proposals_path(&root, "../../etc").is_none(), "a `../../etc` feature must build no path");
-        assert!(promote_proposals_path(&root, "..").is_none(), "a bare `..` feature must build no path");
+        assert!(
+            promote_proposals_path(&root, "../../etc").is_none(),
+            "a `../../etc` feature must build no path"
+        );
+        assert!(
+            promote_proposals_path(&root, "..").is_none(),
+            "a bare `..` feature must build no path"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn validate_feature_name_rejects_a_forward_slash() {
         let root = fresh_root("promote-guard-fslash");
-        assert!(promote_proposals_path(&root, "foo/bar").is_none(), "a feature containing `/` must build no path");
+        assert!(
+            promote_proposals_path(&root, "foo/bar").is_none(),
+            "a feature containing `/` must build no path"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn validate_feature_name_rejects_a_backslash() {
         let root = fresh_root("promote-guard-bslash");
-        assert!(promote_proposals_path(&root, "foo\\bar").is_none(), "a feature containing `\\` must build no path");
+        assert!(
+            promote_proposals_path(&root, "foo\\bar").is_none(),
+            "a feature containing `\\` must build no path"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn validate_feature_name_rejects_an_absolute_posix_path() {
         let root = fresh_root("promote-guard-posix-abs");
-        assert!(promote_proposals_path(&root, "/etc/passwd").is_none(), "an absolute POSIX-shaped feature must build no path");
+        assert!(
+            promote_proposals_path(&root, "/etc/passwd").is_none(),
+            "an absolute POSIX-shaped feature must build no path"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -6277,15 +7730,24 @@ mod tests {
     #[test]
     fn validate_feature_name_rejects_a_leading_dot_name() {
         let root = fresh_root("promote-guard-dotfile");
-        assert!(promote_proposals_path(&root, ".hidden").is_none(), "a dotfile-shaped feature must build no path");
-        assert!(promote_proposals_path(&root, ".").is_none(), "a bare `.` feature must build no path");
+        assert!(
+            promote_proposals_path(&root, ".hidden").is_none(),
+            "a dotfile-shaped feature must build no path"
+        );
+        assert!(
+            promote_proposals_path(&root, ".").is_none(),
+            "a bare `.` feature must build no path"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn validate_feature_name_rejects_an_empty_string() {
         let root = fresh_root("promote-guard-empty");
-        assert!(promote_proposals_path(&root, "").is_none(), "an empty feature name must build no path");
+        assert!(
+            promote_proposals_path(&root, "").is_none(),
+            "an empty feature name must build no path"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -6293,28 +7755,44 @@ mod tests {
     fn validate_feature_name_rejects_a_control_character() {
         let root = fresh_root("promote-guard-control");
         let embedded_nul = "feat\u{0}ure";
-        assert!(promote_proposals_path(&root, embedded_nul).is_none(), "an embedded NUL must build no path");
+        assert!(
+            promote_proposals_path(&root, embedded_nul).is_none(),
+            "an embedded NUL must build no path"
+        );
         let bare_control = "\u{7}"; // BEL — a control character with no separator or dot shape of its own
-        assert!(promote_proposals_path(&root, bare_control).is_none(), "a bare control character must build no path");
+        assert!(
+            promote_proposals_path(&root, bare_control).is_none(),
+            "a bare control character must build no path"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn validate_feature_name_accepts_an_ordinary_slug() {
         let root = fresh_root("promote-guard-ok-slug");
-        let path = promote_proposals_path(&root, "demo").expect("an ordinary slug must build a path");
-        assert_eq!(path, root.join("docs").join("history").join("demo").join("promote-proposals.md"));
+        let path =
+            promote_proposals_path(&root, "demo").expect("an ordinary slug must build a path");
+        assert_eq!(
+            path,
+            root.join("docs")
+                .join("history")
+                .join("demo")
+                .join("promote-proposals.md")
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn validate_feature_name_accepts_a_slug_with_hyphens_and_digits() {
         let root = fresh_root("promote-guard-ok-slug2");
-        let path =
-            promote_proposals_path(&root, "bee-board-pm-12").expect("a hyphenated, digited slug must build a path");
+        let path = promote_proposals_path(&root, "bee-board-pm-12")
+            .expect("a hyphenated, digited slug must build a path");
         assert_eq!(
             path,
-            root.join("docs").join("history").join("bee-board-pm-12").join("promote-proposals.md")
+            root.join("docs")
+                .join("history")
+                .join("bee-board-pm-12")
+                .join("promote-proposals.md")
         );
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6322,7 +7800,11 @@ mod tests {
     #[test]
     fn has_promote_proposals_reports_presence_and_absence_never_a_rejected_lookup() {
         let root = fresh_root("promote-presence");
-        write(&root, "docs/history/demo/promote-proposals.md", "a proposal body that must never be read");
+        write(
+            &root,
+            "docs/history/demo/promote-proposals.md",
+            "a proposal body that must never be read",
+        );
         assert_eq!(has_promote_proposals(&root, "demo"), Some(true));
         assert_eq!(has_promote_proposals(&root, "no-such-feature"), Some(false));
         assert_eq!(
@@ -6336,17 +7818,41 @@ mod tests {
     #[test]
     fn promote_proposals_present_and_absent_reported_correctly_end_to_end() {
         let root = fresh_root("promote-e2e");
-        write(&root, "docs/history/has-proposals/promote-proposals.md", "pending proposal");
-        write(&root, ".bee/state.json", r#"{"feature":"has-proposals","phase":"swarming"}"#);
+        write(
+            &root,
+            "docs/history/has-proposals/promote-proposals.md",
+            "pending proposal",
+        );
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"has-proposals","phase":"swarming"}"#,
+        );
         write(
             &root,
             ".bee/cells/a.json",
-            &feature_cell_json("a", "no-proposals", "capped", Some("2026-01-01T00:00:00Z"), Some("2026-01-02T00:00:00Z")),
+            &feature_cell_json(
+                "a",
+                "no-proposals",
+                "capped",
+                Some("2026-01-01T00:00:00Z"),
+                Some("2026-01-02T00:00:00Z"),
+            ),
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.promote_proposals.get("has-proposals"), Some(&true), "{:?}", snap.promote_proposals);
-        assert_eq!(snap.promote_proposals.get("no-proposals"), Some(&false), "{:?}", snap.promote_proposals);
+        assert_eq!(
+            snap.promote_proposals.get("has-proposals"),
+            Some(&true),
+            "{:?}",
+            snap.promote_proposals
+        );
+        assert_eq!(
+            snap.promote_proposals.get("no-proposals"),
+            Some(&false),
+            "{:?}",
+            snap.promote_proposals
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6363,7 +7869,10 @@ mod tests {
 
     #[test]
     fn extract_context_title_leaves_a_plain_h1_untouched() {
-        assert_eq!(extract_context_title("# Plain Title\n\nbody"), Some("Plain Title".to_string()));
+        assert_eq!(
+            extract_context_title("# Plain Title\n\nbody"),
+            Some("Plain Title".to_string())
+        );
     }
 
     #[test]
@@ -6387,7 +7896,10 @@ mod tests {
 
     #[test]
     fn extract_feature_boundary_paragraph_is_none_without_the_heading() {
-        assert_eq!(extract_feature_boundary_paragraph("# Demo\n\nno boundary section here"), None);
+        assert_eq!(
+            extract_feature_boundary_paragraph("# Demo\n\nno boundary section here"),
+            None
+        );
     }
 
     #[test]
@@ -6415,10 +7927,17 @@ mod tests {
         write(&root, "docs/history/demo/plan.md", "plan body");
 
         let (scopes, cells) = no_fallback_sources();
-        let docs = read_feature_docs(&root, "demo", &scopes, &cells).expect("CONTEXT.md present must read Some");
+        let docs = read_feature_docs(&root, "demo", &scopes, &cells)
+            .expect("CONTEXT.md present must read Some");
         assert_eq!(docs.title, Some("Demo Feature".to_string()));
-        assert_eq!(docs.description, Some("What this feature covers, in one paragraph.".to_string()));
-        assert_eq!(docs.docs, vec!["CONTEXT.md".to_string(), "plan.md".to_string()]);
+        assert_eq!(
+            docs.description,
+            Some("What this feature covers, in one paragraph.".to_string())
+        );
+        assert_eq!(
+            docs.docs,
+            vec!["CONTEXT.md".to_string(), "plan.md".to_string()]
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6427,16 +7946,24 @@ mod tests {
     fn read_feature_docs_is_none_without_context_decisions_or_cells() {
         let root = fresh_root("feature-docs-missing");
         let (scopes, cells) = no_fallback_sources();
-        assert_eq!(read_feature_docs(&root, "no-such-feature", &scopes, &cells), None);
+        assert_eq!(
+            read_feature_docs(&root, "no-such-feature", &scopes, &cells),
+            None
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
     fn read_feature_docs_lists_only_context_when_no_other_md_exists() {
         let root = fresh_root("feature-docs-no-plan");
-        write(&root, "docs/history/demo/CONTEXT.md", "# Demo — Context\n\nno boundary section\n");
+        write(
+            &root,
+            "docs/history/demo/CONTEXT.md",
+            "# Demo — Context\n\nno boundary section\n",
+        );
         let (scopes, cells) = no_fallback_sources();
-        let docs = read_feature_docs(&root, "demo", &scopes, &cells).expect("CONTEXT.md present must read Some");
+        let docs = read_feature_docs(&root, "demo", &scopes, &cells)
+            .expect("CONTEXT.md present must read Some");
         assert_eq!(docs.title, Some("Demo".to_string()));
         assert_eq!(docs.description, None);
         assert_eq!(docs.docs, vec!["CONTEXT.md".to_string()]);
@@ -6462,16 +7989,30 @@ mod tests {
     #[test]
     fn read_feature_docs_lists_promote_proposals_only_dir_and_uses_decision_fallback() {
         let root = fresh_root("feature-docs-promote-only");
-        write(&root, "docs/history/demo/promote-proposals.md", "proposal body");
+        write(
+            &root,
+            "docs/history/demo/promote-proposals.md",
+            "proposal body",
+        );
 
         let mut scopes = std::collections::BTreeMap::new();
-        scopes.insert("demo".to_string(), "Ship the thing behind a flag.".to_string());
+        scopes.insert(
+            "demo".to_string(),
+            "Ship the thing behind a flag.".to_string(),
+        );
 
-        let docs =
-            read_feature_docs(&root, "demo", &scopes, &[]).expect("a docs dir with any .md file must read Some");
+        let docs = read_feature_docs(&root, "demo", &scopes, &[])
+            .expect("a docs dir with any .md file must read Some");
         assert_eq!(docs.docs, vec!["promote-proposals.md".to_string()]);
-        assert_eq!(docs.description, Some("Ship the thing behind a flag.".to_string()));
-        assert_ne!(docs.title, Some("demo".to_string()), "the fallback title must never be the bare slug");
+        assert_eq!(
+            docs.description,
+            Some("Ship the thing behind a flag.".to_string())
+        );
+        assert_ne!(
+            docs.title,
+            Some("demo".to_string()),
+            "the fallback title must never be the bare slug"
+        );
         assert_eq!(docs.title, Some("Demo".to_string()));
 
         std::fs::remove_dir_all(&root).ok();
@@ -6484,14 +8025,31 @@ mod tests {
     #[test]
     fn read_feature_docs_lists_every_markdown_file_sorted_context_and_plan_first() {
         let root = fresh_root("feature-docs-full-listing");
-        write(&root, "docs/history/demo/walkthrough.md", "walkthrough body");
-        write(&root, "docs/history/demo/promote-proposals.md", "proposal body");
+        write(
+            &root,
+            "docs/history/demo/walkthrough.md",
+            "walkthrough body",
+        );
+        write(
+            &root,
+            "docs/history/demo/promote-proposals.md",
+            "proposal body",
+        );
         write(&root, "docs/history/demo/plan.md", "plan body");
-        write(&root, "docs/history/demo/CONTEXT.md", "# Demo — Context\n\nno boundary section\n");
-        write(&root, "docs/history/demo/notes.txt", "not markdown, must never be listed");
+        write(
+            &root,
+            "docs/history/demo/CONTEXT.md",
+            "# Demo — Context\n\nno boundary section\n",
+        );
+        write(
+            &root,
+            "docs/history/demo/notes.txt",
+            "not markdown, must never be listed",
+        );
 
         let (scopes, cells) = no_fallback_sources();
-        let docs = read_feature_docs(&root, "demo", &scopes, &cells).expect("CONTEXT.md present must read Some");
+        let docs = read_feature_docs(&root, "demo", &scopes, &cells)
+            .expect("CONTEXT.md present must read Some");
         assert_eq!(
             docs.docs,
             vec![
@@ -6510,12 +8068,18 @@ mod tests {
     #[test]
     fn read_feature_docs_falls_back_to_first_cell_title_when_no_decision_exists() {
         let root = fresh_root("feature-docs-cell-fallback");
-        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "demo", "open", None, None));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("a", "demo", "open", None, None),
+        );
         let scopes = std::collections::BTreeMap::new();
         let cells =
-            vec![parse_cell(&root.join(".bee/cells/a.json"), &root).expect("fixture cell must parse")];
+            vec![parse_cell(&root.join(".bee/cells/a.json"), &root)
+                .expect("fixture cell must parse")];
 
-        let docs = read_feature_docs(&root, "demo", &scopes, &cells).expect("a cell for this feature must read Some");
+        let docs = read_feature_docs(&root, "demo", &scopes, &cells)
+            .expect("a cell for this feature must read Some");
         assert_eq!(docs.description, Some("Cell a".to_string()));
         assert_eq!(docs.title, Some("Demo".to_string()));
         assert!(docs.docs.is_empty(), "no docs dir exists for this fixture");
@@ -6531,26 +8095,48 @@ mod tests {
             "docs/history/has-docs/CONTEXT.md",
             "# Has Docs — Context\n\n## Feature Boundary\n\nBoundary text for the fixture.\n",
         );
-        write(&root, ".bee/state.json", r#"{"feature":"has-docs","phase":"swarming"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"has-docs","phase":"swarming"}"#,
+        );
         write(
             &root,
             ".bee/cells/a.json",
-            &feature_cell_json("a", "no-docs", "capped", Some("2026-01-01T00:00:00Z"), Some("2026-01-02T00:00:00Z")),
+            &feature_cell_json(
+                "a",
+                "no-docs",
+                "capped",
+                Some("2026-01-01T00:00:00Z"),
+                Some("2026-01-02T00:00:00Z"),
+            ),
         );
 
         let snap = read_snapshot(&root);
-        let docs = snap.feature_docs.get("has-docs").expect("has-docs must have a feature_docs entry");
+        let docs = snap
+            .feature_docs
+            .get("has-docs")
+            .expect("has-docs must have a feature_docs entry");
         assert_eq!(docs.title, Some("Has Docs".to_string()));
-        assert_eq!(docs.description, Some("Boundary text for the fixture.".to_string()));
+        assert_eq!(
+            docs.description,
+            Some("Boundary text for the fixture.".to_string())
+        );
 
         // hub-fallbacks: "no-docs" has no CONTEXT.md and no docs dir at all,
         // but it does have a cell — its own first cell's title is now the
         // description fallback, and its title is the prettified slug, never
         // the bare slug or a missing entry.
-        let no_docs = snap.feature_docs.get("no-docs").expect("a feature with a cell must still get a real entry");
+        let no_docs = snap
+            .feature_docs
+            .get("no-docs")
+            .expect("a feature with a cell must still get a real entry");
         assert_eq!(no_docs.title, Some("No Docs".to_string()));
         assert_eq!(no_docs.description, Some("Cell a".to_string()));
-        assert!(no_docs.docs.is_empty(), "no docs dir exists for this fixture's \"no-docs\" feature");
+        assert!(
+            no_docs.docs.is_empty(),
+            "no docs dir exists for this fixture's \"no-docs\" feature"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6568,9 +8154,19 @@ mod tests {
         write(
             &root,
             ".bee/cells/archive/gone/a.json",
-            &feature_cell_json("a", "gone", "capped", Some("2026-01-01T00:00:00Z"), Some("2026-01-02T00:00:00Z")),
+            &feature_cell_json(
+                "a",
+                "gone",
+                "capped",
+                Some("2026-01-01T00:00:00Z"),
+                Some("2026-01-02T00:00:00Z"),
+            ),
         );
-        write(&root, "docs/history/gone/promote-proposals.md", "proposal body");
+        write(
+            &root,
+            "docs/history/gone/promote-proposals.md",
+            "proposal body",
+        );
 
         let snap = read_snapshot(&root);
         let docs = snap
@@ -6602,7 +8198,13 @@ mod tests {
         write(
             &root,
             ".bee/cells/archive/gone/a.json",
-            &feature_cell_json("a", "gone", "capped", Some("2026-01-01T00:00:00Z"), Some("2026-01-02T00:00:00Z")),
+            &feature_cell_json(
+                "a",
+                "gone",
+                "capped",
+                Some("2026-01-01T00:00:00Z"),
+                Some("2026-01-02T00:00:00Z"),
+            ),
         );
 
         let snap = read_snapshot(&root);
@@ -6612,7 +8214,10 @@ mod tests {
             .expect("an archived-only feature's own cell must still describe it");
         assert_eq!(docs.description, Some("Cell a".to_string()));
         assert_eq!(docs.title, Some("Gone".to_string()));
-        assert!(docs.docs.is_empty(), "this fixture writes no docs dir at all");
+        assert!(
+            docs.docs.is_empty(),
+            "this fixture writes no docs dir at all"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6620,7 +8225,11 @@ mod tests {
     #[test]
     fn traversal_shaped_cell_feature_builds_no_path_outside_the_project() {
         let root = fresh_root("promote-security-cell");
-        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "../../etc", "open", None, None));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("a", "../../etc", "open", None, None),
+        );
 
         let snap = read_snapshot(&root);
         assert!(
@@ -6639,7 +8248,11 @@ mod tests {
     #[test]
     fn traversal_shaped_state_feature_builds_no_path_outside_the_project() {
         let root = fresh_root("promote-security-state");
-        write(&root, ".bee/state.json", r#"{"feature":"../../etc","phase":"swarming"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"../../etc","phase":"swarming"}"#,
+        );
 
         let snap = read_snapshot(&root);
         assert!(
@@ -6659,7 +8272,11 @@ mod tests {
     // attention rules they feed (D4, D6, D7) ---
 
     fn candidate_json(id: &str, feature: &str, mode: &str, cells: &[&str]) -> String {
-        let cells_json = cells.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(",");
+        let cells_json = cells
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(",");
         format!(
             r#"{{"id":"{id}","type":"candidate","date":"2026-08-01T00:00:00.000Z","feature":"{feature}","head":"abc123","mode":"{mode}","baseline":null,"cells":[{cells_json}]}}"#
         )
@@ -6669,13 +8286,27 @@ mod tests {
     /// shape: `included[]` is an array of `{"type": "cell", "id": ...}`
     /// objects, never bare strings. `decision_status: None` omits the
     /// `decision` key entirely, matching a session with no decision at all.
-    fn review_session_json(id: &str, included_cells: &[&str], p1_count: usize, decision_status: Option<&str>) -> String {
-        let included_json =
-            included_cells.iter().map(|c| format!(r#"{{"type":"cell","id":"{c}"}}"#)).collect::<Vec<_>>().join(",");
-        let findings_json: String =
-            (0..p1_count).map(|i| format!(r#"{{"id":"f{i}","severity":"P1","title":"x"}}"#)).collect::<Vec<_>>().join(",");
-        let decision_json = decision_status.map(|s| format!(r#","decision":{{"status":"{s}"}}"#)).unwrap_or_default();
-        format!(r#"{{"id":"{id}","included":[{included_json}],"findings":[{findings_json}]{decision_json}}}"#)
+    fn review_session_json(
+        id: &str,
+        included_cells: &[&str],
+        p1_count: usize,
+        decision_status: Option<&str>,
+    ) -> String {
+        let included_json = included_cells
+            .iter()
+            .map(|c| format!(r#"{{"type":"cell","id":"{c}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let findings_json: String = (0..p1_count)
+            .map(|i| format!(r#"{{"id":"f{i}","severity":"P1","title":"x"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let decision_json = decision_status
+            .map(|s| format!(r#","decision":{{"status":"{s}"}}"#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"id":"{id}","included":[{included_json}],"findings":[{findings_json}]{decision_json}}}"#
+        )
     }
 
     /// Like `cell_json`, but `behavior_change: true` — the shape
@@ -6707,11 +8338,18 @@ mod tests {
     #[test]
     fn candidate_in_no_session_is_unreviewed() {
         let root = fresh_root("review-unreviewed");
-        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &["cell-1"]));
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            &candidate_json("c1", "demo", "standard", &["cell-1"]),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.review.candidates.len(), 1);
-        assert_eq!(snap.review.candidates[0].status, BeeReviewStatus::Unreviewed);
+        assert_eq!(
+            snap.review.candidates[0].status,
+            BeeReviewStatus::Unreviewed
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6719,8 +8357,16 @@ mod tests {
     #[test]
     fn candidate_whose_cell_is_in_a_pending_session_is_in_review() {
         let root = fresh_root("review-pending");
-        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "high-risk", &["cell-1"]));
-        write(&root, ".bee/reviews/r1.json", &review_session_json("r1", &["cell-1"], 0, Some("pending")));
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            &candidate_json("c1", "demo", "high-risk", &["cell-1"]),
+        );
+        write(
+            &root,
+            ".bee/reviews/r1.json",
+            &review_session_json("r1", &["cell-1"], 0, Some("pending")),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.review.candidates[0].status, BeeReviewStatus::InReview);
@@ -6731,8 +8377,16 @@ mod tests {
     #[test]
     fn candidate_whose_cell_is_in_an_approved_session_is_settled() {
         let root = fresh_root("review-approved");
-        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &["cell-1"]));
-        write(&root, ".bee/reviews/r1.json", &review_session_json("r1", &["cell-1"], 0, Some("approved")));
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            &candidate_json("c1", "demo", "standard", &["cell-1"]),
+        );
+        write(
+            &root,
+            ".bee/reviews/r1.json",
+            &review_session_json("r1", &["cell-1"], 0, Some("approved")),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.review.candidates[0].status, BeeReviewStatus::Settled);
@@ -6743,8 +8397,16 @@ mod tests {
     #[test]
     fn candidate_whose_cell_is_in_a_blocked_session_is_settled() {
         let root = fresh_root("review-blocked");
-        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &["cell-1"]));
-        write(&root, ".bee/reviews/r1.json", &review_session_json("r1", &["cell-1"], 0, Some("blocked")));
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            &candidate_json("c1", "demo", "standard", &["cell-1"]),
+        );
+        write(
+            &root,
+            ".bee/reviews/r1.json",
+            &review_session_json("r1", &["cell-1"], 0, Some("blocked")),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(
@@ -6776,11 +8438,33 @@ mod tests {
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.review.candidates.len(), 2);
-        let c1 = snap.review.candidates.iter().find(|c| c.id == "c1").unwrap();
-        let c2 = snap.review.candidates.iter().find(|c| c.id == "c2").unwrap();
-        assert_eq!(c1.status, BeeReviewStatus::Settled, "the real cell must still join and settle");
-        assert_eq!(c2.status, BeeReviewStatus::Unreviewed, "an unrelated candidate stays unaffected");
-        assert!(snap.read_errors.is_empty(), "a ghost cell id in included[] is not a read error: {:?}", snap.read_errors);
+        let c1 = snap
+            .review
+            .candidates
+            .iter()
+            .find(|c| c.id == "c1")
+            .unwrap();
+        let c2 = snap
+            .review
+            .candidates
+            .iter()
+            .find(|c| c.id == "c2")
+            .unwrap();
+        assert_eq!(
+            c1.status,
+            BeeReviewStatus::Settled,
+            "the real cell must still join and settle"
+        );
+        assert_eq!(
+            c2.status,
+            BeeReviewStatus::Unreviewed,
+            "an unrelated candidate stays unaffected"
+        );
+        assert!(
+            snap.read_errors.is_empty(),
+            "a ghost cell id in included[] is not a read error: {:?}",
+            snap.read_errors
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6793,11 +8477,22 @@ mod tests {
         // to always read as Unreviewed — a choice, not an accident of the
         // join, even when a session exists that would otherwise settle it.
         let root = fresh_root("review-zero-cells");
-        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &[]));
-        write(&root, ".bee/reviews/r1.json", &review_session_json("r1", &["some-other-cell"], 0, Some("approved")));
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            &candidate_json("c1", "demo", "standard", &[]),
+        );
+        write(
+            &root,
+            ".bee/reviews/r1.json",
+            &review_session_json("r1", &["some-other-cell"], 0, Some("approved")),
+        );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.review.candidates[0].status, BeeReviewStatus::Unreviewed);
+        assert_eq!(
+            snap.review.candidates[0].status,
+            BeeReviewStatus::Unreviewed
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6812,7 +8507,10 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.review.open_p1_findings, 0, "neither a missing severity nor \"info\" counts as P1");
+        assert_eq!(
+            snap.review.open_p1_findings, 0,
+            "neither a missing severity nor \"info\" counts as P1"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6820,7 +8518,11 @@ mod tests {
     #[test]
     fn session_with_no_decision_at_all_counts_as_not_settled() {
         let root = fresh_root("review-no-decision");
-        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &["cell-1"]));
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            &candidate_json("c1", "demo", "standard", &["cell-1"]),
+        );
         write(
             &root,
             ".bee/reviews/r1.json",
@@ -6833,7 +8535,10 @@ mod tests {
             BeeReviewStatus::InReview,
             "a session with no decision key at all is not settled"
         );
-        assert_eq!(snap.review.open_p1_findings, 1, "the P1 in a decision-less session is open");
+        assert_eq!(
+            snap.review.open_p1_findings, 1,
+            "the P1 in a decision-less session is open"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6844,14 +8549,30 @@ mod tests {
         write(
             &root,
             ".bee/review-candidates.jsonl",
-            &format!("{{ not valid json\n{}", candidate_json("good", "demo", "standard", &["cell-1"])),
+            &format!(
+                "{{ not valid json\n{}",
+                candidate_json("good", "demo", "standard", &["cell-1"])
+            ),
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.review.candidates.len(), 1, "the good row must still parse: {:?}", snap.review.candidates);
+        assert_eq!(
+            snap.review.candidates.len(),
+            1,
+            "the good row must still parse: {:?}",
+            snap.review.candidates
+        );
         assert_eq!(snap.review.candidates[0].id, "good");
-        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
-        assert!(snap.read_errors.iter().any(|e| e.contains("review-candidates.jsonl")));
+        assert_eq!(
+            snap.read_errors.len(),
+            1,
+            "expected exactly one read error: {:?}",
+            snap.read_errors
+        );
+        assert!(snap
+            .read_errors
+            .iter()
+            .any(|e| e.contains("review-candidates.jsonl")));
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6860,11 +8581,23 @@ mod tests {
     fn malformed_review_session_pushes_one_read_error_other_sessions_still_read() {
         let root = fresh_root("review-malformed-session");
         write(&root, ".bee/reviews/bad.json", "{ this is not valid json");
-        write(&root, ".bee/reviews/good.json", &review_session_json("good", &["cell-1"], 1, Some("pending")));
+        write(
+            &root,
+            ".bee/reviews/good.json",
+            &review_session_json("good", &["cell-1"], 1, Some("pending")),
+        );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.review.open_p1_findings, 1, "the good session must still be read");
-        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
+        assert_eq!(
+            snap.review.open_p1_findings, 1,
+            "the good session must still be read"
+        );
+        assert_eq!(
+            snap.read_errors.len(),
+            1,
+            "expected exactly one read error: {:?}",
+            snap.read_errors
+        );
         assert!(snap.read_errors.iter().any(|e| e.contains("bad.json")));
 
         std::fs::remove_dir_all(&root).ok();
@@ -6886,7 +8619,10 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.capture_queue.waiting, 1, "s1 was flushed, s2 is still waiting");
+        assert_eq!(
+            snap.capture_queue.waiting, 1,
+            "s1 was flushed, s2 is still waiting"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6894,7 +8630,11 @@ mod tests {
     #[test]
     fn capture_queue_absent_file_is_silent_no_read_error() {
         let root = fresh_root("capture-queue-absent");
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.capture_queue.waiting, 0);
@@ -6920,9 +8660,21 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.capture_queue.waiting, 1, "the good stub row must still count: {:?}", snap.capture_queue);
-        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
-        assert!(snap.read_errors.iter().any(|e| e.contains("capture-queue.jsonl")));
+        assert_eq!(
+            snap.capture_queue.waiting, 1,
+            "the good stub row must still count: {:?}",
+            snap.capture_queue
+        );
+        assert_eq!(
+            snap.read_errors.len(),
+            1,
+            "expected exactly one read error: {:?}",
+            snap.read_errors
+        );
+        assert!(snap
+            .read_errors
+            .iter()
+            .any(|e| e.contains("capture-queue.jsonl")));
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6930,8 +8682,16 @@ mod tests {
     #[test]
     fn feature_with_capped_behavior_change_cells_and_no_matching_last_scribing_run_has_debt() {
         let root = fresh_root("scribing-debt-active");
-        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"swarming"}"#);
-        write(&root, ".bee/cells/c1.json", &behavior_change_cell_json("c1", "demo", "capped"));
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"demo","phase":"swarming"}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/c1.json",
+            &behavior_change_cell_json("c1", "demo", "capped"),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.scribing_debt, vec!["demo".to_string()]);
@@ -6947,7 +8707,11 @@ mod tests {
             ".bee/state.json",
             r#"{"feature":"demo","phase":"swarming","last_scribing_run":{"feature":"demo","date":"2026-08-01","at":"2026-08-01T00:00:00.000Z"}}"#,
         );
-        write(&root, ".bee/cells/c1.json", &behavior_change_cell_json("c1", "demo", "capped"));
+        write(
+            &root,
+            ".bee/cells/c1.json",
+            &behavior_change_cell_json("c1", "demo", "capped"),
+        );
 
         let snap = read_snapshot(&root);
         assert!(
@@ -6967,7 +8731,11 @@ mod tests {
             ".bee/lanes/demo.json",
             r#"{"feature":"demo","phase":"swarming","last_scribing_run":{"feature":"some-other-feature","date":"2026-08-01","at":"2026-08-01T00:00:00.000Z"}}"#,
         );
-        write(&root, ".bee/cells/c1.json", &behavior_change_cell_json("c1", "demo", "capped"));
+        write(
+            &root,
+            ".bee/cells/c1.json",
+            &behavior_change_cell_json("c1", "demo", "capped"),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(
@@ -6983,7 +8751,11 @@ mod tests {
     #[test]
     fn feature_with_no_behavior_change_cells_never_has_debt() {
         let root = fresh_root("scribing-debt-none");
-        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"swarming"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"demo","phase":"swarming"}"#,
+        );
         write(&root, ".bee/cells/c1.json", &cell_json("c1", "capped"));
 
         let snap = read_snapshot(&root);
@@ -7006,12 +8778,23 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+        assert_eq!(
+            snap.attention.len(),
+            1,
+            "one rule fired, exactly one item: {:?}",
+            snap.attention
+        );
         let item = &snap.attention[0];
         assert_eq!(item.severity, BeeAttentionSeverity::Critical);
-        assert!(item.title.contains('1') && item.title.to_lowercase().contains("p1"), "title: {}", item.title);
         assert!(
-            item.suggested_action.to_lowercase().contains("user-invoked"),
+            item.title.contains('1') && item.title.to_lowercase().contains("p1"),
+            "title: {}",
+            item.title
+        );
+        assert!(
+            item.suggested_action
+                .to_lowercase()
+                .contains("user-invoked"),
             "the action must read as user-invoked work, never automatic pending review: {}",
             item.suggested_action
         );
@@ -7022,15 +8805,30 @@ mod tests {
     #[test]
     fn unreviewed_high_risk_candidate_alone_yields_one_serious_item() {
         let root = fresh_root("attention-unreviewed-high-risk");
-        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "high-risk", &["cell-1"]));
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            &candidate_json("c1", "demo", "high-risk", &["cell-1"]),
+        );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+        assert_eq!(
+            snap.attention.len(),
+            1,
+            "one rule fired, exactly one item: {:?}",
+            snap.attention
+        );
         let item = &snap.attention[0];
         assert_eq!(item.severity, BeeAttentionSeverity::Serious);
-        assert!(item.title.to_lowercase().contains("high-risk"), "title: {}", item.title);
         assert!(
-            item.suggested_action.to_lowercase().contains("user-invoked"),
+            item.title.to_lowercase().contains("high-risk"),
+            "title: {}",
+            item.title
+        );
+        assert!(
+            item.suggested_action
+                .to_lowercase()
+                .contains("user-invoked"),
             "must be worded as user-invoked, never automatic: {}",
             item.suggested_action
         );
@@ -7041,7 +8839,11 @@ mod tests {
     #[test]
     fn unreviewed_standard_mode_candidate_does_not_fire_the_high_risk_rule() {
         let root = fresh_root("attention-unreviewed-standard");
-        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "standard", &["cell-1"]));
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            &candidate_json("c1", "demo", "standard", &["cell-1"]),
+        );
 
         let snap = read_snapshot(&root);
         assert!(
@@ -7063,10 +8865,19 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.attention.len(), 1, "one rule fired, exactly one item: {:?}", snap.attention);
+        assert_eq!(
+            snap.attention.len(),
+            1,
+            "one rule fired, exactly one item: {:?}",
+            snap.attention
+        );
         let item = &snap.attention[0];
         assert_eq!(item.severity, BeeAttentionSeverity::Warning);
-        assert!(item.title.contains("knowledge-debt"), "title: {}", item.title);
+        assert!(
+            item.title.contains("knowledge-debt"),
+            "title: {}",
+            item.title
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -7079,7 +8890,11 @@ mod tests {
             ".bee/reviews/r1.json",
             r#"{"id":"r1","included":[],"findings":[{"id":"f1","severity":"P1","title":"x"}],"decision":{"status":"pending"}}"#,
         );
-        write(&root, ".bee/review-candidates.jsonl", &candidate_json("c1", "demo", "high-risk", &["cell-1"]));
+        write(
+            &root,
+            ".bee/review-candidates.jsonl",
+            &candidate_json("c1", "demo", "high-risk", &["cell-1"]),
+        );
         write(
             &root,
             ".bee/capture-queue.jsonl",
@@ -7087,13 +8902,30 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.attention.len(), 3, "all three rules should fire: {:?}", snap.attention);
+        assert_eq!(
+            snap.attention.len(),
+            3,
+            "all three rules should fire: {:?}",
+            snap.attention
+        );
         assert_eq!(snap.attention[0].severity, BeeAttentionSeverity::Critical);
         assert_eq!(snap.attention[1].severity, BeeAttentionSeverity::Serious);
         assert_eq!(snap.attention[2].severity, BeeAttentionSeverity::Warning);
-        assert!(snap.attention[0].title.to_lowercase().contains("p1"), "{:?}", snap.attention);
-        assert!(snap.attention[1].title.to_lowercase().contains("high-risk"), "{:?}", snap.attention);
-        assert!(snap.attention[2].title.contains("knowledge-debt"), "{:?}", snap.attention);
+        assert!(
+            snap.attention[0].title.to_lowercase().contains("p1"),
+            "{:?}",
+            snap.attention
+        );
+        assert!(
+            snap.attention[1].title.to_lowercase().contains("high-risk"),
+            "{:?}",
+            snap.attention
+        );
+        assert!(
+            snap.attention[2].title.contains("knowledge-debt"),
+            "{:?}",
+            snap.attention
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -7101,10 +8933,18 @@ mod tests {
     #[test]
     fn none_of_the_bbp13_rules_fire_on_a_clean_store() {
         let root = fresh_root("attention-bbp13-clean");
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
 
         let snap = read_snapshot(&root);
-        assert!(snap.attention.is_empty(), "a clean store must yield no attention items: {:?}", snap.attention);
+        assert!(
+            snap.attention.is_empty(),
+            "a clean store must yield no attention items: {:?}",
+            snap.attention
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -7116,10 +8956,17 @@ mod tests {
         let root = fresh_root("reservations-absent");
         // No .bee/reservations.json written — both live stores this reader
         // was verified against hold no such non-empty file either way.
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
 
         let snap = read_snapshot(&root);
-        assert!(snap.reservations.is_empty(), "no reservations file should mean no reservations on the snapshot");
+        assert!(
+            snap.reservations.is_empty(),
+            "no reservations file should mean no reservations on the snapshot"
+        );
         assert!(
             snap.read_errors.is_empty(),
             "an absent reservations.json must never be a read error: {:?}",
@@ -7136,7 +8983,11 @@ mod tests {
 
         let snap = read_snapshot(&root);
         assert!(snap.reservations.is_empty());
-        assert!(snap.read_errors.is_empty(), "an empty array is not a read error: {:?}", snap.read_errors);
+        assert!(
+            snap.read_errors.is_empty(),
+            "an empty array is not a read error: {:?}",
+            snap.read_errors
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -7154,18 +9005,32 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.reservations.len(), 2, "both entries should be carried: {:?}", snap.reservations);
+        assert_eq!(
+            snap.reservations.len(),
+            2,
+            "both entries should be carried: {:?}",
+            snap.reservations
+        );
         let first = &snap.reservations[0];
         assert_eq!(first.agent.as_deref(), Some("healthread"));
         assert_eq!(first.cell.as_deref(), Some("bbp-15"));
-        assert_eq!(first.path.as_deref(), Some("crates/waggledance-core/src/bee.rs"));
+        assert_eq!(
+            first.path.as_deref(),
+            Some("crates/waggledance-core/src/bee.rs")
+        );
         assert_eq!(first.kind.as_deref(), Some("lease"));
         assert_eq!(first.session.as_deref(), Some("s1"));
-        assert_eq!(first.reserved_at.as_deref(), Some("2026-08-06T17:29:44.227Z"));
+        assert_eq!(
+            first.reserved_at.as_deref(),
+            Some("2026-08-06T17:29:44.227Z")
+        );
         assert!(first.released_at.is_none());
         let second = &snap.reservations[1];
         assert_eq!(second.agent.as_deref(), Some("otheragent"));
-        assert_eq!(second.released_at.as_deref(), Some("2026-08-06T11:00:00.000Z"));
+        assert_eq!(
+            second.released_at.as_deref(),
+            Some("2026-08-06T11:00:00.000Z")
+        );
         assert!(snap.read_errors.is_empty());
 
         std::fs::remove_dir_all(&root).ok();
@@ -7180,9 +9045,21 @@ mod tests {
         let snap = read_snapshot(&root);
         assert!(snap.present);
         assert!(snap.reservations.is_empty());
-        assert_eq!(snap.buckets.waiting.len(), 1, "the well-formed cell must still parse");
-        assert_eq!(snap.read_errors.len(), 1, "expected exactly one read error: {:?}", snap.read_errors);
-        assert!(snap.read_errors.iter().any(|e| e.contains("reservations.json")));
+        assert_eq!(
+            snap.buckets.waiting.len(),
+            1,
+            "the well-formed cell must still parse"
+        );
+        assert_eq!(
+            snap.read_errors.len(),
+            1,
+            "expected exactly one read error: {:?}",
+            snap.read_errors
+        );
+        assert!(snap
+            .read_errors
+            .iter()
+            .any(|e| e.contains("reservations.json")));
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -7191,17 +9068,32 @@ mod tests {
     fn reservations_unexpected_shape_reads_as_absent_not_an_error() {
         let root = fresh_root("reservations-unexpected-shape");
         // An object where an array belongs — valid JSON, wrong shape.
-        write(&root, ".bee/reservations.json", r#"{"reservations": {"not": "an array"}}"#);
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/reservations.json",
+            r#"{"reservations": {"not": "an array"}}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
 
         let snap = read_snapshot(&root);
-        assert!(snap.reservations.is_empty(), "an unexpected shape should read as absent");
+        assert!(
+            snap.reservations.is_empty(),
+            "an unexpected shape should read as absent"
+        );
         assert!(
             snap.read_errors.is_empty(),
             "an unexpected shape must never be a read error: {:?}",
             snap.read_errors
         );
-        assert_eq!(snap.buckets.waiting.len(), 1, "the rest of the snapshot still reads");
+        assert_eq!(
+            snap.buckets.waiting.len(),
+            1,
+            "the rest of the snapshot still reads"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -7239,13 +9131,32 @@ mod tests {
     #[test]
     fn tier_mix_across_tiers_reports_counts_and_expensive_share() {
         let root = fresh_root("tier-mix-across");
-        write(&root, ".bee/cells/c1.json", &cell_json_with_tier("c1", "capped", Some("extraction")));
-        write(&root, ".bee/cells/c2.json", &cell_json_with_tier("c2", "capped", Some("generation")));
-        write(&root, ".bee/cells/c3.json", &cell_json_with_tier("c3", "capped", Some("generation")));
-        write(&root, ".bee/cells/c4.json", &cell_json_with_tier("c4", "capped", Some("ceiling")));
+        write(
+            &root,
+            ".bee/cells/c1.json",
+            &cell_json_with_tier("c1", "capped", Some("extraction")),
+        );
+        write(
+            &root,
+            ".bee/cells/c2.json",
+            &cell_json_with_tier("c2", "capped", Some("generation")),
+        );
+        write(
+            &root,
+            ".bee/cells/c3.json",
+            &cell_json_with_tier("c3", "capped", Some("generation")),
+        );
+        write(
+            &root,
+            ".bee/cells/c4.json",
+            &cell_json_with_tier("c4", "capped", Some("ceiling")),
+        );
 
         let snap = read_snapshot(&root);
-        let mix = snap.tier_mix.as_ref().expect("four cells should yield a tier mix");
+        let mix = snap
+            .tier_mix
+            .as_ref()
+            .expect("four cells should yield a tier mix");
         assert_eq!(mix.counts.get("extraction").copied(), Some(1));
         assert_eq!(mix.counts.get("generation").copied(), Some(2));
         assert_eq!(mix.counts.get("ceiling").copied(), Some(1));
@@ -7263,14 +9174,36 @@ mod tests {
     #[test]
     fn tier_mix_counts_cells_with_no_tier_as_untiered_never_dropped_never_guessed() {
         let root = fresh_root("tier-mix-untiered");
-        write(&root, ".bee/cells/c1.json", &cell_json_with_tier("c1", "capped", Some("generation")));
-        write(&root, ".bee/cells/c2.json", &cell_json_with_tier("c2", "capped", None));
+        write(
+            &root,
+            ".bee/cells/c1.json",
+            &cell_json_with_tier("c1", "capped", Some("generation")),
+        );
+        write(
+            &root,
+            ".bee/cells/c2.json",
+            &cell_json_with_tier("c2", "capped", None),
+        );
 
         let snap = read_snapshot(&root);
-        let mix = snap.tier_mix.as_ref().expect("two cells should yield a tier mix");
-        assert_eq!(mix.untiered, 1, "the tier-less cell must be counted, not dropped: {mix:?}");
-        assert_eq!(mix.counts.values().sum::<usize>(), 1, "the untiered cell must never be guessed into a bucket");
-        assert_eq!(mix.expensive_tier_share, Some(0.0), "0 of 1 tiered cells ran at the most expensive tier");
+        let mix = snap
+            .tier_mix
+            .as_ref()
+            .expect("two cells should yield a tier mix");
+        assert_eq!(
+            mix.untiered, 1,
+            "the tier-less cell must be counted, not dropped: {mix:?}"
+        );
+        assert_eq!(
+            mix.counts.values().sum::<usize>(),
+            1,
+            "the untiered cell must never be guessed into a bucket"
+        );
+        assert_eq!(
+            mix.expensive_tier_share,
+            Some(0.0),
+            "0 of 1 tiered cells ran at the most expensive tier"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -7278,11 +9211,22 @@ mod tests {
     #[test]
     fn tier_mix_zero_tiered_cells_reports_no_share() {
         let root = fresh_root("tier-mix-zero-tiered");
-        write(&root, ".bee/cells/c1.json", &cell_json_with_tier("c1", "capped", None));
-        write(&root, ".bee/cells/c2.json", &cell_json_with_tier("c2", "capped", None));
+        write(
+            &root,
+            ".bee/cells/c1.json",
+            &cell_json_with_tier("c1", "capped", None),
+        );
+        write(
+            &root,
+            ".bee/cells/c2.json",
+            &cell_json_with_tier("c2", "capped", None),
+        );
 
         let snap = read_snapshot(&root);
-        let mix = snap.tier_mix.as_ref().expect("two untiered cells should still yield a tier mix");
+        let mix = snap
+            .tier_mix
+            .as_ref()
+            .expect("two untiered cells should still yield a tier mix");
         assert_eq!(mix.untiered, 2);
         assert!(mix.counts.is_empty());
         assert!(
@@ -7316,7 +9260,13 @@ mod tests {
         write(
             root,
             &format!(".bee/cells/archive/{feature}/{id}.json"),
-            &feature_cell_json(id, feature, "capped", Some("2026-08-01T00:00:00.000Z"), capped_at),
+            &feature_cell_json(
+                id,
+                feature,
+                "capped",
+                Some("2026-08-01T00:00:00.000Z"),
+                capped_at,
+            ),
         );
     }
 
@@ -7329,7 +9279,11 @@ mod tests {
         write(&root_b, ".bee/cells/b2.json", &cell_json("b2", "open"));
 
         let rollups = read_rollup(&[root_a.clone(), root_b.clone()]);
-        assert_eq!(rollups.len(), 2, "expected one roll-up entry per root: {rollups:?}");
+        assert_eq!(
+            rollups.len(),
+            2,
+            "expected one roll-up entry per root: {rollups:?}"
+        );
 
         let standalone_a = read_snapshot(&root_a);
         let standalone_b = read_snapshot(&root_b);
@@ -7354,10 +9308,14 @@ mod tests {
         write_archived_cell(&root, "feat-a", "f-1", Some("2026-08-01T02:00:00.000Z"));
         write_archived_cell(&root, "feat-a", "f-2", Some("2026-08-01T05:00:00.000Z"));
 
-        let rollups = read_rollup(&[root.clone()]);
+        let rollups = read_rollup(std::slice::from_ref(&root));
         assert_eq!(rollups.len(), 1);
         let features = &rollups[0].archived_features;
-        assert_eq!(features.len(), 1, "expected exactly one archived feature: {features:?}");
+        assert_eq!(
+            features.len(),
+            1,
+            "expected exactly one archived feature: {features:?}"
+        );
         assert_eq!(features[0].feature, "feat-a");
         assert_eq!(
             features[0].shipped_at.as_deref(),
@@ -7374,7 +9332,7 @@ mod tests {
         write_archived_cell(&root, "feat-b", "f-1", Some("2026-08-01T02:00:00.000Z"));
         write_archived_cell(&root, "feat-b", "f-2", None);
 
-        let rollups = read_rollup(&[root.clone()]);
+        let rollups = read_rollup(std::slice::from_ref(&root));
         let features = &rollups[0].archived_features;
         assert_eq!(features.len(), 1);
         assert_eq!(features[0].feature, "feat-b");
@@ -7394,14 +9352,17 @@ mod tests {
         write(&root, ".bee/cells/c1.json", &cell_json("c1", "open"));
         // No .bee/cells/archive/ at all.
 
-        let rollups = read_rollup(&[root.clone()]);
+        let rollups = read_rollup(std::slice::from_ref(&root));
         assert_eq!(rollups.len(), 1);
         assert!(
             rollups[0].archived_features.is_empty(),
             "a root with no archive directory must yield an empty archived-feature set, not an error: {:?}",
             rollups[0].archived_features
         );
-        assert!(rollups[0].snapshot.present, "the snapshot itself must still read normally");
+        assert!(
+            rollups[0].snapshot.present,
+            "the snapshot itself must still read normally"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -7410,11 +9371,15 @@ mod tests {
     fn rollup_unparseable_archived_cell_does_not_lose_the_root_s_other_features() {
         let root = fresh_root("rollup-unparseable-cell");
         // A feature whose only archived cell is not valid JSON.
-        write(&root, ".bee/cells/archive/broken/z.json", "{ not valid json");
+        write(
+            &root,
+            ".bee/cells/archive/broken/z.json",
+            "{ not valid json",
+        );
         // A sibling feature under the same root, fully readable.
         write_archived_cell(&root, "good", "g-1", Some("2026-08-01T03:00:00.000Z"));
 
-        let rollups = read_rollup(&[root.clone()]);
+        let rollups = read_rollup(std::slice::from_ref(&root));
         let features = &rollups[0].archived_features;
         let names: Vec<&str> = features.iter().map(|f| f.feature.as_str()).collect();
         assert!(
@@ -7426,7 +9391,10 @@ mod tests {
         // The broken feature's directory still exists, so it is still named;
         // it just has no parseable cells to derive a ship time from.
         if let Some(broken) = features.iter().find(|f| f.feature == "broken") {
-            assert!(broken.shipped_at.is_none(), "a feature with no parseable archived cells must be untimed");
+            assert!(
+                broken.shipped_at.is_none(),
+                "a feature with no parseable archived cells must be untimed"
+            );
         }
 
         std::fs::remove_dir_all(&root).ok();
@@ -7445,7 +9413,10 @@ mod tests {
 
         let snap = read_snapshot(&root);
         let state = snap.state.as_ref().expect("state.json must parse");
-        assert_eq!(state.last_activity.as_deref(), Some("2026-08-15T15:48:08.674Z"));
+        assert_eq!(
+            state.last_activity.as_deref(),
+            Some("2026-08-15T15:48:08.674Z")
+        );
         assert_eq!(state.run_state.as_deref(), Some("running"));
 
         std::fs::remove_dir_all(&root).ok();
@@ -7457,7 +9428,10 @@ mod tests {
         write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
 
         let snap = read_snapshot(&root);
-        let state = snap.state.as_ref().expect("an older state.json missing the new keys must still parse");
+        let state = snap
+            .state
+            .as_ref()
+            .expect("an older state.json missing the new keys must still parse");
         assert!(state.last_activity.is_none());
         assert!(state.run_state.is_none());
 
@@ -7532,7 +9506,11 @@ mod tests {
     #[test]
     fn last_tool_call_missing_file_is_none_no_read_error() {
         let root = fresh_root("tools-missing");
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
 
         let snap = read_snapshot(&root);
         assert!(snap.last_tool_call.is_none());
@@ -7561,10 +9539,24 @@ mod tests {
         );
 
         let snap = read_snapshot(&root);
-        assert_eq!(snap.deferred_queue.unresolved_count, 2, "{:?}", snap.deferred_queue);
-        let ids: Vec<&str> = snap.deferred_queue.unresolved.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            snap.deferred_queue.unresolved_count, 2,
+            "{:?}",
+            snap.deferred_queue
+        );
+        let ids: Vec<&str> = snap
+            .deferred_queue
+            .unresolved
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect();
         assert_eq!(ids, vec!["d1", "d2"]);
-        let d1 = snap.deferred_queue.unresolved.iter().find(|e| e.id == "d1").unwrap();
+        let d1 = snap
+            .deferred_queue
+            .unresolved
+            .iter()
+            .find(|e| e.id == "d1")
+            .unwrap();
         assert_eq!(d1.kind.as_deref(), Some("promote"));
         assert_eq!(d1.feature.as_deref(), Some("feat-a"));
         assert_eq!(d1.reason.as_deref(), Some("Promote proposal for feat-a"));
@@ -7601,7 +9593,11 @@ mod tests {
     #[test]
     fn deferred_queue_missing_file_is_zero_debt_no_read_error() {
         let root = fresh_root("deferred-missing");
-        write(&root, ".bee/cells/c-open.json", &cell_json("c-open", "open"));
+        write(
+            &root,
+            ".bee/cells/c-open.json",
+            &cell_json("c-open", "open"),
+        );
 
         let snap = read_snapshot(&root);
         assert_eq!(snap.deferred_queue.unresolved_count, 0);

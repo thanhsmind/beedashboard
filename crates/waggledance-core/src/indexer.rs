@@ -299,14 +299,19 @@ mod tests {
         write(&dir, "notes.txt", "not markdown");
 
         let got = bounded_scan_markdown_files(&dir, &[], 10, Duration::from_secs(5));
-        assert_eq!(got, ScanBudget::Ok(2), "should count the 2 markdown files, ignoring the .txt");
+        assert_eq!(
+            got,
+            ScanBudget::Ok(2),
+            "should count the 2 markdown files, ignoring the .txt"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn bounded_scan_refuses_past_the_file_cap() {
-        let dir = std::env::temp_dir().join(format!("waggledance-bscan-cap-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-bscan-cap-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         for i in 0..5 {
             write(&dir, &format!("f{i}.md"), "# x");
@@ -324,7 +329,8 @@ mod tests {
 
     #[test]
     fn bounded_scan_refuses_past_the_time_budget() {
-        let dir = std::env::temp_dir().join(format!("waggledance-bscan-slow-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-bscan-slow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write(&dir, "a.md", "# a");
         write(&dir, "b.md", "# b");
@@ -334,14 +340,19 @@ mod tests {
         // fires independently of the file-count bound (a cap high enough to
         // never trip on its own, `usize::MAX`).
         let got = bounded_scan_markdown_files(&dir, &[], usize::MAX, Duration::ZERO);
-        assert_eq!(got, ScanBudget::TooSlow, "a zero wall-clock budget must refuse");
+        assert_eq!(
+            got,
+            ScanBudget::TooSlow,
+            "a zero wall-clock budget must refuse"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn bounded_scan_respects_the_same_exclude_patterns_as_scan_markdown_files() {
-        let dir = std::env::temp_dir().join(format!("waggledance-bscan-excl-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-bscan-excl-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write(&dir, "README.md", "# Root");
         write(&dir, "node_modules/pkg/x.md", "# Should be excluded");
@@ -352,7 +363,11 @@ mod tests {
             10,
             Duration::from_secs(5),
         );
-        assert_eq!(got, ScanBudget::Ok(1), "excluded directory must not be walked");
+        assert_eq!(
+            got,
+            ScanBudget::Ok(1),
+            "excluded directory must not be walked"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

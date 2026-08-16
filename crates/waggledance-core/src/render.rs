@@ -457,8 +457,7 @@ fn html_escape(s: &str) -> String {
 fn sanitize(html: &str) -> String {
     let mut b = ammonia::Builder::default();
     b.add_tags(&["pre", "code", "span", "section"]);
-    b.add_generic_attributes(&["class", "id"]);
-    b.add_generic_attribute_prefixes(&["data-"]);
+    b.add_generic_attributes(&["class", "id", "data-sourcepos"]);
     b.add_tag_attributes("a", &["href", "title", "target", "class"]);
     b.add_tag_attributes("img", &["src", "alt", "title", "class"]);
     b.url_relative(ammonia::UrlRelative::PassThrough);
@@ -506,6 +505,28 @@ mod tests {
             "{}",
             page.html
         );
+    }
+
+    #[test]
+    fn sanitizer_strips_unlisted_data_attrs_but_keeps_sourcepos() {
+        let root = PathBuf::from("/proj");
+        let index: HashSet<PathBuf> = HashSet::new();
+        let md = "# Title\n\n<pre class=\"term-screen\" data-pane-id=\"x\" data-term-base=\"https://evil.tld/x\">hi</pre>\n\nfirst para";
+        let page = svc().render(md, &root.join("a.md"), "p1", &root, &index);
+        // a hostile/unlisted data-* attribute is stripped by the sanitizer
+        assert!(
+            !page.html.contains("data-term-base"),
+            "data-term-base must not survive sanitize(): {}",
+            page.html
+        );
+        assert!(
+            !page.html.contains("data-pane-id"),
+            "data-pane-id must not survive sanitize(): {}",
+            page.html
+        );
+        // a legitimately-emitted data-* attribute (data-sourcepos, added by the
+        // renderer itself) still survives
+        assert!(page.html.contains("data-sourcepos=\""), "{}", page.html);
     }
 
     #[test]

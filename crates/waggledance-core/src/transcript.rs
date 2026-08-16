@@ -1089,12 +1089,12 @@ mod tests {
             // `.jsonl`, so it never distinguishes the empty-stem check from
             // the extension check; it is kept here as a defensive
             // regression fixture, not a single-property one.
-            "ev:il.jsonl:0",   // colon only — no slash, no backslash, no ".."
+            "ev:il.jsonl:0",    // colon only — no slash, no backslash, no ".."
             "sec\\ret.jsonl:0", // backslash only — no colon, no slash, no ".."
-            "a/b.jsonl:0",     // multiple components (slash) only
-            "no-extension:0",  // missing `.jsonl` suffix only
-            ".jsonl:0",        // empty stem (session id) only — extension present
-            ":0",              // wholly empty name — caught by the extension check
+            "a/b.jsonl:0",      // multiple components (slash) only
+            "no-extension:0",   // missing `.jsonl` suffix only
+            ".jsonl:0",         // empty stem (session id) only — extension present
+            ":0",               // wholly empty name — caught by the extension check
             "s1.jsonl:not-a-number",
         ] {
             match read_activity_at(root.path(), "/w/e", Some(bad)) {
@@ -1284,9 +1284,8 @@ mod tests {
 
         // Same clip applies to an unknown *content block* type, not just
         // the record type.
-        let raw_block = format!(
-            r#"{{"type":"assistant","message":{{"content":[{{"type":"{huge_type}"}}]}}}}"#
-        );
+        let raw_block =
+            format!(r#"{{"type":"assistant","message":{{"content":[{{"type":"{huge_type}"}}]}}}}"#);
         let block_lines = render_record(&raw_block);
         assert_eq!(block_lines.len(), 1);
         assert!(block_lines[0].chars().count() <= MAX_LINE_CHARS + 1);
@@ -1310,18 +1309,30 @@ mod tests {
         // One record whose payload alone exceeds MAX_READ_BYTES.
         let huge_text = "x".repeat(MAX_READ_BYTES as usize + 1000);
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(f, r#"{{"type":"user","message":{{"content":"{huge_text}"}}}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"content":"{huge_text}"}}}}"#
+        )
+        .unwrap();
         writeln!(f, r#"{{"type":"user","message":{{"content":"after"}}}}"#).unwrap();
         drop(f);
 
         let first = read_activity_at(root.path(), "/w/huge", Some(&open.cursor)).unwrap();
-        assert_eq!(first.lines.len(), 1, "the oversized record renders as one marker line, not its content: {:?}", first.lines);
+        assert_eq!(
+            first.lines.len(),
+            1,
+            "the oversized record renders as one marker line, not its content: {:?}",
+            first.lines
+        );
         assert!(
             first.lines[0].contains("elided"),
             "must be marked, not silently swallowed: {:?}",
             first.lines
         );
-        assert_ne!(first.cursor, open.cursor, "cursor must advance past the oversized record");
+        assert_ne!(
+            first.cursor, open.cursor,
+            "cursor must advance past the oversized record"
+        );
 
         // Never stalls: the next poll reaches what comes after it.
         let second = read_activity_at(root.path(), "/w/huge", Some(&first.cursor)).unwrap();
@@ -1391,7 +1402,11 @@ mod tests {
 
         // They never resurface — the cursor has already moved past them.
         let next = read_activity_at(root.path(), "/w/poll-cap", Some(&chunk.cursor)).unwrap();
-        assert!(next.lines.is_empty(), "dropped oldest lines must never come back: {:?}", next.lines);
+        assert!(
+            next.lines.is_empty(),
+            "dropped oldest lines must never come back: {:?}",
+            next.lines
+        );
     }
 
     /// D7 in the review: the opening backfill window unconditionally

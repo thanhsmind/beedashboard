@@ -5,25 +5,26 @@ use crate::runtime::{self, DaemonInfo};
 use crate::views;
 use anyhow::Result;
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         DefaultBodyLimit, Form, Path, Query, State,
     },
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, Request, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
-use waggledance_core::indexer::now_rfc3339;
-use waggledance_core::render::theme_css;
-use waggledance_core::Engine;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
+use waggledance_core::indexer::now_rfc3339;
+use waggledance_core::render::theme_css;
+use waggledance_core::Engine;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -455,13 +456,19 @@ fn router(state: AppState) -> Router {
         // deliberate — without it, a pane id equal to the literal string
         // `create` would shadow `/p/:id/_terminal/create/pane` and
         // `/create/agent` below.
-        .route("/p/:id/_terminal/pane/:pane_id", get(terminal_page_for_pane))
+        .route(
+            "/p/:id/_terminal/pane/:pane_id",
+            get(terminal_page_for_pane),
+        )
         // agent-terminal-16 (D9): the Transcript tab — a second tab beside
         // Terminal, not a toggle inside its frame.
         .route("/p/:id/_transcript", get(transcript_page))
         // terminal-pane-scope D4: the Transcript tab's own per-pane page,
         // mirroring `terminal_page_for_pane` above.
-        .route("/p/:id/_transcript/pane/:pane_id", get(transcript_page_for_pane))
+        .route(
+            "/p/:id/_transcript/pane/:pane_id",
+            get(transcript_page_for_pane),
+        )
         // agent-terminal-6: one pane's polled screen.
         .route("/p/:id/_terminal/:pane_id/screen", get(terminal_screen))
         // agent-terminal-16 (D9): the gap-free activity channel beside the
@@ -469,7 +476,10 @@ fn router(state: AppState) -> Router {
         // `project_pane_cwd_in_boundary` rather than
         // `project_and_verify_pane_in_boundary` since this route needs the
         // pane's own cwd value, not just a membership check.
-        .route("/p/:id/_terminal/:pane_id/transcript", get(terminal_transcript))
+        .route(
+            "/p/:id/_terminal/:pane_id/transcript",
+            get(terminal_transcript),
+        )
         // agent-terminal-9 (D3): the write side — free text and named keys
         // into a pane.
         .route("/p/:id/_terminal/:pane_id/input", post(terminal_input))
@@ -513,7 +523,79 @@ fn router(state: AppState) -> Router {
         .route("/p/:id/_code/", get(code_root))
         .route("/p/:id/_code/*path", get(code_dir_or_file))
         .route("/p/:id/*path", get(project_path))
+        // review-p1-fixes D1: one layer wrapping every route above, closing
+        // three findings at once (DNS-rebinding control of the daemon, CSRF
+        // on `update_config`, CSRF on register/unregister/refresh) — a
+        // cross-origin or DNS-rebound page cannot forge a valid loopback
+        // `Host` header no matter which route it targets, so gating here
+        // once is equivalent to gating every handler individually. Applied
+        // as the outermost layer (added last, closest to `with_state`) so
+        // it runs before any handler body, including a POST's own body read.
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_loopback_host,
+        ))
         .with_state(state)
+}
+
+/// review-p1-fixes D1: the router-wide `Host` guard. Rejects with HTTP 421
+/// (Misdirected Request) any request whose `Host` header does not name this
+/// daemon -- a loopback address or the operator's own configured display
+/// hostname -- before the request reaches any route handler. A missing
+/// `Host` header is rejected the same way: a real browser always sends one
+/// on HTTP/1.1, so its absence is never a legitimate local client, only a
+/// crafted request trying to dodge the check.
+async fn require_loopback_host(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if !host_is_allowed(req.headers(), &state.engine.config.server.hostname) {
+        return (
+            StatusCode::MISDIRECTED_REQUEST,
+            "misdirected request: unrecognized Host header\n",
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+/// The `Host` allowlist check itself, split out from `require_loopback_host`
+/// so a unit test can drive it directly against a bare `HeaderMap` rather
+/// than a full request/response round trip. Allows `127.0.0.1`, `localhost`,
+/// `::1`/`[::1]` (via `is_loopback_host`, minus any `:port`), and the
+/// operator's configured `server.hostname` when one is set.
+fn host_is_allowed(headers: &HeaderMap, configured_hostname: &Option<String>) -> bool {
+    let Some(host_value) = headers.get(header::HOST) else {
+        return false;
+    };
+    let Ok(host_str) = host_value.to_str() else {
+        return false;
+    };
+    let host = strip_host_port(host_str);
+    if is_loopback_host(host) {
+        return true;
+    }
+    configured_hostname
+        .as_deref()
+        .is_some_and(|configured| configured.eq_ignore_ascii_case(host))
+}
+
+/// Strips a trailing `:port` from a `Host` header value, respecting an
+/// IPv6 literal's own brackets -- `[::1]:7700` becomes `::1`, not a
+/// truncated fragment of the bracket contents -- since `is_loopback_host`
+/// expects the bracket-free form `std::net::IpAddr::parse` accepts.
+fn strip_host_port(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[') {
+        return match rest.find(']') {
+            Some(end) => &rest[..end],
+            None => rest,
+        };
+    }
+    match host.rsplit_once(':') {
+        Some((h, _port)) => h,
+        None => host,
+    }
 }
 
 /// D1/D6: the bound on `index_page`'s one herdr snapshot. `SocketHerdr::call`
@@ -581,7 +663,10 @@ impl<'de> serde::Deserialize<'de> for RegisterFlag {
             type Value = RegisterFlag;
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "a query string carrying at most one register_error value")
+                write!(
+                    f,
+                    "a query string carrying at most one register_error value"
+                )
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -617,7 +702,11 @@ impl<'de> serde::Deserialize<'de> for RegisterFlag {
                         _ => {}
                     }
                 }
-                Ok(RegisterFlag { register_error, tab, pane })
+                Ok(RegisterFlag {
+                    register_error,
+                    tab,
+                    pane,
+                })
             }
         }
 
@@ -672,9 +761,11 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                     let panes = snapshot
                         .as_ref()
                         .map(|snap| {
-                            waggledance_core::paths_boundary::Boundary::new(vec![p.root_path.clone()])
-                                .map(|boundary| project_panes(snap, &boundary))
-                                .unwrap_or_default()
+                            waggledance_core::paths_boundary::Boundary::new(vec![p
+                                .root_path
+                                .clone()])
+                            .map(|boundary| project_panes(snap, &boundary))
+                            .unwrap_or_default()
                         })
                         .unwrap_or_default();
                     (p, c, panes)
@@ -710,7 +801,8 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
             // `bee_projects` narrows to for the Kanban tab.
             let all_projects: Vec<waggledance_core::domain::Project> =
                 with_counts.iter().map(|(p, _, _)| p.clone()).collect();
-            let terminals_panes = terminals_menu_panes(snapshot.as_ref(), &with_counts, &all_projects);
+            let terminals_panes =
+                terminals_menu_panes(snapshot.as_ref(), &with_counts, &all_projects);
             // D8: `snapshot: None` (the family switch off, or herdr timed
             // out/errored) is indistinguishable at this page, same as every
             // other pane list here — `terminals_tab` reads that as "herdr
@@ -746,8 +838,10 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                     .iter()
                     .map(|(p, r)| (p.id.clone(), project_feature_panes(snapshot.as_ref(), p, r)))
                     .collect();
-                let pairs: Vec<(&waggledance_core::domain::Project, &waggledance_core::bee::BeeProjectRollup)> =
-                    rollups.iter().map(|(p, r)| (p, r)).collect();
+                let pairs: Vec<(
+                    &waggledance_core::domain::Project,
+                    &waggledance_core::bee::BeeProjectRollup,
+                )> = rollups.iter().map(|(p, r)| (p, r)).collect();
                 views::bee_cross_project_features_section(&pairs, &feature_panes)
             };
             // home-terminal-parity-2: the same configured D8 preset labels
@@ -794,13 +888,18 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
 /// task itself is dropped here).
 async fn cross_project_rollup(
     projects: Vec<waggledance_core::domain::Project>,
-) -> Vec<(waggledance_core::domain::Project, waggledance_core::bee::BeeProjectRollup)> {
+) -> Vec<(
+    waggledance_core::domain::Project,
+    waggledance_core::bee::BeeProjectRollup,
+)> {
     let handles: Vec<_> = projects
         .into_iter()
         .map(|project| {
             let root = project.root_path.clone();
             let handle = tokio::task::spawn_blocking(move || {
-                waggledance_core::bee::read_rollup(&[root]).into_iter().next()
+                waggledance_core::bee::read_rollup(&[root])
+                    .into_iter()
+                    .next()
             });
             (project, handle)
         })
@@ -911,7 +1010,10 @@ struct SavedFlag {
     notify_error: Option<String>,
 }
 
-async fn settings_page_handler(State(st): State<AppState>, Query(flag): Query<SavedFlag>) -> Response {
+async fn settings_page_handler(
+    State(st): State<AppState>,
+    Query(flag): Query<SavedFlag>,
+) -> Response {
     // Read fresh from disk so the form reflects the last save (the running daemon
     // still uses its startup config until restarted — noted in the UI).
     let cfg = waggledance_core::Config::load_from(&waggledance_core::config::config_path_override(
@@ -1001,7 +1103,10 @@ struct TerminalConfigJson {
 /// doc). That fail-closed reading is deliberate for this switch: it is the
 /// gate on every herdr pane on the host that lives outside a registered
 /// project, so an ambiguous or partial write must never be read as "on".
-async fn update_terminal_config(State(st): State<AppState>, Json(form): Json<TerminalConfigJson>) -> Response {
+async fn update_terminal_config(
+    State(st): State<AppState>,
+    Json(form): Json<TerminalConfigJson>,
+) -> Response {
     let config_path = waggledance_core::config::config_path_override(st.config_data_dir.as_deref());
     let mut cfg = waggledance_core::Config::load_from(&config_path);
     cfg.terminal.enabled = form.enabled;
@@ -1019,7 +1124,8 @@ async fn update_terminal_config(State(st): State<AppState>, Json(form): Json<Ter
     // Per this cell's own rule (mirroring P1): the credential is never a
     // `Config` field, so it is written to its own owner-only file, not into
     // `cfg` — a blank submission leaves whatever is already on disk alone.
-    let cred_path = waggledance_core::config::notify_credential_path_override(st.config_data_dir.as_deref());
+    let cred_path =
+        waggledance_core::config::notify_credential_path_override(st.config_data_dir.as_deref());
     // agent-terminal-24: the write can fail (permissions, a full disk, a
     // vanished parent dir — `save_notify_credential` already logs the path,
     // never the secret, at `warn` on error). Previously this result was
@@ -1080,8 +1186,7 @@ struct SettingsForm {
 }
 
 async fn update_config(State(st): State<AppState>, Form(form): Form<SettingsForm>) -> Response {
-    let config_path =
-        waggledance_core::config::config_path_override(st.config_data_dir.as_deref());
+    let config_path = waggledance_core::config::config_path_override(st.config_data_dir.as_deref());
     let mut cfg = waggledance_core::Config::load_from(&config_path);
     if let Some(p) = form.port {
         if p >= 1 {
@@ -1456,13 +1561,12 @@ async fn bee_board(State(st): State<AppState>, Path(id): Path<String>) -> Respon
     let Ok(Some(project)) = st.engine.get_project(&id) else {
         return not_found("project not found");
     };
-    let herdr_snapshot = match st.herdr.snapshot().await {
-        Ok(snapshot) => Some(snapshot),
-        Err(_) => None,
-    };
+    let herdr_snapshot = st.herdr.snapshot().await.ok();
     let root = project.root_path.clone();
     let rollup = match tokio::task::spawn_blocking(move || {
-        waggledance_core::bee::read_rollup(&[root]).into_iter().next()
+        waggledance_core::bee::read_rollup(&[root])
+            .into_iter()
+            .next()
     })
     .await
     {
@@ -1473,7 +1577,12 @@ async fn bee_board(State(st): State<AppState>, Path(id): Path<String>) -> Respon
         return not_found("this project has no .bee/ store");
     }
     let feature_panes = project_feature_panes(herdr_snapshot.as_ref(), &project, &rollup);
-    Html(views::bee_board_page(&project, &rollup.snapshot, &feature_panes)).into_response()
+    Html(views::bee_board_page(
+        &project,
+        &rollup.snapshot,
+        &feature_panes,
+    ))
+    .into_response()
 }
 
 /// `GET /p/:id/_bee/cell/:cell_id` — one cell in full (D4): title, action,
@@ -1510,7 +1619,10 @@ async fn bee_cell_detail(
 /// D2 boundary did not already accept. `None` only when `panes` is empty,
 /// which is the honest empty state, not a redirect to a pane that does not
 /// exist.
-fn default_pane_id(panes: &[views::TerminalPaneView], focused_pane_id: Option<&str>) -> Option<String> {
+fn default_pane_id(
+    panes: &[views::TerminalPaneView],
+    focused_pane_id: Option<&str>,
+) -> Option<String> {
     if let Some(focused) = focused_pane_id {
         if panes.iter().any(|p| p.pane_id == focused) {
             return Some(focused.to_string());
@@ -1553,9 +1665,10 @@ async fn terminal_page_inner(
             // A boundary that fails to construct (e.g. a project registered
             // on top of the hard-deny list) can never accept any pane —
             // fail closed to zero panes, not a crash and not a laxer check.
-            let panes = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
-                .map(|boundary| project_panes(&snapshot, &boundary))
-                .unwrap_or_default();
+            let panes =
+                waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+                    .map(|boundary| project_panes(&snapshot, &boundary))
+                    .unwrap_or_default();
             let selected = match requested_pane_id {
                 Some(pane_id) => {
                     if !panes.iter().any(|p| p.pane_id == pane_id) {
@@ -1565,7 +1678,13 @@ async fn terminal_page_inner(
                 }
                 None => default_pane_id(&panes, snapshot.focused_pane_id.as_deref()),
             };
-            Html(views::terminal_page(&project, &panes, selected.as_deref(), &presets)).into_response()
+            Html(views::terminal_page(
+                &project,
+                &panes,
+                selected.as_deref(),
+                &presets,
+            ))
+            .into_response()
         }
         Err(_) => Html(views::terminal_down_page(&project)).into_response(),
     }
@@ -1608,9 +1727,10 @@ async fn transcript_page_inner(
     };
     match st.herdr.snapshot().await {
         Ok(snapshot) => {
-            let panes = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
-                .map(|boundary| project_panes(&snapshot, &boundary))
-                .unwrap_or_default();
+            let panes =
+                waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+                    .map(|boundary| project_panes(&snapshot, &boundary))
+                    .unwrap_or_default();
             let selected = match requested_pane_id {
                 Some(pane_id) => {
                     if !panes.iter().any(|p| p.pane_id == pane_id) {
@@ -1620,7 +1740,12 @@ async fn transcript_page_inner(
                 }
                 None => default_pane_id(&panes, snapshot.focused_pane_id.as_deref()),
             };
-            Html(views::transcript_page(&project, &panes, selected.as_deref())).into_response()
+            Html(views::transcript_page(
+                &project,
+                &panes,
+                selected.as_deref(),
+            ))
+            .into_response()
         }
         Err(_) => Html(views::terminal_down_page(&project)).into_response(),
     }
@@ -1954,8 +2079,7 @@ async fn scroll_aware_read(
     // A genuine "load older" request: requested > 0.
     match st.scroll_tracker.get(pane_id) {
         None => {
-            let (read, strategy, reached) =
-                scroller.read_to_depth(pane_id, 0, requested).await?;
+            let (read, strategy, reached) = scroller.read_to_depth(pane_id, 0, requested).await?;
             if strategy == herdr::pane_scroller::ScrollStrategy::EscapeInjection {
                 // D: record the depth ACTUALLY reached, not the requested
                 // one — they differ when the hop loop broke early (the
@@ -1969,8 +2093,7 @@ async fn scroll_aware_read(
                 .herdr
                 .read_pane(pane_id, herdr::ReadSource::Visible, 0)
                 .await?;
-            if herdr::pane_scroller::normalized_content_diverges(&current.text, &record.last_text)
-            {
+            if herdr::pane_scroller::normalized_content_diverges(&current.text, &record.last_text) {
                 // Rail: something else moved this pane since the record was
                 // made (another operator, a reply sent, the agent's own
                 // redraw) — the remembered depth can no longer be trusted
@@ -2043,11 +2166,12 @@ async fn terminal_screen(
         Ok(s) => s,
         Err(_) => return herdr_down_response(),
     };
-    let in_project = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
-        .map(|boundary| project_panes(&snapshot, &boundary))
-        .unwrap_or_default()
-        .iter()
-        .any(|p| p.pane_id == pane_id);
+    let in_project =
+        waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+            .map(|boundary| project_panes(&snapshot, &boundary))
+            .unwrap_or_default()
+            .iter()
+            .any(|p| p.pane_id == pane_id);
     if !in_project {
         return not_found("pane not found");
     }
@@ -2120,11 +2244,12 @@ async fn project_and_verify_pane_in_boundary(
         Ok(s) => s,
         Err(_) => return Err(herdr_down_response()),
     };
-    let in_project = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
-        .map(|boundary| project_panes(&snapshot, &boundary))
-        .unwrap_or_default()
-        .iter()
-        .any(|p| p.pane_id == pane_id);
+    let in_project =
+        waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+            .map(|boundary| project_panes(&snapshot, &boundary))
+            .unwrap_or_default()
+            .iter()
+            .any(|p| p.pane_id == pane_id);
     if !in_project {
         return Err(not_found("pane not found"));
     }
@@ -2217,7 +2342,9 @@ async fn terminal_transcript(
         Err(refusal) => return refusal,
     };
     let result = match st.transcript_root.as_deref() {
-        Some(root) => waggledance_core::transcript::read_activity_at(root, &cwd, q.cursor.as_deref()),
+        Some(root) => {
+            waggledance_core::transcript::read_activity_at(root, &cwd, q.cursor.as_deref())
+        }
         None => waggledance_core::transcript::read_activity(&cwd, q.cursor.as_deref()),
     };
     match result {
@@ -2227,7 +2354,8 @@ async fn terminal_transcript(
                 .iter()
                 .map(|l| waggledance_core::ansi::to_html(l))
                 .collect();
-            Json(json!({ "available": true, "lines": lines, "cursor": chunk.cursor })).into_response()
+            Json(json!({ "available": true, "lines": lines, "cursor": chunk.cursor }))
+                .into_response()
         }
         Err(waggledance_core::transcript::TranscriptError::NotAvailable) => {
             Json(json!({ "available": false })).into_response()
@@ -2237,7 +2365,9 @@ async fn terminal_transcript(
             Json(json!({ "error": "bad activity cursor" })),
         )
             .into_response(),
-        Err(waggledance_core::transcript::TranscriptError::Io(_)) => transcript_read_failed_response(),
+        Err(waggledance_core::transcript::TranscriptError::Io(_)) => {
+            transcript_read_failed_response()
+        }
     }
 }
 
@@ -2446,7 +2576,13 @@ fn attach_bytes_match_mime(mime: &str, bytes: &[u8]) -> bool {
 fn sanitize_attach_segment(raw: &str) -> String {
     let mapped: String = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     if mapped.is_empty() {
         "-".to_string()
@@ -2563,13 +2699,19 @@ async fn terminal_attach(
     }
     if let Err(e) = std::fs::create_dir_all(&pane_dir) {
         tracing::warn!("attach dir create failed ({e})");
-        return attach_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to store the upload");
+        return attach_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to store the upload",
+        );
     }
     let leaf = format!("{:032x}.{ext}", rand::random::<u128>());
     let path = pane_dir.join(leaf);
     if let Err(e) = std::fs::write(&path, &body) {
         tracing::warn!("attach write failed ({e})");
-        return attach_error(StatusCode::INTERNAL_SERVER_ERROR, "failed to store the upload");
+        return attach_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to store the upload",
+        );
     }
 
     Json(json!({ "path": path.to_string_lossy() })).into_response()
@@ -2609,7 +2751,10 @@ fn project_creation_destination(
         let resolved = boundary
             .validate_existing(std::path::Path::new(&anchor))
             .ok()?;
-        Some((w.workspace_id.clone(), resolved.to_string_lossy().into_owned()))
+        Some((
+            w.workspace_id.clone(),
+            resolved.to_string_lossy().into_owned(),
+        ))
     })
 }
 
@@ -2693,7 +2838,8 @@ async fn terminal_create_pane(
         Ok(s) => s,
         Err(_) => return herdr_down_response(),
     };
-    let Ok(boundary) = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+    let Ok(boundary) =
+        waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
     else {
         return destination_unresolved_response(&project.id);
     };
@@ -2737,7 +2883,12 @@ async fn terminal_create_agent(
     let cfg = waggledance_core::Config::load_from(&waggledance_core::config::config_path_override(
         st.config_data_dir.as_deref(),
     ));
-    let Some(preset) = cfg.terminal.agent_presets.iter().find(|p| p.label == body.preset) else {
+    let Some(preset) = cfg
+        .terminal
+        .agent_presets
+        .iter()
+        .find(|p| p.label == body.preset)
+    else {
         return unknown_preset_response(&body.preset);
     };
     let argv = preset.argv.clone();
@@ -2745,7 +2896,8 @@ async fn terminal_create_agent(
         Ok(s) => s,
         Err(_) => return herdr_down_response(),
     };
-    let Ok(boundary) = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+    let Ok(boundary) =
+        waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
     else {
         return destination_unresolved_response(&project.id);
     };
@@ -2801,9 +2953,9 @@ fn project_panes(
                 .as_deref()
                 .and_then(|raw| boundary.validate_existing(std::path::Path::new(raw)).ok())
                 .or_else(|| {
-                    pane.foreground_cwd.as_deref().and_then(|raw| {
-                        boundary.validate_existing(std::path::Path::new(raw)).ok()
-                    })
+                    pane.foreground_cwd
+                        .as_deref()
+                        .and_then(|raw| boundary.validate_existing(std::path::Path::new(raw)).ok())
                 })?;
             let agent = snapshot.agents.iter().find(|a| a.pane_id == pane.pane_id);
             Some(views::TerminalPaneView {
@@ -2881,7 +3033,9 @@ fn project_feature_panes(
         out.insert(feature.to_string(), project_panes(snap, &boundary));
     }
 
-    let Ok(project_boundary) = waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()]) else {
+    let Ok(project_boundary) =
+        waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+    else {
         return out;
     };
     let main_panes = project_panes(snap, &project_boundary);
@@ -2944,7 +3098,11 @@ fn unassigned_panes(
     for p in projects {
         match waggledance_core::paths_boundary::Boundary::new(vec![p.root_path.clone()]) {
             Ok(boundary) => {
-                assigned.extend(project_panes(snapshot, &boundary).into_iter().map(|pane| pane.pane_id));
+                assigned.extend(
+                    project_panes(snapshot, &boundary)
+                        .into_iter()
+                        .map(|pane| pane.pane_id),
+                );
             }
             Err(_) => {
                 // Fail closed: this project's own panes cannot be told apart
@@ -3003,7 +3161,11 @@ fn unassigned_panes(
 /// outside every registered project unconditionally.
 fn terminals_menu_panes(
     snapshot: Option<&herdr::Snapshot>,
-    with_counts: &[(waggledance_core::domain::Project, usize, Vec<views::TerminalPaneView>)],
+    with_counts: &[(
+        waggledance_core::domain::Project,
+        usize,
+        Vec<views::TerminalPaneView>,
+    )],
     projects: &[waggledance_core::domain::Project],
 ) -> Vec<views::TerminalsMenuPane> {
     let Some(snap) = snapshot else {
@@ -3313,7 +3475,10 @@ async fn unassigned_terminal_page(State(st): State<AppState>) -> Response {
 /// falling through to an empty project list, which would have made every
 /// pane in the system, including ones inside a real project's boundary,
 /// verify as unassigned.
-async fn verify_pane_is_unassigned(st: &AppState, pane_id: &str) -> std::result::Result<(), Response> {
+async fn verify_pane_is_unassigned(
+    st: &AppState,
+    pane_id: &str,
+) -> std::result::Result<(), Response> {
     let Ok(projects) = st.engine.list_projects() else {
         return Err(not_found("pane not found"));
     };
@@ -3353,7 +3518,9 @@ async fn unassigned_terminal_screen(
             // An unassigned pane's screen carries no project to link a doc
             // path into, but a URL an agent printed is absolute on its own —
             // this path needs no project base to linkify it.
-            let html = waggledance_core::doc_links::linkify_urls(&waggledance_core::ansi::to_html(&read.text));
+            let html = waggledance_core::doc_links::linkify_urls(&waggledance_core::ansi::to_html(
+                &read.text,
+            ));
             Json(json!({ "text": html, "revision": revision })).into_response()
         }
         Err(herdr::HerdrError::NoSuchPane(_)) => not_found("pane not found"),
@@ -3441,9 +3608,14 @@ async fn bee_feature_detail(
         return not_found("this project has no .bee/ store");
     }
 
-    let by_feature = |cells: &[waggledance_core::bee::BeeCell]| -> Vec<waggledance_core::bee::BeeCell> {
-        cells.iter().filter(|c| c.feature == feature).cloned().collect()
-    };
+    let by_feature =
+        |cells: &[waggledance_core::bee::BeeCell]| -> Vec<waggledance_core::bee::BeeCell> {
+            cells
+                .iter()
+                .filter(|c| c.feature == feature)
+                .cloned()
+                .collect()
+        };
     let mut buckets = waggledance_core::bee::BeeBuckets {
         doing: by_feature(&snapshot.buckets.doing),
         waiting: by_feature(&snapshot.buckets.waiting),
@@ -3463,7 +3635,8 @@ async fn bee_feature_detail(
     // must never keep the header from reading Closed.
     let archived_cells = waggledance_core::bee::read_archived_cells(&project.root_path, &feature);
     let has_archived = !archived_cells.is_empty();
-    let is_closed = has_archived && buckets.doing.is_empty() && buckets.waiting.is_empty() && shipped.is_none();
+    let is_closed =
+        has_archived && buckets.doing.is_empty() && buckets.waiting.is_empty() && shipped.is_none();
 
     for cell in archived_cells {
         match cell.status.as_str() {
@@ -3504,20 +3677,34 @@ async fn bee_feature_detail(
     // active feature (the only feature `state.json` can ever speak for) —
     // and neither when this feature is known only through its cells or the
     // archive, exactly the "when present" the cell's own action names.
-    let is_active_feature = snapshot.state.as_ref().and_then(|s| s.feature.as_deref()) == Some(feature.as_str());
+    let is_active_feature =
+        snapshot.state.as_ref().and_then(|s| s.feature.as_deref()) == Some(feature.as_str());
     let lane_record = snapshot.lanes.iter().find(|l| l.feature == feature);
     let lane_label: Option<String> = lane_record
         .and_then(|l| l.route.as_ref())
         .and_then(|r| r.lane.clone())
         .or_else(|| {
             is_active_feature
-                .then(|| snapshot.state.as_ref().and_then(|s| s.route.as_ref()).and_then(|r| r.lane.clone()))
+                .then(|| {
+                    snapshot
+                        .state
+                        .as_ref()
+                        .and_then(|s| s.route.as_ref())
+                        .and_then(|r| r.lane.clone())
+                })
                 .flatten()
         });
     let gates: Option<&waggledance_core::bee::BeeApprovedGates> = lane_record
         .and_then(|l| l.approved_gates.as_ref())
         .or_else(|| {
-            is_active_feature.then(|| snapshot.state.as_ref().and_then(|s| s.approved_gates.as_ref())).flatten()
+            is_active_feature
+                .then(|| {
+                    snapshot
+                        .state
+                        .as_ref()
+                        .and_then(|s| s.approved_gates.as_ref())
+                })
+                .flatten()
         });
 
     // Activity's timeline: `.bee/decisions.jsonl`'s own recent-decide window
@@ -3539,9 +3726,11 @@ async fn bee_feature_detail(
     // and never a laxer check than the terminal family's own routes apply.
     let panes: Vec<views::TerminalPaneView> = if terminal_family_enabled(&st) {
         match st.herdr.snapshot().await {
-            Ok(herdr_snapshot) => waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
-                .map(|boundary| project_panes(&herdr_snapshot, &boundary))
-                .unwrap_or_default(),
+            Ok(herdr_snapshot) => {
+                waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+                    .map(|boundary| project_panes(&herdr_snapshot, &boundary))
+                    .unwrap_or_default()
+            }
             Err(_) => Vec::new(),
         }
     } else {
@@ -3585,7 +3774,8 @@ async fn bee_pbi_detail(
     let Some(pbi) = snapshot.backlog.pbis.iter().find(|p| p.id == pbi_id) else {
         return not_found("pbi not found");
     };
-    let feature_known = !pbi.feature.is_empty() && bee_pbi_feature_is_known(&project.root_path, &snapshot, &pbi.feature);
+    let feature_known = !pbi.feature.is_empty()
+        && bee_pbi_feature_is_known(&project.root_path, &snapshot, &pbi.feature);
     Html(views::bee_pbi_page(&project, pbi, feature_known)).into_response()
 }
 
@@ -3594,11 +3784,19 @@ async fn bee_pbi_detail(
 /// tests (shipped, archived, any live bucket, or a `phase_board` entry),
 /// minus the buckets/lane/gate work that route needs and this link does
 /// not: a PBI whose feature would 404 must never be linked at all.
-fn bee_pbi_feature_is_known(root: &std::path::Path, snapshot: &waggledance_core::bee::BeeSnapshot, feature: &str) -> bool {
+fn bee_pbi_feature_is_known(
+    root: &std::path::Path,
+    snapshot: &waggledance_core::bee::BeeSnapshot,
+    feature: &str,
+) -> bool {
     snapshot.shipped.iter().any(|f| f.feature == feature)
         || snapshot.phase_board.iter().any(|f| f.feature == feature)
         || snapshot.buckets.doing.iter().any(|c| c.feature == feature)
-        || snapshot.buckets.waiting.iter().any(|c| c.feature == feature)
+        || snapshot
+            .buckets
+            .waiting
+            .iter()
+            .any(|c| c.feature == feature)
         || snapshot.buckets.stuck.iter().any(|c| c.feature == feature)
         || snapshot.buckets.done.iter().any(|c| c.feature == feature)
         || !waggledance_core::bee::read_archived_cells(root, feature).is_empty()
@@ -3705,15 +3903,22 @@ fn cell_full_from_json(v: &serde_json::Value, root: &std::path::Path) -> views::
     use serde_json::Value;
 
     let str_field = |key: &str| -> String {
-        v.get(key).and_then(Value::as_str).unwrap_or_default().to_string()
+        v.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
     };
-    let opt_str_field = |key: &str| -> Option<String> {
-        v.get(key).and_then(Value::as_str).map(String::from)
-    };
+    let opt_str_field =
+        |key: &str| -> Option<String> { v.get(key).and_then(Value::as_str).map(String::from) };
     let str_array = |key: &str| -> Vec<String> {
         v.get(key)
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let path_array = |key: &str| -> Vec<String> {
@@ -3732,7 +3937,12 @@ fn cell_full_from_json(v: &serde_json::Value, root: &std::path::Path) -> views::
         .get("must_haves")
         .and_then(|m| m.get("truths"))
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(Value::as_str).map(String::from).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
 
     let trace = v.get("trace");
@@ -3764,13 +3974,20 @@ fn cell_full_from_json(v: &serde_json::Value, root: &std::path::Path) -> views::
                 .map(|d| {
                     d.as_str()
                         .map(String::from)
-                        .or_else(|| d.get("description").and_then(Value::as_str).map(String::from))
+                        .or_else(|| {
+                            d.get("description")
+                                .and_then(Value::as_str)
+                                .map(String::from)
+                        })
                         .unwrap_or_else(|| d.to_string())
                 })
                 .collect()
         })
         .unwrap_or_default();
-    let tests = trace.and_then(|t| t.get("tests")).and_then(Value::as_str).map(String::from);
+    let tests = trace
+        .and_then(|t| t.get("tests"))
+        .and_then(Value::as_str)
+        .map(String::from);
     let results = trace
         .and_then(|t| t.get("results"))
         .and_then(Value::as_str)
@@ -4355,11 +4572,11 @@ mod bee_route_tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
-    use waggledance_core::domain::Project;
-    use waggledance_core::{Config, SqliteStore};
     use std::path::{Path, PathBuf};
     use std::time::Duration;
     use tower::ServiceExt;
+    use waggledance_core::domain::Project;
+    use waggledance_core::{Config, SqliteStore};
 
     fn fresh_root(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -4461,9 +4678,15 @@ mod bee_route_tests {
     }
 
     async fn get(app: Router, uri: &str) -> Response {
-        app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap()
+        app.oneshot(
+            Request::builder()
+                .header(header::HOST, "127.0.0.1")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
     }
 
     async fn body_string(resp: Response) -> String {
@@ -4525,7 +4748,11 @@ mod bee_route_tests {
             for entry in std::fs::read_dir(cur).unwrap() {
                 let entry = entry.unwrap();
                 let path = entry.path();
-                let rel = path.strip_prefix(base).unwrap().to_string_lossy().into_owned();
+                let rel = path
+                    .strip_prefix(base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
                 if path.is_dir() {
                     out.push(TreeEntry::Dir(rel));
                     walk(base, &path, out);
@@ -4600,9 +4827,20 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/todo-feat.json",
-            &lane_json("todo-feat", "swarming", "standard", "keep going", None, None),
+            &lane_json(
+                "todo-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                None,
+                None,
+            ),
         );
-        write(&root, ".bee/cells/a.json", &feature_cell_json("wf-1", "todo-feat", "open", None, None));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("wf-1", "todo-feat", "open", None, None),
+        );
         write(
             &root,
             ".bee/lanes/gated-feat.json",
@@ -4615,7 +4853,11 @@ mod bee_route_tests {
                 None,
             ),
         );
-        write(&root, ".bee/cells/c.json", &feature_cell_json("gf-1", "gated-feat", "claimed", None, None));
+        write(
+            &root,
+            ".bee/cells/c.json",
+            &feature_cell_json("gf-1", "gated-feat", "claimed", None, None),
+        );
         write(
             &root,
             ".bee/lanes/progress-feat.json",
@@ -4628,11 +4870,22 @@ mod bee_route_tests {
                 None,
             ),
         );
-        write(&root, ".bee/cells/b.json", &feature_cell_json("pf-1", "progress-feat", "claimed", None, None));
+        write(
+            &root,
+            ".bee/cells/b.json",
+            &feature_cell_json("pf-1", "progress-feat", "claimed", None, None),
+        );
         write(
             &root,
             ".bee/lanes/review-feat.json",
-            &lane_json("review-feat", "swarming", "standard", "keep going", None, None),
+            &lane_json(
+                "review-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                None,
+                None,
+            ),
         );
         write(
             &root,
@@ -4642,12 +4895,26 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/compound-feat.json",
-            &lane_json("compound-feat", "compounding", "standard", "none", None, None),
+            &lane_json(
+                "compound-feat",
+                "compounding",
+                "standard",
+                "none",
+                None,
+                None,
+            ),
         );
         write(
             &root,
             ".bee/lanes/finished-feat.json",
-            &lane_json("finished-feat", "compounding-complete", "standard", "none", None, None),
+            &lane_json(
+                "finished-feat",
+                "compounding-complete",
+                "standard",
+                "none",
+                None,
+                None,
+            ),
         );
         write(
             &root,
@@ -4663,7 +4930,12 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/runtime/workspaces/finished-feat-wt.json",
-            &workspace_json("finished-feat-wt", "/tmp/nonexistent-finished-feat-wt", "wt/finished-feat", &[]),
+            &workspace_json(
+                "finished-feat-wt",
+                "/tmp/nonexistent-finished-feat-wt",
+                "wt/finished-feat",
+                &[],
+            ),
         );
 
         let st = build_state();
@@ -4672,11 +4944,26 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"1\""), "{body}");
-        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"2\""), "{body}");
-        assert!(body.contains("data-hub-group=\"review\" data-hub-count=\"1\""), "{body}");
-        assert!(body.contains("data-hub-group=\"compound\" data-hub-count=\"1\""), "{body}");
-        assert!(body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""), "{body}");
+        assert!(
+            body.contains("data-hub-group=\"todo\" data-hub-count=\"1\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"2\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"review\" data-hub-count=\"1\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"compound\" data-hub-count=\"1\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""),
+            "{body}"
+        );
 
         assert!(
             body.contains(&format!(
@@ -4762,7 +5049,10 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""), "{body}");
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""),
+            "{body}"
+        );
         assert!(
             body.contains("data-hub-group=\"compound\" href=\"/p/") && body.contains("stale-feat"),
             "a stale lane with zero live cells honestly places under Compound, per its own phase: {body}"
@@ -4805,7 +5095,10 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""), "{body}");
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""),
+            "{body}"
+        );
         assert_eq!(
             body.matches(&format!(
                 "bee-hub__detail-link\" href=\"/p/{}/_bee/feature/handoff-feat\"",
@@ -4901,7 +5194,11 @@ mod bee_route_tests {
                 Some(&rfc3339_minutes_ago(30)),
             ),
         );
-        write(&root, ".bee/cells/archive/orphan-feat/b.json", &feature_cell_json("of-2", "orphan-feat", "dropped", None, None));
+        write(
+            &root,
+            ".bee/cells/archive/orphan-feat/b.json",
+            &feature_cell_json("of-2", "orphan-feat", "dropped", None, None),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "hub-archive-only");
@@ -4909,9 +5206,15 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""), "{body}");
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/orphan-feat\"", project.id)),
+            body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/orphan-feat\"",
+                project.id
+            )),
             "the archive-only feature must still link to its own detail page: {body}"
         );
 
@@ -4933,7 +5236,14 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/wound-down-feat.json",
-            &lane_json("wound-down-feat", "compounding", "standard", "none", None, None),
+            &lane_json(
+                "wound-down-feat",
+                "compounding",
+                "standard",
+                "none",
+                None,
+                None,
+            ),
         );
         write(
             &root,
@@ -4953,15 +5263,30 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""), "{body}");
+        assert!(
+            body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""),
+            "{body}"
+        );
         assert!(
             body.contains(&format!("href=\"/p/{}/_bee/feature/wound-down-feat\"", project.id)),
             "an archived feature whose lane phase never reached compounding-complete must still render under Finished: {body}"
         );
-        assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"0\""), "{body}");
-        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""), "{body}");
-        assert!(body.contains("data-hub-group=\"review\" data-hub-count=\"0\""), "{body}");
-        assert!(body.contains("data-hub-group=\"compound\" data-hub-count=\"0\""), "{body}");
+        assert!(
+            body.contains("data-hub-group=\"todo\" data-hub-count=\"0\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"review\" data-hub-count=\"0\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"compound\" data-hub-count=\"0\""),
+            "{body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -4982,15 +5307,35 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/wt-feat.json",
-            &lane_json("wt-feat", "compounding-complete", "standard", "none", None, None),
+            &lane_json(
+                "wt-feat",
+                "compounding-complete",
+                "standard",
+                "none",
+                None,
+                None,
+            ),
         );
         let sibling = make_worktree_sibling("feature-hub-1-wt-still-open");
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"wt-feat","mode":"standard"}"#);
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["feature-hub-1-wt-still-open"]));
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"wt-feat","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["feature-hub-1-wt-still-open"]),
+        );
         write(
             &root,
             ".bee/runtime/workspaces/w.json",
-            &workspace_json("feature-hub-1-wt-still-open", &sibling.to_string_lossy(), "wt/wt-feat", &[]),
+            &workspace_json(
+                "feature-hub-1-wt-still-open",
+                &sibling.to_string_lossy(),
+                "wt/wt-feat",
+                &[],
+            ),
         );
 
         let st = build_state();
@@ -4999,7 +5344,10 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""), "{body}");
+        assert!(
+            body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""),
+            "{body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&sibling).ok();
@@ -5012,7 +5360,8 @@ mod bee_route_tests {
     /// cell closes, reported while every cell was capped between units of
     /// work but two sessions were still actively on the repo.
     #[tokio::test]
-    async fn feature_hub_places_session_bound_and_worktree_bound_zero_cell_features_under_in_progress() {
+    async fn feature_hub_places_session_bound_and_worktree_bound_zero_cell_features_under_in_progress(
+    ) {
         let root = fresh_root("hub-liveness-union");
         write(
             &root,
@@ -5048,8 +5397,16 @@ mod bee_route_tests {
             ),
         );
         let sibling = make_worktree_sibling("hub-liveness-union-wt");
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"wt-live-feat","mode":"standard"}"#);
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["hub-liveness-union-wt"]));
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"wt-live-feat","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["hub-liveness-union-wt"]),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "hub-liveness-union");
@@ -5057,16 +5414,28 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"2\""), "{body}");
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/session-live-feat\"", project.id)),
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"2\""),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/session-live-feat\"",
+                project.id
+            )),
             "the session-bound zero-cell feature must render under In Progress: {body}"
         );
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/wt-live-feat\"", project.id)),
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/wt-live-feat\"",
+                project.id
+            )),
             "the worktree-bound zero-cell feature must render under In Progress: {body}"
         );
-        assert!(!body.contains("Waiting on you"), "with every gate approved, neither card carries a Waiting on you line: {body}");
+        assert!(
+            !body.contains("Waiting on you"),
+            "with every gate approved, neither card carries a Waiting on you line: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&sibling).ok();
@@ -5122,9 +5491,20 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/todo-feat.json",
-            &lane_json("todo-feat", "swarming", "standard", "keep going", None, None),
+            &lane_json(
+                "todo-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                None,
+                None,
+            ),
         );
-        write(&root, ".bee/cells/a.json", &feature_cell_json("wf-1", "todo-feat", "open", None, None));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("wf-1", "todo-feat", "open", None, None),
+        );
         write(
             &root,
             ".bee/backlog.jsonl",
@@ -5137,13 +5517,32 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"2\""), "{body}");
-        let feature_href = format!("data-hub-group=\"todo\" href=\"/p/{}/_bee/feature/todo-feat\"", project.id);
-        let pbi_href = format!("data-hub-group=\"todo\" href=\"/p/{}/_bee/pbi/PBI-1\"", project.id);
-        let feature_pos = body.find(&feature_href).expect(&format!("the feature row must render: {body}"));
-        let pbi_pos = body.find(&pbi_href).expect(&format!("the PBI row must render, linked to its own detail page: {body}"));
-        assert!(pbi_pos > feature_pos, "the PBI row must sit below the feature row within Todo: {body}");
-        assert!(body.contains("Ship the widget"), "the PBI's own title must render: {body}");
+        assert!(
+            body.contains("data-hub-group=\"todo\" data-hub-count=\"2\""),
+            "{body}"
+        );
+        let feature_href = format!(
+            "data-hub-group=\"todo\" href=\"/p/{}/_bee/feature/todo-feat\"",
+            project.id
+        );
+        let pbi_href = format!(
+            "data-hub-group=\"todo\" href=\"/p/{}/_bee/pbi/PBI-1\"",
+            project.id
+        );
+        let feature_pos = body
+            .find(&feature_href)
+            .unwrap_or_else(|| panic!("the feature row must render: {body}"));
+        let pbi_pos = body.find(&pbi_href).unwrap_or_else(|| {
+            panic!("the PBI row must render, linked to its own detail page: {body}")
+        });
+        assert!(
+            pbi_pos > feature_pos,
+            "the PBI row must sit below the feature row within Todo: {body}"
+        );
+        assert!(
+            body.contains("Ship the widget"),
+            "the PBI's own title must render: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5168,9 +5567,15 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"0\""), "{body}");
         assert!(
-            !body.contains(&format!("data-hub-group=\"todo\" href=\"/p/{}/_bee\"", project.id)),
+            body.contains("data-hub-group=\"todo\" data-hub-count=\"0\""),
+            "{body}"
+        );
+        assert!(
+            !body.contains(&format!(
+                "data-hub-group=\"todo\" href=\"/p/{}/_bee\"",
+                project.id
+            )),
             "no PBI row may render for a non-proposed status: {body}"
         );
 
@@ -5196,7 +5601,10 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"todo\" data-hub-count=\"1\""), "{body}");
+        assert!(
+            body.contains("data-hub-group=\"todo\" data-hub-count=\"1\""),
+            "{body}"
+        );
         assert!(
             body.contains(&format!("data-hub-group=\"todo\" href=\"/p/{}/_bee/pbi/PBI-1\"", project.id)),
             "a PBI whose feature names no lane must still render a working link to its own detail page: {body}"
@@ -5215,9 +5623,20 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/todo-feat.json",
-            &lane_json("todo-feat", "swarming", "standard", "keep going", None, None),
+            &lane_json(
+                "todo-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                None,
+                None,
+            ),
         );
-        write(&root, ".bee/cells/a.json", &feature_cell_json("wf-1", "todo-feat", "open", None, None));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("wf-1", "todo-feat", "open", None, None),
+        );
         write(
             &root,
             ".bee/backlog.jsonl",
@@ -5230,11 +5649,23 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("Ship the widget"), "the PBI's own title must render: {body}");
-        assert!(body.contains("proposed"), "the PBI's own status must render: {body}");
-        assert!(body.contains("widget ships"), "the PBI's own condition-of-satisfaction text must render: {body}");
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/todo-feat\"", project.id)),
+            body.contains("Ship the widget"),
+            "the PBI's own title must render: {body}"
+        );
+        assert!(
+            body.contains("proposed"),
+            "the PBI's own status must render: {body}"
+        );
+        assert!(
+            body.contains("widget ships"),
+            "the PBI's own condition-of-satisfaction text must render: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/todo-feat\"",
+                project.id
+            )),
             "the owning feature, known to the snapshot, must be linked: {body}"
         );
 
@@ -5260,9 +5691,15 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("never-lane-feature"), "the unknown feature must still be named: {body}");
         assert!(
-            !body.contains(&format!("href=\"/p/{}/_bee/feature/never-lane-feature\"", project.id)),
+            body.contains("never-lane-feature"),
+            "the unknown feature must still be named: {body}"
+        );
+        assert!(
+            !body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/never-lane-feature\"",
+                project.id
+            )),
             "a feature the snapshot does not know must never be linked: {body}"
         );
 
@@ -5282,7 +5719,11 @@ mod bee_route_tests {
 
         let st = build_state();
         let project = register(&st, &root, "pbi-detail-unknown-id");
-        let resp = get(router(st), &format!("/p/{}/_bee/pbi/does-not-exist", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/pbi/does-not-exist", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         std::fs::remove_dir_all(&root).ok();
@@ -5310,7 +5751,11 @@ mod bee_route_tests {
                 None,
             ),
         );
-        write(&root, ".bee/cells/a.json", &feature_cell_json("ro-1", "review-only-feat", "claimed", None, None));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("ro-1", "review-only-feat", "claimed", None, None),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "hub-review-only-gate");
@@ -5318,7 +5763,10 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""), "{body}");
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""),
+            "{body}"
+        );
         assert!(
             body.contains(&format!("href=\"/p/{}/_bee/feature/review-only-feat\"", project.id)),
             "a feature with only the review gate outstanding must still render, under In Progress: {body}"
@@ -5350,7 +5798,11 @@ mod bee_route_tests {
                 None,
             ),
         );
-        write(&root, ".bee/cells/a.json", &feature_cell_json("bf-1", "both-feat", "claimed", None, None));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("bf-1", "both-feat", "claimed", None, None),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "hub-priority");
@@ -5358,13 +5810,19 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""), "{body}");
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""),
+            "{body}"
+        );
         assert_eq!(
             body.matches("bee-hub__detail-link\" href=\"").count(),
             1,
             "the feature must render exactly one In Progress card, never counted in a second group: {body}"
         );
-        assert!(body.contains("Waiting on you — Execute gate awaiting your decision"), "{body}");
+        assert!(
+            body.contains("Waiting on you — Execute gate awaiting your decision"),
+            "{body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5379,7 +5837,14 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/terminal-feat.json",
-            &lane_json("terminal-feat", "compounding-complete", "standard", "none", None, None),
+            &lane_json(
+                "terminal-feat",
+                "compounding-complete",
+                "standard",
+                "none",
+                None,
+                None,
+            ),
         );
         write(
             &root,
@@ -5414,7 +5879,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn feature_hub_theme_tokens_render_for_both_light_and_dark() {
         let root = fresh_root("hub-theme");
-        write(&root, ".bee/cells/a.json", &cell_json("r1", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("r1", "open", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "hub-theme");
@@ -5445,7 +5914,6 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&root).ok();
     }
-
 
     #[tokio::test]
     async fn no_bee_dir_is_not_found_route_and_no_home_page_entry_point() {
@@ -5480,7 +5948,11 @@ mod bee_route_tests {
         // present, not two unrelated code paths.
         let root = fresh_root("home-entry");
         write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
-        write(&root, ".bee/cells/a.json", &cell_json("c1", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("c1", "open", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "home-entry");
@@ -5502,7 +5974,8 @@ mod bee_route_tests {
     /// `home_page_cross_project_card_badges_the_pane_in_its_own_checkout_and_no_other_card`
     /// above).
     #[tokio::test]
-    async fn bee_board_renders_terminal_badges_for_an_in_progress_feature_with_a_pane_in_its_checkout() {
+    async fn bee_board_renders_terminal_badges_for_an_in_progress_feature_with_a_pane_in_its_checkout(
+    ) {
         use crate::herdr::fake::FakeHerdr;
 
         let config_dir = fresh_root("bee-board-terminals-config");
@@ -5525,11 +5998,17 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/feat-badged\"", project.id)),
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/feat-badged\"",
+                project.id
+            )),
             "the feature's own card must still render: {body}"
         );
         assert!(
-            body.contains(&format!("href=\"/p/{}/_terminal/pane/{}\"", project.id, pane.pane_id)),
+            body.contains(&format!(
+                "href=\"/p/{}/_terminal/pane/{}\"",
+                project.id, pane.pane_id
+            )),
             "the card must badge the pane running in its own checkout: {body}"
         );
         assert!(
@@ -5570,7 +6049,10 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/feat-quiet\"", project.id)),
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/feat-quiet\"",
+                project.id
+            )),
             "the board must still render the feature's own card with herdr down: {body}"
         );
         assert!(
@@ -5586,18 +6068,12 @@ mod bee_route_tests {
     async fn no_absolute_path_or_fixture_root_in_response_body() {
         let root = fresh_root("security");
         let root_str = root.to_string_lossy().into_owned();
-        let inside_abs = root
-            .join("src/inside.rs")
-            .to_string_lossy()
-            .into_owned();
+        let inside_abs = root.join("src/inside.rs").to_string_lossy().into_owned();
         let outside_abs = std::env::temp_dir()
             .join("waggledance-server-bee-outside-file.rs")
             .to_string_lossy()
             .into_owned();
-        let worker_abs = root
-            .join("workers/reader-1")
-            .to_string_lossy()
-            .into_owned();
+        let worker_abs = root.join("workers/reader-1").to_string_lossy().into_owned();
 
         write(
             &root,
@@ -5648,7 +6124,11 @@ mod bee_route_tests {
         let root = fresh_root("read-only");
         write(&root, "README.md", "# hi");
         write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
-        write(&root, ".bee/cells/a.json", &cell_json("a", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("a", "open", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "read-only");
@@ -5787,7 +6267,11 @@ mod bee_route_tests {
                 "2026-08-04T08:24:00Z",
             ),
         );
-        write(&root, ".bee/cells/open.json", &cell_json("a", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/open.json",
+            &cell_json("a", "open", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "velocity-read-only");
@@ -5803,7 +6287,13 @@ mod bee_route_tests {
 
     // ── bee-cockpit-6: backlog / sessions / lanes panels ──────────────────
 
-    fn session_json(id: &str, last_heartbeat: &str, transcript_path: &str, workspace_id: &str, source: &str) -> String {
+    fn session_json(
+        id: &str,
+        last_heartbeat: &str,
+        transcript_path: &str,
+        workspace_id: &str,
+        source: &str,
+    ) -> String {
         format!(
             r#"{{
                 "id": "{id}",
@@ -5835,8 +6325,9 @@ mod bee_route_tests {
         let gates_field = approved_gates
             .map(|g| format!(r#", "approved_gates": {{{g}}}"#))
             .unwrap_or_default();
-        let created_at_field =
-            created_at.map(|c| format!(r#", "created_at": "{c}""#)).unwrap_or_default();
+        let created_at_field = created_at
+            .map(|c| format!(r#", "created_at": "{c}""#))
+            .unwrap_or_default();
         format!(
             r#"{{"feature": "{feature}", "phase": "{phase}", "mode": "{mode}", "next_action": "{next_action}"{gates_field}{created_at_field}}}"#
         )
@@ -5900,7 +6391,10 @@ mod bee_route_tests {
             !body.contains("Findings by severity"),
             "the findings block is gone from the board: {body}"
         );
-        assert!(!body.contains("P1: 1") && !body.contains("P2: 1"), "no severity chips remain: {body}");
+        assert!(
+            !body.contains("P1: 1") && !body.contains("P2: 1"),
+            "no severity chips remain: {body}"
+        );
         assert!(
             !body.contains("Race in write path") && !body.contains("Slow query"),
             "no finding row renders on the board: {body}"
@@ -5908,7 +6402,6 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&root).ok();
     }
-
 
     /// (bbp-14, edge; updated backlog-open-detail-1) 25 OPEN PBIs plus 5
     /// `done` ones exceed the backlog panel's own display cap (20), so the
@@ -5943,8 +6436,14 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("proposed: 25"), "the status chip count must cover every open PBI: {body}");
-        assert!(body.contains("done: 5"), "the status chip count must still cover done PBIs too: {body}");
+        assert!(
+            body.contains("proposed: 25"),
+            "the status chip count must cover every open PBI: {body}"
+        );
+        assert!(
+            body.contains("done: 5"),
+            "the status chip count must still cover done PBIs too: {body}"
+        );
         assert!(
             body.contains("Showing 20 of 25 backlog items."),
             "the capped PBI subset must state its true OPEN total (25), not the stored total (30): {body}"
@@ -6000,8 +6499,14 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("Add search"), "PBI-1's title must render: {body}");
-        assert!(body.contains("Add filter"), "PBI-2's title must render: {body}");
+        assert!(
+            body.contains("Add search"),
+            "PBI-1's title must render: {body}"
+        );
+        assert!(
+            body.contains("Add filter"),
+            "PBI-2's title must render: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6028,7 +6533,10 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("Add search"), "the open PBI's title must still render: {body}");
+        assert!(
+            body.contains("Add search"),
+            "the open PBI's title must still render: {body}"
+        );
         assert!(
             !body.contains("Ship the old widget"),
             "a done PBI's title must not render in the card list: {body}"
@@ -6037,9 +6545,18 @@ mod bee_route_tests {
             !body.contains("Drop the legacy export"),
             "a declined PBI's title must not render in the card list: {body}"
         );
-        assert!(body.contains("in-flight: 1"), "the chips must still count the open status: {body}");
-        assert!(body.contains("done: 1"), "the chips must still count done, even though its card is hidden: {body}");
-        assert!(body.contains("declined: 1"), "the chips must still count declined, even though its card is hidden: {body}");
+        assert!(
+            body.contains("in-flight: 1"),
+            "the chips must still count the open status: {body}"
+        );
+        assert!(
+            body.contains("done: 1"),
+            "the chips must still count done, even though its card is hidden: {body}"
+        );
+        assert!(
+            body.contains("declined: 1"),
+            "the chips must still count declined, even though its card is hidden: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6066,8 +6583,14 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(body.contains("No open backlog items."), "{body}");
-        assert!(body.contains("done: 1"), "the chips must still count the closed PBIs: {body}");
-        assert!(body.contains("declined: 1"), "the chips must still count the closed PBIs: {body}");
+        assert!(
+            body.contains("done: 1"),
+            "the chips must still count the closed PBIs: {body}"
+        );
+        assert!(
+            body.contains("declined: 1"),
+            "the chips must still count the closed PBIs: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6090,12 +6613,20 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("<details class=\"bee-cell__detail\">"), "cos must render inside a details expander: {body}");
         assert!(
-            body.contains("Search returns results in &lt;100ms &amp; handles &quot;quoted&quot; terms."),
+            body.contains("<details class=\"bee-cell__detail\">"),
+            "cos must render inside a details expander: {body}"
+        );
+        assert!(
+            body.contains(
+                "Search returns results in &lt;100ms &amp; handles &quot;quoted&quot; terms."
+            ),
             "cos text must render, HTML-escaped like title: {body}"
         );
-        assert!(!body.contains("<100ms"), "raw unescaped cos markup leaked: {body}");
+        assert!(
+            !body.contains("<100ms"),
+            "raw unescaped cos markup leaked: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6150,7 +6681,10 @@ mod bee_route_tests {
             body.contains("Fix &lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;quote&quot; it."),
             "escaped title missing: {body}"
         );
-        assert!(!body.contains("<script>alert(1)</script>"), "raw script tag leaked: {body}");
+        assert!(
+            !body.contains("<script>alert(1)</script>"),
+            "raw script tag leaked: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6162,7 +6696,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn backlog_pbi_title_embedded_absolute_path_does_not_leak() {
         let root = fresh_root("panels-backlog-title-scrub");
-        let secret = root.join("src").join("secret.rs").to_string_lossy().into_owned();
+        let secret = root
+            .join("src")
+            .join("secret.rs")
+            .to_string_lossy()
+            .into_owned();
         let secret_escaped = secret.replace('\\', "\\\\");
         write(
             &root,
@@ -6179,8 +6717,14 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(!body.contains(&secret), "the backlog panel leaked an absolute PBI-title path: {body}");
-        assert!(body.contains("src/secret.rs"), "the reduced relative path should still read: {body}");
+        assert!(
+            !body.contains(&secret),
+            "the backlog panel leaked an absolute PBI-title path: {body}"
+        );
+        assert!(
+            body.contains("src/secret.rs"),
+            "the reduced relative path should still read: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6219,7 +6763,10 @@ mod bee_route_tests {
         assert!(body.contains("Unreviewed: 1"), "{body}");
         assert!(body.contains("In review: 1"), "{body}");
         assert!(body.contains("Settled: 1"), "{body}");
-        assert!(body.contains("1 open P1 finding"), "the open P1 count must be called out: {body}");
+        assert!(
+            body.contains("1 open P1 finding"),
+            "the open P1 count must be called out: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6242,7 +6789,10 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(body.contains("Review state unknown"), "{body}");
-        assert!(!body.contains("Unreviewed: 0"), "an unknown review state must not render as a clean zero: {body}");
+        assert!(
+            !body.contains("Unreviewed: 0"),
+            "an unknown review state must not render as a clean zero: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6267,7 +6817,10 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(!body.contains("Review state unknown"), "candidates exist — this is a real count, not unknown: {body}");
+        assert!(
+            !body.contains("Review state unknown"),
+            "candidates exist — this is a real count, not unknown: {body}"
+        );
         assert!(body.contains("Unreviewed: 2"), "{body}");
         assert!(body.contains("In review: 0"), "{body}");
         assert!(body.contains("Settled: 0"), "{body}");
@@ -6295,7 +6848,10 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("invoked by the owner"), "the review queue must read as owner-invoked: {body}");
+        assert!(
+            body.contains("invoked by the owner"),
+            "the review queue must read as owner-invoked: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6324,9 +6880,19 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/sessions/a.json",
-            &session_json("sess-a", &rfc3339_minutes_ago(2), "/home/x/t.json", "ws-1", "claude"),
+            &session_json(
+                "sess-a",
+                &rfc3339_minutes_ago(2),
+                "/home/x/t.json",
+                "ws-1",
+                "claude",
+            ),
         );
-        write(&root, ".bee/lanes/demo.json", &lane_json("demo", "swarming", "standard", "run tests", None, None));
+        write(
+            &root,
+            ".bee/lanes/demo.json",
+            &lane_json("demo", "swarming", "standard", "run tests", None, None),
+        );
         write(
             &root,
             ".bee/runtime/workspaces/ws-1.json",
@@ -6351,7 +6917,13 @@ mod bee_route_tests {
     /// verify, read_first, decisions, must_haves.truths, and a full trace
     /// (worker, claim/cap timestamps, outcome, deviations, tests, results) —
     /// the fields the board's trimmed `cell_json` fixture never carries.
-    fn full_cell_json(id: &str, feature: &str, status: &str, files: &[String], read_first: &[String]) -> String {
+    fn full_cell_json(
+        id: &str,
+        feature: &str,
+        status: &str,
+        files: &[String],
+        read_first: &[String],
+    ) -> String {
         let files_json = files
             .iter()
             .map(|f| serde_json::to_string(f).unwrap())
@@ -6407,7 +6979,11 @@ mod bee_route_tests {
 
         let st = build_state();
         let project = register(&st, &root, "cell-detail-happy");
-        let resp = get(router(st), &format!("/p/{}/_bee/cell/bee-cockpit-7", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/cell/bee-cockpit-7", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
@@ -6415,12 +6991,24 @@ mod bee_route_tests {
         assert!(body.contains("capped"), "status missing: {body}");
         assert!(body.contains("lane: standard"), "lane missing: {body}");
         assert!(body.contains("do the full thing"), "action missing: {body}");
-        assert!(body.contains("cargo test --workspace"), "verify missing: {body}");
-        assert!(body.contains("truth one"), "must_haves truth missing: {body}");
+        assert!(
+            body.contains("cargo test --workspace"),
+            "verify missing: {body}"
+        );
+        assert!(
+            body.contains("truth one"),
+            "must_haves truth missing: {body}"
+        );
         assert!(body.contains("D1"), "decision citation missing: {body}");
         assert!(body.contains("worker-1"), "trace worker missing: {body}");
-        assert!(body.contains("shipped the detail pages"), "trace outcome missing: {body}");
-        assert!(body.contains("noted a small deviation"), "trace deviation missing: {body}");
+        assert!(
+            body.contains("shipped the detail pages"),
+            "trace outcome missing: {body}"
+        );
+        assert!(
+            body.contains("noted a small deviation"),
+            "trace deviation missing: {body}"
+        );
         assert!(body.contains("green"), "trace test result missing: {body}");
         // A timestamp reads as relative language, not the raw ISO string
         // it was derived from — see the D4/panels precedent in the test above.
@@ -6454,14 +7042,27 @@ mod bee_route_tests {
 
         let st = build_state();
         let project = register(&st, &root, "feature-detail-happy");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/detail-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/detail-feature", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
         assert!(body.contains("Shipped"), "shipped banner missing: {body}");
-        assert!(body.contains("0.4h to finish"), "cycle time missing: {body}");
-        assert!(body.contains("1/1 cell done"), "chip-row cell count missing: {body}");
-        assert!(body.contains("bee-todo--done"), "capped cell must render struck-through in Todos: {body}");
+        assert!(
+            body.contains("0.4h to finish"),
+            "cycle time missing: {body}"
+        );
+        assert!(
+            body.contains("1/1 cell done"),
+            "chip-row cell count missing: {body}"
+        );
+        assert!(
+            body.contains("bee-todo--done"),
+            "capped cell must render struck-through in Todos: {body}"
+        );
         assert!(body.contains("Cell f1"), "cell title missing: {body}");
 
         std::fs::remove_dir_all(&root).ok();
@@ -6475,24 +7076,41 @@ mod bee_route_tests {
     #[tokio::test]
     async fn feature_detail_page_renders_the_three_tab_controls() {
         let root = fresh_root("feature-detail-tab-shell");
-        write(&root, ".bee/cells/a.json", &feature_cell_json("ts-1", "tab-shell-feature", "open", None, None));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("ts-1", "tab-shell-feature", "open", None, None),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "feature-detail-tab-shell");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/tab-shell-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/tab-shell-feature", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains(r#"<div class="bee-tabs" data-tabs="1">"#), "tab shell container missing: {body}");
+        assert!(
+            body.contains(r#"<div class="bee-tabs" data-tabs="1">"#),
+            "tab shell container missing: {body}"
+        );
         for id in ["bee-tab-activity", "bee-tab-todos", "bee-tab-terminal"] {
             assert!(
                 body.contains(&format!(r#"id="{id}""#)),
                 "tab radio control {id} missing: {body}"
             );
         }
-        for (id, label) in [("bee-tab-activity", "Activity"), ("bee-tab-todos", "Todos"), ("bee-tab-terminal", "Terminal")] {
+        for (id, label) in [
+            ("bee-tab-activity", "Activity"),
+            ("bee-tab-todos", "Todos"),
+            ("bee-tab-terminal", "Terminal"),
+        ] {
             assert!(
-                body.contains(&format!(r#"<label class="bee-tabs__label" for="{id}">{label}</label>"#)),
+                body.contains(&format!(
+                    r#"<label class="bee-tabs__label" for="{id}">{label}</label>"#
+                )),
                 "tab nav label {label} missing: {body}"
             );
         }
@@ -6524,15 +7142,31 @@ mod bee_route_tests {
 
         let st = build_state();
         let project = register(&st, &root, "feature-detail-buckets");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/grouped-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/grouped-feature", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
         assert!(body.contains("Not shipped yet"), "{body}");
-        assert!(body.contains("0/3 cells done"), "chip-row cell count missing: {body}");
-        assert!(body.contains("bee-todo--claimed"), "claimed cell missing its Todos marker: {body}");
-        assert!(body.contains("bee-todo--open"), "open cell missing its Todos marker: {body}");
-        assert!(body.contains("bee-todo--blocked"), "blocked cell missing its red Todos marker: {body}");
+        assert!(
+            body.contains("0/3 cells done"),
+            "chip-row cell count missing: {body}"
+        );
+        assert!(
+            body.contains("bee-todo--claimed"),
+            "claimed cell missing its Todos marker: {body}"
+        );
+        assert!(
+            body.contains("bee-todo--open"),
+            "open cell missing its Todos marker: {body}"
+        );
+        assert!(
+            body.contains("bee-todo--blocked"),
+            "blocked cell missing its red Todos marker: {body}"
+        );
         assert!(
             body.contains("fg-chip fg-chip--accent bee-todo__badge\">w1</span>"),
             "claimed cell must carry its own worker as an agent badge: {body}"
@@ -6582,21 +7216,42 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/runtime/workspaces/closed-feature-wt.json",
-            &workspace_json("closed-feature-wt", "/tmp/nonexistent-closed-feature-wt", "wt/closed-feature", &[]),
+            &workspace_json(
+                "closed-feature-wt",
+                "/tmp/nonexistent-closed-feature-wt",
+                "wt/closed-feature",
+                &[],
+            ),
         );
 
         let st = build_state();
         let project = register(&st, &root, "feature-detail-archived");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/closed-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/closed-feature", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
         assert!(body.contains("Closed"), "closed header missing: {body}");
         assert!(body.contains("2 cells done"), "done count missing: {body}");
-        assert!(!body.contains("Not shipped yet"), "wrong empty-state banner: {body}");
-        assert!(body.contains("2/2 cells done"), "chip-row cell count missing: {body}");
-        assert!(body.contains("Cell ca1"), "archived cell card missing: {body}");
-        assert!(body.contains("Cell ca2"), "archived cell card missing: {body}");
+        assert!(
+            !body.contains("Not shipped yet"),
+            "wrong empty-state banner: {body}"
+        );
+        assert!(
+            body.contains("2/2 cells done"),
+            "chip-row cell count missing: {body}"
+        );
+        assert!(
+            body.contains("Cell ca1"),
+            "archived cell card missing: {body}"
+        );
+        assert!(
+            body.contains("Cell ca2"),
+            "archived cell card missing: {body}"
+        );
         assert!(
             body.contains("fg-chip--success\">Merged</span>"),
             "a closed feature with no active worktree grant but a leftover workspace record naming its own branch must read Merged: {body}"
@@ -6640,14 +7295,24 @@ mod bee_route_tests {
 
         let st = build_state();
         let project = register(&st, &root, "feature-detail-archived-still-open");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/still-open-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/still-open-feature", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
         assert!(body.contains("Not shipped yet"), "{body}");
         assert!(!body.contains("Closed"), "wrongly reported closed: {body}");
-        assert!(body.contains("1/2 cells done"), "chip-row cell count missing: {body}");
-        assert!(body.contains("bee-todo--open"), "the live open cell must still render on Todos: {body}");
+        assert!(
+            body.contains("1/2 cells done"),
+            "chip-row cell count missing: {body}"
+        );
+        assert!(
+            body.contains("bee-todo--open"),
+            "the live open cell must still render on Todos: {body}"
+        );
         assert!(
             body.contains("bee-todo--done"),
             "the archived cell should still merge into the Todos checklist as done: {body}"
@@ -6695,12 +7360,22 @@ mod bee_route_tests {
 
         let st = build_state();
         let project = register(&st, &root, "activity-happy");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/activity-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/activity-feature", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("Context approved"), "approved gate stamp missing: {body}");
-        assert!(body.contains("Shape not yet approved"), "unapproved gate stamp missing: {body}");
+        assert!(
+            body.contains("Context approved"),
+            "approved gate stamp missing: {body}"
+        );
+        assert!(
+            body.contains("Shape not yet approved"),
+            "unapproved gate stamp missing: {body}"
+        );
         assert!(
             body.contains("Own the activity tab join"),
             "the feature-scoped decision must appear on the timeline: {body}"
@@ -6709,14 +7384,21 @@ mod bee_route_tests {
             !body.contains("An unrelated feature decision"),
             "a decision scoped to a different feature must not leak in: {body}"
         );
-        assert!(body.contains("worker-1"), "capped cell's own worker missing: {body}");
-        assert!(body.contains("shipped the detail pages"), "capped cell's own outcome missing: {body}");
+        assert!(
+            body.contains("worker-1"),
+            "capped cell's own worker missing: {body}"
+        );
+        assert!(
+            body.contains("shipped the detail pages"),
+            "capped cell's own outcome missing: {body}"
+        );
         assert!(
             body.contains(&format!("href=\"/p/{}/_bee/cell/act-1\"", project.id)),
             "the timeline's capped-cell entry must link to its own cell detail page: {body}"
         );
         assert!(
-            body.contains("Latest verify") && body.contains("fg-chip fg-chip--success\">green</span>"),
+            body.contains("Latest verify")
+                && body.contains("fg-chip fg-chip--success\">green</span>"),
             "the latest verify/test state must render: {body}"
         );
 
@@ -6747,12 +7429,19 @@ mod bee_route_tests {
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
         let project = register(&st, &root, "terminal-tab-happy");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/terminal-tab-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/terminal-tab-feature", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
         assert!(
-            body.contains(&format!("href=\"/p/{}/_terminal/pane/{}\"", project.id, pane.pane_id)),
+            body.contains(&format!(
+                "href=\"/p/{}/_terminal/pane/{}\"",
+                project.id, pane.pane_id
+            )),
             "the Terminal tab must link this project's own pane to its live page: {body}"
         );
 
@@ -6776,7 +7465,11 @@ mod bee_route_tests {
 
         let st = build_state();
         let project = register(&st, &root, "terminal-tab-empty");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/terminal-empty-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/terminal-empty-feature", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
@@ -6813,25 +7506,54 @@ mod bee_route_tests {
             ),
         );
         let sibling = make_worktree_sibling("feature-hub-2-wt-chip");
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"chip-feature","mode":"standard"}"#);
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["feature-hub-2-wt-chip"]));
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"chip-feature","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["feature-hub-2-wt-chip"]),
+        );
         write(
             &root,
             ".bee/runtime/workspaces/w.json",
-            &workspace_json("feature-hub-2-wt-chip", &sibling.to_string_lossy(), "wt/chip-feature", &[]),
+            &workspace_json(
+                "feature-hub-2-wt-chip",
+                &sibling.to_string_lossy(),
+                "wt/chip-feature",
+                &[],
+            ),
         );
 
         let st = build_state();
         let project = register(&st, &root, "chips-happy");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/chip-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/chip-feature", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("bee-detail-chips"), "chip row missing: {body}");
+        assert!(
+            body.contains("bee-detail-chips"),
+            "chip row missing: {body}"
+        );
         assert!(body.contains("lane: standard"), "lane chip missing: {body}");
-        assert!(body.contains("fg-chip--info\">Open · wt/chip-feature</span>"), "worktree chip missing: {body}");
-        assert!(body.contains("0.4h claim→cap"), "duration chip missing: {body}");
-        assert!(body.contains("1/1 cell done"), "cell-count chip missing: {body}");
+        assert!(
+            body.contains("fg-chip--info\">Open · wt/chip-feature</span>"),
+            "worktree chip missing: {body}"
+        );
+        assert!(
+            body.contains("0.4h claim→cap"),
+            "duration chip missing: {body}"
+        );
+        assert!(
+            body.contains("1/1 cell done"),
+            "cell-count chip missing: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&sibling).ok();
@@ -6858,17 +7580,34 @@ mod bee_route_tests {
             ),
         );
         let sibling = make_worktree_sibling("feature-hub-2-wt-unmerged");
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"unmerged-feature","mode":"standard"}"#);
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["feature-hub-2-wt-unmerged"]));
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"unmerged-feature","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["feature-hub-2-wt-unmerged"]),
+        );
         write(
             &root,
             ".bee/runtime/workspaces/w.json",
-            &workspace_json("feature-hub-2-wt-unmerged", &sibling.to_string_lossy(), "wt/unmerged-feature", &[]),
+            &workspace_json(
+                "feature-hub-2-wt-unmerged",
+                &sibling.to_string_lossy(),
+                "wt/unmerged-feature",
+                &[],
+            ),
         );
 
         let st = build_state();
         let project = register(&st, &root, "chips-unmerged");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/unmerged-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/unmerged-feature", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
@@ -6893,12 +7632,23 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/empty-states-feature.json",
-            &lane_json("empty-states-feature", "compounding-complete", "standard", "none", None, None),
+            &lane_json(
+                "empty-states-feature",
+                "compounding-complete",
+                "standard",
+                "none",
+                None,
+                None,
+            ),
         );
 
         let st = build_state();
         let project = register(&st, &root, "detail-empty-states");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/empty-states-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/empty-states-feature", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
@@ -6907,8 +7657,14 @@ mod bee_route_tests {
             "a lane record with no approved_gates key must read honestly, not as all-false: {body}"
         );
         assert!(body.contains("No activity recorded yet."), "{body}");
-        assert!(body.contains("No cells recorded for this feature."), "{body}");
-        assert!(body.contains("No terminal panes running for this project right now."), "{body}");
+        assert!(
+            body.contains("No cells recorded for this feature."),
+            "{body}"
+        );
+        assert!(
+            body.contains("No terminal panes running for this project right now."),
+            "{body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6928,7 +7684,11 @@ mod bee_route_tests {
 
         let st = build_state();
         let project = register(&st, &root, "cell-detail-archived");
-        let resp = get(router(st), &format!("/p/{}/_bee/cell/archived-7", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/cell/archived-7", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
@@ -6954,7 +7714,11 @@ mod bee_route_tests {
 
         let st = build_state();
         let project = register(&st, &root, "cell-detail-nowhere");
-        let resp = get(router(st), &format!("/p/{}/_bee/cell/no-such-cell", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/cell/no-such-cell", project.id),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
         std::fs::remove_dir_all(&root).ok();
@@ -7031,7 +7795,18 @@ mod bee_route_tests {
                 "2026-08-04T08:24:00Z",
             ),
         );
-        write(&root, ".bee/lanes/link-feature.json", &lane_json("link-feature", "swarming", "standard", "keep going", None, None));
+        write(
+            &root,
+            ".bee/lanes/link-feature.json",
+            &lane_json(
+                "link-feature",
+                "swarming",
+                "standard",
+                "keep going",
+                None,
+                None,
+            ),
+        );
         write(
             &root,
             ".bee/state.json",
@@ -7040,7 +7815,13 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/sessions/w1.json",
-            &session_json("w1", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
+            &session_json(
+                "w1",
+                &rfc3339_minutes_ago(1),
+                "/home/x/t.jsonl",
+                "main",
+                "startup",
+            ),
         );
 
         let st = build_state();
@@ -7050,7 +7831,10 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/link-feature\"", project.id)),
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/link-feature\"",
+                project.id
+            )),
             "the active feature's own hub card must link to its detail page: {body}"
         );
 
@@ -7071,7 +7855,15 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/cells/a.json",
-            &timed_cell_json("hub-first-cell", "hub-first-feature", "blocked", &[], "w1", "x", "y"),
+            &timed_cell_json(
+                "hub-first-cell",
+                "hub-first-feature",
+                "blocked",
+                &[],
+                "w1",
+                "x",
+                "y",
+            ),
         );
         write(
             &root,
@@ -7094,8 +7886,16 @@ mod bee_route_tests {
             ),
         );
         let sibling = make_worktree_sibling("board-trim-layout-wt");
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"hub-first-feature","mode":"standard"}"#);
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["board-trim-layout-wt"]));
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"hub-first-feature","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["board-trim-layout-wt"]),
+        );
         write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
         write(
             &root,
@@ -7111,13 +7911,22 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        let main_start = body.find("<main class=\"fg-page bee-hub-theme\">").expect("main tag");
+        let main_start = body
+            .find("<main class=\"fg-page bee-hub-theme\">")
+            .expect("main tag");
         let after_main = &body[main_start..];
-        let hub_at = after_main.find(r#"<section class="fg-card bee-hub" data-feature-hub="1">"#).expect("hub section");
-        let finished_at = after_main.find(r#"<section class="fg-card bee-finished""#).expect("finished section");
-        let panels_at = after_main.find(r#"<div class="bee-panels">"#).expect("panels wrapper");
-        let backlog_at =
-            after_main.find(r#"<h3 class="bee-panel__head">Backlog &amp; Review</h3>"#).expect("backlog panel");
+        let hub_at = after_main
+            .find(r#"<section class="fg-card bee-hub" data-feature-hub="1">"#)
+            .expect("hub section");
+        let finished_at = after_main
+            .find(r#"<section class="fg-card bee-finished""#)
+            .expect("finished section");
+        let panels_at = after_main
+            .find(r#"<div class="bee-panels">"#)
+            .expect("panels wrapper");
+        let backlog_at = after_main
+            .find(r#"<h3 class="bee-panel__head">Backlog &amp; Review</h3>"#)
+            .expect("backlog panel");
         assert!(
             hub_at < finished_at && finished_at < panels_at && panels_at < backlog_at,
             "the board page must render, in order, the Feature Hub, the Finished list, then the panels wrapper carrying only Backlog & review: {body}"
@@ -7186,14 +7995,29 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/sessions/strip-session.json",
-            &session_json("strip-session", &rfc3339_minutes_ago(2), "/home/x/t.jsonl", "main", "startup"),
+            &session_json(
+                "strip-session",
+                &rfc3339_minutes_ago(2),
+                "/home/x/t.jsonl",
+                "main",
+                "startup",
+            ),
         );
         let sibling = make_worktree_sibling("live-strip-wt");
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"strip-wt-feat","mode":"standard"}"#);
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"strip-wt-feat","mode":"standard"}"#,
+        );
         write(
             &root,
             ".bee/runtime/workspaces/live-strip-wt.json",
-            &workspace_json("live-strip-wt", "/tmp/nonexistent-live-strip-wt", "wt/strip-wt-feat", &[]),
+            &workspace_json(
+                "live-strip-wt",
+                "/tmp/nonexistent-live-strip-wt",
+                "wt/strip-wt-feat",
+                &[],
+            ),
         );
         write(
             &root,
@@ -7207,10 +8031,16 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        let main_start = body.find("<main class=\"fg-page bee-hub-theme\">").expect("main tag");
+        let main_start = body
+            .find("<main class=\"fg-page bee-hub-theme\">")
+            .expect("main tag");
         let after_main = &body[main_start..];
-        let strip_at = after_main.find(r#"<section class="fg-card bee-strip""#).expect("live strip section");
-        let hub_at = after_main.find(r#"<section class="fg-card bee-hub" data-feature-hub="1">"#).expect("hub section");
+        let strip_at = after_main
+            .find(r#"<section class="fg-card bee-strip""#)
+            .expect("live strip section");
+        let hub_at = after_main
+            .find(r#"<section class="fg-card bee-hub" data-feature-hub="1">"#)
+            .expect("hub section");
         assert!(
             strip_at < hub_at,
             "the live strip must render above the Feature Hub section: {body}"
@@ -7220,7 +8050,10 @@ mod bee_route_tests {
             body.contains("strip-active-feat"),
             "the live session's own row must name the active feature it falls back to (no lane of its own): {body}"
         );
-        assert!(body.contains("2 minutes ago"), "the live session's row must state its heartbeat age: {body}");
+        assert!(
+            body.contains("2 minutes ago"),
+            "the live session's row must state its heartbeat age: {body}"
+        );
 
         assert!(
             body.contains("wt/strip-wt-feat"),
@@ -7255,9 +8088,21 @@ mod bee_route_tests {
     #[tokio::test]
     async fn board_done_section_groups_by_feature_and_states_true_total() {
         let root = fresh_root("done-grouped");
-        write(&root, ".bee/cells/a.json", &cell_json("d1", "capped", &[], "w1"));
-        write(&root, ".bee/cells/b.json", &cell_json("d2", "capped", &[], "w1"));
-        write(&root, ".bee/cells/c.json", &cell_json("d3", "capped", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("d1", "capped", &[], "w1"),
+        );
+        write(
+            &root,
+            ".bee/cells/b.json",
+            &cell_json("d2", "capped", &[], "w1"),
+        );
+        write(
+            &root,
+            ".bee/cells/c.json",
+            &cell_json("d3", "capped", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "done-grouped");
@@ -7278,9 +8123,13 @@ mod bee_route_tests {
         // itself, not one card per done cell — scoped to that section's own
         // markup, since the agent board's separate Done column legitimately
         // carries one card per capped cell (D2).
-        let finished_start = body.find("class=\"fg-card bee-finished\"").expect("finished section");
+        let finished_start = body
+            .find("class=\"fg-card bee-finished\"")
+            .expect("finished section");
         let finished_html = &body[finished_start..];
-        let finished_html = &finished_html[..finished_html.find("</section>").expect("finished section close") ];
+        let finished_html = &finished_html[..finished_html
+            .find("</section>")
+            .expect("finished section close")];
         assert!(!finished_html.contains("Cell d1"), "{finished_html}");
         assert!(!finished_html.contains("Cell d2"), "{finished_html}");
         assert!(!finished_html.contains("Cell d3"), "{finished_html}");
@@ -7299,7 +8148,15 @@ mod bee_route_tests {
             write(
                 &root,
                 &format!(".bee/cells/f{i}.json"),
-                &timed_cell_json(&format!("d{i}"), &format!("feature-{i:02}"), "capped", &[], "w1", "x", "y"),
+                &timed_cell_json(
+                    &format!("d{i}"),
+                    &format!("feature-{i:02}"),
+                    "capped",
+                    &[],
+                    "w1",
+                    "x",
+                    "y",
+                ),
             );
         }
 
@@ -7334,8 +8191,16 @@ mod bee_route_tests {
     #[tokio::test]
     async fn board_done_summary_states_feature_and_cell_totals() {
         let root = fresh_root("done-summary-totals");
-        write(&root, ".bee/cells/a.json", &cell_json("d1", "capped", &[], "w1"));
-        write(&root, ".bee/cells/b.json", &cell_json("d2", "capped", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("d1", "capped", &[], "w1"),
+        );
+        write(
+            &root,
+            ".bee/cells/b.json",
+            &cell_json("d2", "capped", &[], "w1"),
+        );
         write(
             &root,
             ".bee/cells/c.json",
@@ -7348,7 +8213,10 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        assert!(body.contains("data-finished-features=\"2\" data-finished-cells=\"3\""), "{body}");
+        assert!(
+            body.contains("data-finished-features=\"2\" data-finished-cells=\"3\""),
+            "{body}"
+        );
         assert!(
             body.contains("2 features finished"),
             "summary must state the finished-feature count: {body}"
@@ -7367,7 +8235,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn board_done_details_element_has_no_open_attribute() {
         let root = fresh_root("done-collapsed");
-        write(&root, ".bee/cells/a.json", &cell_json("d1", "capped", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("d1", "capped", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "done-collapsed");
@@ -7455,8 +8327,16 @@ mod bee_route_tests {
     async fn agent_board_read_never_writes_the_fixtures_bee_tree() {
         let root = fresh_root("agent-board-read-only");
         write(&root, "README.md", "# hi");
-        write(&root, ".bee/cells/a.json", &cell_json("c-open", "open", &[], "w1"));
-        write(&root, ".bee/cells/b.json", &cell_json("c-capped", "capped", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("c-open", "open", &[], "w1"),
+        );
+        write(
+            &root,
+            ".bee/cells/b.json",
+            &cell_json("c-capped", "capped", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "agent-board-read-only");
@@ -7469,7 +8349,6 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&root).ok();
     }
-
 
     // --- bbp-5 rebuilt this section's top-of-board stack; board-declutter
     // retires most of it (D5/D6/D7/D8/D9) ---
@@ -7487,7 +8366,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn board_feature_with_all_dropped_cells_renders_honest_progress_no_division_artifact() {
         let root = fresh_root("top-all-dropped");
-        write(&root, ".bee/state.json", r#"{"feature": "all-dropped-feature"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature": "all-dropped-feature"}"#,
+        );
         write(
             &root,
             ".bee/cells/a.json",
@@ -7505,7 +8388,10 @@ mod bee_route_tests {
             !body.contains("No cells recorded."),
             "hub-finished-compact: an empty hub card must render no empty-state paragraph at all: {body}"
         );
-        assert!(!body.contains("0/0"), "a division artifact leaked in: {body}");
+        assert!(
+            !body.contains("0/0"),
+            "a division artifact leaked in: {body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -7662,7 +8548,15 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/cells/c-open.json",
-            &timed_cell_json("c-open", "review-candidates-read-only", "open", &[], "w1", "x", "y"),
+            &timed_cell_json(
+                "c-open",
+                "review-candidates-read-only",
+                "open",
+                &[],
+                "w1",
+                "x",
+                "y",
+            ),
         );
 
         let st = build_state();
@@ -7703,7 +8597,15 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/cells/c-open.json",
-            &timed_cell_json("c-open", "review-session-read-only", "open", &[], "w1", "x", "y"),
+            &timed_cell_json(
+                "c-open",
+                "review-session-read-only",
+                "open",
+                &[],
+                "w1",
+                "x",
+                "y",
+            ),
         );
 
         let st = build_state();
@@ -7744,7 +8646,15 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/cells/c-open.json",
-            &timed_cell_json("c-open", "capture-queue-read-only", "open", &[], "w1", "x", "y"),
+            &timed_cell_json(
+                "c-open",
+                "capture-queue-read-only",
+                "open",
+                &[],
+                "w1",
+                "x",
+                "y",
+            ),
         );
 
         let st = build_state();
@@ -7787,7 +8697,15 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/cells/c-open.json",
-            &timed_cell_json("c-open", "reservations-read-only", "open", &[], "w1", "x", "y"),
+            &timed_cell_json(
+                "c-open",
+                "reservations-read-only",
+                "open",
+                &[],
+                "w1",
+                "x",
+                "y",
+            ),
         );
 
         let st = build_state();
@@ -7834,7 +8752,14 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/live-feature.json",
-            &lane_json("live-feature", "swarming", "standard", "keep going", None, None),
+            &lane_json(
+                "live-feature",
+                "swarming",
+                "standard",
+                "keep going",
+                None,
+                None,
+            ),
         );
         write(
             &root,
@@ -7868,7 +8793,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn board_done_section_renders_honest_empty_state_when_nothing_done() {
         let root = fresh_root("done-empty");
-        write(&root, ".bee/cells/a.json", &cell_json("open-only", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("open-only", "open", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "done-empty");
@@ -7947,13 +8876,24 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/lanes/archived-feature.json",
-            &lane_json("archived-feature", "compounding-complete", "standard", "none", None, None),
+            &lane_json(
+                "archived-feature",
+                "compounding-complete",
+                "standard",
+                "none",
+                None,
+                None,
+            ),
         );
         // Deliberately no `.bee/cells/*.json` for this feature at all.
 
         let st = build_state();
         let project = register(&st, &root, "lane-only-feature-detail");
-        let resp = get(router(st), &format!("/p/{}/_bee/feature/archived-feature", project.id)).await;
+        let resp = get(
+            router(st),
+            &format!("/p/{}/_bee/feature/archived-feature", project.id),
+        )
+        .await;
         assert_eq!(
             resp.status(),
             StatusCode::OK,
@@ -7968,16 +8908,28 @@ mod bee_route_tests {
     #[tokio::test]
     async fn unknown_cell_id_and_unknown_feature_name_are_not_found() {
         let root = fresh_root("detail-unknown");
-        write(&root, ".bee/cells/a.json", &cell_json("real-cell", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("real-cell", "open", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "detail-unknown");
         let app = router(st);
 
-        let cell_resp = get(app.clone(), &format!("/p/{}/_bee/cell/does-not-exist", project.id)).await;
+        let cell_resp = get(
+            app.clone(),
+            &format!("/p/{}/_bee/cell/does-not-exist", project.id),
+        )
+        .await;
         assert_eq!(cell_resp.status(), StatusCode::NOT_FOUND);
 
-        let feature_resp = get(app, &format!("/p/{}/_bee/feature/does-not-exist", project.id)).await;
+        let feature_resp = get(
+            app,
+            &format!("/p/{}/_bee/feature/does-not-exist", project.id),
+        )
+        .await;
         assert_eq!(feature_resp.status(), StatusCode::NOT_FOUND);
 
         std::fs::remove_dir_all(&root).ok();
@@ -7993,7 +8945,11 @@ mod bee_route_tests {
         let project = register(&st, &root, "detail-no-bee");
         let app = router(st);
 
-        let cell_resp = get(app.clone(), &format!("/p/{}/_bee/cell/anything", project.id)).await;
+        let cell_resp = get(
+            app.clone(),
+            &format!("/p/{}/_bee/cell/anything", project.id),
+        )
+        .await;
         assert_eq!(cell_resp.status(), StatusCode::NOT_FOUND);
 
         let feature_resp = get(app, &format!("/p/{}/_bee/feature/anything", project.id)).await;
@@ -8017,7 +8973,10 @@ mod bee_route_tests {
             .to_string_lossy()
             .into_owned();
         let worker_abs = root.join("workers/reader-1").to_string_lossy().into_owned();
-        let results_abs = root.join(".bee/logs/test-results.json").to_string_lossy().into_owned();
+        let results_abs = root
+            .join(".bee/logs/test-results.json")
+            .to_string_lossy()
+            .into_owned();
 
         let leaky_cell = format!(
             r#"{{
@@ -8058,28 +9017,48 @@ mod bee_route_tests {
         let project = register(&st, &root, "detail-security");
         let app = router(st);
 
-        let cell_resp = get(app.clone(), &format!("/p/{}/_bee/cell/leaky-cell", project.id)).await;
+        let cell_resp = get(
+            app.clone(),
+            &format!("/p/{}/_bee/cell/leaky-cell", project.id),
+        )
+        .await;
         assert_eq!(cell_resp.status(), StatusCode::OK);
         let cell_body = body_string(cell_resp).await;
 
-        assert!(!cell_body.contains(&root_str), "cell page leaked the fixture root: {cell_body}");
+        assert!(
+            !cell_body.contains(&root_str),
+            "cell page leaked the fixture root: {cell_body}"
+        );
         assert!(
             !cell_body.contains(&outside_abs),
             "cell page leaked an absolute path outside the fixture root: {cell_body}"
         );
-        assert!(!cell_body.contains(&worker_abs), "cell page leaked the absolute worker path: {cell_body}");
+        assert!(
+            !cell_body.contains(&worker_abs),
+            "cell page leaked the absolute worker path: {cell_body}"
+        );
         assert!(
             !cell_body.contains(&inside_abs),
             "cell page leaked the in-root absolute path verbatim: {cell_body}"
         );
-        assert!(!cell_body.contains(&results_abs), "cell page leaked the absolute results path: {cell_body}");
+        assert!(
+            !cell_body.contains(&results_abs),
+            "cell page leaked the absolute results path: {cell_body}"
+        );
         assert!(cell_body.contains("src/inside.rs"), "{cell_body}");
 
-        let feature_resp = get(app, &format!("/p/{}/_bee/feature/leaky-feature", project.id)).await;
+        let feature_resp = get(
+            app,
+            &format!("/p/{}/_bee/feature/leaky-feature", project.id),
+        )
+        .await;
         assert_eq!(feature_resp.status(), StatusCode::OK);
         let feature_body = body_string(feature_resp).await;
 
-        assert!(!feature_body.contains(&root_str), "feature page leaked the fixture root: {feature_body}");
+        assert!(
+            !feature_body.contains(&root_str),
+            "feature page leaked the fixture root: {feature_body}"
+        );
         assert!(
             !feature_body.contains(&outside_abs),
             "feature page leaked an absolute path outside the fixture root: {feature_body}"
@@ -8138,8 +9117,16 @@ mod bee_route_tests {
             "# Demo Feature — Context\n\n## Feature Boundary\n\nOne clamped line describing the demo feature.\n\n## Locked Decisions\n",
         );
         write(&root, "docs/history/demo/plan.md", "the plan body");
-        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#);
-        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "demo", "open", None, None));
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("a", "demo", "open", None, None),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "feature-docs-present");
@@ -8148,7 +9135,10 @@ mod bee_route_tests {
         let hub_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(hub_resp.status(), StatusCode::OK);
         let hub_body = body_string(hub_resp).await;
-        assert!(hub_body.contains("Demo Feature"), "hub card must show the human title: {hub_body}");
+        assert!(
+            hub_body.contains("Demo Feature"),
+            "hub card must show the human title: {hub_body}"
+        );
         assert!(
             hub_body.contains("One clamped line describing the demo feature."),
             "hub card must show the boundary description: {hub_body}"
@@ -8199,7 +9189,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn feature_without_context_md_falls_back_to_slug_with_no_docs_row() {
         let root = fresh_root("feature-docs-absent");
-        write(&root, ".bee/state.json", r#"{"feature":"no-docs-feature","phase":"exploring","mode":"standard"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"no-docs-feature","phase":"exploring","mode":"standard"}"#,
+        );
 
         let st = build_state();
         let project = register(&st, &root, "feature-docs-absent");
@@ -8208,7 +9202,10 @@ mod bee_route_tests {
         let hub_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(hub_resp.status(), StatusCode::OK);
         let hub_body = body_string(hub_resp).await;
-        assert!(hub_body.contains("no-docs-feature"), "hub card must still show the slug: {hub_body}");
+        assert!(
+            hub_body.contains("no-docs-feature"),
+            "hub card must still show the slug: {hub_body}"
+        );
         // project-color-identity-4: the subtitle survives on a title-less
         // card to carry the worktree state, but holds nothing else — the
         // slug is already the title and must not be printed a second time.
@@ -8221,7 +9218,11 @@ mod bee_route_tests {
             "a title-less card must never repeat its slug as a subtitle: {hub_body}"
         );
 
-        let detail_resp = get(app, &format!("/p/{}/_bee/feature/no-docs-feature", project.id)).await;
+        let detail_resp = get(
+            app,
+            &format!("/p/{}/_bee/feature/no-docs-feature", project.id),
+        )
+        .await;
         assert_eq!(detail_resp.status(), StatusCode::OK);
         let detail_body = body_string(detail_resp).await;
         assert!(
@@ -8244,7 +9245,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn feature_without_context_md_falls_back_to_decision_when_present() {
         let root = fresh_root("feature-docs-decision-fallback");
-        write(&root, ".bee/state.json", r#"{"feature":"no-docs-feature","phase":"exploring","mode":"standard"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"no-docs-feature","phase":"exploring","mode":"standard"}"#,
+        );
         write(
             &root,
             ".bee/decisions.jsonl",
@@ -8267,7 +9272,11 @@ mod bee_route_tests {
             "hub card title must be the prettified slug: {hub_body}"
         );
 
-        let detail_resp = get(app, &format!("/p/{}/_bee/feature/no-docs-feature", project.id)).await;
+        let detail_resp = get(
+            app,
+            &format!("/p/{}/_bee/feature/no-docs-feature", project.id),
+        )
+        .await;
         let detail_body = body_string(detail_resp).await;
         assert!(
             detail_body.contains("Ship the no-docs feature behind a flag."),
@@ -8299,13 +9308,21 @@ mod bee_route_tests {
             ".bee/state.json",
             r#"{"feature":"promote-only-feature","phase":"exploring","mode":"standard"}"#,
         );
-        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "promote-only-feature", "open", None, None));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("a", "promote-only-feature", "open", None, None),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "feature-docs-promote-only");
         let app = router(st);
 
-        let detail_resp = get(app, &format!("/p/{}/_bee/feature/promote-only-feature", project.id)).await;
+        let detail_resp = get(
+            app,
+            &format!("/p/{}/_bee/feature/promote-only-feature", project.id),
+        )
+        .await;
         assert_eq!(detail_resp.status(), StatusCode::OK);
         let detail_body = body_string(detail_resp).await;
         assert!(
@@ -8341,7 +9358,11 @@ mod bee_route_tests {
             "docs/history/demo/CONTEXT.md",
             "# Demo — Context\n\n## Feature Boundary\n\nReplace the by-phase board section on `/p/:id/_bee` with a grouped view.\n",
         );
-        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#,
+        );
 
         let st = build_state();
         let project = register(&st, &root, "feature-docs-route-unredacted");
@@ -8395,8 +9416,16 @@ mod bee_route_tests {
                 "# Demo — Context\n\n## Feature Boundary\n\nSee {root_str}/src/inside.rs and {outside_abs} for detail.\n"
             ),
         );
-        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#);
-        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "demo", "open", None, None));
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("a", "demo", "open", None, None),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "feature-docs-abs-leak");
@@ -8404,17 +9433,29 @@ mod bee_route_tests {
 
         let hub_resp = get(app.clone(), &format!("/p/{}/_bee", project.id)).await;
         let hub_body = body_string(hub_resp).await;
-        assert!(!hub_body.contains(&root_str), "hub card leaked the fixture root: {hub_body}");
-        assert!(!hub_body.contains(&outside_abs), "hub card leaked an absolute path outside the root: {hub_body}");
+        assert!(
+            !hub_body.contains(&root_str),
+            "hub card leaked the fixture root: {hub_body}"
+        );
+        assert!(
+            !hub_body.contains(&outside_abs),
+            "hub card leaked an absolute path outside the root: {hub_body}"
+        );
 
         let detail_resp = get(app, &format!("/p/{}/_bee/feature/demo", project.id)).await;
         let detail_body = body_string(detail_resp).await;
-        assert!(!detail_body.contains(&root_str), "detail header leaked the fixture root: {detail_body}");
+        assert!(
+            !detail_body.contains(&root_str),
+            "detail header leaked the fixture root: {detail_body}"
+        );
         assert!(
             !detail_body.contains(&outside_abs),
             "detail header leaked an absolute path outside the root: {detail_body}"
         );
-        assert!(detail_body.contains("src/inside.rs"), "the in-root path must survive relativized: {detail_body}");
+        assert!(
+            detail_body.contains("src/inside.rs"),
+            "the in-root path must survive relativized: {detail_body}"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -8431,8 +9472,16 @@ mod bee_route_tests {
             "# Demo — Context\n\n## Feature Boundary\n\nBoundary text.\n",
         );
         write(&root, "docs/history/demo/plan.md", "plan body");
-        write(&root, ".bee/state.json", r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#);
-        write(&root, ".bee/cells/a.json", &feature_cell_json("a", "demo", "open", None, None));
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature":"demo","phase":"exploring","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json("a", "demo", "open", None, None),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "feature-docs-read-only");
@@ -8443,7 +9492,10 @@ mod bee_route_tests {
         let _ = get(app, &format!("/p/{}/_bee/feature/demo", project.id)).await;
 
         let after = snapshot_tree(&root);
-        assert_eq!(before, after, "reading feature docs must never write to the fixture tree");
+        assert_eq!(
+            before, after,
+            "reading feature docs must never write to the fixture tree"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -8463,11 +9515,15 @@ mod bee_route_tests {
     // still read-only and leak-free. ──────
 
     fn state_json_with_workers(workers_json: &str) -> String {
-        format!(r#"{{"phase":"exploring","feature":"demo","mode":"standard","workers":[{workers_json}]}}"#)
+        format!(
+            r#"{{"phase":"exploring","feature":"demo","mode":"standard","workers":[{workers_json}]}}"#
+        )
     }
 
     fn worker_json(nickname: &str, cell: &str, tier: &str, status: &str) -> String {
-        format!(r#"{{"nickname":"{nickname}","cell":"{cell}","tier":"{tier}","status":"{status}"}}"#)
+        format!(
+            r#"{{"nickname":"{nickname}","cell":"{cell}","tier":"{tier}","status":"{status}"}}"#
+        )
     }
 
     /// (happy) The presence of a worker naming a still-open cell must never
@@ -8484,7 +9540,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn d7_buckets_unchanged_by_worker_presence() {
         let root = fresh_root("running-buckets-untouched");
-        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/kf-1.json",
+            &cell_json("kf-1", "open", &[], "w1"),
+        );
         write(
             &root,
             ".bee/state.json",
@@ -8493,7 +9553,13 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/sessions/kf1-worker.json",
-            &session_json("kf1-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
+            &session_json(
+                "kf1-worker",
+                &rfc3339_minutes_ago(1),
+                "/home/x/t.jsonl",
+                "main",
+                "startup",
+            ),
         );
 
         let st = build_state();
@@ -8529,7 +9595,11 @@ mod bee_route_tests {
     async fn running_section_read_never_writes_the_fixtures_bee_tree() {
         let root = fresh_root("running-read-only");
         write(&root, "README.md", "# hi");
-        write(&root, ".bee/cells/kf-1.json", &cell_json("kf-1", "claimed", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/kf-1.json",
+            &cell_json("kf-1", "claimed", &[], "w1"),
+        );
         write(
             &root,
             ".bee/state.json",
@@ -8538,7 +9608,13 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/sessions/kf1-worker.json",
-            &session_json("kf1-worker", &rfc3339_minutes_ago(1), "/home/x/t.jsonl", "main", "startup"),
+            &session_json(
+                "kf1-worker",
+                &rfc3339_minutes_ago(1),
+                "/home/x/t.jsonl",
+                "main",
+                "startup",
+            ),
         );
 
         let st = build_state();
@@ -8588,7 +9664,11 @@ mod bee_route_tests {
     }
 
     fn grants_json(ids: &[&str]) -> String {
-        let entries: String = ids.iter().map(|id| format!("\"{id}\": true")).collect::<Vec<_>>().join(",");
+        let entries: String = ids
+            .iter()
+            .map(|id| format!("\"{id}\": true"))
+            .collect::<Vec<_>>()
+            .join(",");
         format!("{{{entries}}}")
     }
 
@@ -8607,11 +9687,23 @@ mod bee_route_tests {
     #[tokio::test]
     async fn worktree_cell_files_do_not_change_buckets_or_shipped_set() {
         let root = fresh_root("wt-no-cell-merge");
-        write(&root, ".bee/cells/a.json", &cell_json("c-open", "open", &[], "w1"));
-        write(&root, ".bee/lanes/demo.json", &lane_json("demo", "swarming", "standard", "keep going", None, None));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("c-open", "open", &[], "w1"),
+        );
+        write(
+            &root,
+            ".bee/lanes/demo.json",
+            &lane_json("demo", "swarming", "standard", "keep going", None, None),
+        );
 
         let sibling = make_worktree_sibling("bee-board-ux-4-srv-wt-cells");
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"ghost-feature","mode":"standard"}"#);
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"ghost-feature","mode":"standard"}"#,
+        );
         // A capped cell sitting only in the worktree's own store. If this
         // were ever merged into the main snapshot it would count toward this
         // project's Todo/Done columns and appear as an extra shipped
@@ -8619,10 +9711,20 @@ mod bee_route_tests {
         write(
             &sibling,
             ".bee/cells/ghost.json",
-            &feature_cell_json("ghost-1", "ghost-feature", "capped", Some(&rfc3339_minutes_ago(60)), Some(&rfc3339_minutes_ago(1))),
+            &feature_cell_json(
+                "ghost-1",
+                "ghost-feature",
+                "capped",
+                Some(&rfc3339_minutes_ago(60)),
+                Some(&rfc3339_minutes_ago(1)),
+            ),
         );
 
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-srv-wt-cells"]));
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-srv-wt-cells"]),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "wt-no-cell-merge");
@@ -8655,8 +9757,12 @@ mod bee_route_tests {
         claimed_at: Option<&str>,
         capped_at: Option<&str>,
     ) -> String {
-        let claimed_json = claimed_at.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".to_string());
-        let capped_json = capped_at.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".to_string());
+        let claimed_json = claimed_at
+            .map(|s| format!("\"{s}\""))
+            .unwrap_or_else(|| "null".to_string());
+        let capped_json = capped_at
+            .map(|s| format!("\"{s}\""))
+            .unwrap_or_else(|| "null".to_string());
         format!(
             r#"{{
                 "id": "{id}",
@@ -8686,13 +9792,27 @@ mod bee_route_tests {
     async fn worktree_read_never_writes_the_project_or_sibling_bee_tree() {
         let root = fresh_root("wt-read-only");
         let sibling = make_worktree_sibling("bee-board-ux-4-srv-wt-read-only");
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-ro","mode":"standard"}"#);
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"feat-ro","mode":"standard"}"#,
+        );
         write(
             &sibling,
             ".bee/sessions/s1.json",
-            &session_json("s1", &rfc3339_minutes_ago(2), "/home/x/t.jsonl", "main", "startup"),
+            &session_json(
+                "s1",
+                &rfc3339_minutes_ago(2),
+                "/home/x/t.jsonl",
+                "main",
+                "startup",
+            ),
         );
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["bee-board-ux-4-srv-wt-read-only"]));
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-srv-wt-read-only"]),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "wt-read-only");
@@ -8703,8 +9823,14 @@ mod bee_route_tests {
 
         let after_root = snapshot_tree(&root);
         let after_sibling = snapshot_tree(&sibling);
-        assert_eq!(before_root, after_root, ".bee/ tree changed after a request");
-        assert_eq!(before_sibling, after_sibling, "the worktree's own .bee/ tree changed after a request");
+        assert_eq!(
+            before_root, after_root,
+            ".bee/ tree changed after a request"
+        );
+        assert_eq!(
+            before_sibling, after_sibling,
+            "the worktree's own .bee/ tree changed after a request"
+        );
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&sibling).ok();
@@ -8766,6 +9892,7 @@ mod bee_route_tests {
         st.config_data_dir = Some(dir.clone());
 
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/config")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -8836,6 +9963,7 @@ mod bee_route_tests {
                 .clone()
                 .oneshot(
                     Request::builder()
+                        .header(header::HOST, "127.0.0.1")
                         .method("POST")
                         .uri(uri)
                         .body(Body::empty())
@@ -8861,7 +9989,7 @@ mod bee_route_tests {
         let dir = fresh_root("terminal-switches-not-via-api-config");
         let st = build_state_with_dir(&dir);
 
-        let req = Request::builder()
+        let req = Request::builder().header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/config")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -8873,7 +10001,10 @@ mod bee_route_tests {
         assert!(resp.status().is_redirection());
 
         let saved = Config::load_from(&dir.join("config.toml"));
-        assert_eq!(saved.server.port, 58312, "the legitimate field was not saved");
+        assert_eq!(
+            saved.server.port, 58312,
+            "the legitimate field was not saved"
+        );
         assert!(
             !saved.terminal.enabled,
             "POST /api/config flipped the terminal enable switch"
@@ -8908,6 +10039,7 @@ mod bee_route_tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -8955,10 +10087,13 @@ mod bee_route_tests {
         let _resp = app
             .oneshot(
                 Request::builder()
+                    .header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from("enabled=on&supervisor_enabled=on&notify_enabled=on"))
+                    .body(Body::from(
+                        "enabled=on&supervisor_enabled=on&notify_enabled=on",
+                    ))
                     .unwrap(),
             )
             .await
@@ -8994,6 +10129,7 @@ mod bee_route_tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -9045,6 +10181,7 @@ mod bee_route_tests {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -9064,6 +10201,7 @@ mod bee_route_tests {
         let second = app
             .oneshot(
                 Request::builder()
+                    .header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -9103,6 +10241,7 @@ mod bee_route_tests {
         assert!(!st.terminal_background.notify_running());
 
         let on_req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
@@ -9129,10 +10268,13 @@ mod bee_route_tests {
         // Leaving both switch fields off this submission (only `enabled` is
         // carried) must stop both live tasks — no restart needed.
         let off_req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(serde_json::json!({ "enabled": true }).to_string()))
+            .body(Body::from(
+                serde_json::json!({ "enabled": true }).to_string(),
+            ))
             .unwrap();
         let resp = app.oneshot(off_req).await.unwrap();
         assert!(resp.status().is_redirection());
@@ -9243,6 +10385,7 @@ mod bee_route_tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -9285,6 +10428,7 @@ mod bee_route_tests {
         let st = build_state_with_dir(&dir);
 
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/config")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -9296,7 +10440,10 @@ mod bee_route_tests {
         assert!(resp.status().is_redirection());
 
         let saved = Config::load_from(&dir.join("config.toml"));
-        assert_eq!(saved.server.port, 58313, "the legitimate field was not saved");
+        assert_eq!(
+            saved.server.port, 58313,
+            "the legitimate field was not saved"
+        );
         assert_eq!(
             saved.terminal.notify_chat_id, None,
             "POST /api/config set the notification destination"
@@ -9324,6 +10471,7 @@ mod bee_route_tests {
 
         let secret = "unique-telegram-secret-98765";
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
@@ -9356,6 +10504,7 @@ mod bee_route_tests {
 
         let secret = "never-shown-in-full-abcd";
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
@@ -9412,6 +10561,7 @@ mod bee_route_tests {
 
         let secret = "should-never-reach-disk-or-response";
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/terminal-config")
             .header(header::CONTENT_TYPE, "application/json")
@@ -9477,9 +10627,15 @@ mod bee_route_tests {
         let body = body_string(resp).await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["terminal"]["enabled"], serde_json::json!(false));
-        assert_eq!(json["terminal"]["supervisor_enabled"], serde_json::json!(false));
+        assert_eq!(
+            json["terminal"]["supervisor_enabled"],
+            serde_json::json!(false)
+        );
         assert_eq!(json["terminal"]["notify_enabled"], serde_json::json!(false));
-        assert_eq!(json["terminal"]["unassigned_enabled"], serde_json::json!(false));
+        assert_eq!(
+            json["terminal"]["unassigned_enabled"],
+            serde_json::json!(false)
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -9498,6 +10654,7 @@ mod bee_route_tests {
     /// probed by passing `Some`.
     fn terminal_req(id: &str, cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal"))
             .method("GET");
         if let Some(c) = cookie {
@@ -9511,6 +10668,7 @@ mod bee_route_tests {
     /// `terminal_req` above.
     fn terminal_pane_req(id: &str, pane_id: &str, cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/pane/{pane_id}"))
             .method("GET");
         if let Some(c) = cookie {
@@ -9524,6 +10682,7 @@ mod bee_route_tests {
     /// `terminal_req` above.
     fn terminal_screen_req(id: &str, pane_id: &str, cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/{pane_id}/screen"))
             .method("GET");
         if let Some(c) = cookie {
@@ -9573,6 +10732,7 @@ mod bee_route_tests {
         let resp = app
             .oneshot(
                 Request::builder()
+                    .header(header::HOST, "127.0.0.1")
                     .method("GET")
                     .uri("/api/terminal-config?enabled=on&supervisor_enabled=on&notify_enabled=on")
                     .body(Body::empty())
@@ -9587,12 +10747,18 @@ mod bee_route_tests {
         );
 
         let saved = Config::load_from(&dir.join("config.toml"));
-        assert!(!saved.terminal.enabled, "a GET must never flip the enabled switch");
+        assert!(
+            !saved.terminal.enabled,
+            "a GET must never flip the enabled switch"
+        );
         assert!(
             !saved.terminal.supervisor_enabled,
             "a GET must never flip the supervisor switch"
         );
-        assert!(!saved.terminal.notify_enabled, "a GET must never flip the notify switch");
+        assert!(
+            !saved.terminal.notify_enabled,
+            "a GET must never flip the notify switch"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -9627,7 +10793,11 @@ mod bee_route_tests {
         let dir = fresh_root("terminal-tab-present");
         let root = fresh_root("terminal-tab-present-project");
         write(&root, ".bee/state.json", r#"{"phase":"swarming"}"#);
-        write(&root, ".bee/cells/a.json", &cell_json("c1", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("c1", "open", &[], "w1"),
+        );
 
         let st = build_state_with_dir(&dir);
         let project = register(&st, &root, "tab-present");
@@ -9659,7 +10829,10 @@ mod bee_route_tests {
 
         let st = build_state_with_dir(&dir);
         let project = register(&st, &root, "frame-css");
-        let resp = router(st).oneshot(terminal_req(&project.id, None)).await.unwrap();
+        let resp = router(st)
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         let style = board_style_block(&body);
@@ -9673,7 +10846,8 @@ mod bee_route_tests {
             .unwrap_or(style.len());
         let frame_rule = &style[frame_start..frame_end];
         assert!(
-            frame_rule.contains("white-space: pre") && !frame_rule.contains("white-space: pre-wrap"),
+            frame_rule.contains("white-space: pre")
+                && !frame_rule.contains("white-space: pre-wrap"),
             "a frame block must never wrap its own grid, on any screen size: {frame_rule}"
         );
         assert!(
@@ -9681,9 +10855,9 @@ mod bee_route_tests {
             "a frame block scrolls itself sideways instead of wrapping: {frame_rule}"
         );
 
-        let media_start = style
-            .find("@media (max-width: 720px)")
-            .unwrap_or_else(|| panic!("the terminal page must still carry its narrow-screen rule: {style}"));
+        let media_start = style.find("@media (max-width: 720px)").unwrap_or_else(|| {
+            panic!("the terminal page must still carry its narrow-screen rule: {style}")
+        });
         // The frame rule is declared unconditionally, ahead of the
         // narrow-screen block — never nested inside it, or it would only win
         // there and lose the cascade battle with `.term-screen` everywhere
@@ -9720,7 +10894,10 @@ mod bee_route_tests {
 
         let st = build_state_with_dir(&dir);
         let project = register(&st, &root, "scroll-hints-css");
-        let resp = router(st).oneshot(terminal_req(&project.id, None)).await.unwrap();
+        let resp = router(st)
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         let style = board_style_block(&body);
@@ -9771,10 +10948,7 @@ mod bee_route_tests {
         let project = register(&st, &root, "herdr-down");
         let app = router(st);
 
-        let resp = app
-            .oneshot(terminal_req(&project.id, None))
-            .await
-            .unwrap();
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
@@ -9828,7 +11002,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let at_root = fake
-            .agent_start("w1", Some(&root_a.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&root_a.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
         let above = fake
@@ -9840,7 +11018,11 @@ mod bee_route_tests {
             .await
             .unwrap();
         let below_agent = fake
-            .agent_start("w1", Some(&below.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&below.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
         let via_symlink = fake
@@ -9852,7 +11034,11 @@ mod bee_route_tests {
             .await
             .unwrap();
         let other_project = fake
-            .agent_start("w1", Some(&root_b.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&root_b.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -9869,7 +11055,8 @@ mod bee_route_tests {
             .unwrap();
         assert_eq!(resp_a.status(), StatusCode::OK);
         let body_a = body_string(resp_a).await;
-        let strip_href = |project_id: &str, pane_id: &str| format!("/p/{project_id}/_terminal/pane/{pane_id}");
+        let strip_href =
+            |project_id: &str, pane_id: &str| format!("/p/{project_id}/_terminal/pane/{pane_id}");
         assert!(
             body_a.contains(&strip_href(&project_a.id, &at_root.pane_id)),
             "root pane missing from the strip: {body_a}"
@@ -9922,7 +11109,11 @@ mod bee_route_tests {
         let project = register(&st, &root, "family-disabled");
         let app = router(st);
 
-        let page = app.clone().oneshot(terminal_req(&project.id, None)).await.unwrap();
+        let page = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
         assert_eq!(page.status(), StatusCode::NOT_FOUND);
         assert_eq!(
             page.headers().get(header::CONTENT_TYPE).unwrap(),
@@ -9930,7 +11121,10 @@ mod bee_route_tests {
             "the disabled terminal page must answer the ordinary not-found page, not an empty body"
         );
         let page_body = body_string(page).await;
-        assert!(!page_body.is_empty(), "a disabled terminal must never answer with nothing");
+        assert!(
+            !page_body.is_empty(),
+            "a disabled terminal must never answer with nothing"
+        );
 
         let screen = app
             .oneshot(terminal_screen_req(&project.id, "w1:p1", None))
@@ -9982,7 +11176,12 @@ mod bee_route_tests {
             );
         }
 
-        assert_reached_real_logic(app.clone(), terminal_req(&project.id, None), "terminal_page").await;
+        assert_reached_real_logic(
+            app.clone(),
+            terminal_req(&project.id, None),
+            "terminal_page",
+        )
+        .await;
         assert_reached_real_logic(
             app.clone(),
             transcript_page_req(&project.id, None),
@@ -10013,15 +11212,28 @@ mod bee_route_tests {
             "terminal_keys",
         )
         .await;
-        assert_reached_real_logic(app.clone(), create_pane_req(&project.id, None), "terminal_create_pane")
-            .await;
         assert_reached_real_logic(
             app.clone(),
-            create_agent_req(&project.id, &serde_json::json!({ "preset": "unconfigured" }), None),
+            create_pane_req(&project.id, None),
+            "terminal_create_pane",
+        )
+        .await;
+        assert_reached_real_logic(
+            app.clone(),
+            create_agent_req(
+                &project.id,
+                &serde_json::json!({ "preset": "unconfigured" }),
+                None,
+            ),
             "terminal_create_agent",
         )
         .await;
-        assert_reached_real_logic(app.clone(), unassigned_req(None), "unassigned_terminal_page").await;
+        assert_reached_real_logic(
+            app.clone(),
+            unassigned_req(None),
+            "unassigned_terminal_page",
+        )
+        .await;
         assert_reached_real_logic(
             app.clone(),
             unassigned_screen_req("no-such-pane", None),
@@ -10063,10 +11275,13 @@ mod bee_route_tests {
         let switch_resp = app
             .oneshot(
                 Request::builder()
+                    .header(header::HOST, "127.0.0.1")
                     .method("POST")
                     .uri("/api/terminal-config")
                     .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(serde_json::json!({ "enabled": true }).to_string()))
+                    .body(Body::from(
+                        serde_json::json!({ "enabled": true }).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -10102,7 +11317,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
         let outside_agent = fake
-            .agent_start("w1", Some(&outside.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&outside.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -10112,7 +11331,11 @@ mod bee_route_tests {
         let app = router(st);
 
         let resp = app
-            .oneshot(terminal_screen_req(&project_a.id, &outside_agent.pane_id, None))
+            .oneshot(terminal_screen_req(
+                &project_a.id,
+                &outside_agent.pane_id,
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(
@@ -10622,8 +11845,14 @@ mod bee_route_tests {
         );
         assert!(text.contains("ansi-fg-red"), "no colour markup: {text}");
         assert!(!text.contains("<script>"), "raw script tag leaked: {text}");
-        assert!(text.contains("&lt;script&gt;"), "text must still be escaped: {text}");
-        assert!(text.ends_with("plain"), "cursor-clear escape must be dropped, not shown: {text}");
+        assert!(
+            text.contains("&lt;script&gt;"),
+            "text must still be escaped: {text}"
+        );
+        assert!(
+            text.ends_with("plain"),
+            "cursor-clear escape must be dropped, not shown: {text}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
@@ -10661,7 +11890,11 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["text"], serde_json::json!(waggledance_core::ansi::to_html(text)), "{body}");
+        assert_eq!(
+            json["text"],
+            serde_json::json!(waggledance_core::ansi::to_html(text)),
+            "{body}"
+        );
         assert!(
             fake.sent_text_log(&started.pane_id).await.is_empty(),
             "an absent history param must never route through PaneScroller"
@@ -10712,11 +11945,17 @@ mod bee_route_tests {
         let app = router(st);
 
         let resp = app
-            .oneshot(Request::builder()
-                .uri(format!("/p/{}/_terminal/{}/screen?history=2", project.id, started.pane_id))
-                .method("GET")
-                .body(Body::empty())
-                .unwrap())
+            .oneshot(
+                Request::builder()
+                    .header(header::HOST, "127.0.0.1")
+                    .uri(format!(
+                        "/p/{}/_terminal/{}/screen?history=2",
+                        project.id, started.pane_id
+                    ))
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -10771,11 +12010,17 @@ mod bee_route_tests {
         // First: a history request records this pane at depth 1.
         let history_resp = app
             .clone()
-            .oneshot(Request::builder()
-                .uri(format!("/p/{}/_terminal/{}/screen?history=1", project.id, started.pane_id))
-                .method("GET")
-                .body(Body::empty())
-                .unwrap())
+            .oneshot(
+                Request::builder()
+                    .header(header::HOST, "127.0.0.1")
+                    .uri(format!(
+                        "/p/{}/_terminal/{}/screen?history=1",
+                        project.id, started.pane_id
+                    ))
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(history_resp.status(), StatusCode::OK);
@@ -11023,22 +12268,34 @@ mod bee_route_tests {
         // First: a history request records this pane at depth 1.
         let history_resp = app
             .clone()
-            .oneshot(Request::builder()
-                .uri(format!("/p/{}/_terminal/{}/screen?history=1", project.id, started.pane_id))
-                .method("GET")
-                .body(Body::empty())
-                .unwrap())
+            .oneshot(
+                Request::builder()
+                    .header(header::HOST, "127.0.0.1")
+                    .uri(format!(
+                        "/p/{}/_terminal/{}/screen?history=1",
+                        project.id, started.pane_id
+                    ))
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(history_resp.status(), StatusCode::OK);
 
         // Second: the Live button's own explicit `?history=0`.
         let live_resp = app
-            .oneshot(Request::builder()
-                .uri(format!("/p/{}/_terminal/{}/screen?history=0", project.id, started.pane_id))
-                .method("GET")
-                .body(Body::empty())
-                .unwrap())
+            .oneshot(
+                Request::builder()
+                    .header(header::HOST, "127.0.0.1")
+                    .uri(format!(
+                        "/p/{}/_terminal/{}/screen?history=0",
+                        project.id, started.pane_id
+                    ))
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(live_resp.status(), StatusCode::OK);
@@ -11107,11 +12364,17 @@ mod bee_route_tests {
         let app = router(st); // a fresh AppState -- no record for this pane exists
 
         let live_resp = app
-            .oneshot(Request::builder()
-                .uri(format!("/p/{}/_terminal/{}/screen?history=0", project.id, started.pane_id))
-                .method("GET")
-                .body(Body::empty())
-                .unwrap())
+            .oneshot(
+                Request::builder()
+                    .header(header::HOST, "127.0.0.1")
+                    .uri(format!(
+                        "/p/{}/_terminal/{}/screen?history=0",
+                        project.id, started.pane_id
+                    ))
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(live_resp.status(), StatusCode::OK);
@@ -11357,10 +12620,7 @@ mod bee_route_tests {
              the pane already at depth 2 and sends no PageUp of its own, never two: {:?}",
             fake.sent_text_log("w1:p1").await
         );
-        let record = st
-            .scroll_tracker
-            .get("w1:p1")
-            .expect("depth 2 recorded");
+        let record = st.scroll_tracker.get("w1:p1").expect("depth 2 recorded");
         assert_eq!(
             record.depth, 2,
             "the recorded depth must equal the depth actually reached, never drifted by the \
@@ -11434,7 +12694,9 @@ mod bee_route_tests {
         let js = views::APP_JS;
 
         assert!(
-            js.contains("window.addEventListener(\"pagehide\", restoreEveryScrolledPaneBestEffort)"),
+            js.contains(
+                "window.addEventListener(\"pagehide\", restoreEveryScrolledPaneBestEffort)"
+            ),
             "a pagehide listener must fire the best-effort restore"
         );
         assert!(
@@ -11512,6 +12774,7 @@ mod bee_route_tests {
     /// route — the transcript sibling of `terminal_req`.
     fn transcript_page_req(id: &str, cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_transcript"))
             .method("GET");
         if let Some(c) = cookie {
@@ -11525,6 +12788,7 @@ mod bee_route_tests {
     /// `transcript_page_req` above.
     fn transcript_pane_req(id: &str, pane_id: &str, cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_transcript/pane/{pane_id}"))
             .method("GET");
         if let Some(c) = cookie {
@@ -11547,7 +12811,10 @@ mod bee_route_tests {
             uri.push_str("?cursor=");
             uri.push_str(&urlencoding_lite(c));
         }
-        let mut b = Request::builder().uri(uri).method("GET");
+        let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
+            .uri(uri)
+            .method("GET");
         if let Some(c) = cookie {
             b = b.header(header::COOKIE, c.to_string());
         }
@@ -11619,7 +12886,10 @@ mod bee_route_tests {
             "the disabled Transcript tab must answer the ordinary not-found page, not an empty body"
         );
         let page_body = body_string(page).await;
-        assert!(!page_body.is_empty(), "a disabled terminal must never answer with nothing");
+        assert!(
+            !page_body.is_empty(),
+            "a disabled terminal must never answer with nothing"
+        );
 
         let data = app
             .oneshot(terminal_transcript_req(&project.id, "w1:p1", None, None))
@@ -11660,7 +12930,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
         let outside_agent = fake
-            .agent_start("w1", Some(&outside.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&outside.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -11714,7 +12988,12 @@ mod bee_route_tests {
         let app = router(st);
 
         let resp = app
-            .oneshot(terminal_transcript_req(&project.id, &started.pane_id, None, None))
+            .oneshot(terminal_transcript_req(
+                &project.id,
+                &started.pane_id,
+                None,
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -11761,30 +13040,48 @@ mod bee_route_tests {
         // Opening read: backfills the tail.
         let open_resp = app
             .clone()
-            .oneshot(terminal_transcript_req(&project.id, &started.pane_id, None, None))
+            .oneshot(terminal_transcript_req(
+                &project.id,
+                &started.pane_id,
+                None,
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(open_resp.status(), StatusCode::OK);
         let open_body = body_string(open_resp).await;
         let open_json: serde_json::Value = serde_json::from_str(&open_body).unwrap();
-        assert_eq!(open_json["available"], serde_json::json!(true), "{open_body}");
+        assert_eq!(
+            open_json["available"],
+            serde_json::json!(true),
+            "{open_body}"
+        );
         let open_lines: Vec<String> = open_json["lines"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
-        assert_eq!(open_lines, vec!["» first prompt".to_string()], "{open_body}");
+        assert_eq!(
+            open_lines,
+            vec!["» first prompt".to_string()],
+            "{open_body}"
+        );
         let cursor1 = open_json["cursor"].as_str().unwrap().to_string();
 
         // Append a second record after the cursor was minted.
-        let claude_dir = transcript_root.join(waggledance_core::transcript::encode_project_dir(&cwd));
+        let claude_dir =
+            transcript_root.join(waggledance_core::transcript::encode_project_dir(&cwd));
         let mut f = std::fs::OpenOptions::new()
             .append(true)
             .open(claude_dir.join("s1.jsonl"))
             .unwrap();
         use std::io::Write as _;
-        writeln!(f, "{{\"type\":\"user\",\"message\":{{\"content\":\"second prompt\"}}}}").unwrap();
+        writeln!(
+            f,
+            "{{\"type\":\"user\",\"message\":{{\"content\":\"second prompt\"}}}}"
+        )
+        .unwrap();
         drop(f);
 
         // Poll with the first cursor: only the new record, never the first
@@ -11814,7 +13111,10 @@ mod bee_route_tests {
             "the first record must never be re-delivered: {mid_body}"
         );
         let cursor2 = mid_json["cursor"].as_str().unwrap().to_string();
-        assert_ne!(cursor1, cursor2, "the cursor must advance past the newly read record");
+        assert_ne!(
+            cursor1, cursor2,
+            "the cursor must advance past the newly read record"
+        );
 
         // Poll again with the latest cursor: nothing new, nothing skipped.
         let after_resp = app
@@ -11918,7 +13218,10 @@ mod bee_route_tests {
             )),
             "no transcript viewport for the pane: {body}"
         );
-        assert!(!body.contains("class=\"term-screen\""), "the Transcript tab must not render a screen viewport: {body}");
+        assert!(
+            !body.contains("class=\"term-screen\""),
+            "the Transcript tab must not render a screen viewport: {body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
@@ -11959,7 +13262,9 @@ mod bee_route_tests {
         // has advanced, is exactly the bug this test exists to catch.
         let headers_start = js
             .find("// Headers have arrived, but the request has not settled")
-            .expect("the headers-handler comment documenting why it must not clear the flag must exist");
+            .expect(
+                "the headers-handler comment documenting why it must not clear the flag must exist",
+            );
         let headers_end = js[headers_start..]
             .find("return res.json();")
             .map(|i| headers_start + i)
@@ -12036,7 +13341,9 @@ mod bee_route_tests {
              (Older, Newer, Live): found {update_calls} calls"
         );
 
-        let newer_start = js.find("if (newerBtn) {").expect("the Newer button handler must exist");
+        let newer_start = js
+            .find("if (newerBtn) {")
+            .expect("the Newer button handler must exist");
         let newer_end = js[newer_start..]
             .find("if (liveBtn) {")
             .map(|i| newer_start + i)
@@ -12171,7 +13478,12 @@ mod bee_route_tests {
     #[test]
     fn terminal_config_form_submission_carries_every_switch_the_page_renders() {
         let cfg = Config::default();
-        let html = views::settings_page(&cfg, false, false, views::NotifyCredentialView::NotConfigured);
+        let html = views::settings_page(
+            &cfg,
+            false,
+            false,
+            views::NotifyCredentialView::NotConfigured,
+        );
         let form_start = html
             .find(r#"id="terminal-config-form""#)
             .expect("the terminal settings form must exist on the settings page");
@@ -12232,6 +13544,7 @@ mod bee_route_tests {
             None => serde_json::json!({ "text": text }),
         };
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/{pane_id}/input"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -12252,6 +13565,7 @@ mod bee_route_tests {
     ) -> Request<Body> {
         let body = serde_json::json!({ "keys": keys });
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/{pane_id}/keys"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -12435,7 +13749,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
         let outside_agent = fake
-            .agent_start("w1", Some(&outside.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&outside.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -12502,7 +13820,13 @@ mod bee_route_tests {
 
         let input = app
             .clone()
-            .oneshot(terminal_input_req(&project.id, "w1:p1", "hi", Some(true), None))
+            .oneshot(terminal_input_req(
+                &project.id,
+                "w1:p1",
+                "hi",
+                Some(true),
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(input.status(), StatusCode::NOT_FOUND);
@@ -12543,6 +13867,7 @@ mod bee_route_tests {
     /// (plan.md's Approach: one request per file, no `multipart` feature).
     fn attach_req(id: &str, pane_id: &str, content_type: &str, body: Vec<u8>) -> Request<Body> {
         Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/{pane_id}/attach"))
             .method("POST")
             .header(header::CONTENT_TYPE, content_type)
@@ -12609,7 +13934,12 @@ mod bee_route_tests {
         let app = router(st);
 
         let resp = app
-            .oneshot(attach_req(&project.id, "w1:p1", "image/png", fake_png_bytes()))
+            .oneshot(attach_req(
+                &project.id,
+                "w1:p1",
+                "image/png",
+                fake_png_bytes(),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -12641,7 +13971,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
         let outside_agent = fake
-            .agent_start("w1", Some(&outside.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&outside.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -12749,7 +14083,12 @@ mod bee_route_tests {
 
         let resp = app
             .clone()
-            .oneshot(attach_req(&project.id, &pane_id, "text/plain", b"hello".to_vec()))
+            .oneshot(attach_req(
+                &project.id,
+                &pane_id,
+                "text/plain",
+                b"hello".to_vec(),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -12802,10 +14141,18 @@ mod bee_route_tests {
     #[tokio::test]
     async fn terminal_attach_stores_a_valid_png_under_the_sanitized_attach_root() {
         let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("happy").await;
-        assert!(pane_id.contains(':'), "fixture pane id must carry ':' to make this test mean anything: {pane_id}");
+        assert!(
+            pane_id.contains(':'),
+            "fixture pane id must carry ':' to make this test mean anything: {pane_id}"
+        );
 
         let resp = app
-            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .oneshot(attach_req(
+                &project.id,
+                &pane_id,
+                "image/png",
+                fake_png_bytes(),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -12815,12 +14162,18 @@ mod bee_route_tests {
         let path = std::path::Path::new(path_str);
         assert!(path.is_absolute(), "{}", path.display());
         assert!(path.starts_with(&attach_root), "{}", path.display());
-        assert!(path.exists(), "the uploaded file must actually land on disk");
+        assert!(
+            path.exists(),
+            "the uploaded file must actually land on disk"
+        );
         let parent = path.parent().unwrap();
         let relative = parent.strip_prefix(&attach_root).unwrap();
         for component in relative.components() {
             let seg = component.as_os_str().to_string_lossy();
-            assert!(!seg.contains(':'), "pane/project segment leaked a raw ':': {seg}");
+            assert!(
+                !seg.contains(':'),
+                "pane/project segment leaked a raw ':': {seg}"
+            );
         }
 
         cleanup_attach_fixture(&dir, &scratch, &attach_root);
@@ -12834,7 +14187,12 @@ mod bee_route_tests {
 
         let first = app
             .clone()
-            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .oneshot(attach_req(
+                &project.id,
+                &pane_id,
+                "image/png",
+                fake_png_bytes(),
+            ))
             .await
             .unwrap();
         assert_eq!(first.status(), StatusCode::OK);
@@ -12845,7 +14203,12 @@ mod bee_route_tests {
             .to_string();
 
         let second = app
-            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .oneshot(attach_req(
+                &project.id,
+                &pane_id,
+                "image/png",
+                fake_png_bytes(),
+            ))
             .await
             .unwrap();
         assert_eq!(second.status(), StatusCode::OK);
@@ -12855,7 +14218,10 @@ mod bee_route_tests {
             .unwrap()
             .to_string();
 
-        assert_ne!(first_path, second_path, "two uploads must never collide on the same name");
+        assert_ne!(
+            first_path, second_path,
+            "two uploads must never collide on the same name"
+        );
 
         cleanup_attach_fixture(&dir, &scratch, &attach_root);
     }
@@ -12876,14 +14242,22 @@ mod bee_route_tests {
         }
 
         let resp = app
-            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .oneshot(attach_req(
+                &project.id,
+                &pane_id,
+                "image/png",
+                fake_png_bytes(),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_string(resp).await;
         assert!(body.contains("\"error\""), "{body}");
         let count = std::fs::read_dir(&pane_dir).unwrap().count();
-        assert_eq!(count, ATTACH_MAX_FILES_PER_PANE, "a refused upload must never land on disk");
+        assert_eq!(
+            count, ATTACH_MAX_FILES_PER_PANE,
+            "a refused upload must never land on disk"
+        );
 
         cleanup_attach_fixture(&dir, &scratch, &attach_root);
     }
@@ -12897,7 +14271,8 @@ mod bee_route_tests {
     /// (std-only, no new dependency).
     #[tokio::test]
     async fn terminal_attach_prunes_stale_files_before_the_cap_and_accepts_the_upload() {
-        let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("prune-stale").await;
+        let (app, project, pane_id, dir, scratch, attach_root) =
+            attach_fixture("prune-stale").await;
 
         let pane_dir = attach_root
             .join(sanitize_attach_segment(&project.id))
@@ -12913,7 +14288,12 @@ mod bee_route_tests {
         }
 
         let resp = app
-            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .oneshot(attach_req(
+                &project.id,
+                &pane_id,
+                "image/png",
+                fake_png_bytes(),
+            ))
             .await
             .unwrap();
         assert_eq!(
@@ -12922,7 +14302,10 @@ mod bee_route_tests {
             "a pane directory of only stale files must be pruned before the cap check"
         );
         let remaining = std::fs::read_dir(&pane_dir).unwrap().count();
-        assert_eq!(remaining, 1, "the 32 stale seed files must be pruned, leaving only the new upload");
+        assert_eq!(
+            remaining, 1,
+            "the 32 stale seed files must be pruned, leaving only the new upload"
+        );
 
         cleanup_attach_fixture(&dir, &scratch, &attach_root);
     }
@@ -12933,7 +14316,8 @@ mod bee_route_tests {
     /// upload — pruning narrows the cap's growth, it never disables it.
     #[tokio::test]
     async fn terminal_attach_does_not_prune_fresh_files_and_still_refuses_the_cap() {
-        let (app, project, pane_id, dir, scratch, attach_root) = attach_fixture("prune-fresh").await;
+        let (app, project, pane_id, dir, scratch, attach_root) =
+            attach_fixture("prune-fresh").await;
 
         let pane_dir = attach_root
             .join(sanitize_attach_segment(&project.id))
@@ -12944,12 +14328,20 @@ mod bee_route_tests {
         }
 
         let resp = app
-            .oneshot(attach_req(&project.id, &pane_id, "image/png", fake_png_bytes()))
+            .oneshot(attach_req(
+                &project.id,
+                &pane_id,
+                "image/png",
+                fake_png_bytes(),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let count = std::fs::read_dir(&pane_dir).unwrap().count();
-        assert_eq!(count, ATTACH_MAX_FILES_PER_PANE, "fresh files must not be pruned away");
+        assert_eq!(
+            count, ATTACH_MAX_FILES_PER_PANE,
+            "fresh files must not be pruned away"
+        );
 
         cleanup_attach_fixture(&dir, &scratch, &attach_root);
     }
@@ -12974,14 +14366,14 @@ mod bee_route_tests {
         let project = register(&st, &root, "reply-bar-render");
         let app = router(st);
 
-        let resp = app
-            .oneshot(terminal_req(&project.id, None))
-            .await
-            .unwrap();
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
-            body.contains(&format!("class=\"term-reply\" data-pane-id=\"{}\"", started.pane_id)),
+            body.contains(&format!(
+                "class=\"term-reply\" data-pane-id=\"{}\"",
+                started.pane_id
+            )),
             "no reply bar for the pane: {body}"
         );
         assert!(body.contains("class=\"term-reply__send\""), "{body}");
@@ -13001,7 +14393,10 @@ mod bee_route_tests {
         // its own two scroll controls riding on it, then the keys that drive
         // the agent, then the box they write in — with its send row under it,
         // not squeezed beside it.
-        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("missing {needle}: {body}"));
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("missing {needle}: {body}"))
+        };
         let screen = at("class=\"term-screen\"");
         let scroll = at("class=\"term-scroll\"");
         let arrows = at("class=\"term-keys term-keys--move\"");
@@ -13130,7 +14525,10 @@ mod bee_route_tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let screen = fake.read_pane(&started.pane_id, crate::herdr::ReadSource::Visible, 200).await.unwrap();
+        let screen = fake
+            .read_pane(&started.pane_id, crate::herdr::ReadSource::Visible, 200)
+            .await
+            .unwrap();
         assert!(
             screen.text.contains("<ctrl+c>"),
             "the interrupt must reach the pane under its own name: {}",
@@ -13168,15 +14566,15 @@ mod bee_route_tests {
         let project = register(&st, &root, "scroll-fab-render");
         let app = router(st);
 
-        let resp = app
-            .oneshot(terminal_req(&project.id, None))
-            .await
-            .unwrap();
+        let resp = app.oneshot(terminal_req(&project.id, None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
         let group_start = body
-            .find(&format!("class=\"term-scroll\" data-pane-id=\"{}\"", started.pane_id))
+            .find(&format!(
+                "class=\"term-scroll\" data-pane-id=\"{}\"",
+                started.pane_id
+            ))
             .unwrap_or_else(|| panic!("no scroll group for the pane: {body}"));
         // scroll-fab-follow: the buttons ride in the sticky column nested in
         // the rail, so the group ends at the rail's own close — the second
@@ -13227,7 +14625,8 @@ mod bee_route_tests {
             "the disabled Newer button must render visibly dimmed: {body}"
         );
         assert!(
-            !body.contains(".term-scroll button { min-width: 44px") && !body.contains(".term-scroll { min-width: 44px"),
+            !body.contains(".term-scroll button { min-width: 44px")
+                && !body.contains(".term-scroll { min-width: 44px"),
             "the 44px floor must come from the circle's own fixed size, not a reintroduced \
              min-width rule the terminal_key_rows test in views.rs pins absent: {body}"
         );
@@ -13305,9 +14704,13 @@ mod bee_route_tests {
         std::fs::create_dir_all(&stray_root).unwrap();
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&stray_root.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
 
         // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
         let mut st = build_state_with_dir(&dir);
@@ -13370,12 +14773,20 @@ mod bee_route_tests {
         std::fs::create_dir_all(&stray_root).unwrap();
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        fake.agent_start("w1", Some(&owned_sub.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
-        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&owned_sub.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&stray_root.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -13449,12 +14860,20 @@ mod bee_route_tests {
         let stray_root = fresh_root("suggest-dedup-stray");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
-        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["codex".to_string()])
-            .await
-            .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&stray_root.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&stray_root.to_string_lossy()),
+            &["codex".to_string()],
+        )
+        .await
+        .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -13593,10 +15012,16 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let started = fake
-            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&stray_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
-        fake.set_pane_dirs(&started.pane_id, None, None).await.unwrap();
+        fake.set_pane_dirs(&started.pane_id, None, None)
+            .await
+            .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -13628,7 +15053,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let started = fake
-            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&stray_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -13693,9 +15122,13 @@ mod bee_route_tests {
         let project_root = fresh_root("suggest-own-root-project");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        fake.agent_start("w1", Some(&project_root.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&project_root.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -13731,9 +15164,13 @@ mod bee_route_tests {
         std::fs::create_dir_all(&pane_cwd).unwrap();
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        fake.agent_start("w1", Some(&pane_cwd.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&pane_cwd.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -13766,8 +15203,8 @@ mod bee_route_tests {
     /// components form a prefix of the dotted candidate's raw components,
     /// regardless of what the trailing `..` textually does.
     #[tokio::test]
-    async fn suggestions_drop_a_pane_whose_cwd_carries_a_dot_dot_component_but_resolves_inside_a_registered_project()
-    {
+    async fn suggestions_drop_a_pane_whose_cwd_carries_a_dot_dot_component_but_resolves_inside_a_registered_project(
+    ) {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("suggest-dot-dot");
@@ -13813,8 +15250,8 @@ mod bee_route_tests {
     /// it used to print here anyway. The traversal drop must catch this one
     /// too, regardless of what it resolves to.
     #[tokio::test]
-    async fn suggestions_drop_a_pane_whose_cwd_carries_a_sibling_dot_dot_that_resolves_inside_a_registered_project()
-    {
+    async fn suggestions_drop_a_pane_whose_cwd_carries_a_sibling_dot_dot_that_resolves_inside_a_registered_project(
+    ) {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("suggest-sibling-dot-dot");
@@ -13863,8 +15300,8 @@ mod bee_route_tests {
     /// button could never succeed, because `validate_register_path` refuses
     /// any submitted path carrying a traversal component outright.
     #[tokio::test]
-    async fn suggestions_drop_a_pane_whose_cwd_carries_a_dot_dot_component_even_when_it_resolves_outside_every_project()
-    {
+    async fn suggestions_drop_a_pane_whose_cwd_carries_a_dot_dot_component_even_when_it_resolves_outside_every_project(
+    ) {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("suggest-dot-dot-outside");
@@ -13872,10 +15309,7 @@ mod bee_route_tests {
         let scratch = fresh_root("suggest-dot-dot-outside-scratch");
         std::fs::create_dir_all(scratch.join("a")).unwrap();
         std::fs::create_dir_all(scratch.join("b")).unwrap();
-        let dotted_cwd = format!(
-            "{}/a/../b",
-            scratch.to_string_lossy().trim_end_matches('/')
-        );
+        let dotted_cwd = format!("{}/a/../b", scratch.to_string_lossy().trim_end_matches('/'));
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         fake.agent_start("w1", Some(&dotted_cwd), &["claude".to_string()])
@@ -13906,7 +15340,8 @@ mod bee_route_tests {
     /// the predicate was swapped for a text prefix, so this pins it at the
     /// route the disclosure actually happens on.
     #[tokio::test]
-    async fn suggestions_include_a_sibling_whose_name_merely_shares_a_prefix_with_a_registered_project() {
+    async fn suggestions_include_a_sibling_whose_name_merely_shares_a_prefix_with_a_registered_project(
+    ) {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("suggest-sibling-prefix");
@@ -13918,9 +15353,13 @@ mod bee_route_tests {
         std::fs::create_dir_all(&sibling_root).unwrap();
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        fake.agent_start("w1", Some(&sibling_root.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&sibling_root.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -13948,8 +15387,8 @@ mod bee_route_tests {
     /// leaving it implicit.
     #[cfg(unix)]
     #[tokio::test]
-    async fn suggestions_drop_a_pane_inside_a_registered_project_whose_cwd_resolves_onto_the_hard_deny_list_through_a_symlink()
-    {
+    async fn suggestions_drop_a_pane_inside_a_registered_project_whose_cwd_resolves_onto_the_hard_deny_list_through_a_symlink(
+    ) {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("suggest-symlink-deny");
@@ -13992,7 +15431,8 @@ mod bee_route_tests {
     /// created. The raw containment check is the only thing that still
     /// suppresses a suggestion for a path under that missing root.
     #[tokio::test]
-    async fn suggestions_drop_a_pane_under_a_registered_projects_root_that_does_not_exist_on_disk() {
+    async fn suggestions_drop_a_pane_under_a_registered_projects_root_that_does_not_exist_on_disk()
+    {
         use crate::herdr::fake::FakeHerdr;
 
         let dir = fresh_root("suggest-missing-root");
@@ -14004,9 +15444,13 @@ mod bee_route_tests {
         let pane_cwd = missing_root.join("sub");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        fake.agent_start("w1", Some(&pane_cwd.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&pane_cwd.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -14050,9 +15494,13 @@ mod bee_route_tests {
         let denied_root = PathBuf::from("/etc/waggledance-test-fixture-nonexistent");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&stray_root.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -14089,9 +15537,13 @@ mod bee_route_tests {
         write(&stray_root, "README.md", "# Stray\n");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&stray_root.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -14106,6 +15558,7 @@ mod bee_route_tests {
         );
 
         let register_req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -14164,9 +15617,13 @@ mod bee_route_tests {
         let stray_root = fresh_root("suggest-double-register-stray");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&stray_root.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -14175,6 +15632,7 @@ mod bee_route_tests {
 
         let post_register = || {
             Request::builder()
+                .header(header::HOST, "127.0.0.1")
                 .method("POST")
                 .uri("/api/projects/register")
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -14247,6 +15705,7 @@ mod bee_route_tests {
         );
 
         let register_req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -14289,9 +15748,13 @@ mod bee_route_tests {
         std::fs::create_dir_all(&stray_root).unwrap();
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        fake.agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
-            .await
-            .unwrap();
+        fake.agent_start(
+            "w1",
+            Some(&stray_root.to_string_lossy()),
+            &["claude".to_string()],
+        )
+        .await
+        .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -14324,7 +15787,10 @@ mod bee_route_tests {
     /// A GET request to `/_terminal/unassigned`, optionally carrying the
     /// given session cookie value — the group-wide sibling of `terminal_req`.
     fn unassigned_req(cookie: Option<&str>) -> Request<Body> {
-        let mut b = Request::builder().uri("/_terminal/unassigned").method("GET");
+        let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
+            .uri("/_terminal/unassigned")
+            .method("GET");
         if let Some(c) = cookie {
             b = b.header(header::COOKIE, c.to_string());
         }
@@ -14334,6 +15800,7 @@ mod bee_route_tests {
     /// A GET request to `/_terminal/unassigned/{pane_id}/screen`.
     fn unassigned_screen_req(pane_id: &str, cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/_terminal/unassigned/{pane_id}/screen"))
             .method("GET");
         if let Some(c) = cookie {
@@ -14344,9 +15811,15 @@ mod bee_route_tests {
 
     /// A POST request to `/_terminal/unassigned/{pane_id}/input` carrying a
     /// JSON `{ "text": ..., "submit": ... }` body.
-    fn unassigned_input_req(pane_id: &str, text: &str, submit: bool, cookie: Option<&str>) -> Request<Body> {
+    fn unassigned_input_req(
+        pane_id: &str,
+        text: &str,
+        submit: bool,
+        cookie: Option<&str>,
+    ) -> Request<Body> {
         let body = serde_json::json!({ "text": text, "submit": submit });
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/_terminal/unassigned/{pane_id}/input"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -14361,6 +15834,7 @@ mod bee_route_tests {
     fn unassigned_keys_req(pane_id: &str, keys: &[&str], cookie: Option<&str>) -> Request<Body> {
         let body = serde_json::json!({ "keys": keys });
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/_terminal/unassigned/{pane_id}/keys"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -14394,7 +15868,10 @@ mod bee_route_tests {
             "a disabled terminal must answer the ordinary not-found page, not an empty body"
         );
         let body = body_string(disabled).await;
-        assert!(!body.is_empty(), "a disabled terminal must never answer with nothing");
+        assert!(
+            !body.is_empty(),
+            "a disabled terminal must never answer with nothing"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -14416,13 +15893,21 @@ mod bee_route_tests {
                 .oneshot(unassigned_screen_req("no-such-pane", None))
                 .await
                 .unwrap();
-            assert_eq!(screen.status(), StatusCode::NOT_FOUND, "{label}: screen route");
+            assert_eq!(
+                screen.status(),
+                StatusCode::NOT_FOUND,
+                "{label}: screen route"
+            );
             let input = app
                 .clone()
                 .oneshot(unassigned_input_req("no-such-pane", "hi", true, None))
                 .await
                 .unwrap();
-            assert_eq!(input.status(), StatusCode::NOT_FOUND, "{label}: input route");
+            assert_eq!(
+                input.status(),
+                StatusCode::NOT_FOUND,
+                "{label}: input route"
+            );
             let keys = app
                 .clone()
                 .oneshot(unassigned_keys_req("no-such-pane", &["enter"], None))
@@ -14465,7 +15950,11 @@ mod bee_route_tests {
         enable_terminal(&dir_both);
         enable_unassigned_group(&dir_both);
         let app_both = router(build_state_with_dir(&dir_both));
-        let page_both = app_both.clone().oneshot(unassigned_req(None)).await.unwrap();
+        let page_both = app_both
+            .clone()
+            .oneshot(unassigned_req(None))
+            .await
+            .unwrap();
         assert_eq!(
             page_both.status(),
             StatusCode::OK,
@@ -14507,11 +15996,19 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let owned = fake
-            .agent_start("w1", Some(&project_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&project_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
         let stray = fake
-            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&stray_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -14522,11 +16019,7 @@ mod bee_route_tests {
         let projects_before = engine.list_projects().unwrap();
         let app = router(st);
 
-        let unassigned_resp = app
-            .clone()
-            .oneshot(unassigned_req(None))
-            .await
-            .unwrap();
+        let unassigned_resp = app.clone().oneshot(unassigned_req(None)).await.unwrap();
         assert_eq!(unassigned_resp.status(), StatusCode::OK);
         let unassigned_body = body_string(unassigned_resp).await;
         assert!(
@@ -14663,7 +16156,9 @@ mod bee_route_tests {
         let body = body_string(get(router(st), "/").await).await;
 
         let full = &p.last_seen_at;
-        let (date, rest) = full.split_once('T').expect("registry writes an RFC3339 instant");
+        let (date, rest) = full
+            .split_once('T')
+            .expect("registry writes an RFC3339 instant");
         let minute = format!("{date} {}", &rest[..5]);
         assert!(
             body.contains(&format!("datetime=\"{full}\"")),
@@ -14765,15 +16260,27 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let parent_pane = fake
-            .agent_start("w1", Some(&parent_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&parent_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
         let branch_pane = fake
-            .agent_start("w1", Some(&branch_root.to_string_lossy()), &["codex".to_string()])
+            .agent_start(
+                "w1",
+                Some(&branch_root.to_string_lossy()),
+                &["codex".to_string()],
+            )
             .await
             .unwrap();
         let sibling_pane = fake
-            .agent_start("w1", Some(&sibling_root.to_string_lossy()), &["aider".to_string()])
+            .agent_start(
+                "w1",
+                Some(&sibling_root.to_string_lossy()),
+                &["aider".to_string()],
+            )
             .await
             .unwrap();
 
@@ -14785,7 +16292,8 @@ mod bee_route_tests {
         let app = router(st);
 
         let body = body_string(get(app, "/").await).await;
-        let href = |project_id: &str, pane_id: &str| format!("/p/{project_id}/_terminal/pane/{pane_id}");
+        let href =
+            |project_id: &str, pane_id: &str| format!("/p/{project_id}/_terminal/pane/{pane_id}");
 
         assert!(
             body.contains(&href(&parent.id, &parent_pane.pane_id)),
@@ -14916,7 +16424,12 @@ mod bee_route_tests {
         ) -> herdr::Result<herdr::ScreenRead> {
             unimplemented!("index_page never reads a pane")
         }
-        async fn send_input(&self, _pane_id: &str, _text: &str, _submit: bool) -> herdr::Result<()> {
+        async fn send_input(
+            &self,
+            _pane_id: &str,
+            _text: &str,
+            _submit: bool,
+        ) -> herdr::Result<()> {
             unimplemented!("index_page never sends input")
         }
         async fn send_text(&self, _pane_id: &str, _bytes: &str) -> herdr::Result<()> {
@@ -14925,7 +16438,11 @@ mod bee_route_tests {
         async fn send_keys(&self, _pane_id: &str, _keys: &[String]) -> herdr::Result<()> {
             unimplemented!("index_page never sends keys")
         }
-        async fn tab_create(&self, _workspace_id: &str, _cwd: Option<&str>) -> herdr::Result<herdr::TabCreated> {
+        async fn tab_create(
+            &self,
+            _workspace_id: &str,
+            _cwd: Option<&str>,
+        ) -> herdr::Result<herdr::TabCreated> {
             unimplemented!("index_page never creates a tab")
         }
         async fn agent_start(
@@ -15037,15 +16554,24 @@ mod bee_route_tests {
         let scratch = fresh_root("home-badges-unconstructable-scratch");
         let ok_root = scratch.join("demo");
         std::fs::create_dir_all(&ok_root).unwrap();
-        let denied_root = PathBuf::from("/etc/waggledance-test-fixture-nonexistent-projects-home-1");
+        let denied_root =
+            PathBuf::from("/etc/waggledance-test-fixture-nonexistent-projects-home-1");
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let ok_pane = fake
-            .agent_start("w1", Some(&ok_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&ok_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
         let denied_pane = fake
-            .agent_start("w1", Some(&denied_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&denied_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -15112,23 +16638,34 @@ mod bee_route_tests {
             .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
             .await
             .unwrap();
-        fake.set_status(&working.pane_id, AgentStatus::Working).await.unwrap();
+        fake.set_status(&working.pane_id, AgentStatus::Working)
+            .await
+            .unwrap();
         let idle = fake
             .agent_start("w1", Some(&root.to_string_lossy()), &["codex".to_string()])
             .await
             .unwrap();
-        fake.set_status(&idle.pane_id, AgentStatus::Idle).await.unwrap();
+        fake.set_status(&idle.pane_id, AgentStatus::Idle)
+            .await
+            .unwrap();
         let done = fake
             .agent_start("w1", Some(&root.to_string_lossy()), &["aider".to_string()])
             .await
             .unwrap();
-        fake.set_status(&done.pane_id, AgentStatus::Done).await.unwrap();
+        fake.set_status(&done.pane_id, AgentStatus::Done)
+            .await
+            .unwrap();
         let blocked = fake
             .agent_start("w1", Some(&root.to_string_lossy()), &["cursor".to_string()])
             .await
             .unwrap();
-        fake.set_status(&blocked.pane_id, AgentStatus::Blocked).await.unwrap();
-        let shell = fake.tab_create("w1", Some(&root.to_string_lossy())).await.unwrap();
+        fake.set_status(&blocked.pane_id, AgentStatus::Blocked)
+            .await
+            .unwrap();
+        let shell = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -15327,18 +16864,26 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         body.find(r#"data-feature-hub="cross-project""#)
-            .expect(&format!("the cross-project Features section must render on the default (Kanban) tab: {body}"));
+            .unwrap_or_else(|| {
+                panic!(
+                "the cross-project Features section must render on the default (Kanban) tab: {body}"
+            )
+            });
         assert!(
             !body.contains("<ul class=\"proj-list\">"),
             "the Kanban tab must not also render the project list: {body}"
         );
-        assert!(body.contains("feat-a") && body.contains("feat-b"), "both projects' features must appear: {body}");
+        assert!(
+            body.contains("feat-a") && body.contains("feat-b"),
+            "both projects' features must appear: {body}"
+        );
         assert!(
             body.contains("Project A") && body.contains("Project B"),
             "both projects' own names must label their entries: {body}"
         );
         assert!(
-            !body.contains(r#"data-feature-hub="cross-project-live""#) && !body.contains(r#"class="bee-strip""#),
+            !body.contains(r#"data-feature-hub="cross-project-live""#)
+                && !body.contains(r#"class="bee-strip""#),
             "the home page must emit no Live section at all: {body}"
         );
 
@@ -15365,6 +16910,60 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// D6 (review-p1-fixes): `assets/app.js`'s `shouldReload` predicate
+    /// (homepage-terminal-refresh) skips a forced reload whenever the
+    /// current document shows a live `.term-screen` element
+    /// (`document.querySelector(".term-screen")`) — that guard cannot run
+    /// under a node-free Rust test, but its only input is the server-served
+    /// markup, so this proves the boundary the guard actually assumes: the
+    /// Kanban and Projects tabs, which the guard must let reload, never
+    /// carry a `.term-screen`; a Terminals tab with a selected,
+    /// agent-backed pane — the exact live-session case the guard exists to
+    /// protect — always does.
+    #[tokio::test]
+    async fn only_terminals_tab_with_selected_pane_carries_the_term_screen_shouldreload_guards_on()
+    {
+        use crate::herdr::fake::FakeHerdr;
+
+        let dir = fresh_root("shouldreload-term-screen-guard");
+        enable_terminal(&dir);
+        let root = fresh_root("shouldreload-term-screen-guard-project");
+        write_bee_project_fixture(&root, "feat-a");
+
+        let fake = std::sync::Arc::new(FakeHerdr::new());
+        let agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "proj-a");
+        let app = router(st);
+
+        let kanban_body = body_string(get(app.clone(), "/?tab=kanban").await).await;
+        assert!(
+            !kanban_body.contains("class=\"term-screen\""),
+            "the Kanban tab must never carry a .term-screen — shouldReload would wrongly block its reload otherwise: {kanban_body}"
+        );
+
+        let projects_body = body_string(get(app.clone(), "/?tab=projects").await).await;
+        assert!(
+            !projects_body.contains("class=\"term-screen\""),
+            "the Projects tab must never carry a .term-screen — shouldReload would wrongly block its reload otherwise: {projects_body}"
+        );
+
+        let terminals_body =
+            body_string(get(app, &format!("/?tab=terminals&pane={}", agent.pane_id)).await).await;
+        assert!(
+            terminals_body.contains("class=\"term-screen\""),
+            "a Terminals tab with a selected agent pane must carry a .term-screen — this is the live session shouldReload must not reload out from under: {terminals_body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (kanban-columns D2, edge) On the cross-project board, every
     /// project's feature Todo row must sit above every project's PBI Todo
     /// row within the merged column — a single accumulator appending each
@@ -15373,7 +16972,8 @@ mod bee_route_tests {
     /// alone, not just within one project. Two projects, each carrying
     /// both kinds, is the shape that would catch that regression.
     #[tokio::test]
-    async fn cross_project_board_orders_every_projects_feature_rows_above_every_projects_pbi_rows() {
+    async fn cross_project_board_orders_every_projects_feature_rows_above_every_projects_pbi_rows()
+    {
         let dir = fresh_root("home-cross-pbi-order");
         let st = build_state_with_dir(&dir);
         let root_a = dir.join("proj-a");
@@ -15381,16 +16981,32 @@ mod bee_route_tests {
         std::fs::create_dir_all(&root_a).unwrap();
         std::fs::create_dir_all(&root_b).unwrap();
 
-        write(&root_a, ".bee/lanes/feat-a.json", &lane_json("feat-a", "swarming", "standard", "keep going", None, None));
-        write(&root_a, ".bee/cells/a.json", &feature_cell_json("a-1", "feat-a", "open", None, None));
+        write(
+            &root_a,
+            ".bee/lanes/feat-a.json",
+            &lane_json("feat-a", "swarming", "standard", "keep going", None, None),
+        );
+        write(
+            &root_a,
+            ".bee/cells/a.json",
+            &feature_cell_json("a-1", "feat-a", "open", None, None),
+        );
         write(
             &root_a,
             ".bee/backlog.jsonl",
             "{\"kind\":\"pbi\",\"id\":\"PBI-A\",\"title\":\"Widget A\",\"status\":\"proposed\",\"feature\":\"feat-a\"}\n",
         );
 
-        write(&root_b, ".bee/lanes/feat-b.json", &lane_json("feat-b", "swarming", "standard", "keep going", None, None));
-        write(&root_b, ".bee/cells/a.json", &feature_cell_json("b-1", "feat-b", "open", None, None));
+        write(
+            &root_b,
+            ".bee/lanes/feat-b.json",
+            &lane_json("feat-b", "swarming", "standard", "keep going", None, None),
+        );
+        write(
+            &root_b,
+            ".bee/cells/a.json",
+            &feature_cell_json("b-1", "feat-b", "open", None, None),
+        );
         write(
             &root_b,
             ".bee/backlog.jsonl",
@@ -15415,14 +17031,22 @@ mod bee_route_tests {
             todo_hrefs.push(&body[start..end]);
             idx = end;
         }
-        assert_eq!(todo_hrefs.len(), 4, "two feature rows and two PBI rows must render under Todo: {body}");
+        assert_eq!(
+            todo_hrefs.len(),
+            4,
+            "two feature rows and two PBI rows must render under Todo: {body}"
+        );
 
-        let last_feature_idx =
-            todo_hrefs.iter().rposition(|h| h.contains("/feature/")).expect("at least one feature row must render");
+        let last_feature_idx = todo_hrefs
+            .iter()
+            .rposition(|h| h.contains("/feature/"))
+            .expect("at least one feature row must render");
         let first_pbi_idx = todo_hrefs
             .iter()
             .position(|h| !h.contains("/feature/"))
-            .expect("at least one PBI row (linking straight to a project's own bee board) must render");
+            .expect(
+                "at least one PBI row (linking straight to a project's own bee board) must render",
+            );
         assert!(
             last_feature_idx < first_pbi_idx,
             "every feature row must sit above every PBI row within the merged Todo column, got hrefs in order {todo_hrefs:?}"
@@ -15467,7 +17091,9 @@ mod bee_route_tests {
             "exactly one tab must carry aria-current: {kanban_body}"
         );
         assert!(
-            kanban_body.contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=kanban" aria-current="page">Kanban</a>"#),
+            kanban_body.contains(
+                r#"<a class="fg-tab fg-tab--on" href="/?tab=kanban" aria-current="page">Kanban</a>"#
+            ),
             "Kanban must be the selected tab by default: {kanban_body}"
         );
         assert!(
@@ -15634,7 +17260,10 @@ mod bee_route_tests {
             !body.contains("bee-hub-theme"),
             "no qualifying project means no Kanban theme either: {body}"
         );
-        assert!(body.contains("<ul class=\"proj-list\">") || body.contains("fg-empty"), "the plain project list must still render: {body}");
+        assert!(
+            body.contains("<ul class=\"proj-list\">") || body.contains("fg-empty"),
+            "the plain project list must still render: {body}"
+        );
 
         let terminals_resp = get(app, "/?tab=terminals").await;
         assert_eq!(terminals_resp.status(), StatusCode::OK);
@@ -15664,10 +17293,14 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            !body.contains("data-feature-hub=\"cross-project-live\"") && !body.contains("data-feature-hub=\"cross-project\""),
+            !body.contains("data-feature-hub=\"cross-project-live\"")
+                && !body.contains("data-feature-hub=\"cross-project\""),
             "neither cross-project section may render when nothing qualifies: {body}"
         );
-        assert!(body.contains("<ul class=\"proj-list\">"), "the ordinary project list must still render: {body}");
+        assert!(
+            body.contains("<ul class=\"proj-list\">"),
+            "the ordinary project list must still render: {body}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -15692,7 +17325,8 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
-            !body.contains("data-feature-hub=\"cross-project-live\"") && !body.contains("data-feature-hub=\"cross-project\""),
+            !body.contains("data-feature-hub=\"cross-project-live\"")
+                && !body.contains("data-feature-hub=\"cross-project\""),
             "a root missing from disk must not qualify for the cross-project sections: {body}"
         );
 
@@ -15753,13 +17387,20 @@ mod bee_route_tests {
         std::fs::create_dir_all(&outside).unwrap();
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
-        let shell = fake.tab_create("w1", Some(&root.to_string_lossy())).await.unwrap();
+        let shell = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
         let project_agent = fake
             .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
             .await
             .unwrap();
         let unassigned_agent = fake
-            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .agent_start(
+                "w2",
+                Some(&outside.to_string_lossy()),
+                &["codex".to_string()],
+            )
             .await
             .unwrap();
 
@@ -15769,7 +17410,11 @@ mod bee_route_tests {
         let app = router(st);
 
         let project_body = body_string(
-            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+            get(
+                app.clone(),
+                &format!("/?tab=terminals&pane={}", project_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -15778,7 +17423,11 @@ mod bee_route_tests {
         );
 
         let unassigned_body = body_string(
-            get(app.clone(), &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+            get(
+                app.clone(),
+                &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -15786,7 +17435,8 @@ mod bee_route_tests {
             "an agent-backed pane outside every registered project must still be selectable: {unassigned_body}"
         );
 
-        let shell_body = body_string(get(app, &format!("/?tab=terminals&pane={}", shell.pane_id)).await).await;
+        let shell_body =
+            body_string(get(app, &format!("/?tab=terminals&pane={}", shell.pane_id)).await).await;
         assert!(
             shell_body.contains("This terminal is gone."),
             "a bare shell pane must never be selectable from the tab: {shell_body}"
@@ -15829,17 +17479,23 @@ mod bee_route_tests {
             .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
             .await
             .unwrap();
-        fake.set_status(&rest.pane_id, AgentStatus::Done).await.unwrap();
+        fake.set_status(&rest.pane_id, AgentStatus::Done)
+            .await
+            .unwrap();
         let working = fake
             .agent_start("w1", Some(&root.to_string_lossy()), &["codex".to_string()])
             .await
             .unwrap();
-        fake.set_status(&working.pane_id, AgentStatus::Working).await.unwrap();
+        fake.set_status(&working.pane_id, AgentStatus::Working)
+            .await
+            .unwrap();
         let blocked = fake
             .agent_start("w1", Some(&root.to_string_lossy()), &["aider".to_string()])
             .await
             .unwrap();
-        fake.set_status(&blocked.pane_id, AgentStatus::Blocked).await.unwrap();
+        fake.set_status(&blocked.pane_id, AgentStatus::Blocked)
+            .await
+            .unwrap();
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake;
@@ -15875,15 +17531,25 @@ mod bee_route_tests {
             fake2.set_status(seeded, AgentStatus::Idle).await.unwrap();
         }
         let rest2 = fake2
-            .agent_start("w1", Some(&root2.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&root2.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
-        fake2.set_status(&rest2.pane_id, AgentStatus::Done).await.unwrap();
+        fake2
+            .set_status(&rest2.pane_id, AgentStatus::Done)
+            .await
+            .unwrap();
         let working2 = fake2
             .agent_start("w1", Some(&root2.to_string_lossy()), &["codex".to_string()])
             .await
             .unwrap();
-        fake2.set_status(&working2.pane_id, AgentStatus::Working).await.unwrap();
+        fake2
+            .set_status(&working2.pane_id, AgentStatus::Working)
+            .await
+            .unwrap();
 
         let mut st2 = build_state_with_dir(&dir2);
         st2.herdr = fake2;
@@ -15939,7 +17605,8 @@ mod bee_route_tests {
             "a vanished pane must render a plain not-found line: {body}"
         );
         assert!(
-            body.contains(r#"id="agent-drawer-toggle""#) && body.contains(r#"data-agent-drawer-homepage"#),
+            body.contains(r#"id="agent-drawer-toggle""#)
+                && body.contains(r#"data-agent-drawer-homepage"#),
             "the Agents drawer switcher must still render once the named pane is gone: {body}"
         );
         assert!(
@@ -16029,7 +17696,11 @@ mod bee_route_tests {
             .await
             .unwrap();
         let unassigned_agent = fake
-            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .agent_start(
+                "w2",
+                Some(&outside.to_string_lossy()),
+                &["codex".to_string()],
+            )
             .await
             .unwrap();
 
@@ -16039,7 +17710,11 @@ mod bee_route_tests {
         let app = router(st);
 
         let project_body = body_string(
-            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+            get(
+                app.clone(),
+                &format!("/?tab=terminals&pane={}", project_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -16051,7 +17726,11 @@ mod bee_route_tests {
         );
 
         let unassigned_body = body_string(
-            get(app, &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+            get(
+                app,
+                &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -16093,13 +17772,19 @@ mod bee_route_tests {
         register(&st, &root, "proj-a");
         let app = router(st);
 
-        let body = body_string(get(app, &format!("/?tab=terminals&pane={}", agent.pane_id)).await).await;
+        let body =
+            body_string(get(app, &format!("/?tab=terminals&pane={}", agent.pane_id)).await).await;
         assert!(
-            body.contains(&format!(r#"class="term-scroll" data-pane-id="{}""#, agent.pane_id)),
+            body.contains(&format!(
+                r#"class="term-scroll" data-pane-id="{}""#,
+                agent.pane_id
+            )),
             "the selected pane's scroll box must render on the homepage tab: {body}"
         );
         assert!(
-            body.contains(r#"<button type="button" data-scroll="older" aria-label="Older">↑</button>"#),
+            body.contains(
+                r#"<button type="button" data-scroll="older" aria-label="Older">↑</button>"#
+            ),
             "the Older button must render: {body}"
         );
         assert!(
@@ -16107,7 +17792,9 @@ mod bee_route_tests {
             "the Newer button must start disabled: {body}"
         );
         assert!(
-            body.contains(r#"<button type="button" data-scroll="live" aria-label="Live">Live</button>"#),
+            body.contains(
+                r#"<button type="button" data-scroll="live" aria-label="Live">Live</button>"#
+            ),
             "the Live button must render: {body}"
         );
 
@@ -16139,7 +17826,11 @@ mod bee_route_tests {
             .await
             .unwrap();
         let unassigned_agent = fake
-            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .agent_start(
+                "w2",
+                Some(&outside.to_string_lossy()),
+                &["codex".to_string()],
+            )
             .await
             .unwrap();
 
@@ -16150,7 +17841,11 @@ mod bee_route_tests {
 
         let project_base = format!("/p/{}/_terminal/{}", project.id, project_agent.pane_id);
         let project_body = body_string(
-            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+            get(
+                app.clone(),
+                &format!("/?tab=terminals&pane={}", project_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -16175,7 +17870,11 @@ mod bee_route_tests {
 
         let unassigned_base = format!("/_terminal/unassigned/{}", unassigned_agent.pane_id);
         let unassigned_body = body_string(
-            get(app, &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+            get(
+                app,
+                &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -16227,9 +17926,15 @@ mod bee_route_tests {
             .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
             .await
             .unwrap();
-        fake.set_status(&project_agent.pane_id, AgentStatus::Working).await.unwrap();
+        fake.set_status(&project_agent.pane_id, AgentStatus::Working)
+            .await
+            .unwrap();
         let unassigned_agent = fake
-            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .agent_start(
+                "w2",
+                Some(&outside.to_string_lossy()),
+                &["codex".to_string()],
+            )
             .await
             .unwrap();
 
@@ -16239,7 +17944,11 @@ mod bee_route_tests {
         let app = router(st);
 
         let project_body = body_string(
-            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+            get(
+                app.clone(),
+                &format!("/?tab=terminals&pane={}", project_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -16264,7 +17973,11 @@ mod bee_route_tests {
         );
 
         let unassigned_body = body_string(
-            get(app, &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+            get(
+                app,
+                &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -16299,7 +18012,11 @@ mod bee_route_tests {
             .await
             .unwrap();
         let unassigned_agent = fake
-            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .agent_start(
+                "w2",
+                Some(&outside.to_string_lossy()),
+                &["codex".to_string()],
+            )
             .await
             .unwrap();
 
@@ -16309,16 +18026,27 @@ mod bee_route_tests {
         let app = router(st);
 
         let project_body = body_string(
-            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+            get(
+                app.clone(),
+                &format!("/?tab=terminals&pane={}", project_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
-            project_body.contains(&format!(r#"class="term-attach" data-pane-id="{}""#, project_agent.pane_id)),
+            project_body.contains(&format!(
+                r#"class="term-attach" data-pane-id="{}""#,
+                project_agent.pane_id
+            )),
             "a project pane's reply form must carry the attach control: {project_body}"
         );
 
         let unassigned_body = body_string(
-            get(app, &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+            get(
+                app,
+                &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -16358,7 +18086,8 @@ mod bee_route_tests {
 
         let body = body_string(get(app, "/?tab=terminals").await).await;
         assert!(
-            body.contains(r#"id="agent-drawer-toggle""#) && body.contains(r#"data-agent-drawer-list"#),
+            body.contains(r#"id="agent-drawer-toggle""#)
+                && body.contains(r#"data-agent-drawer-list"#),
             "the tab must render the Agents drawer chrome: {body}"
         );
         assert!(
@@ -16409,7 +18138,11 @@ mod bee_route_tests {
             .await
             .unwrap();
         let unassigned_agent = fake
-            .agent_start("w2", Some(&outside.to_string_lossy()), &["codex".to_string()])
+            .agent_start(
+                "w2",
+                Some(&outside.to_string_lossy()),
+                &["codex".to_string()],
+            )
             .await
             .unwrap();
 
@@ -16419,7 +18152,11 @@ mod bee_route_tests {
         let app = router(st);
 
         let project_body = body_string(
-            get(app.clone(), &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+            get(
+                app.clone(),
+                &format!("/?tab=terminals&pane={}", project_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -16431,12 +18168,17 @@ mod bee_route_tests {
             "a configured agent preset must still be offered: {project_body}"
         );
         assert!(
-            !project_body.contains(">New shell<") && !project_body.contains("class=\"term-create__pane\""),
+            !project_body.contains(">New shell<")
+                && !project_body.contains("class=\"term-create__pane\""),
             "the Terminals tab must offer no plain-shell button: {project_body}"
         );
 
         let unassigned_body = body_string(
-            get(app, &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id)).await,
+            get(
+                app,
+                &format!("/?tab=terminals&pane={}", unassigned_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -16476,7 +18218,11 @@ mod bee_route_tests {
         let app = router(st);
 
         let body = body_string(
-            get(app, &format!("/?tab=terminals&pane={}", project_agent.pane_id)).await,
+            get(
+                app,
+                &format!("/?tab=terminals&pane={}", project_agent.pane_id),
+            )
+            .await,
         )
         .await;
         assert!(
@@ -16520,7 +18266,8 @@ mod bee_route_tests {
 
         let body = body_string(get(app, &format!("/p/{}/_terminal", project.id)).await).await;
         assert!(
-            body.contains(r#"id="agent-drawer-toggle""#) && body.contains(r#"data-agent-drawer-list"#),
+            body.contains(r#"id="agent-drawer-toggle""#)
+                && body.contains(r#"data-agent-drawer-list"#),
             "the project terminal page must still render the Agents drawer: {body}"
         );
         assert!(
@@ -16583,12 +18330,25 @@ mod bee_route_tests {
         write_cross_project_live_feature(&root, "feat-main", "live-main");
         write_cross_project_live_feature(&root, "feat-also-main", "live-also-main");
         write_cross_project_live_feature(&root, "feat-wt", "live-wt");
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"feat-wt","mode":"standard"}"#);
-        write(&root, ".bee/runtime/worktree-grants.json", &grants_json(&["card-terminals-cross-wt"]));
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"feat-wt","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["card-terminals-cross-wt"]),
+        );
         write(
             &root,
             ".bee/runtime/workspaces/w.json",
-            &workspace_json("card-terminals-cross-wt", &sibling.to_string_lossy(), "wt/feat-wt", &[]),
+            &workspace_json(
+                "card-terminals-cross-wt",
+                &sibling.to_string_lossy(),
+                "wt/feat-wt",
+                &[],
+            ),
         );
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
@@ -16597,7 +18357,11 @@ mod bee_route_tests {
             .await
             .unwrap();
         let wt_pane = fake
-            .agent_start("w1", Some(&sibling.to_string_lossy()), &["codex".to_string()])
+            .agent_start(
+                "w1",
+                Some(&sibling.to_string_lossy()),
+                &["codex".to_string()],
+            )
             .await
             .unwrap();
 
@@ -16615,20 +18379,39 @@ mod bee_route_tests {
         let section_start = body
             .find(r#"data-feature-hub="cross-project""#)
             .unwrap_or_else(|| panic!("the cross-project Features section must render: {body}"));
-        let section = &body[section_start..body[section_start..].find("</section>").map(|i| section_start + i).unwrap_or(body.len())];
+        let section = &body[section_start
+            ..body[section_start..]
+                .find("</section>")
+                .map(|i| section_start + i)
+                .unwrap_or(body.len())];
 
-        let main_href = format!("href=\"/p/{}/_terminal/pane/{}\"", project.id, main_pane.pane_id);
-        let wt_href = format!("href=\"/p/{}/_terminal/pane/{}\"", project.id, wt_pane.pane_id);
+        let main_href = format!(
+            "href=\"/p/{}/_terminal/pane/{}\"",
+            project.id, main_pane.pane_id
+        );
+        let wt_href = format!(
+            "href=\"/p/{}/_terminal/pane/{}\"",
+            project.id, wt_pane.pane_id
+        );
         let feat_also_main_card_at = section
-            .find(&format!("href=\"/p/{}/_bee/feature/feat-also-main\"", project.id))
+            .find(&format!(
+                "href=\"/p/{}/_bee/feature/feat-also-main\"",
+                project.id
+            ))
             .unwrap_or_else(|| panic!("feat-also-main's own card must render: {section}"));
         let feat_main_card_at = section
-            .find(&format!("href=\"/p/{}/_bee/feature/feat-main\"", project.id))
+            .find(&format!(
+                "href=\"/p/{}/_bee/feature/feat-main\"",
+                project.id
+            ))
             .unwrap_or_else(|| panic!("feat-main's own card must render: {section}"));
         let feat_wt_card_at = section
             .find(&format!("href=\"/p/{}/_bee/feature/feat-wt\"", project.id))
             .unwrap_or_else(|| panic!("feat-wt's own card must render: {section}"));
-        let main_badges_at: Vec<usize> = section.match_indices(main_href.as_str()).map(|(i, _)| i).collect();
+        let main_badges_at: Vec<usize> = section
+            .match_indices(main_href.as_str())
+            .map(|(i, _)| i)
+            .collect();
         let wt_badge_at = section
             .find(&wt_href)
             .unwrap_or_else(|| panic!("the worktree's own pane must badge some card: {section}"));
@@ -16646,7 +18429,11 @@ mod bee_route_tests {
             feat_also_main_card_at < main_badges_at[0] && main_badges_at[0] < feat_main_card_at,
             "the main pane's first badge must sit on feat-also-main's card, ahead of feat-main's own card: {section}"
         );
-        assert_eq!(section.matches(wt_href.as_str()).count(), 1, "the worktree pane's badge must render exactly once in this section: {section}");
+        assert_eq!(
+            section.matches(wt_href.as_str()).count(),
+            1,
+            "the worktree pane's badge must render exactly once in this section: {section}"
+        );
         assert!(
             feat_wt_card_at < wt_badge_at,
             "the worktree's own pane must badge feat-wt's card, its own checkout: {section}"
@@ -16681,7 +18468,10 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/feat-quiet\"", project.id)),
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/feat-quiet\"",
+                project.id
+            )),
             "the feature's own card must still render: {body}"
         );
         assert!(
@@ -16719,7 +18509,10 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains(&format!("href=\"/p/{}/_bee/feature/feat-main\"", project.id)),
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/feat-main\"",
+                project.id
+            )),
             "the feature card itself must still render with the switch off: {body}"
         );
         assert!(
@@ -16744,7 +18537,13 @@ mod bee_route_tests {
         write(
             &root,
             ".bee/cells/archive/finished-feat/c-1.json",
-            &feature_cell_json("c-1", "finished-feat", "capped", Some(&rfc3339_minutes_ago(60)), Some(&rfc3339_minutes_ago(30))),
+            &feature_cell_json(
+                "c-1",
+                "finished-feat",
+                "capped",
+                Some(&rfc3339_minutes_ago(60)),
+                Some(&rfc3339_minutes_ago(30)),
+            ),
         );
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
@@ -16767,10 +18566,17 @@ mod bee_route_tests {
         let section_start = body
             .find(r#"data-feature-hub="cross-project""#)
             .unwrap_or_else(|| panic!("the cross-project Features section must render: {body}"));
-        let section = &body[section_start..body[section_start..].find("</section>").map(|i| section_start + i).unwrap_or(body.len())];
+        let section = &body[section_start
+            ..body[section_start..]
+                .find("</section>")
+                .map(|i| section_start + i)
+                .unwrap_or(body.len())];
 
         assert!(
-            section.contains(&format!("data-hub-group=\"finished\" href=\"/p/{}/_bee/feature/finished-feat\"", project.id)),
+            section.contains(&format!(
+                "data-hub-group=\"finished\" href=\"/p/{}/_bee/feature/finished-feat\"",
+                project.id
+            )),
             "the finished feature must still render its row: {section}"
         );
         assert!(
@@ -16791,11 +18597,16 @@ mod bee_route_tests {
     /// `no_web_framework_dependency_declared` self-inspection test.
     #[test]
     fn cross_project_rollup_calls_read_rollup_inside_spawn_blocking() {
-        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/server.rs")).unwrap();
+        let src =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/server.rs")).unwrap();
         let sig = "async fn cross_project_rollup(";
-        let start = src.find(sig).expect("cross_project_rollup must exist in server.rs");
+        let start = src
+            .find(sig)
+            .expect("cross_project_rollup must exist in server.rs");
         let rest = &src[start..];
-        let open = rest.find('{').expect("cross_project_rollup must have a body");
+        let open = rest
+            .find('{')
+            .expect("cross_project_rollup must have a body");
         let mut depth = 0i32;
         let mut end = open;
         for (i, ch) in rest[open..].char_indices() {
@@ -16868,7 +18679,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let stray = fake
-            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&stray_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -17003,11 +18818,19 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let owned = fake
-            .agent_start("w1", Some(&project_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&project_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
         let stray = fake
-            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&stray_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -17036,7 +18859,12 @@ mod bee_route_tests {
         // Free-text input reaches the stray pane and is readable back.
         let input_resp = app
             .clone()
-            .oneshot(unassigned_input_req(&stray.pane_id, "hello stray", true, None))
+            .oneshot(unassigned_input_req(
+                &stray.pane_id,
+                "hello stray",
+                true,
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(input_resp.status(), StatusCode::OK);
@@ -17049,7 +18877,10 @@ mod bee_route_tests {
             .await
             .unwrap();
         let after_input_body = body_string(after_input).await;
-        assert!(after_input_body.contains("hello stray"), "{after_input_body}");
+        assert!(
+            after_input_body.contains("hello stray"),
+            "{after_input_body}"
+        );
 
         // Named keys reach the stray pane.
         let keys_resp = app
@@ -17062,7 +18893,12 @@ mod bee_route_tests {
         // Input refuses the owned pane too — the write paths honor the same
         // partition the read path and the listing page do.
         let owned_input_resp = app
-            .oneshot(unassigned_input_req(&owned.pane_id, "should never land", true, None))
+            .oneshot(unassigned_input_req(
+                &owned.pane_id,
+                "should never land",
+                true,
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(owned_input_resp.status(), StatusCode::NOT_FOUND);
@@ -17089,10 +18925,19 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let stray = fake
-            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&stray_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
-        fake.seed_scroll_pane(&stray.pane_id, "unassigned first frame", "unassigned first frame", None);
+        fake.seed_scroll_pane(
+            &stray.pane_id,
+            "unassigned first frame",
+            "unassigned first frame",
+            None,
+        );
 
         let mut st = build_state_with_dir(&dir);
         st.herdr = fake.clone();
@@ -17120,7 +18965,12 @@ mod bee_route_tests {
         );
 
         // The agent produces new output on its own — no input sent.
-        fake.seed_scroll_pane(&stray.pane_id, "unassigned second frame", "unassigned second frame", None);
+        fake.seed_scroll_pane(
+            &stray.pane_id,
+            "unassigned second frame",
+            "unassigned second frame",
+            None,
+        );
 
         let second = app
             .oneshot(unassigned_screen_req(&stray.pane_id, None))
@@ -17154,7 +19004,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let stray = fake
-            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&stray_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
         let text = "unassigned live frame";
@@ -17171,7 +19025,11 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["text"], serde_json::json!(waggledance_core::ansi::to_html(text)), "{body}");
+        assert_eq!(
+            json["text"],
+            serde_json::json!(waggledance_core::ansi::to_html(text)),
+            "{body}"
+        );
         assert!(
             fake.sent_text_log(&stray.pane_id).await.is_empty(),
             "an absent history param must never route through PaneScroller"
@@ -17197,7 +19055,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let stray = fake
-            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&stray_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
         let text = "see https://example.dev/status now";
@@ -17243,7 +19105,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(FakeHerdr::new());
         let stray = fake
-            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&stray_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
         let live_bottom = "page0 (live)\n❯ ";
@@ -17263,11 +19129,17 @@ mod bee_route_tests {
         let app = router(st);
 
         let resp = app
-            .oneshot(Request::builder()
-                .uri(format!("/_terminal/unassigned/{}/screen?history=2", stray.pane_id))
-                .method("GET")
-                .body(Body::empty())
-                .unwrap())
+            .oneshot(
+                Request::builder()
+                    .header(header::HOST, "127.0.0.1")
+                    .uri(format!(
+                        "/_terminal/unassigned/{}/screen?history=2",
+                        stray.pane_id
+                    ))
+                    .method("GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -17305,7 +19177,10 @@ mod bee_route_tests {
         let st = build_state_with_dir(&dir);
         let app = router(st);
 
-        let screen = app.oneshot(unassigned_screen_req("w1:p1", None)).await.unwrap();
+        let screen = app
+            .oneshot(unassigned_screen_req("w1:p1", None))
+            .await
+            .unwrap();
         assert_eq!(screen.status(), StatusCode::NOT_FOUND);
         assert_eq!(
             screen.headers().get(header::CONTENT_TYPE).unwrap(),
@@ -17401,11 +19276,19 @@ mod bee_route_tests {
         // A pane whose cwd sits under the hard-deny-listed project's own
         // root -- this is the pane that must NOT leak into Unassigned.
         let denied_project_pane = fake
-            .agent_start("w1", Some(&denied_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&denied_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
         let stray = fake
-            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&stray_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -17452,9 +19335,7 @@ mod bee_route_tests {
         let project = register(&st, &root, "keys-bound");
         let app = router(st);
 
-        let too_many: Vec<&str> = std::iter::repeat("enter")
-            .take(MAX_KEYS_PER_REQUEST + 1)
-            .collect();
+        let too_many: Vec<&str> = std::iter::repeat_n("enter", MAX_KEYS_PER_REQUEST + 1).collect();
         let resp = app
             .oneshot(terminal_keys_req(
                 &project.id,
@@ -17494,7 +19375,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
         let stray = fake
-            .agent_start("w1", Some(&stray_root.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&stray_root.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -17502,9 +19387,7 @@ mod bee_route_tests {
         st.herdr = fake.clone();
         let app = router(st);
 
-        let too_many: Vec<&str> = std::iter::repeat("enter")
-            .take(MAX_KEYS_PER_REQUEST + 1)
-            .collect();
+        let too_many: Vec<&str> = std::iter::repeat_n("enter", MAX_KEYS_PER_REQUEST + 1).collect();
         let resp = app
             .oneshot(unassigned_keys_req(&stray.pane_id, &too_many, None))
             .await
@@ -17537,10 +19420,12 @@ mod bee_route_tests {
     /// existing tab). Every other `Herdr` method is unreachable — the create
     /// routes never call them. Mirrors herdr-go's own `RecordingHerdr`
     /// (`herdr-go/src/web/create.rs`).
+    type AgentCallLog = Vec<(String, Option<String>, Vec<String>)>;
+
     struct RecordingHerdr {
         snap: herdr::Snapshot,
         tab_calls: std::sync::Mutex<Vec<(String, Option<String>)>>,
-        agent_calls: std::sync::Mutex<Vec<(String, Option<String>, Vec<String>)>>,
+        agent_calls: std::sync::Mutex<AgentCallLog>,
         /// When set, `tab_create`/`agent_start` return this error instead of
         /// a synthesized success — taken (moved out) on the first call, since
         /// `herdr::HerdrError` carries no `Clone` impl. This is the one
@@ -17590,7 +19475,12 @@ mod bee_route_tests {
         ) -> herdr::Result<herdr::ScreenRead> {
             unreachable!("create routes never read")
         }
-        async fn send_input(&self, _pane_id: &str, _text: &str, _submit: bool) -> herdr::Result<()> {
+        async fn send_input(
+            &self,
+            _pane_id: &str,
+            _text: &str,
+            _submit: bool,
+        ) -> herdr::Result<()> {
             unreachable!("create routes never send input")
         }
         async fn send_text(&self, _pane_id: &str, _bytes: &str) -> herdr::Result<()> {
@@ -17622,10 +19512,11 @@ mod bee_route_tests {
             cwd: Option<&str>,
             argv: &[String],
         ) -> herdr::Result<herdr::AgentStarted> {
-            self.agent_calls
-                .lock()
-                .unwrap()
-                .push((workspace_id.to_string(), cwd.map(str::to_string), argv.to_vec()));
+            self.agent_calls.lock().unwrap().push((
+                workspace_id.to_string(),
+                cwd.map(str::to_string),
+                argv.to_vec(),
+            ));
             if let Some(err) = self.fail.lock().unwrap().take() {
                 return Err(err);
             }
@@ -17697,7 +19588,12 @@ mod bee_route_tests {
         ) -> herdr::Result<herdr::ScreenRead> {
             unreachable!("page-selection tests never read a screen")
         }
-        async fn send_input(&self, _pane_id: &str, _text: &str, _submit: bool) -> herdr::Result<()> {
+        async fn send_input(
+            &self,
+            _pane_id: &str,
+            _text: &str,
+            _submit: bool,
+        ) -> herdr::Result<()> {
             unreachable!("page-selection tests never send input")
         }
         async fn send_text(&self, _pane_id: &str, _bytes: &str) -> herdr::Result<()> {
@@ -17791,7 +19687,11 @@ mod bee_route_tests {
         let project = register(&st, &root, "two-panes");
         let app = router(st);
 
-        let bare = app.clone().oneshot(terminal_req(&project.id, None)).await.unwrap();
+        let bare = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
         assert_eq!(bare.status(), StatusCode::OK);
         let bare_body = body_string(bare).await;
         let href = |pane_id: &str| format!("/p/{}/_terminal/pane/{}", project.id, pane_id);
@@ -17803,7 +19703,11 @@ mod bee_route_tests {
             bare_body.contains(&href(&second.pane_id)),
             "the strip must carry the second pane's own href: {bare_body}"
         );
-        assert_ne!(href(&first.pane_id), href(&second.pane_id), "the two hrefs must differ");
+        assert_ne!(
+            href(&first.pane_id),
+            href(&second.pane_id),
+            "the two hrefs must differ"
+        );
 
         for pane_id in [&first.pane_id, &second.pane_id] {
             let resp = app
@@ -17840,7 +19744,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
         let outside_pane = fake
-            .agent_start("w1", Some(&outside.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&outside.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -17868,7 +19776,11 @@ mod bee_route_tests {
 
         // The Transcript tab's own pane-scoped route makes the same refusal.
         let transcript_resp = app
-            .oneshot(transcript_pane_req(&project.id, &outside_pane.pane_id, None))
+            .oneshot(transcript_pane_req(
+                &project.id,
+                &outside_pane.pane_id,
+                None,
+            ))
             .await
             .unwrap();
         assert_eq!(transcript_resp.status(), StatusCode::NOT_FOUND);
@@ -17926,7 +19838,10 @@ mod bee_route_tests {
             });
             let project2 = register(&st2, &root2, "default-fallback-first");
             let app2 = router(st2);
-            let resp2 = app2.oneshot(terminal_req(&project2.id, None)).await.unwrap();
+            let resp2 = app2
+                .oneshot(terminal_req(&project2.id, None))
+                .await
+                .unwrap();
             assert_eq!(resp2.status(), StatusCode::OK);
             let body2 = body_string(resp2).await;
             assert!(
@@ -17965,7 +19880,11 @@ mod bee_route_tests {
         let project = register(&st, &root, "no-panes-empty");
         let app = router(st);
 
-        let terminal_resp = app.clone().oneshot(terminal_req(&project.id, None)).await.unwrap();
+        let terminal_resp = app
+            .clone()
+            .oneshot(terminal_req(&project.id, None))
+            .await
+            .unwrap();
         assert_eq!(
             terminal_resp.status(),
             StatusCode::OK,
@@ -18036,15 +19955,18 @@ mod bee_route_tests {
     /// already there (mirrors `enable_terminal`'s load-mutate-save shape).
     fn configure_preset(dir: &Path, label: &str, argv: &[&str]) {
         let mut cfg = Config::load_from(&dir.join("config.toml"));
-        cfg.terminal.agent_presets.push(waggledance_core::config::AgentPreset {
-            label: label.to_string(),
-            argv: argv.iter().map(|s| s.to_string()).collect(),
-        });
+        cfg.terminal
+            .agent_presets
+            .push(waggledance_core::config::AgentPreset {
+                label: label.to_string(),
+                argv: argv.iter().map(|s| s.to_string()).collect(),
+            });
         cfg.save_to(&dir.join("config.toml")).unwrap();
     }
 
     fn create_pane_req(id: &str, cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/create/pane"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -18056,6 +19978,7 @@ mod bee_route_tests {
 
     fn create_agent_req(id: &str, body: &serde_json::Value, cookie: Option<&str>) -> Request<Body> {
         let mut b = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .uri(format!("/p/{id}/_terminal/create/agent"))
             .method("POST")
             .header(header::CONTENT_TYPE, "application/json");
@@ -18069,8 +19992,7 @@ mod bee_route_tests {
     /// family's reasoned JSON 404 — no cookie, no token, nothing but the
     /// switch decides this.
     #[tokio::test]
-    async fn terminal_create_routes_disabled_answer_with_a_reasoned_json_404()
-    {
+    async fn terminal_create_routes_disabled_answer_with_a_reasoned_json_404() {
         let dir = fresh_root("terminal-create-disabled");
         // Deliberately no `enable_terminal(&dir)` call: the switch defaults off.
         let root = fresh_root("terminal-create-disabled-project");
@@ -18306,8 +20228,8 @@ mod bee_route_tests {
     /// 409 always, or 502 always — makes one of the two assertions below go
     /// red.
     #[tokio::test]
-    async fn terminal_create_routes_map_a_workspace_conflict_to_409_and_any_other_herdr_error_to_502()
-    {
+    async fn terminal_create_routes_map_a_workspace_conflict_to_409_and_any_other_herdr_error_to_502(
+    ) {
         let dir = fresh_root("terminal-create-error-mapping");
         enable_terminal(&dir);
         let root = fresh_root("terminal-create-error-mapping-project");
@@ -18400,13 +20322,19 @@ mod bee_route_tests {
         let body = body_string(resp).await;
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(json["tab_id"].as_str().unwrap().starts_with("w:"), "{body}");
-        assert!(json["pane_id"].as_str().unwrap().starts_with("w:"), "{body}");
+        assert!(
+            json["pane_id"].as_str().unwrap().starts_with("w:"),
+            "{body}"
+        );
 
         let calls = herdr.tab_calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "w");
         let canonical_root = std::fs::canonicalize(&root).unwrap();
-        assert_eq!(calls[0].1.as_deref(), Some(canonical_root.to_str().unwrap()));
+        assert_eq!(
+            calls[0].1.as_deref(),
+            Some(canonical_root.to_str().unwrap())
+        );
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&root).ok();
@@ -18447,7 +20375,10 @@ mod bee_route_tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "w");
         let canonical_root = std::fs::canonicalize(&root).unwrap();
-        assert_eq!(calls[0].1.as_deref(), Some(canonical_root.to_str().unwrap()));
+        assert_eq!(
+            calls[0].1.as_deref(),
+            Some(canonical_root.to_str().unwrap())
+        );
         assert_eq!(calls[0].2, vec!["claude".to_string()]);
 
         std::fs::remove_dir_all(&dir).ok();
@@ -18523,8 +20454,12 @@ mod bee_route_tests {
     /// `app.css`, loaded by `<link>`, never inlined) for something the board
     /// itself declared.
     fn board_style_block(body: &str) -> &str {
-        let start = body.find("<style>").expect("board body must carry its inline <style> block");
-        let end = body[start..].find("</style>").expect("the inline <style> block must close");
+        let start = body
+            .find("<style>")
+            .expect("board body must carry its inline <style> block");
+        let end = body[start..]
+            .find("</style>")
+            .expect("the inline <style> block must close");
         &body[start..start + end]
     }
 
@@ -18578,7 +20513,9 @@ mod bee_route_tests {
             let after = &rest[idx..];
             let Some(gt) = after.find('>') else { break };
             let after_tag = &after[gt + 1..];
-            let Some(close) = after_tag.find("</span>") else { break };
+            let Some(close) = after_tag.find("</span>") else {
+                break;
+            };
             out.push(after_tag[..close].to_string());
             rest = &after_tag[close + "</span>".len()..];
         }
@@ -18594,7 +20531,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn board_declares_narrow_screen_grid_collapse_and_no_wide_fixed_widths() {
         let root = fresh_root("responsive-collapse");
-        write(&root, ".bee/cells/a.json", &cell_json("r1", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("r1", "open", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "responsive-collapse");
@@ -18607,11 +20548,7 @@ mod bee_route_tests {
             style.contains("@media (max-width:"),
             "the board must declare a narrow-screen breakpoint: {style}"
         );
-        for grid_class in [
-            ".bee-hub__groups",
-            ".bee-panels",
-            ".bee-done-grid",
-        ] {
+        for grid_class in [".bee-hub__groups", ".bee-panels", ".bee-done-grid"] {
             assert!(
                 style.contains(grid_class),
                 "the narrow-screen rule must name {grid_class} among the grids it collapses: {style}"
@@ -18642,7 +20579,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn board_hub_description_clamps_within_its_card_instead_of_forcing_page_width() {
         let root = fresh_root("responsive-hub-desc-clamp");
-        write(&root, ".bee/cells/a.json", &cell_json("r1", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("r1", "open", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "responsive-hub-desc-clamp");
@@ -18660,7 +20601,10 @@ mod bee_route_tests {
             let start = style
                 .find(min_width_rule)
                 .unwrap_or_else(|| panic!("the board must declare {min_width_rule}: {style}"));
-            let end = style[start..].find('}').map(|i| start + i).unwrap_or(style.len());
+            let end = style[start..]
+                .find('}')
+                .map(|i| start + i)
+                .unwrap_or(style.len());
             assert!(
                 style[start..end].contains("min-width: 0"),
                 "{min_width_rule} must break the flex/grid item's own default min-width so a long \
@@ -18672,7 +20616,10 @@ mod bee_route_tests {
         let desc_start = style
             .find(".bee-hub__desc {")
             .expect("the board must declare .bee-hub__desc");
-        let desc_end = style[desc_start..].find('}').map(|i| desc_start + i).unwrap_or(style.len());
+        let desc_end = style[desc_start..]
+            .find('}')
+            .map(|i| desc_start + i)
+            .unwrap_or(style.len());
         let desc_rule = &style[desc_start..desc_end];
         assert!(
             !desc_rule.contains("white-space: nowrap"),
@@ -18699,7 +20646,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn feature_detail_description_wraps_instead_of_forcing_page_width() {
         let root = fresh_root("responsive-detail-desc-clamp");
-        write(&root, ".bee/cells/a.json", &cell_json("r1", "capped", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("r1", "capped", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "responsive-detail-desc-clamp");
@@ -18758,7 +20709,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn board_no_longer_declares_a_wide_scrolling_container() {
         let root = fresh_root("responsive-overflow");
-        write(&root, ".bee/cells/a.json", &cell_json("r1", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("r1", "open", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "responsive-overflow");
@@ -18825,7 +20780,11 @@ mod bee_route_tests {
     #[tokio::test]
     async fn board_page_carries_explicit_theme_attribute_and_no_flash_script() {
         let root = fresh_root("theme-attribute");
-        write(&root, ".bee/cells/a.json", &cell_json("t1", "open", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("t1", "open", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "theme-attribute");
@@ -18857,7 +20816,11 @@ mod bee_route_tests {
     async fn board_severity_and_state_chips_always_carry_a_word_not_color_alone() {
         let root = fresh_root("colour-chips");
         write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
-        write(&root, ".bee/cells/a.json", &cell_json("stuck1", "blocked", &[], "w1"));
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &cell_json("stuck1", "blocked", &[], "w1"),
+        );
 
         let st = build_state();
         let project = register(&st, &root, "colour-chips");
@@ -19613,7 +21576,8 @@ mod bee_route_tests {
         );
         let blocked_body = pane_page(app.clone(), &project.id, &blocked.pane_id).await;
         assert!(
-            card(&blocked_body, &blocked.pane_id).contains("class=\"fg-status fg-status--blocked\""),
+            card(&blocked_body, &blocked.pane_id)
+                .contains("class=\"fg-status fg-status--blocked\""),
             "blocked must render the blocked pill: {blocked_body}"
         );
         let done_body = pane_page(app.clone(), &project.id, &done.pane_id).await;
@@ -19846,6 +21810,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -19901,6 +21866,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -19940,6 +21906,7 @@ mod bee_route_tests {
 
         for raw in ["", "relative/path", "/tmp/../tmp"] {
             let req = Request::builder()
+                .header(header::HOST, "127.0.0.1")
                 .method("POST")
                 .uri("/api/projects/register")
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -19984,6 +21951,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20018,6 +21986,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20056,6 +22025,7 @@ mod bee_route_tests {
         // "/" contains /etc (and every other hard-deny-listed root) — refused
         // regardless of what $HOME happens to be in this environment.
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20072,6 +22042,7 @@ mod bee_route_tests {
         // $HOME itself is never named on the deny list.
         if let Some(home) = std::env::var_os("HOME") {
             let req = Request::builder()
+                .header(header::HOST, "127.0.0.1")
                 .method("POST")
                 .uri("/api/projects/register")
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -20117,6 +22088,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20168,6 +22140,7 @@ mod bee_route_tests {
             format!("{}/", root.to_string_lossy()),
         ] {
             let req = Request::builder()
+                .header(header::HOST, "127.0.0.1")
                 .method("POST")
                 .uri("/api/projects/register")
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -20211,6 +22184,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20251,6 +22225,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20288,6 +22263,7 @@ mod bee_route_tests {
         let marker = "UNIQUE-MARKER-should-never-render-4f8c";
         let raw = format!("/definitely/not/real/{marker}");
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri("/api/projects/register")
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20325,6 +22301,7 @@ mod bee_route_tests {
         let app = router(st);
 
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("GET")
             .uri("/api/projects/register?path=%2Ftmp")
             .body(Body::empty())
@@ -20419,7 +22396,11 @@ mod bee_route_tests {
 
         let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
         let agent = fake
-            .agent_start("w1", Some(&inner.to_string_lossy()), &["claude".to_string()])
+            .agent_start(
+                "w1",
+                Some(&inner.to_string_lossy()),
+                &["claude".to_string()],
+            )
             .await
             .unwrap();
 
@@ -20489,10 +22470,7 @@ mod bee_route_tests {
         );
         let body = body_string(resp).await;
         assert!(
-            body.contains(&format!(
-                "action=\"/api/projects/{}/refresh\"",
-                project.id
-            )),
+            body.contains(&format!("action=\"/api/projects/{}/refresh\"", project.id)),
             "the 404 for a known project must offer the refresh form: {body}"
         );
         assert!(
@@ -20528,6 +22506,7 @@ mod bee_route_tests {
 
         let redirect_path = format!("/p/{}/new-page.md", project.id);
         let req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
             .method("POST")
             .uri(format!("/api/projects/{}/refresh", project.id))
             .header("content-type", "application/x-www-form-urlencoded")
@@ -20582,6 +22561,7 @@ mod bee_route_tests {
             "evil.com/",
         ] {
             let req = Request::builder()
+                .header(header::HOST, "127.0.0.1")
                 .method("POST")
                 .uri(format!("/api/projects/{}/refresh", project.id))
                 .header("content-type", "application/x-www-form-urlencoded")
@@ -20626,5 +22606,330 @@ mod bee_route_tests {
             !body.contains("action=\"/api/projects/"),
             "an unknown project's 404 must carry no refresh form at all: {body}"
         );
+    }
+
+    // ── review-p1-fixes D1: router-wide Host guard ─────────────────────
+
+    /// `build_state()` plus a configured `server.hostname` — the D1
+    /// must-have that the allowlist includes the operator's own configured
+    /// display hostname, not just the loopback set. `Arc::get_mut` is safe
+    /// here because `build_state()` hands back a fresh `Arc<Engine>` with
+    /// refcount 1, nothing else holding a clone yet.
+    fn build_state_with_hostname(hostname: &str) -> AppState {
+        let mut st = build_state();
+        Arc::get_mut(&mut st.engine)
+            .expect("a freshly built AppState's Arc<Engine> has refcount 1")
+            .config
+            .server
+            .hostname = Some(hostname.to_string());
+        st
+    }
+
+    /// The allowlist check in isolation, driven directly against a bare
+    /// `HeaderMap`, so `strip_host_port`'s bracket/port handling is pinned
+    /// once here rather than re-proven through a full router round trip
+    /// for every spelling.
+    #[test]
+    fn host_is_allowed_accepts_every_loopback_spelling_with_or_without_a_port() {
+        let none: Option<String> = None;
+        for host in [
+            "127.0.0.1",
+            "127.0.0.1:7700",
+            "localhost",
+            "localhost:7700",
+            "[::1]",
+            "[::1]:7700",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::HOST, host.parse().unwrap());
+            assert!(
+                host_is_allowed(&headers, &none),
+                "loopback Host {host:?} must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn host_is_allowed_accepts_the_configured_hostname_case_insensitively() {
+        let configured = Some("mymachine.local".to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "MyMachine.Local:7700".parse().unwrap());
+        assert!(
+            host_is_allowed(&headers, &configured),
+            "the configured hostname must be allowed regardless of case"
+        );
+    }
+
+    #[test]
+    fn host_is_allowed_refuses_a_foreign_host_and_a_missing_one() {
+        let none: Option<String> = None;
+
+        let mut foreign = HeaderMap::new();
+        foreign.insert(header::HOST, "evil.tld".parse().unwrap());
+        assert!(
+            !host_is_allowed(&foreign, &none),
+            "a foreign Host must be refused"
+        );
+
+        let missing = HeaderMap::new();
+        assert!(
+            !host_is_allowed(&missing, &none),
+            "a request with no Host header must be refused"
+        );
+    }
+
+    /// D1 must-have 1: a loopback Host — in every spelling the decision
+    /// names — passes an ordinary GET route through unchanged.
+    #[tokio::test]
+    async fn loopback_host_reaches_a_plain_get_route_unchanged() {
+        for host in ["127.0.0.1:7700", "localhost:7700", "[::1]:7700"] {
+            let app = router(build_state());
+            let req = Request::builder()
+                .header(header::HOST, host)
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "loopback Host {host:?} must reach /health unchanged"
+            );
+        }
+    }
+
+    /// D1 must-have 1, on the state-changing route one of the closed CSRF
+    /// findings named: a loopback Host still reaches `update_config` and
+    /// the write it makes still lands.
+    #[tokio::test]
+    async fn loopback_host_reaches_post_api_config_and_writes_it() {
+        let dir = fresh_root("d1-loopback-api-config");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let req = Request::builder()
+            .header(header::HOST, "127.0.0.1:7700")
+            .method("POST")
+            .uri("/api/config")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("port=58312"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert!(
+            resp.status().is_redirection(),
+            "a loopback Host must still reach update_config, got {}",
+            resp.status()
+        );
+
+        let saved = Config::load_from(&dir.join("config.toml"));
+        assert_eq!(
+            saved.server.port, 58312,
+            "the loopback-Host write must land"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D1 must-have 3: the allowlist includes the operator's configured
+    /// display hostname, not just the fixed loopback set.
+    #[tokio::test]
+    async fn configured_hostname_reaches_a_plain_get_route() {
+        let app = router(build_state_with_hostname("mymachine.local"));
+        let req = Request::builder()
+            .header(header::HOST, "mymachine.local:7700")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the configured hostname must be allowed"
+        );
+    }
+
+    /// D1 must-have 2: a foreign Host is refused on an ordinary GET too,
+    /// not just on the state-changing routes below.
+    #[tokio::test]
+    async fn foreign_host_is_refused_with_421_on_a_plain_get() {
+        let app = router(build_state());
+        let req = Request::builder()
+            .header(header::HOST, "evil.tld")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    /// D1 must-have 2, the CSRF-on-`/api/config` finding itself: a foreign
+    /// Host is refused with 421, and — the assertion that actually proves
+    /// the CSRF is closed, per
+    /// `docs/history/learnings/20260805-toothless-security-assertions.md`
+    /// — the config on disk is untouched, not merely the response code.
+    #[tokio::test]
+    async fn foreign_host_to_post_api_config_is_refused_and_leaves_config_unchanged() {
+        let dir = fresh_root("d1-foreign-api-config");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let req = Request::builder()
+            .header(header::HOST, "evil.tld")
+            .method("POST")
+            .uri("/api/config")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("port=58313"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+
+        assert!(
+            !dir.join("config.toml").exists(),
+            "a foreign Host must never reach update_config's write at all"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D1 must-have 2, the CSRF-on-`/api/terminal-config` finding: a
+    /// foreign Host is refused with 421 and every switch stays off.
+    #[tokio::test]
+    async fn foreign_host_to_post_terminal_config_is_refused_and_leaves_switches_unchanged() {
+        let dir = fresh_root("d1-foreign-terminal-config");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let req = Request::builder()
+            .header(header::HOST, "evil.tld")
+            .method("POST")
+            .uri("/api/terminal-config")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "enabled": true,
+                    "supervisor_enabled": true,
+                    "notify_enabled": true,
+                    "unassigned_enabled": true
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+
+        assert!(
+            !dir.join("config.toml").exists(),
+            "a foreign Host must never reach update_terminal_config's write at all"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D1 must-have 2, the DNS-rebinding/CSRF finding on the register
+    /// route: a foreign Host is refused with 421 and nothing gets
+    /// registered.
+    #[tokio::test]
+    async fn foreign_host_to_register_project_is_refused_and_registers_nothing() {
+        let dir = fresh_root("d1-foreign-register");
+        let scratch = fresh_root("d1-foreign-register-scratch");
+        let root = scratch.join("newproj");
+        std::fs::create_dir_all(&root).unwrap();
+        write(&root, "README.md", "# New Project");
+
+        let st = build_state_with_dir(&dir);
+        let engine = st.engine.clone();
+        let app = router(st);
+
+        let req = Request::builder()
+            .header(header::HOST, "evil.tld")
+            .method("POST")
+            .uri("/api/projects/register")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "path={}",
+                urlencoding_lite(&root.to_string_lossy())
+            )))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+
+        let projects = engine.list_projects().unwrap();
+        assert!(
+            projects.is_empty(),
+            "a foreign Host must never reach register_project's write: {projects:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    /// D1 must-have 2, the same finding's write-side mirror: a foreign
+    /// Host is refused with 421 and an already-registered project stays
+    /// registered.
+    #[tokio::test]
+    async fn foreign_host_to_unregister_project_is_refused_and_the_project_stays_registered() {
+        let dir = fresh_root("d1-foreign-unregister");
+        let root = fresh_root("d1-foreign-unregister-root");
+        write(&root, "README.md", "# Existing Project");
+
+        let st = build_state_with_dir(&dir);
+        let project = register(&st, &root, "existing");
+        let app = router(st.clone());
+
+        let req = Request::builder()
+            .header(header::HOST, "evil.tld")
+            .method("POST")
+            .uri(format!("/api/projects/{}/unregister", project.id))
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+
+        let still_there = st.engine.list_projects().unwrap();
+        assert!(
+            still_there.iter().any(|p| p.id == project.id),
+            "a foreign Host must never reach unregister_project's write"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// D1 must-have 2: no `Host` header at all is refused the same way a
+    /// foreign one is, on a plain GET.
+    #[tokio::test]
+    async fn missing_host_header_is_refused_with_421_on_a_plain_get() {
+        let app = router(build_state());
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+
+    /// D1 must-have 2's state-changing mirror: no `Host` header at all
+    /// never reaches `update_config`'s write either.
+    #[tokio::test]
+    async fn missing_host_header_to_post_api_config_is_refused_and_leaves_config_unchanged() {
+        let dir = fresh_root("d1-missing-host-api-config");
+        let st = build_state_with_dir(&dir);
+        let app = router(st);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/config")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("port=58314"))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::MISDIRECTED_REQUEST);
+
+        assert!(
+            !dir.join("config.toml").exists(),
+            "a Host-less request must never reach update_config's write at all"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

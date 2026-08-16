@@ -5,9 +5,9 @@
 use crate::runtime;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::path::{Path, PathBuf};
 use waggledance_core::indexer;
 use waggledance_core::Config;
-use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(

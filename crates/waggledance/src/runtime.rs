@@ -2,12 +2,14 @@
 //! Lock + health live in `waggledance_core::daemon` (shared with the desktop shell).
 
 use anyhow::Result;
+use std::time::Duration;
 use waggledance_core::config::{self, Config};
 use waggledance_core::daemon;
 use waggledance_core::{Engine, SqliteStore};
-use std::time::Duration;
 
-pub use waggledance_core::daemon::{read_lock, remove_lock, running_daemon, write_lock, DaemonInfo};
+pub use waggledance_core::daemon::{
+    read_lock, remove_lock, running_daemon, write_lock, DaemonInfo,
+};
 
 /// Open the shared registry DB + config and build an Engine.
 pub fn build_engine() -> Result<Engine> {
@@ -125,7 +127,9 @@ fn ensure_bind() -> (String, u16) {
     // Daemon never answered: surface it rather than silently handing back a
     // config-default URL that looks live. The URL is still returned for the
     // caller to print, but the operator now sees why it may not respond.
-    eprintln!("waggledance: daemon did not become ready in time; the viewer URL may not respond yet.");
+    eprintln!(
+        "waggledance: daemon did not become ready in time; the viewer URL may not respond yet."
+    );
     let cfg = Config::load();
     bind_fallback(daemon::read_lock(), &cfg)
 }
@@ -242,8 +246,8 @@ mod tests {
     use super::{
         acquire_spawn_gate_at, bind_fallback, build_display_urls, is_wildcard, DaemonInfo, Gate,
     };
-    use waggledance_core::config::Config;
     use std::time::Duration;
+    use waggledance_core::config::Config;
 
     fn gate_tmp(label: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(

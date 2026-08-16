@@ -2,6 +2,32 @@
 (function () {
   "use strict";
 
+  // review-p1-fixes D3: `data-term-base` is markdown-adjacent, attacker-reachable
+  // data (a hostile `<pre data-term-base="https://evil.tld/x">` in a rendered
+  // file) that every terminal poller/poster below uses as a fetch/postJson URL
+  // prefix. The sanitizer (render.rs) now closes the open `data-*` allowlist
+  // that let it survive at all — this is the second, independent gate: even if
+  // one ever slips through, only a same-origin `/p/<project>/...` shape on this
+  // daemon's own origin is accepted. Anything else (an absolute URL, a
+  // protocol-relative `//host/...`, a bare path outside `/p/`) resolves to
+  // `null`, and every call site below already falls back to its safe
+  // `projectId`-built path — exactly as if `data-term-base` were simply absent.
+  function validTermBase(base) {
+    if (typeof base !== "string" || base === "") return null;
+    // Reject a scheme (`https:`) or a protocol-relative prefix (`//host/...`)
+    // before ever handing the string to `URL` — both would make `base + "/x"`
+    // resolve off-origin the moment a caller fetches it.
+    if (base.charAt(0) !== "/" || base.charAt(1) === "/") return null;
+    if (!/^\/p\/[^/]+\/.+$/.test(base)) return null;
+    try {
+      var resolved = new URL(base, window.location.origin);
+      if (resolved.origin !== window.location.origin) return null;
+    } catch (e) {
+      return null;
+    }
+    return base;
+  }
+
   // One-shot storage-key migration (D5 of the waggledance rename): the old
   // "mdview-theme" / "mdview-folders-open" key is read exactly once, copied
   // to its new "waggledance-*" key, then deleted — so neither the user's
@@ -1030,7 +1056,7 @@
     function pollOne(el) {
       var paneId = el.getAttribute("data-pane-id");
       if (viewingHistory[paneId]) return; // the operator is reading history; leave it alone
-      var base = el.getAttribute("data-term-base");
+      var base = validTermBase(el.getAttribute("data-term-base"));
       fetch(screenUrl(paneId, null, base), { credentials: "same-origin" })
         .then(function (res) {
           // A 502 is the one status `herdr_down_response()` (server.rs) ever
@@ -1122,7 +1148,7 @@
       // homepage Terminals tab's `.term-screen` (`views.rs::screen_frame`),
       // absent (so `screenUrl` falls back to `projectId`) on the project
       // and Unassigned pages, unchanged.
-      var base = screenEl.getAttribute("data-term-base");
+      var base = validTermBase(screenEl.getAttribute("data-term-base"));
       var olderBtn = group.querySelector('[data-scroll="older"]');
       var newerBtn = group.querySelector('[data-scroll="newer"]');
       var liveBtn = group.querySelector('[data-scroll="live"]');
@@ -1625,7 +1651,7 @@
 
     Array.prototype.slice.call(forms).forEach(function (form) {
       var paneId = form.getAttribute("data-pane-id");
-      var base = form.getAttribute("data-term-base");
+      var base = validTermBase(form.getAttribute("data-term-base"));
       var input = form.querySelector(".term-reply__text");
       var stageBtn = form.querySelector(".term-reply__stage");
       var approveBtn = form.querySelector(".term-reply__approve");
@@ -1711,7 +1737,7 @@
 
     Array.prototype.slice.call(keyGroups).forEach(function (group) {
       var paneId = group.getAttribute("data-pane-id");
-      var base = group.getAttribute("data-term-base");
+      var base = validTermBase(group.getAttribute("data-term-base"));
       Array.prototype.slice.call(group.querySelectorAll("button[data-key]")).forEach(function (btn) {
         btn.addEventListener("click", function () {
           var key = btn.getAttribute("data-key");

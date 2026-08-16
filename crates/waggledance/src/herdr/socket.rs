@@ -89,6 +89,12 @@ fn default_socket_path_from_config_dir(config_dir: Result<PathBuf>) -> Result<Pa
 /// An explicit socket override wins, then a named session, then the historical
 /// default endpoint. The logical filesystem path is retained on Windows because
 /// herdr also uses it for its ownership marker.
+///
+/// Only exercised by this module's own tests today — every production caller
+/// builds a `SocketHerdr` from a path it already has — kept `#[cfg(test)]`
+/// rather than deleted since the doc comment above still documents the
+/// intended resolution order for a future production caller.
+#[cfg(test)]
 pub fn resolve_socket_path(explicit: &str, session: &str) -> Result<PathBuf> {
     if !explicit.is_empty() {
         return Ok(PathBuf::from(explicit));
@@ -96,6 +102,7 @@ pub fn resolve_socket_path(explicit: &str, session: &str) -> Result<PathBuf> {
     resolve_socket_path_from_config_dir(explicit, session, herdr_config_dir())
 }
 
+#[cfg(test)]
 fn resolve_socket_path_from_config_dir(
     explicit: &str,
     session: &str,
