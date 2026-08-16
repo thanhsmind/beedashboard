@@ -923,6 +923,11 @@
     var POLL_MS = 1500;
     var HERDR_DOWN_TEXT = "herdr is not running";
     var lastRevision = {}; // pane id -> last-rendered revision
+    // poller-inflight-guard D1: mirrors the transcript poller's own
+    // `inFlight` map below — a pane whose screen fetch is still outstanding
+    // (each fetch holds the server-side per-pane `pane_lock`) is skipped on
+    // the next tick rather than stacking a second request behind it.
+    var inFlightScreen = {}; // pane id -> a screen fetch for this pane is still outstanding
     // terminal-scroll-2: true while this pane's "Load older" button owns the
     // viewport — pollOne below must never overwrite that history view with
     // the next live-tail repaint before the operator has looked at it and
@@ -1077,6 +1082,8 @@
       // `/p/null/...` (the Unassigned page, wired by its own scoped
       // script instead).
       if (!hasTarget(base, projectId)) return;
+      if (inFlightScreen[paneId]) return; // a slow predecessor is still out; never stack a second fetch on it
+      inFlightScreen[paneId] = true;
       fetch(screenUrl(paneId, null, base), { credentials: "same-origin" })
         .then(function (res) {
           // A 502 is the one status `herdr_down_response()` (server.rs) ever
@@ -1118,10 +1125,18 @@
           el.innerHTML = body.text;
           fitScreenFont(el);
         })
+        .then(function () {
+          // The request has settled (success or a handled non-ok status) —
+          // clear here, not on headers, so the next tick can only ever
+          // refetch once this poll is truly done.
+          inFlightScreen[paneId] = false;
+        })
         .catch(function () {
           // Thrown fetch (network blip, phone waking from sleep) or an
           // unparseable 502 body — none of these confirm herdr is actually
-          // down, so the pane keeps whatever it last showed.
+          // down, so the pane keeps whatever it last showed. Settle the flag
+          // here too, or this pane's poller wedges forever after one error.
+          inFlightScreen[paneId] = false;
           el.classList.add("term-screen--stale");
         });
     }
