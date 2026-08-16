@@ -16805,13 +16805,15 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// D2: every pane in the boundary badges whatever its status —
-    /// working, idle, done, blocked, and an agent-less shell. D3's own
-    /// `status_pill` tints only done/working/blocked, so idle and shell
-    /// share the neutral, unmodified dot and are told apart only by the
-    /// pill's own text — asserted on that text, never on a modifier class
-    /// neither carries. D1a: the badge prints the pane's program (`kind`,
-    /// or the literal `shell`), and the agent's own `name` field never
+    /// D2's every-pane-badges rule is superseded by board-badges-agents-only:
+    /// only agent panes badge — working, idle, done, blocked — while a plain
+    /// agent-less shell pane never does; the board is a fleet overview of
+    /// running agents, and a shell stays reachable through the Terminals tab
+    /// and its own pane page instead. D3's own `status_pill` tints only
+    /// done/working/blocked, so idle shares the neutral, unmodified dot and
+    /// is told apart only by the pill's own text — asserted on that text,
+    /// never on a modifier class it does not carry. D1a: the badge prints
+    /// the pane's program (`kind`), and the agent's own `name` field never
     /// reaches the page.
     #[tokio::test]
     async fn home_page_badges_cover_every_pane_status_and_the_program_never_the_agent_name() {
@@ -16873,20 +16875,27 @@ mod bee_route_tests {
             &idle.pane_id,
             &done.pane_id,
             &blocked.pane_id,
-            &shell.pane_id,
         ] {
             assert!(
                 body.contains(&href(pane_id)),
-                "every pane, whatever its status, must badge: {body}"
+                "every agent pane, whatever its status, must badge: {body}"
             );
         }
-        for status_text in ["working", "idle", "done", "blocked", "shell"] {
+        assert!(
+            !body.contains(&href(&shell.pane_id)),
+            "board-badges-agents-only: a plain shell pane must never badge on the board: {body}"
+        );
+        for status_text in ["working", "idle", "done", "blocked"] {
             assert!(
                 body.contains(&format!(">{status_text}</span>")),
                 "the {status_text} pill's own text must appear: {body}"
             );
         }
-        for program in ["claude", "codex", "aider", "cursor", "shell"] {
+        assert!(
+            !body.contains(">shell</span>"),
+            "board-badges-agents-only: a shell pane's status pill must never appear on the board: {body}"
+        );
+        for program in ["claude", "codex", "aider", "cursor"] {
             assert!(
                 body.contains(program),
                 "the pane's program {program} must badge: {body}"
