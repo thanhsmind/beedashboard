@@ -265,9 +265,23 @@ impl SocketHerdr {
     /// fault this closes (terminal-attach-submit-race). Polls
     /// `read_pane(.., ReadSource::Visible, ..)` after an initial quiet
     /// window (`self.settle.min_quiet`) every `self.settle.poll_interval`
-    /// until two consecutive reads report the same revision, or
+    /// until two consecutive reads report the same screen TEXT, or
     /// `self.settle.max_wait` (from this call's own start, i.e. from the
     /// text write) elapses.
+    ///
+    /// Compares `ScreenRead.text`, never `ScreenRead.revision`
+    /// (terminal-attach-submit-race-2): measured against the real herdr
+    /// daemon, `revision` is a dead field -- 8 consecutive `pane.read`
+    /// calls taken while a Claude Code pane was actively streaming output
+    /// all answered `revision: 0` while the screen text visibly changed
+    /// underneath them, and every pane in `herdr pane list` reports
+    /// revision 0 regardless of activity. A revision-only settle check
+    /// would see an "equal" revision on its very first poll and return
+    /// immediately, collapsing this wait into a fixed `min_quiet + one
+    /// poll_interval` floor no matter whether the screen has actually
+    /// stopped changing -- do not "simplify" this back to comparing
+    /// `revision` alone; if it is ever reintroduced as a short-circuit,
+    /// text equality must still be required alongside it.
     ///
     /// Never returns an error: a poll read failure, any `HerdrError` from
     /// the poll, or the cap all fall through to the same outcome -- give up
@@ -278,7 +292,7 @@ impl SocketHerdr {
         let deadline = tokio::time::Instant::now() + self.settle.max_wait;
         tokio::time::sleep(self.settle.min_quiet).await;
 
-        let mut last_revision: Option<u64> = None;
+        let mut last_text: Option<String> = None;
         loop {
             if tokio::time::Instant::now() >= deadline {
                 return;
@@ -287,10 +301,10 @@ impl SocketHerdr {
                 Ok(read) => read,
                 Err(_) => return,
             };
-            if last_revision == Some(read.revision) {
+            if last_text.as_deref() == Some(read.text.as_str()) {
                 return;
             }
-            last_revision = Some(read.revision);
+            last_text = Some(read.text);
 
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
@@ -1111,14 +1125,20 @@ mod tests {
 
     /// A mock `herdr.sock` server for the `send_input` settle-wait tests
     /// below: drains every request until the submit Enter arrives (rather
-    /// than a fixed count), answering each `pane.read` with `revision`
-    /// computed by `read_revision` so a test can script either "settles
-    /// after two identical reads" or "never settles" by choosing that
-    /// closure. Returns every request it saw, in arrival order.
+    /// than a fixed count), answering each `pane.read` with `text`
+    /// computed by `read_text` so a test can script either "settles after
+    /// two identical reads" or "never settles" by choosing that closure.
+    /// `revision` is pinned to a constant `0` on every reply -- matching
+    /// the real herdr daemon's measured behavior (terminal-attach-submit-
+    /// race-2: revision stays 0 across every read while a pane streams)
+    /// -- so these tests exercise the settle wait exactly as it behaves
+    /// against production, where `revision` alone could never distinguish
+    /// "settled" from "still changing". Returns every request it saw, in
+    /// arrival order.
     #[cfg(unix)]
     async fn run_settle_mock_server(
         listener: tokio::net::UnixListener,
-        mut read_revision: impl FnMut() -> u64 + Send + 'static,
+        mut read_text: impl FnMut() -> String + Send + 'static,
     ) -> Vec<Value> {
         let mut requests = Vec::new();
         loop {
@@ -1135,7 +1155,7 @@ mod tests {
             let value: Value = serde_json::from_slice(&buf).unwrap();
             let is_submit_enter = value["params"]["keys"] == json!(["enter"]);
             let result = if value["method"] == "pane.read" {
-                json!({ "type": "pane_read", "read": { "text": "", "revision": read_revision() } })
+                json!({ "type": "pane_read", "read": { "text": read_text(), "revision": 0 } })
             } else {
                 json!({})
             };
@@ -1183,8 +1203,9 @@ mod tests {
 
             // Settles after its second identical read, like a composer
             // whose redraw has already finished by the time the poll loop
-            // catches up.
-            let server = tokio::spawn(run_settle_mock_server(listener, || 1));
+            // catches up. Constant text (not just a constant revision)
+            // is what actually settles this -- see `run_settle_mock_server`.
+            let server = tokio::spawn(run_settle_mock_server(listener, || "steady".to_string()));
 
             client.send_input("w1:p1", "hello", true).await.unwrap();
             server.await.unwrap()
@@ -1219,8 +1240,8 @@ mod tests {
     }
 
     /// terminal-attach-submit-race: a pane whose screen never stops
-    /// changing (every `pane.read` answers a new revision) must not
-    /// withhold the submit Enter forever -- `wait_for_pane_to_settle`'s
+    /// changing (every `pane.read` answers new text) must not withhold
+    /// the submit Enter forever -- `wait_for_pane_to_settle`'s
     /// `SETTLE_MAX_WAIT` cap must fire and the Enter must still reach the
     /// socket, proving a user's submit is never silently dropped for a
     /// screen that will not hold still. Uses
@@ -1241,10 +1262,10 @@ mod tests {
                 TEST_SETTLE_MAX_WAIT,
             );
 
-            let mut revision = 0u64;
+            let mut frame = 0u64;
             let server = tokio::spawn(run_settle_mock_server(listener, move || {
-                revision += 1;
-                revision
+                frame += 1;
+                format!("frame-{frame}")
             }));
 
             client.send_input("w1:p1", "hello", true).await.unwrap();
@@ -1267,6 +1288,66 @@ mod tests {
             outcome.iter().any(|r| r["method"] == "pane.read"),
             "the settle-wait poll must have run at least once before the cap sent \
              the Enter anyway: {outcome:?}"
+        );
+    }
+
+    /// terminal-attach-submit-race-2: `run_settle_mock_server` pins
+    /// `revision` to a constant `0` on every reply, matching the real
+    /// herdr daemon's measured behavior. Against the old revision-only
+    /// settle check this pane would falsely "settle" on the very first
+    /// poll (revision 0 == revision 0) regardless of what the screen text
+    /// was doing. Scripts three distinct texts before the text repeats,
+    /// so a correct text-comparing settle wait must keep polling through
+    /// all three changes and stop only on the first repeat -- proving the
+    /// wait watches text, not revision.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sendinput_keeps_polling_while_text_changes_despite_flat_revision() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("herdr.sock");
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            let client = SocketHerdr::with_settle_durations_for_test(
+                path.clone(),
+                TEST_SETTLE_MIN_QUIET,
+                TEST_SETTLE_POLL_INTERVAL,
+                TEST_SETTLE_MAX_WAIT,
+            );
+
+            // "a", "ab", "abc" all differ; "abc" then repeats -- the
+            // settle wait must poll through the first three (four reads
+            // total) and stop on the fourth, which is the first repeat.
+            let texts = ["a", "ab", "abc", "abc", "abc"];
+            let mut calls = 0usize;
+            let server = tokio::spawn(run_settle_mock_server(listener, move || {
+                let text = texts.get(calls).copied().unwrap_or("abc").to_string();
+                calls += 1;
+                text
+            }));
+
+            client.send_input("w1:p1", "hello", true).await.unwrap();
+            server.await.unwrap()
+        })
+        .await
+        .expect("send_input must not hang");
+
+        let reads = outcome
+            .iter()
+            .filter(|r| r["method"] == "pane.read")
+            .count();
+        assert!(
+            reads >= 3,
+            "the settle wait must keep polling while the text keeps changing, even \
+             though revision stays flat at 0 like the real daemon -- only {reads} \
+             pane.read call(s) before settling: {outcome:?}"
+        );
+
+        let last = outcome.last().expect("at least the enter request");
+        assert_eq!(last["method"], "pane.send_input");
+        assert_eq!(
+            last["params"]["keys"],
+            json!(["enter"]),
+            "the settle wait must still send the Enter once the text repeats: {outcome:?}"
         );
     }
 
