@@ -3390,6 +3390,10 @@ fn terminals_status_rank(status: &str) -> u8 {
 /// vocabulary `unassigned_panes` itself never spells out because its own
 /// view has no project column, but the label agent-terminal already uses
 /// for that group's own page title ("Unassigned agents").
+/// drawer-title-1: `title` is the agent's own terminal title
+/// (`herdr::wire::Agent::title`, herdr's `terminal_title_stripped`) — the one
+/// line that says what the agent is currently doing. Empty when the agent has
+/// not set one, never omitted.
 #[derive(serde::Serialize)]
 struct AgentPaneRow {
     project_id: Option<String>,
@@ -3397,9 +3401,24 @@ struct AgentPaneRow {
     pane_id: String,
     name: String,
     status: String,
+    title: String,
     workspace: String,
     tab: String,
     url: String,
+}
+
+/// drawer-title-1: the terminal title of the agent behind `pane_id`, or `""`
+/// when no agent matches. Resolved here from the snapshot rather than carried
+/// on [`views::TerminalPaneView`]: only this feed wants it, and that view's
+/// own doc contract keeps it to the plain display fields every terminal
+/// surface shares.
+fn agent_title_for(snapshot: &herdr::Snapshot, pane_id: &str) -> String {
+    snapshot
+        .agents
+        .iter()
+        .find(|a| a.pane_id == pane_id)
+        .map(|a| a.title.clone())
+        .unwrap_or_default()
 }
 
 /// `GET /api/agents`'s assembly (agent-switch-drawer): every agent-backed
@@ -3443,6 +3462,7 @@ fn agent_pane_rows(
                 project_id: Some(project.id.clone()),
                 project_name: project.name.clone(),
                 url: format!("/p/{}/_terminal/pane/{}", project.id, pane.pane_id),
+                title: agent_title_for(snapshot, &pane.pane_id),
                 pane_id: pane.pane_id,
                 name: pane.name,
                 status: pane.status,
@@ -3468,6 +3488,7 @@ fn agent_pane_rows(
             project_id: None,
             project_name: "(unassigned)".to_string(),
             url: "/_terminal/unassigned".to_string(),
+            title: agent_title_for(snapshot, &pane.pane_id),
             pane_id: pane.pane_id,
             name: pane.name,
             status: pane.status,
@@ -22988,6 +23009,50 @@ mod bee_route_tests {
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&outer).ok();
+    }
+
+    /// drawer-title-1: every `GET /api/agents` row carries the agent's own
+    /// terminal title (`herdr` `terminal_title_stripped`) so the drawer can
+    /// say what the agent is doing — and an agent with no title carries the
+    /// empty string rather than dropping the field.
+    #[tokio::test]
+    async fn api_agents_carries_agent_terminal_titles() {
+        let dir = fresh_root("agent-drawer-title-data");
+        enable_terminal(&dir);
+        let root = fresh_root("agent-drawer-title-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        // `agent_start` seeds its agent with an empty title (`fake.rs`), so
+        // this pane is the titleless case; the seeded `w2:p3` agent
+        // ("Finished the refactor") rides the Unassigned half untouched and
+        // is the titled case.
+        let agent = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        register(&st, &root, "drawer-title");
+        let app = router(st);
+
+        let resp = get(app, "/api/agents").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+
+        assert!(
+            rows.iter()
+                .any(|r| r["pane_id"] == "w2:p3" && r["title"] == "Finished the refactor"),
+            "an agent's terminal title must ride its drawer row: {body}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r["pane_id"] == agent.pane_id && r["title"] == ""),
+            "a titleless agent must carry an empty title, never a missing field: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── stale-index-refresh-2: the 404 page's Refresh index button ─────────
