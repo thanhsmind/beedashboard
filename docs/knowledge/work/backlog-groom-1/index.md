@@ -1,6 +1,3 @@
----
-okf_version: 0.1
----
 <!--
 GENERATED FILE — do not hand-edit.
 Rendered by `bee knowledge index` from concept frontmatter inside docs/knowledge/ (okf-foundation D21).
@@ -9,12 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# Knowledge Bundle
+# work/backlog-groom-1/
 
-## Sections
+## Concepts
 
-- [work/](work/index.md) — 36 concept(s)
-
-## Critical patterns
-
-None.
+- [backlog-groom-1 — delivery](delivery.md) — Delivery record for work item backlog-groom-1: the unregister happy-path pinned by a test, and the live watcher's reload broadcast gated on content actually changing.

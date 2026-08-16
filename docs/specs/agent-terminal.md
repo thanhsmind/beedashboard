@@ -270,6 +270,13 @@ tab; a row opened from a project page goes to the agent's own view. Rows keep
 their pane name, status pill, and `project · workspace:tab` suffix, ordered by
 status.
 
+The switching strip itself is narrower than the drawer: on the homepage's
+Terminals tab it offers only the panes belonging to the selected pane's own
+project — matched on the project's identity, never on its display label —
+and a pane belonging to no project switches only among the other
+project-less panes. Crossing into another project's panes is the drawer's
+job, which remains the one cross-project view.
+
 ### Viewing the transcript
 
 - **Triggers:** opening a registered project's Transcript tab while the
