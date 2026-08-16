@@ -48,3 +48,4 @@ never a generation timestamp or any other wall-clock value.
 - [upstream-code-viewer/](upstream-code-viewer/index.md) — 1 concept(s)
 - [upstream-short-link/](upstream-short-link/index.md) — 1 concept(s)
 - [waggledance-rename/](waggledance-rename/index.md) — 1 concept(s)
+- [waiting-on-badge/](waiting-on-badge/index.md) — 1 concept(s)
