@@ -199,7 +199,9 @@ mod tests {
             r#"{"status":"ok","app":"waggledance","version":"0.1.0"}"#
         ));
         assert!(looks_like_daemon("HTTP/1.1 200 OK\r\n\r\n"));
-        assert!(!looks_like_daemon(r#"{"status":"ok","app":"some-other-app"}"#));
+        assert!(!looks_like_daemon(
+            r#"{"status":"ok","app":"some-other-app"}"#
+        ));
     }
 
     #[test]

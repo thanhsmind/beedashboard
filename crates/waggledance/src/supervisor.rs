@@ -106,13 +106,24 @@ pub struct Supervisor {
 }
 
 impl Supervisor {
+    /// Production always shares a caller-owned cancellation flag via
+    /// [`with_cancel_flag`](Self::with_cancel_flag) instead — only this
+    /// module's own tests, which have no such flag to share, use this
+    /// convenience constructor.
+    #[cfg(test)]
     pub fn new(
         control: Arc<dyn Herdr>,
         restart: Arc<dyn RestartAction>,
         interval: Duration,
         backoff: Duration,
     ) -> Self {
-        Self::with_cancel_flag(control, restart, interval, backoff, Arc::new(AtomicBool::new(false)))
+        Self::with_cancel_flag(
+            control,
+            restart,
+            interval,
+            backoff,
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
     /// Like [`new`](Self::new), but sharing a caller-owned cancellation flag
@@ -294,7 +305,10 @@ mod tests {
         cancelled.store(true, Ordering::SeqCst);
         let (health, restarted) = sup.check_once().await;
         assert_eq!(health, Health::Down, "health is still reported honestly");
-        assert!(!restarted, "a cancelled supervisor must not report a restart");
+        assert!(
+            !restarted,
+            "a cancelled supervisor must not report a restart"
+        );
         assert_eq!(
             count.load(Ordering::SeqCst),
             0,
@@ -309,10 +323,24 @@ mod tests {
     #[test]
     fn backoff_grows_then_caps() {
         let base = Duration::from_secs(3);
-        assert_eq!(backoff_for(base, 1), base, "the first backoff is unchanged from before");
-        assert!(backoff_for(base, 2) > backoff_for(base, 1), "must grow on a second consecutive restart");
-        assert!(backoff_for(base, 3) > backoff_for(base, 2), "must keep growing on a third");
-        assert_eq!(backoff_for(base, 1000), MAX_BACKOFF, "must cap rather than grow without bound");
+        assert_eq!(
+            backoff_for(base, 1),
+            base,
+            "the first backoff is unchanged from before"
+        );
+        assert!(
+            backoff_for(base, 2) > backoff_for(base, 1),
+            "must grow on a second consecutive restart"
+        );
+        assert!(
+            backoff_for(base, 3) > backoff_for(base, 2),
+            "must keep growing on a third"
+        );
+        assert_eq!(
+            backoff_for(base, 1000),
+            MAX_BACKOFF,
+            "must cap rather than grow without bound"
+        );
     }
 
     /// Defect (6): a persistently unavailable herdr must be retried with
@@ -356,7 +384,9 @@ mod tests {
             );
         }
         assert!(
-            recorded.iter().any(|(_, wait)| *wait > Duration::from_millis(2)),
+            recorded
+                .iter()
+                .any(|(_, wait)| *wait > Duration::from_millis(2)),
             "must actually back off beyond the base interval eventually: {recorded:?}"
         );
     }

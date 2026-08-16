@@ -103,11 +103,15 @@ impl TerminalBackground {
     /// How many health checks the supervisor task has actually completed —
     /// a real side effect of the loop still running, unlike
     /// [`supervisor_running`](Self::supervisor_running)'s bookkeeping.
+    /// Only this module's own tests read it today.
+    #[cfg(test)]
     fn supervisor_ticks(&self) -> u64 {
         self.supervisor_ticks.load(Ordering::SeqCst)
     }
 
-    /// How many poll cycles the notify task has actually completed.
+    /// How many poll cycles the notify task has actually completed. Only
+    /// this module's own tests read it today.
+    #[cfg(test)]
     fn notify_ticks(&self) -> u64 {
         self.notify_ticks.load(Ordering::SeqCst)
     }
@@ -368,16 +372,24 @@ mod terminal_background_tests {
     #[tokio::test]
     async fn supervisor_switch_on_starts_the_watchdog_off_stops_it() {
         let bg = TerminalBackground::new();
-        let mut cfg = TerminalConfig::default();
+        let mut cfg = TerminalConfig {
+            supervisor_enabled: true,
+            ..Default::default()
+        };
 
-        cfg.supervisor_enabled = true;
         bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
-        assert!(bg.supervisor_running(), "switching on must start the watchdog");
+        assert!(
+            bg.supervisor_running(),
+            "switching on must start the watchdog"
+        );
         assert!(!bg.notify_running(), "the notify switch is still off");
 
         cfg.supervisor_enabled = false;
         bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
-        assert!(!bg.supervisor_running(), "switching off must stop the watchdog");
+        assert!(
+            !bg.supervisor_running(),
+            "switching off must stop the watchdog"
+        );
     }
 
     /// The notify switch: on starts the watcher/drain task, off stops it —
@@ -387,12 +399,17 @@ mod terminal_background_tests {
     #[tokio::test]
     async fn notify_switch_on_starts_the_watcher_off_stops_it() {
         let bg = TerminalBackground::new();
-        let mut cfg = TerminalConfig::default();
+        let mut cfg = TerminalConfig {
+            notify_enabled: true,
+            ..Default::default()
+        };
 
-        cfg.notify_enabled = true;
         bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
         assert!(bg.notify_running(), "switching on must start the watcher");
-        assert!(!bg.supervisor_running(), "the supervisor switch is still off");
+        assert!(
+            !bg.supervisor_running(),
+            "the supervisor switch is still off"
+        );
 
         cfg.notify_enabled = false;
         bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
@@ -404,16 +421,21 @@ mod terminal_background_tests {
     #[tokio::test]
     async fn switches_are_independent() {
         let bg = TerminalBackground::new();
-        let mut cfg = TerminalConfig::default();
-        cfg.supervisor_enabled = true;
-        cfg.notify_enabled = true;
+        let mut cfg = TerminalConfig {
+            supervisor_enabled: true,
+            notify_enabled: true,
+            ..Default::default()
+        };
         bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
         assert!(bg.supervisor_running());
         assert!(bg.notify_running());
 
         cfg.notify_enabled = false;
         bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
-        assert!(bg.supervisor_running(), "turning off notify must not touch the supervisor");
+        assert!(
+            bg.supervisor_running(),
+            "turning off notify must not touch the supervisor"
+        );
         assert!(!bg.notify_running());
     }
 
@@ -423,8 +445,10 @@ mod terminal_background_tests {
     #[tokio::test]
     async fn reconciling_an_already_running_switch_is_a_no_op() {
         let bg = TerminalBackground::new();
-        let mut cfg = TerminalConfig::default();
-        cfg.supervisor_enabled = true;
+        let cfg = TerminalConfig {
+            supervisor_enabled: true,
+            ..Default::default()
+        };
         bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
         assert!(bg.supervisor_running());
         bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
@@ -530,8 +554,12 @@ mod terminal_background_tests {
             unimplemented!("not exercised by the supervisor")
         }
         async fn ping(&self) -> crate::herdr::Result<crate::herdr::ProtocolInfo> {
-            let now = self.in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            self.max_in_flight.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+            let now = self
+                .in_flight
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.max_in_flight
+                .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
             let _guard = InFlightGuard(self.in_flight.clone());
             tokio::time::sleep(self.delay).await;
             Ok(crate::herdr::ProtocolInfo {
@@ -547,7 +575,12 @@ mod terminal_background_tests {
         ) -> crate::herdr::Result<crate::herdr::ScreenRead> {
             unimplemented!("not exercised by the supervisor")
         }
-        async fn send_input(&self, _pane_id: &str, _text: &str, _submit: bool) -> crate::herdr::Result<()> {
+        async fn send_input(
+            &self,
+            _pane_id: &str,
+            _text: &str,
+            _submit: bool,
+        ) -> crate::herdr::Result<()> {
             unimplemented!("not exercised by the supervisor")
         }
         async fn send_text(&self, _pane_id: &str, _bytes: &str) -> crate::herdr::Result<()> {

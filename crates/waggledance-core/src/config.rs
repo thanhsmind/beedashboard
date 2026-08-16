@@ -377,7 +377,10 @@ pub fn save_notify_credential(path: &Path, secret: &str) -> Result<()> {
     let result = write_owner_only(&tmp_path, secret.as_bytes())
         .and_then(|()| std::fs::rename(&tmp_path, path).map_err(Error::from));
     if let Err(ref e) = result {
-        tracing::warn!("failed to save notify credential to {}: {e}", path.display());
+        tracing::warn!(
+            "failed to save notify credential to {}: {e}",
+            path.display()
+        );
         // Best-effort: a failed write never leaves debris beside the
         // credential for a later save to trip over.
         let _ = std::fs::remove_file(&tmp_path);
@@ -525,12 +528,10 @@ mod tests {
 
     #[test]
     fn resolve_data_dir_uses_override_when_set() {
-        let dir = std::env::temp_dir().join(format!("waggledance-cfg-override-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-cfg-override-{}", std::process::id()));
         assert_eq!(resolve_data_dir(Some(&dir)), dir);
-        assert_eq!(
-            config_path_override(Some(&dir)),
-            dir.join("config.toml")
-        );
+        assert_eq!(config_path_override(Some(&dir)), dir.join("config.toml"));
     }
 
     #[test]
@@ -590,7 +591,10 @@ mod tests {
 
         let result = migrate_data_dir(&old_dir, &new_dir);
         assert!(result.is_ok(), "migration must succeed: {result:?}");
-        assert!(!old_dir.exists(), "old directory must be gone after migration");
+        assert!(
+            !old_dir.exists(),
+            "old directory must be gone after migration"
+        );
         assert!(new_dir.exists(), "new directory must exist after migration");
         assert_eq!(
             std::fs::read(new_dir.join("registry.db")).unwrap(),
@@ -605,7 +609,10 @@ mod tests {
         // Idempotent: a second call (the "run once per process" guard's
         // effect, proved at the pure-function level) is a safe no-op.
         let second = migrate_data_dir(&old_dir, &new_dir);
-        assert!(second.is_ok(), "a repeat migration call must stay Ok: {second:?}");
+        assert!(
+            second.is_ok(),
+            "a repeat migration call must stay Ok: {second:?}"
+        );
         assert_eq!(
             std::fs::read(new_dir.join("registry.db")).unwrap(),
             registry_bytes,
@@ -695,7 +702,8 @@ mod tests {
         assert!(!c.terminal.unassigned_enabled);
 
         // Round-trips through TOML with no token anywhere in the section.
-        let dir = std::env::temp_dir().join(format!("waggledance-cfg-terminal-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-cfg-terminal-{}", std::process::id()));
         let p = dir.join("config.toml");
         c.save_to(&p).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
@@ -719,10 +727,17 @@ mod tests {
         // build that predates this switch entirely — has never heard of
         // `unassigned_enabled`, and loading it must still resolve to off,
         // not fail to parse and not silently read as on.
-        let dir = std::env::temp_dir().join(format!("waggledance-cfg-unassigned-absent-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "waggledance-cfg-unassigned-absent-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("config.toml");
-        std::fs::write(&p, "[terminal]\nenabled = true\nsupervisor_enabled = true\n").unwrap();
+        std::fs::write(
+            &p,
+            "[terminal]\nenabled = true\nsupervisor_enabled = true\n",
+        )
+        .unwrap();
         let loaded = Config::load_from(&p);
         assert!(loaded.terminal.enabled);
         assert!(loaded.terminal.supervisor_enabled);
@@ -738,7 +753,8 @@ mod tests {
         let c = Config::default();
         assert!(c.terminal.agent_presets.is_empty());
 
-        let dir = std::env::temp_dir().join(format!("waggledance-cfg-presets-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-cfg-presets-{}", std::process::id()));
         let p = dir.join("config.toml");
         let mut c = Config::default();
         c.terminal.agent_presets = vec![AgentPreset {
@@ -777,13 +793,17 @@ mod tests {
         // every other setting.
         assert_eq!(Config::default().terminal.notify_chat_id, None);
 
-        let dir = std::env::temp_dir().join(format!("waggledance-cfg-chatid-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-cfg-chatid-{}", std::process::id()));
         let p = dir.join("config.toml");
         let mut c = Config::default();
         c.terminal.notify_chat_id = Some("-100123456789".into());
         c.save_to(&p).unwrap();
         let loaded = Config::load_from(&p);
-        assert_eq!(loaded.terminal.notify_chat_id.as_deref(), Some("-100123456789"));
+        assert_eq!(
+            loaded.terminal.notify_chat_id.as_deref(),
+            Some("-100123456789")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -802,12 +822,18 @@ mod tests {
         assert_eq!(load_notify_credential(&path).as_deref(), Some(secret));
         let masked = masked_notify_credential(&path).unwrap();
         assert_eq!(masked, "*******************1234");
-        assert!(!masked.contains(secret), "masked view must never carry the full secret");
+        assert!(
+            !masked.contains(secret),
+            "masked view must never carry the full secret"
+        );
 
         // Saving again (rotation) overwrites atomically rather than
         // appending or leaving a stale temp file behind.
         save_notify_credential(&path, "second-secret-9999").unwrap();
-        assert_eq!(load_notify_credential(&path).as_deref(), Some("second-secret-9999"));
+        assert_eq!(
+            load_notify_credential(&path).as_deref(),
+            Some("second-secret-9999")
+        );
         let entries: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -828,7 +854,8 @@ mod tests {
         // beside), not a hardcoded literal — a decorative assertion would
         // stay green even if the credential quietly became a Config field
         // under a different name.
-        let dir = std::env::temp_dir().join(format!("waggledance-cfg-cred-leak-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-cfg-cred-leak-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cred_path = notify_credential_path_override(Some(&dir));
         let secret = "definitely-a-secret-value-42";
@@ -862,7 +889,8 @@ mod tests {
     /// succeed regardless of scheduling.
     #[test]
     fn concurrent_saves_never_collide_on_the_temp_name() {
-        let dir = std::env::temp_dir().join(format!("waggledance-cfg-cred-race-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-cfg-cred-race-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = notify_credential_path_override(Some(&dir));
 
@@ -873,13 +901,20 @@ mod tests {
         let result_a = a.join().unwrap();
         let result_b = b.join().unwrap();
 
-        assert!(result_a.is_ok(), "first concurrent save must succeed: {result_a:?}");
-        assert!(result_b.is_ok(), "second concurrent save must succeed: {result_b:?}");
+        assert!(
+            result_a.is_ok(),
+            "first concurrent save must succeed: {result_a:?}"
+        );
+        assert!(
+            result_b.is_ok(),
+            "second concurrent save must succeed: {result_b:?}"
+        );
         // Whichever rename lands last wins the final content; either is
         // fine — the point proven here is that neither call itself failed.
         let final_value = load_notify_credential(&path);
         assert!(
-            final_value.as_deref() == Some("secret-a") || final_value.as_deref() == Some("secret-b"),
+            final_value.as_deref() == Some("secret-a")
+                || final_value.as_deref() == Some("secret-b"),
             "credential must hold whichever concurrent save landed last, got {final_value:?}"
         );
 
@@ -894,19 +929,31 @@ mod tests {
     /// never block a later save from succeeding.
     #[test]
     fn a_leftover_temp_file_never_blocks_a_later_save() {
-        let dir = std::env::temp_dir().join(format!("waggledance-cfg-cred-leftover-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "waggledance-cfg-cred-leftover-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = notify_credential_path_override(Some(&dir));
 
         // Simulate the historical bug's leftover: the fixed pid-derived
         // name a pre-fix build would have used, never cleaned up because
         // its rename never ran.
-        let stale = dir.join(format!("{NOTIFY_CREDENTIAL_FILE_NAME}.tmp-{}", std::process::id()));
+        let stale = dir.join(format!(
+            "{NOTIFY_CREDENTIAL_FILE_NAME}.tmp-{}",
+            std::process::id()
+        ));
         std::fs::write(&stale, b"leftover from a crashed save").unwrap();
 
         let result = save_notify_credential(&path, "fresh-secret");
-        assert!(result.is_ok(), "a leftover temp file must never block a later save: {result:?}");
-        assert_eq!(load_notify_credential(&path).as_deref(), Some("fresh-secret"));
+        assert!(
+            result.is_ok(),
+            "a leftover temp file must never block a later save: {result:?}"
+        );
+        assert_eq!(
+            load_notify_credential(&path).as_deref(),
+            Some("fresh-secret")
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -920,7 +967,10 @@ mod tests {
     fn a_save_that_cannot_write_reports_the_failure() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("waggledance-cfg-cred-denied-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "waggledance-cfg-cred-denied-{}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = notify_credential_path_override(Some(&dir));
         // No write permission on the containing directory: `create_new`
@@ -932,7 +982,10 @@ mod tests {
         // Restore write permission before cleanup, or `remove_dir_all` fails too.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
 
-        assert!(result.is_err(), "a save that cannot write must report failure, not Ok(())");
+        assert!(
+            result.is_err(),
+            "a save that cannot write must report failure, not Ok(())"
+        );
         assert_eq!(
             load_notify_credential(&path),
             None,
@@ -950,13 +1003,17 @@ mod tests {
     fn credential_file_is_created_owner_only_on_unix() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("waggledance-cfg-cred-mode-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-cfg-cred-mode-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = notify_credential_path_override(Some(&dir));
         save_notify_credential(&path, "mode-check-secret").unwrap();
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "telegram credential file must be owner-read/write only");
+        assert_eq!(
+            mode, 0o600,
+            "telegram credential file must be owner-read/write only"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

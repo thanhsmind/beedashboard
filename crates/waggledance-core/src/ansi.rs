@@ -528,7 +528,7 @@ fn consume_csi(chars: &mut Peekable<Chars>) -> EscapeOutcome {
     let mut plain_params = true;
     loop {
         match chars.next() {
-            Some(c) if ('0'..='9').contains(&c) || c == ';' => {
+            Some(c) if c.is_ascii_digit() || c == ';' => {
                 params_buf.push(c);
             }
             Some(c) if ('\u{20}'..='\u{3f}').contains(&c) => {
@@ -593,7 +593,9 @@ fn parse_sgr_params(buf: &str) -> Vec<u32> {
     if buf.is_empty() {
         return vec![0];
     }
-    buf.split(';').map(|p| p.parse::<u32>().unwrap_or(0)).collect()
+    buf.split(';')
+        .map(|p| p.parse::<u32>().unwrap_or(0))
+        .collect()
 }
 
 /// Applies one SGR run's parameters to `style` in order, per ECMA-48 /
@@ -664,7 +666,11 @@ fn apply_extended_color(rest: &[u32], mut set: impl FnMut(Option<Color>)) -> Opt
             let r = *rest.get(1)?;
             let g = *rest.get(2)?;
             let b = *rest.get(3)?;
-            set(Some(Color::Rgb(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8)));
+            set(Some(Color::Rgb(
+                r.min(255) as u8,
+                g.min(255) as u8,
+                b.min(255) as u8,
+            )));
             Some(4)
         }
         _ => None,
@@ -794,7 +800,10 @@ mod tests {
     #[test]
     fn truecolor_combined_with_bold_emits_both_class_and_style_on_one_span() {
         let html = to_html("\u{1b}[1;38;2;255;0;128mtext\u{1b}[0m");
-        assert_eq!(html, "<span class=\"ansi-bold\" style=\"color:#ff0080\">text</span>");
+        assert_eq!(
+            html,
+            "<span class=\"ansi-bold\" style=\"color:#ff0080\">text</span>"
+        );
     }
 
     #[test]
@@ -812,10 +821,22 @@ mod tests {
 
     #[test]
     fn bold_dim_italic_underline_each_render_their_own_class() {
-        assert_eq!(to_html("\u{1b}[1mx\u{1b}[0m"), "<span class=\"ansi-bold\">x</span>");
-        assert_eq!(to_html("\u{1b}[2mx\u{1b}[0m"), "<span class=\"ansi-dim\">x</span>");
-        assert_eq!(to_html("\u{1b}[3mx\u{1b}[0m"), "<span class=\"ansi-italic\">x</span>");
-        assert_eq!(to_html("\u{1b}[4mx\u{1b}[0m"), "<span class=\"ansi-underline\">x</span>");
+        assert_eq!(
+            to_html("\u{1b}[1mx\u{1b}[0m"),
+            "<span class=\"ansi-bold\">x</span>"
+        );
+        assert_eq!(
+            to_html("\u{1b}[2mx\u{1b}[0m"),
+            "<span class=\"ansi-dim\">x</span>"
+        );
+        assert_eq!(
+            to_html("\u{1b}[3mx\u{1b}[0m"),
+            "<span class=\"ansi-italic\">x</span>"
+        );
+        assert_eq!(
+            to_html("\u{1b}[4mx\u{1b}[0m"),
+            "<span class=\"ansi-underline\">x</span>"
+        );
     }
 
     #[test]
@@ -836,7 +857,10 @@ mod tests {
     #[test]
     fn reset_clears_every_attribute_and_colour() {
         let html = to_html("\u{1b}[1;31;4mstyled\u{1b}[0mplain");
-        assert_eq!(html, "<span class=\"ansi-bold ansi-underline ansi-fg-red\">styled</span>plain");
+        assert_eq!(
+            html,
+            "<span class=\"ansi-bold ansi-underline ansi-fg-red\">styled</span>plain"
+        );
     }
 
     // --- unknown / non-visual sequences: dropped, never emitted raw ---
@@ -1017,7 +1041,10 @@ mod tests {
         let second_open = html.rfind("<div class=\"term-frame\">").unwrap();
         assert!(first_close < second_open, "{html}");
         let between = &html[first_close..second_open];
-        assert!(between.contains("first prose line") && between.contains("second prose line"), "{between}");
+        assert!(
+            between.contains("first prose line") && between.contains("second prose line"),
+            "{between}"
+        );
     }
 
     #[test]
@@ -1043,8 +1070,16 @@ mod tests {
         // No span may straddle the div boundary in either direction.
         let before = &html[..div_open];
         let after = &html[div_close..];
-        assert_eq!(before.matches("<span").count(), before.matches("</span>").count(), "{before}");
-        assert_eq!(after.matches("<span").count(), after.matches("</span>").count(), "{after}");
+        assert_eq!(
+            before.matches("<span").count(),
+            before.matches("</span>").count(),
+            "{before}"
+        );
+        assert_eq!(
+            after.matches("<span").count(),
+            after.matches("</span>").count(),
+            "{after}"
+        );
     }
 
     #[test]
@@ -1084,7 +1119,10 @@ mod tests {
         let a = revision_of("");
         let b = revision_of("");
         assert_eq!(a, b, "an empty screen must still report a stable revision");
-        assert_ne!(a, 0, "an empty screen's revision must not collapse to the 0 sentinel");
+        assert_ne!(
+            a, 0,
+            "an empty screen's revision must not collapse to the 0 sentinel"
+        );
     }
 
     #[test]

@@ -12,11 +12,11 @@
 //! stale lock's pid can be recycled by an unrelated live process, and
 //! killing by pid alone would have signaled that process.
 
-use waggledance_core::daemon::{health_check, DaemonInfo};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
+use waggledance_core::daemon::{health_check, DaemonInfo};
 
 /// Kills and reaps a spawned child on drop, even if an assertion above
 /// panics — a leaked process would otherwise strand a listening port/pid
@@ -39,7 +39,8 @@ fn scratch_home(label: &str) -> PathBuf {
             .unwrap()
             .as_nanos()
     ));
-    std::fs::create_dir_all(dir.join(".waggledance")).expect("create scratch HOME/.waggledance dir");
+    std::fs::create_dir_all(dir.join(".waggledance"))
+        .expect("create scratch HOME/.waggledance dir");
     dir
 }
 
@@ -58,11 +59,8 @@ fn write_lock(home: &Path, pid: u32, host: &str, port: u16) {
         // written by a build that never carried one is exactly the `None` case.
         version: None,
     };
-    std::fs::write(
-        lock_path(home),
-        serde_json::to_vec_pretty(&info).unwrap(),
-    )
-    .expect("write daemon.lock");
+    std::fs::write(lock_path(home), serde_json::to_vec_pretty(&info).unwrap())
+        .expect("write daemon.lock");
 }
 
 /// A pid guaranteed to name no running process: spawn a trivial short-lived

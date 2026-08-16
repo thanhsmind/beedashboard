@@ -15,6 +15,9 @@
 //! implementations — [`socket::SocketHerdr`] over the real socket and
 //! [`fake::FakeHerdr`] for tests.
 
+// `fake` backs every test's `Herdr` (see the module doc above); nothing
+// outside `#[cfg(test)]` ever constructs it, so it is gated the same way.
+#[cfg(test)]
 pub mod fake;
 pub mod pane_scroller;
 pub mod socket;
@@ -22,7 +25,13 @@ pub mod wire;
 
 use async_trait::async_trait;
 
-pub use wire::{Agent, AgentStatus, ProtocolInfo, ScreenRead, Snapshot, HERDR_PROTOCOL};
+pub use wire::{AgentStatus, ProtocolInfo, ScreenRead, Snapshot};
+// `HERDR_PROTOCOL` reaches production code only through `super::wire::*`
+// (see `socket.rs`) — this re-export exists for the `#[cfg(test)]` block
+// in `main.rs`, so it is test-only too. `fake.rs` also imports `wire::*`
+// directly, so `Agent` needs no re-export at all here.
+#[cfg(test)]
+pub use wire::HERDR_PROTOCOL;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HerdrError {

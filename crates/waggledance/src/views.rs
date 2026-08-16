@@ -5,8 +5,8 @@
 use waggledance_core::bee::{
     feature_cell_span, list_archived_feature_dirs, BeeApprovedGates, BeeBacklog, BeeBuckets,
     BeeCell, BeeDecisionSummary, BeeDeferredEntry, BeeFeaturePhase, BeePbi, BeeProjectRollup,
-    BeeReview, BeeReviewStatus, BeeSession, BeeShippedFeature, BeeSnapshot, BeeState,
-    BeeWorkspace, BeeWorktree,
+    BeeReview, BeeReviewStatus, BeeSession, BeeShippedFeature, BeeSnapshot, BeeWorkspace,
+    BeeWorktree,
 };
 use waggledance_core::code_source::DirListing;
 use waggledance_core::config::Config;
@@ -199,6 +199,7 @@ fn home_tab_strip(selected: HomeTab) -> String {
 /// the Projects tab's render would add a dead `<style>` block with no
 /// selector able to match anything on that page -- there is no reason to
 /// ship it there.
+#[allow(clippy::too_many_arguments)] // each param is an independent render input server.rs::index_page already assembles; bundling them loses the doc comments pinned to each one above
 pub fn home_page(
     projects: &[(Project, usize, Vec<TerminalPaneView>)],
     unassigned_visible: bool,
@@ -250,7 +251,12 @@ pub fn home_page(
         ),
         HomeTab::Terminals => (
             "Terminals",
-            terminals_tab(terminals_panes, terminals_selected_pane, terminals_herdr_ok, terminals_presets),
+            terminals_tab(
+                terminals_panes,
+                terminals_selected_pane,
+                terminals_herdr_ok,
+                terminals_presets,
+            ),
         ),
     };
     let body = format!(
@@ -291,7 +297,8 @@ fn project_list_main(
         // in, and each one is immediately followed by its own branches, in
         // their own arrival order. A branch is never emitted twice and never
         // emitted before its parent, whatever order the registry hands them in.
-        let mut ordered: Vec<(&(Project, usize, Vec<TerminalPaneView>), Option<&str>)> = Vec::new();
+        type OrderedProjectRow<'a> = (&'a (Project, usize, Vec<TerminalPaneView>), Option<&'a str>);
+        let mut ordered: Vec<OrderedProjectRow> = Vec::new();
         for entry in projects {
             if worktree_branch(&entry.0.id)
                 .map(|(parent, _)| registered.contains(parent))
@@ -847,7 +854,12 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 /// (`pane_cards`/`transcript_cards`'s `empty_msg`) already says so, and an
 /// empty strip would say it twice. No JavaScript: these are links, and one
 /// pane per page means `assets/app.js` polls one screen instead of N.
-fn pane_strip(project_id: &str, kind: &str, panes: &[TerminalPaneView], selected: Option<&str>) -> String {
+fn pane_strip(
+    project_id: &str,
+    kind: &str,
+    panes: &[TerminalPaneView],
+    selected: Option<&str>,
+) -> String {
     if panes.is_empty() {
         return String::new();
     }
@@ -1166,7 +1178,12 @@ fn screen_frame(pane: &TerminalsMenuPane) -> String {
         title = title_suffix,
         name = esc(&pane.view.name),
         base = esc(&pane.base),
-        controls = pane_controls(&pane.view.pane_id, &pane.view.name, pane.is_project_pane, Some(&pane.base)),
+        controls = pane_controls(
+            &pane.view.pane_id,
+            &pane.view.name,
+            pane.is_project_pane,
+            Some(&pane.base)
+        ),
     )
 }
 
@@ -1251,7 +1268,9 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str, attach: bool) -> Stri
 /// `None`: their controls already resolve through that project-scoped
 /// fallback and must render byte-identical markup to before this cell.
 fn pane_controls(pane_id: &str, name: &str, attach: bool, base: Option<&str>) -> String {
-    let base_attr = base.map(|b| format!(r#" data-term-base="{}""#, esc(b))).unwrap_or_default();
+    let base_attr = base
+        .map(|b| format!(r#" data-term-base="{}""#, esc(b)))
+        .unwrap_or_default();
     let attach_block = if attach {
         format!(
             r#"
@@ -1442,7 +1461,11 @@ fn terminal_create_controls(project_id: &str, presets: &[String], plain_shell: b
 /// then the rest, within each group) and links each row to
 /// `/?tab=terminals&pane=<pane_id>` built from the agent's own `pane_id`.
 fn agent_switch_drawer(homepage: bool) -> String {
-    let homepage_attr = if homepage { " data-agent-drawer-homepage" } else { "" };
+    let homepage_attr = if homepage {
+        " data-agent-drawer-homepage"
+    } else {
+        ""
+    };
     format!(
         r#"<div class="agent-drawer js-menu">
   <input type="checkbox" id="agent-drawer-toggle" class="agent-drawer__check">
@@ -1548,7 +1571,11 @@ fn transcript_cards(panes: &[TerminalPaneView], empty_msg: &str) -> String {
 /// this tab's down state also reuses — listing which panes belong to this
 /// project still needs a herdr snapshot even though transcript content
 /// itself doesn't).
-pub fn transcript_page(project: &Project, panes: &[TerminalPaneView], selected: Option<&str>) -> String {
+pub fn transcript_page(
+    project: &Project,
+    panes: &[TerminalPaneView],
+    selected: Option<&str>,
+) -> String {
     let empty_msg = "No agents are running under this project right now.";
     let rows = match selected.and_then(|pid| panes.iter().find(|p| p.pane_id == pid)) {
         Some(pane) => transcript_cards(std::slice::from_ref(pane), empty_msg),
@@ -1733,7 +1760,11 @@ const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
 /// of its own. Zero panes renders a named empty state distinct from both
 /// [`terminal_page`]'s own empty wording and [`unassigned_terminal_down_page`].
 pub fn unassigned_terminal_page(panes: &[TerminalPaneView]) -> String {
-    let rows = pane_cards(panes, "No agents are running outside a registered project right now.", false);
+    let rows = pane_cards(
+        panes,
+        "No agents are running outside a registered project right now.",
+        false,
+    );
     let body = format!(
         r#"{topbar}
 {tab_style}
@@ -1892,9 +1923,8 @@ pub fn bee_board_page(
 /// `<main class="fg-page bee-hub-theme">` to opt in (see the palette
 /// comment below for why that scoping class exists at all).
 fn bee_hub_style() -> String {
-    format!(
-        r#"<style>
-.bee-finished {{ margin-bottom: var(--space-4); }}
+    r#"<style>
+.bee-finished { margin-bottom: var(--space-4); }
 /* D3: anthropic.com-inspired palette (cream page, warm panel, near-black
    ink, book-cloth coral accent), scoped to the bee page only via the
    `.bee-hub-theme` class on this page's own `<main>` — every other page
@@ -1905,7 +1935,7 @@ fn bee_hub_style() -> String {
    no-flash head script (`layout`) sets `data-scheme` on `<html>` before
    first paint; this only adds a scoped override keyed off that same
    attribute, never a second toggle mechanism. */
-.bee-hub-theme {{
+.bee-hub-theme {
   --color-bg: #FAF9F5;
   --color-surface: #FFFFFF;
   --color-surface-raised: #FFFFFF;
@@ -1956,8 +1986,8 @@ fn bee_hub_style() -> String {
   --bee-hub-project-8: #442E9E;
   --bee-hub-project-9: #882E9E;
   --bee-hub-project-10: #9E2E71;
-}}
-html[data-scheme="dark"] .bee-hub-theme {{
+}
+html[data-scheme="dark"] .bee-hub-theme {
   --color-bg: #241E18;
   --color-surface: #2D261F;
   --color-surface-raised: #342C24;
@@ -1984,19 +2014,19 @@ html[data-scheme="dark"] .bee-hub-theme {{
   --color-info: #7FADAB;
   --color-info-tint: #22302F;
   --color-surface-hover: #342C24;
-}}
-.bee-hub {{ margin-bottom: var(--space-4); }}
+}
+.bee-hub { margin-bottom: var(--space-4); }
 /* board-liveness-3: the live strip's own dense-row idiom, one row per live
    session or granted worktree — deliberately never `.bee-hub__row`'s
    feature-link styling, since a strip row never links anywhere of its
    own. */
-.bee-strip {{ margin-bottom: var(--space-4); }}
-.bee-strip__rows {{ display: flex; flex-direction: column; gap: var(--space-1); }}
-.bee-strip__row {{ display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); padding: var(--space-1) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); font-size: var(--type-body-sm-size); }}
-.bee-strip__row:last-child {{ border-bottom: none; }}
-.bee-strip__label {{ font-weight: var(--weight-strong); color: var(--color-text); }}
-.bee-strip__meta {{ color: var(--color-text-muted); }}
-.bee-strip__row--unresolved .bee-strip__meta {{ color: var(--color-danger); }}
+.bee-strip { margin-bottom: var(--space-4); }
+.bee-strip__rows { display: flex; flex-direction: column; gap: var(--space-1); }
+.bee-strip__row { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); padding: var(--space-1) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); font-size: var(--type-body-sm-size); }
+.bee-strip__row:last-child { border-bottom: none; }
+.bee-strip__label { font-weight: var(--weight-strong); color: var(--color-text); }
+.bee-strip__meta { color: var(--color-text-muted); }
+.bee-strip__row--unresolved .bee-strip__meta { color: var(--color-danger); }
 /* kanban-columns D1/D12: five explicit tracks in the board's own left-to-
    right column order (Todo, In Progress, Review, Compound, Finished) rather
    than `repeat(auto-fit, minmax(260px, 1fr))` — that auto-fit sizing was
@@ -2004,7 +2034,7 @@ html[data-scheme="dark"] .bee-hub-theme {{
    dense row lists needing far less width than the one that still renders
    cards. In Progress keeps the wider, card-shaped track; the four row
    columns share a narrower one. */
-.bee-hub__groups {{ display: grid; grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.6fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr); gap: var(--space-4); }}
+.bee-hub__groups { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.6fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr); gap: var(--space-4); }
 /* hub-fallbacks: a grid/flex item's own default `min-width: auto` sizes it
    to its content's min-content width — normally harmless, but a clamped
    `.bee-hub__desc` below is `white-space: nowrap` at its own min-content
@@ -2014,80 +2044,80 @@ html[data-scheme="dark"] .bee-hub-theme {{
    and push the whole page into horizontal scroll on a phone — the same
    chain `.term-panes` and its siblings already pin above for the same
    reason. */
-.bee-hub__group {{ display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }}
-.bee-hub__cards {{ display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }}
+.bee-hub__group { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.bee-hub__cards { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 /* card-badge-inside: the shell carries `.fg-card`'s box paint (border,
    background, radius, padding) so the card's own `<a>` and its terminal
    badge `<nav>` both land inside one painted box instead of the badges
    sitting as a bare row underneath it — see `bee_hub_card`'s doc comment. */
-.bee-hub__shell {{ display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }}
+.bee-hub__shell { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 /* card-collapse-inprogress: `.bee-hub__card` now names the `<details>`
    itself rather than the old whole-card `<a>` -- the flex-column layout
    moved to `.bee-hub__body` below (only that inner div still needs to
    stack the card's own rows), leaving this rule only the `min-width: 0`
    the hub-fallbacks shrink chain still requires from every level between
    the grid track and the clamped description. */
-.bee-hub__card {{ min-width: 0; }}
+.bee-hub__card { min-width: 0; }
 /* card-collapse-inprogress D1/D3/D6: the collapsed header row -- name plus
    chevron -- is the details element's own `<summary>`, native to the
    `<details>`/`<summary>` disclosure this card now uses (no JS, no
    persisted state); the `list-style`/`::-webkit-details-marker` pair
    strips the browser's own default marker so only `.bee-hub__chev` below
    draws one. */
-.bee-hub__summary {{ display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); cursor: pointer; list-style: none; }}
-.bee-hub__summary::-webkit-details-marker {{ display: none; }}
-.bee-hub__summary:focus-visible {{ outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }}
+.bee-hub__summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); cursor: pointer; list-style: none; }
+.bee-hub__summary::-webkit-details-marker { display: none; }
+.bee-hub__summary:focus-visible { outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }
 /* Same rotation `.chap-folders__chev` uses (app.css) for its own disclosure
    chevron, keyed off the native `[open]` attribute a `<details>` toggles
    itself rather than that pattern's own `.is-open` class. */
-.bee-hub__chev {{ flex: none; line-height: 1; color: var(--color-text-subtle); transition: transform var(--motion-fast) var(--ease-standard); }}
-.bee-hub__card[open] .bee-hub__chev {{ transform: rotate(90deg); }}
+.bee-hub__chev { flex: none; line-height: 1; color: var(--color-text-subtle); transition: transform var(--motion-fast) var(--ease-standard); }
+.bee-hub__card[open] .bee-hub__chev { transform: rotate(90deg); }
 /* D2: everything the collapsed header does not show -- the subtitle,
    description, progress bar, reason and activity lines -- plus D4's own
    Feature detail link row, stacked in the same column gap the old
    whole-card `<a>` used. `min-width: 0` keeps the hub-fallbacks shrink
    chain intact now that `.bee-hub__desc` sits one flex level deeper than
    before. */
-.bee-hub__body {{ display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }}
+.bee-hub__body { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
 /* D4: the feature-detail link row -- the one place the card still reaches
    its own detail page now that the `<details>` can no longer be that link
    itself. */
-.bee-hub__detail-link {{ display: flex; align-items: center; gap: var(--space-1); color: var(--color-link); font-size: var(--type-body-sm-size); font-weight: var(--weight-strong); text-decoration: none; }}
-.bee-hub__detail-link:hover {{ color: var(--color-link-hover); }}
+.bee-hub__detail-link { display: flex; align-items: center; gap: var(--space-1); color: var(--color-link); font-size: var(--type-body-sm-size); font-weight: var(--weight-strong); text-decoration: none; }
+.bee-hub__detail-link:hover { color: var(--color-link-hover); }
 /* project-color-identity: the Features board card's own chip row is gone
    (D3), but this rule stays -- [`bee_feature_terminal_tab`]'s pane rows
    still reuse it for their own status-pill layout, unrelated to this
    cell. */
-.bee-hub__chips {{ display: flex; flex-wrap: wrap; gap: var(--space-1); }}
+.bee-hub__chips { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 /* card-badge-inside: cancels the shared badge-nav class's own full-width
    flex-basis and right/bottom padding (app.css) for this context,
    replacing them with a hairline top rule that separates the badges from
    the card's content inside the shared shell. */
-.bee-hub__badges {{ border-top: var(--border-width-hairline) solid var(--color-border); padding: var(--space-2) 0 0 0; flex: 0 0 auto; }}
-.bee-hub__progress-label {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
-.bee-hub__reason {{ font-style: italic; }}
+.bee-hub__badges { border-top: var(--border-width-hairline) solid var(--color-border); padding: var(--space-2) 0 0 0; flex: 0 0 auto; }
+.bee-hub__progress-label { margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }
+.bee-hub__reason { font-style: italic; }
 /* kanban-live-signals D2: the run_state badge rides in the collapsed
    `<summary>` beside the title (see `bee_hub_card`'s own doc comment) --
    the same `.fg-chip` tone modifiers every other badge on this board
    already uses, never a palette of its own. */
-.bee-hub__run-state {{ margin-left: var(--space-2); }}
+.bee-hub__run-state { margin-left: var(--space-2); }
 /* kanban-live-signals D1: a small "working now" dot beside the Last
    activity line -- `.fg-status__dot`'s own sizing (components.css) plus a
    gentle pulse animation, since a plain static dot would read identically
    to `.fg-status`'s existing non-live indicators, and this one specifically
    means "a tool call landed in the last couple of minutes", not just "has
    a status". */
-.bee-hub__pulse {{ display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--color-success); vertical-align: middle; animation: beeHubPulse 1.6s ease-in-out infinite; }}
-@keyframes beeHubPulse {{ 0%, 100% {{ opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 55%, transparent); }} 50% {{ opacity: 0.55; box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-success) 0%, transparent); }} }}
+.bee-hub__pulse { display: inline-block; width: 7px; height: 7px; border-radius: var(--radius-pill); background: var(--color-success); vertical-align: middle; animation: beeHubPulse 1.6s ease-in-out infinite; }
+@keyframes beeHubPulse { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 55%, transparent); } 50% { opacity: 0.55; box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-success) 0%, transparent); } }
 /* kanban-live-signals D3: the deferred-debt badge reuses `.fg-badge` for
    its own collapsed `<summary>` and the board's existing click-to-reveal
    `<details>` idiom (`.bee-cell__detail`, the backlog card's "Condition of
    satisfaction" disclosure) for its per-entry detail list. */
-.bee-hub__deferred {{ margin: 0; }}
-.bee-hub__deferred > summary {{ cursor: pointer; list-style: none; }}
-.bee-hub__deferred > summary::-webkit-details-marker {{ display: none; }}
-.bee-hub__deferred-list {{ margin: var(--space-1) 0 0 0; padding-left: var(--space-4); font-size: var(--type-body-sm-size); color: var(--color-text-muted); }}
-.bee-hub__deferred-kind {{ font-weight: var(--weight-strong); color: var(--color-text); }}
+.bee-hub__deferred { margin: 0; }
+.bee-hub__deferred > summary { cursor: pointer; list-style: none; }
+.bee-hub__deferred > summary::-webkit-details-marker { display: none; }
+.bee-hub__deferred-list { margin: var(--space-1) 0 0 0; padding-left: var(--space-4); font-size: var(--type-body-sm-size); color: var(--color-text-muted); }
+.bee-hub__deferred-kind { font-weight: var(--weight-strong); color: var(--color-text); }
 /* hub-finished-compact, kanban-columns D12: the shared dense-row shape now
    rendered by all four of Todo, Review, Compound and Finished — name only,
    linking straight to the detail page — mirroring `.bee-done-line`'s
@@ -2095,17 +2125,17 @@ html[data-scheme="dark"] .bee-hub-theme {{
    Progress still keeps; plus the nested-details toggle
    ([`bee_hub_finished_rows`]) that pages each of the four ten rows at a
    time. */
-.bee-hub__row {{ display: block; color: var(--color-text); font-size: var(--type-body-sm-size); text-decoration: none; padding: var(--space-1) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); overflow-wrap: anywhere; }}
-.bee-hub__row:hover {{ color: var(--color-action); }}
+.bee-hub__row { display: block; color: var(--color-text); font-size: var(--type-body-sm-size); text-decoration: none; padding: var(--space-1) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); overflow-wrap: anywhere; }
+.bee-hub__row:hover { color: var(--color-action); }
 /* cross-board D5/D10: the cross-project board's own project label and ship
    time on a Finished row — absent on every per-project board row, which
    passes neither and renders unchanged. */
-.bee-hub__row-project {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); }}
-.bee-hub__row-time {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); float: right; }}
-.bee-hub__more {{ margin-top: var(--space-1); }}
-.bee-hub__more-summary {{ cursor: pointer; list-style: none; color: var(--color-text-subtle); font-size: var(--type-caption-size); padding: var(--space-1) var(--space-2); }}
-.bee-hub__more-summary::-webkit-details-marker {{ display: none; }}
-.bee-hub__more-summary:hover {{ color: var(--color-action); }}
+.bee-hub__row-project { color: var(--color-text-subtle); font-size: var(--type-caption-size); }
+.bee-hub__row-time { color: var(--color-text-subtle); font-size: var(--type-caption-size); float: right; }
+.bee-hub__more { margin-top: var(--space-1); }
+.bee-hub__more-summary { cursor: pointer; list-style: none; color: var(--color-text-subtle); font-size: var(--type-caption-size); padding: var(--space-1) var(--space-2); }
+.bee-hub__more-summary::-webkit-details-marker { display: none; }
+.bee-hub__more-summary:hover { color: var(--color-action); }
 /* feature-titles: the card's own slug subtitle (shown only alongside a
    human title read from CONTEXT.md — a title-less card already shows the
    slug as its own title) and its boundary-description line, clamped so no
@@ -2118,7 +2148,7 @@ html[data-scheme="dark"] .bee-hub-theme {{
    `overflow-wrap: anywhere` still guards the one word inside it long
    enough to overflow a single line on its own (an unbroken URL, a long
    identifier). */
-.bee-hub__slug {{ margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
+.bee-hub__slug { margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }
 /* project-color-identity: the cross-project board's own per-project accent
    -- a local custom property set by whichever `bee-hub__shell--pN`/
    `bee-hub__row-project--pN` modifier the project's own colour slot landed
@@ -2132,140 +2162,140 @@ html[data-scheme="dark"] .bee-hub-theme {{
    keeping the min-width: 0 chain documented above intact). `.bee-hub__project`
    carries no colour of its own; a per-project board card never gets a
    `--pN` modifier at all, so it never gets a border or a colour here. */
-.bee-hub__project {{ margin: 0; font-size: var(--type-caption-size); }}
+.bee-hub__project { margin: 0; font-size: var(--type-caption-size); }
 /* project-color-identity: the worktree half of the project line reads
    muted rather than the project's own accent colour -- the accent already
    does one job (telling projects apart at a glance) and a second coloured
    run of text on the same short line would fight it for attention, so the
    worktree state stays the same subdued tone `.bee-hub__slug` already
    uses elsewhere on this card. */
-.bee-hub__project-worktree {{ color: var(--color-text-subtle); }}
-.bee-hub__shell--p1 {{ --project-accent: var(--bee-hub-project-1); }}
-.bee-hub__shell--p2 {{ --project-accent: var(--bee-hub-project-2); }}
-.bee-hub__shell--p3 {{ --project-accent: var(--bee-hub-project-3); }}
-.bee-hub__shell--p4 {{ --project-accent: var(--bee-hub-project-4); }}
-.bee-hub__shell--p5 {{ --project-accent: var(--bee-hub-project-5); }}
-.bee-hub__shell--p6 {{ --project-accent: var(--bee-hub-project-6); }}
-.bee-hub__shell--p7 {{ --project-accent: var(--bee-hub-project-7); }}
-.bee-hub__shell--p8 {{ --project-accent: var(--bee-hub-project-8); }}
-.bee-hub__shell--p9 {{ --project-accent: var(--bee-hub-project-9); }}
-.bee-hub__shell--p10 {{ --project-accent: var(--bee-hub-project-10); }}
-.bee-hub__row-project--p1 {{ --project-accent: var(--bee-hub-project-1); }}
-.bee-hub__row-project--p2 {{ --project-accent: var(--bee-hub-project-2); }}
-.bee-hub__row-project--p3 {{ --project-accent: var(--bee-hub-project-3); }}
-.bee-hub__row-project--p4 {{ --project-accent: var(--bee-hub-project-4); }}
-.bee-hub__row-project--p5 {{ --project-accent: var(--bee-hub-project-5); }}
-.bee-hub__row-project--p6 {{ --project-accent: var(--bee-hub-project-6); }}
-.bee-hub__row-project--p7 {{ --project-accent: var(--bee-hub-project-7); }}
-.bee-hub__row-project--p8 {{ --project-accent: var(--bee-hub-project-8); }}
-.bee-hub__row-project--p9 {{ --project-accent: var(--bee-hub-project-9); }}
-.bee-hub__row-project--p10 {{ --project-accent: var(--bee-hub-project-10); }}
-.bee-hub__shell[class*="bee-hub__shell--p"] {{ border-left: var(--border-width-strong) solid var(--project-accent); }}
-.bee-hub__project, .bee-hub__row-project {{ color: var(--project-accent); }}
-.bee-hub__desc {{ margin: 0; font-size: var(--type-body-sm-size); color: var(--color-text-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }}
+.bee-hub__project-worktree { color: var(--color-text-subtle); }
+.bee-hub__shell--p1 { --project-accent: var(--bee-hub-project-1); }
+.bee-hub__shell--p2 { --project-accent: var(--bee-hub-project-2); }
+.bee-hub__shell--p3 { --project-accent: var(--bee-hub-project-3); }
+.bee-hub__shell--p4 { --project-accent: var(--bee-hub-project-4); }
+.bee-hub__shell--p5 { --project-accent: var(--bee-hub-project-5); }
+.bee-hub__shell--p6 { --project-accent: var(--bee-hub-project-6); }
+.bee-hub__shell--p7 { --project-accent: var(--bee-hub-project-7); }
+.bee-hub__shell--p8 { --project-accent: var(--bee-hub-project-8); }
+.bee-hub__shell--p9 { --project-accent: var(--bee-hub-project-9); }
+.bee-hub__shell--p10 { --project-accent: var(--bee-hub-project-10); }
+.bee-hub__row-project--p1 { --project-accent: var(--bee-hub-project-1); }
+.bee-hub__row-project--p2 { --project-accent: var(--bee-hub-project-2); }
+.bee-hub__row-project--p3 { --project-accent: var(--bee-hub-project-3); }
+.bee-hub__row-project--p4 { --project-accent: var(--bee-hub-project-4); }
+.bee-hub__row-project--p5 { --project-accent: var(--bee-hub-project-5); }
+.bee-hub__row-project--p6 { --project-accent: var(--bee-hub-project-6); }
+.bee-hub__row-project--p7 { --project-accent: var(--bee-hub-project-7); }
+.bee-hub__row-project--p8 { --project-accent: var(--bee-hub-project-8); }
+.bee-hub__row-project--p9 { --project-accent: var(--bee-hub-project-9); }
+.bee-hub__row-project--p10 { --project-accent: var(--bee-hub-project-10); }
+.bee-hub__shell[class*="bee-hub__shell--p"] { border-left: var(--border-width-strong) solid var(--project-accent); }
+.bee-hub__project, .bee-hub__row-project { color: var(--project-accent); }
+.bee-hub__desc { margin: 0; font-size: var(--type-body-sm-size); color: var(--color-text-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 /* feature-titles: the detail header's own title/slug/description stack,
    and the docs row beneath the chip row linking every markdown file the
    feature's docs dir holds (hub-fallbacks; CONTEXT.md/plan.md lead when
    present) through the viewer's own document routes. */
-.bee-detail-slug {{ margin: var(--space-1) 0 0 0; font-size: var(--type-body-sm-size); color: var(--color-text-subtle); }}
-.bee-detail-desc {{ margin: var(--space-1) 0 0 0; color: var(--color-text-muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; max-width: 100%; }}
-.bee-detail-docs {{ display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-4) 0; }}
-.bee-detail-docs a {{ color: var(--color-link); font-size: var(--type-body-sm-size); }}
-.bee-done-summary {{ cursor: pointer; list-style: none; padding: var(--space-2) 0; font-weight: var(--weight-strong); color: var(--color-text); }}
-.bee-done-summary::-webkit-details-marker {{ display: none; }}
-.bee-done-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-2); padding-top: var(--space-2); }}
-.bee-done-line {{ display: block; color: var(--color-text-muted); font-size: var(--type-caption-size); text-decoration: none; padding: var(--space-1) 0; border-bottom: var(--border-width-hairline) solid var(--color-border); overflow-wrap: anywhere; }}
-.bee-done-line:hover {{ color: var(--color-action); }}
-.bee-cell {{ padding: var(--space-2); gap: var(--space-1); }}
-.bee-cell .fg-card__title {{ font-size: var(--type-body-sm-size); overflow-wrap: anywhere; }}
-.bee-cell__meta {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }}
-.bee-cell__detail {{ margin-top: var(--space-1); font-size: var(--type-caption-size); color: var(--color-text-subtle); }}
-.bee-cell__detail summary {{ cursor: pointer; color: var(--color-text); }}
-.bee-cell__detail p {{ margin: var(--space-1) 0 0 0; overflow-wrap: anywhere; }}
-.bee-panels {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }}
-.bee-panel__head {{ display: flex; align-items: center; gap: var(--space-2); margin: 0; }}
-.bee-panel__subhead {{ margin: var(--space-3) 0 var(--space-2) 0; font-size: var(--type-heading-sm-size); }}
-.bee-panel__chips {{ display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); }}
-.bee-panel__list {{ display: flex; flex-direction: column; gap: var(--space-2); }}
-.bee-severity--p1 {{ font-weight: var(--weight-strong); }}
-.bee-asof {{ color: var(--color-text-subtle); font-size: var(--type-body-sm-size); }}
-.bee-progress {{ height: 8px; border-radius: var(--radius-pill); background: var(--color-surface-sunken); overflow: hidden; }}
-.bee-progress__bar {{ height: 100%; background: var(--color-success); }}
-.bee-done-summary:focus-visible {{ outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }}
+.bee-detail-slug { margin: var(--space-1) 0 0 0; font-size: var(--type-body-sm-size); color: var(--color-text-subtle); }
+.bee-detail-desc { margin: var(--space-1) 0 0 0; color: var(--color-text-muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; max-width: 100%; }
+.bee-detail-docs { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: 0 0 var(--space-4) 0; }
+.bee-detail-docs a { color: var(--color-link); font-size: var(--type-body-sm-size); }
+.bee-done-summary { cursor: pointer; list-style: none; padding: var(--space-2) 0; font-weight: var(--weight-strong); color: var(--color-text); }
+.bee-done-summary::-webkit-details-marker { display: none; }
+.bee-done-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-2); padding-top: var(--space-2); }
+.bee-done-line { display: block; color: var(--color-text-muted); font-size: var(--type-caption-size); text-decoration: none; padding: var(--space-1) 0; border-bottom: var(--border-width-hairline) solid var(--color-border); overflow-wrap: anywhere; }
+.bee-done-line:hover { color: var(--color-action); }
+.bee-cell { padding: var(--space-2); gap: var(--space-1); }
+.bee-cell .fg-card__title { font-size: var(--type-body-sm-size); overflow-wrap: anywhere; }
+.bee-cell__meta { color: var(--color-text-subtle); font-size: var(--type-caption-size); word-break: break-word; }
+.bee-cell__detail { margin-top: var(--space-1); font-size: var(--type-caption-size); color: var(--color-text-subtle); }
+.bee-cell__detail summary { cursor: pointer; color: var(--color-text); }
+.bee-cell__detail p { margin: var(--space-1) 0 0 0; overflow-wrap: anywhere; }
+.bee-panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }
+.bee-panel__head { display: flex; align-items: center; gap: var(--space-2); margin: 0; }
+.bee-panel__subhead { margin: var(--space-3) 0 var(--space-2) 0; font-size: var(--type-heading-sm-size); }
+.bee-panel__chips { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-2); }
+.bee-panel__list { display: flex; flex-direction: column; gap: var(--space-2); }
+.bee-severity--p1 { font-weight: var(--weight-strong); }
+.bee-asof { color: var(--color-text-subtle); font-size: var(--type-body-sm-size); }
+.bee-progress { height: 8px; border-radius: var(--radius-pill); background: var(--color-surface-sunken); overflow: hidden; }
+.bee-progress__bar { height: 100%; background: var(--color-success); }
+.bee-done-summary:focus-visible { outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }
 /* feature-hub-2: the feature detail page's own header, chip row and
    CSS-only tab pattern — no JS framework, same checkbox/radio-plus-label
    idiom `topbar_full`'s own doc comment already explains the reasoning
    for (a `<details>` element hides its content even when it should not,
    past what any `display` override here can undo; a plain input a browser
    already knows how to toggle needs none of that). */
-.bee-detail-head {{ display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-2); }}
+.bee-detail-head { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: var(--space-3); margin-bottom: var(--space-2); }
 /* Same shrink chain the hub cards need: without `min-width: 0` this flex
    column grows to its description's widest line instead of wrapping it,
    and the whole detail page scrolls sideways on a phone. */
-.bee-detail-head > div {{ min-width: 0; flex: 1 1 16rem; }}
-.bee-detail-chips {{ display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-4); }}
-.bee-tabs {{ margin-top: var(--space-2); }}
-.bee-tabs__radio {{ position: absolute; opacity: 0; pointer-events: none; }}
-.bee-tabs__nav {{ display: flex; flex-wrap: wrap; gap: var(--space-1); border-bottom: var(--border-width-hairline) solid var(--color-border); margin-bottom: var(--space-4); }}
-.bee-tabs__label {{ cursor: pointer; padding: var(--space-2) var(--space-3); color: var(--color-text-muted); font-weight: var(--weight-strong); border-bottom: 2px solid transparent; }}
-.bee-tabs__label:hover {{ color: var(--color-text); }}
-.bee-tabs__panel {{ display: none; }}
+.bee-detail-head > div { min-width: 0; flex: 1 1 16rem; }
+.bee-detail-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-4); }
+.bee-tabs { margin-top: var(--space-2); }
+.bee-tabs__radio { position: absolute; opacity: 0; pointer-events: none; }
+.bee-tabs__nav { display: flex; flex-wrap: wrap; gap: var(--space-1); border-bottom: var(--border-width-hairline) solid var(--color-border); margin-bottom: var(--space-4); }
+.bee-tabs__label { cursor: pointer; padding: var(--space-2) var(--space-3); color: var(--color-text-muted); font-weight: var(--weight-strong); border-bottom: 2px solid transparent; }
+.bee-tabs__label:hover { color: var(--color-text); }
+.bee-tabs__panel { display: none; }
 #bee-tab-activity:checked ~ .bee-tabs__nav label[for="bee-tab-activity"],
 #bee-tab-todos:checked ~ .bee-tabs__nav label[for="bee-tab-todos"],
-#bee-tab-terminal:checked ~ .bee-tabs__nav label[for="bee-tab-terminal"] {{
+#bee-tab-terminal:checked ~ .bee-tabs__nav label[for="bee-tab-terminal"] {
   color: var(--color-action);
   border-bottom-color: var(--color-action);
-}}
+}
 #bee-tab-activity:checked ~ .bee-tabs__body #bee-panel-activity,
 #bee-tab-todos:checked ~ .bee-tabs__body #bee-panel-todos,
-#bee-tab-terminal:checked ~ .bee-tabs__body #bee-panel-terminal {{
+#bee-tab-terminal:checked ~ .bee-tabs__body #bee-panel-terminal {
   display: block;
-}}
+}
 #bee-tab-activity:focus-visible ~ .bee-tabs__nav label[for="bee-tab-activity"],
 #bee-tab-todos:focus-visible ~ .bee-tabs__nav label[for="bee-tab-todos"],
-#bee-tab-terminal:focus-visible ~ .bee-tabs__nav label[for="bee-tab-terminal"] {{
+#bee-tab-terminal:focus-visible ~ .bee-tabs__nav label[for="bee-tab-terminal"] {
   outline: var(--focus-width) solid var(--focus-color);
   outline-offset: var(--focus-offset);
-}}
-.bee-activity {{ display: flex; flex-direction: column; gap: var(--space-3); }}
-.bee-activity__gates {{ display: flex; flex-wrap: wrap; gap: var(--space-1); }}
-.bee-activity__timeline {{ display: flex; flex-direction: column; gap: var(--space-2); }}
-.bee-activity__item {{ padding: var(--space-2); gap: var(--space-1); }}
-.bee-activity__ts {{ color: var(--color-text-subtle); font-size: var(--type-caption-size); }}
-.bee-todos {{ list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }}
-.bee-todo {{ display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--card-radius); background: var(--color-surface); }}
-.bee-todo a {{ display: flex; align-items: center; gap: var(--space-2); flex: 1; min-width: 0; color: var(--color-text); text-decoration: none; }}
-.bee-todo__mark {{ flex: none; width: 20px; text-align: center; color: var(--color-text-subtle); }}
-.bee-todo__title {{ overflow-wrap: anywhere; }}
-.bee-todo--done .bee-todo__title {{ text-decoration: line-through; color: var(--color-text-subtle); }}
-.bee-todo--done .bee-todo__mark {{ color: var(--color-success); }}
-.bee-todo--blocked .bee-todo__mark {{ color: var(--color-danger); }}
-.bee-todo--blocked {{ border-color: var(--color-danger); }}
-.bee-todo__badge {{ flex: none; }}
-.bee-terminal-panes {{ display: flex; flex-direction: column; gap: var(--space-2); }}
-.bee-terminal-pane {{ text-decoration: none; }}
+}
+.bee-activity { display: flex; flex-direction: column; gap: var(--space-3); }
+.bee-activity__gates { display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.bee-activity__timeline { display: flex; flex-direction: column; gap: var(--space-2); }
+.bee-activity__item { padding: var(--space-2); gap: var(--space-1); }
+.bee-activity__ts { color: var(--color-text-subtle); font-size: var(--type-caption-size); }
+.bee-todos { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.bee-todo { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--card-radius); background: var(--color-surface); }
+.bee-todo a { display: flex; align-items: center; gap: var(--space-2); flex: 1; min-width: 0; color: var(--color-text); text-decoration: none; }
+.bee-todo__mark { flex: none; width: 20px; text-align: center; color: var(--color-text-subtle); }
+.bee-todo__title { overflow-wrap: anywhere; }
+.bee-todo--done .bee-todo__title { text-decoration: line-through; color: var(--color-text-subtle); }
+.bee-todo--done .bee-todo__mark { color: var(--color-success); }
+.bee-todo--blocked .bee-todo__mark { color: var(--color-danger); }
+.bee-todo--blocked { border-color: var(--color-danger); }
+.bee-todo__badge { flex: none; }
+.bee-terminal-panes { display: flex; flex-direction: column; gap: var(--space-2); }
+.bee-terminal-pane { text-decoration: none; }
 /* Narrow-screen pass (bbp-17): every multi-column grid this board declares
    collapses to one column below this breakpoint (matches the sidebar
    breakpoint in app.css) so a phone never needs the page itself to scroll
    sideways — a genuinely wide container (the agent board's columns) keeps
    its own `overflow-x` above instead of forcing the page wider. */
-@media (max-width: 700px) {{
+@media (max-width: 700px) {
   .bee-hub__groups,
   .bee-panels,
-  .bee-done-grid {{
+  .bee-done-grid {
     grid-template-columns: 1fr;
-  }}
+  }
   /* inprogress-priority-order-2 (D1): on a narrow screen the one column
      that still carries cards moves to the very top of the stacked board,
      above Todo -- selected through the group's own `data-hub-group`
      attribute (`bee_hub_group`, no markup change) so this rule never
      leaks outside this media query and wide screens render unchanged. */
-  .bee-hub__groups > [data-hub-group="in-progress"] {{
+  .bee-hub__groups > [data-hub-group="in-progress"] {
     order: -1;
-  }}
-}}
+  }
+}
 </style>"#
-    )
+        .to_string()
 }
 
 /// The board's own header: the project name and when this snapshot was
@@ -2349,7 +2379,11 @@ fn bee_live_strip_section(snapshot: &BeeSnapshot) -> String {
     let mut row_count = 0usize;
 
     for s in &live_sessions {
-        let label = s.lane.as_deref().or(active_feature).unwrap_or("no active lane");
+        let label = s
+            .lane
+            .as_deref()
+            .or(active_feature)
+            .unwrap_or("no active lane");
         let phase = snapshot
             .phase_board
             .iter()
@@ -2569,7 +2603,9 @@ fn bee_feature_hub_section(
     feature_panes: &std::collections::HashMap<String, Vec<TerminalPaneView>>,
 ) -> String {
     let archived_features: std::collections::HashSet<String> =
-        list_archived_feature_dirs(&project.root_path).into_iter().collect();
+        list_archived_feature_dirs(&project.root_path)
+            .into_iter()
+            .collect();
     let placements = bee_classify_features(snapshot, &archived_features);
     bee_render_hub_section(project, &placements, &snapshot.backlog.pbis, feature_panes)
 }
@@ -2690,7 +2726,10 @@ fn bee_classify_features(
         // pre-kanban-columns rule did) would swallow every feature Todo is
         // meant to hold into In Progress first, making D2's branch dead
         // code.
-        let has_live_work = f.cell_counts.doing + f.cell_counts.stuck > 0 || is_active || session_bound || worktree_bound;
+        let has_live_work = f.cell_counts.doing + f.cell_counts.stuck > 0
+            || is_active
+            || session_bound
+            || worktree_bound;
         // (waiting-means-stopped-1) A grant is not a heartbeat: only a
         // session's own recency counts toward "working right now", never a
         // granted worktree on its own.
@@ -2731,13 +2770,16 @@ fn bee_classify_features(
             // to this same card.
             let reason = if !working_now && (gate_stop.is_some() || waiting_via_handoff) {
                 Some(match gate_stop {
-                    Some((_, label)) => format!("Waiting on you — {label} gate awaiting your decision"),
+                    Some((_, label)) => {
+                        format!("Waiting on you — {label} gate awaiting your decision")
+                    }
                     None => "Waiting on you — Work is parked, waiting on your decision".to_string(),
                 })
             } else {
                 None
             };
-            let cell_activity = bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
+            let cell_activity =
+                bee_hub_latest_activity(bee_hub_feature_cells(&snapshot.buckets, &f.feature));
             // kanban-live-signals D1/D2: `state.json` describes one project's
             // single currently-active feature at a time (`BeeState::feature`)
             // -- its `last_activity`, `run_state` and the tools.jsonl-derived
@@ -2746,11 +2788,25 @@ fn bee_classify_features(
             // sibling In Progress card for the same project.
             let last_activity = bee_hub_effective_activity(
                 cell_activity.as_deref(),
-                if is_active { snapshot.state.as_ref().and_then(|s| s.last_activity.as_deref()) } else { None },
+                if is_active {
+                    snapshot
+                        .state
+                        .as_ref()
+                        .and_then(|s| s.last_activity.as_deref())
+                } else {
+                    None
+                },
             );
-            let run_state =
-                if is_active { snapshot.state.as_ref().and_then(|s| s.run_state.clone()) } else { None };
-            let last_tool_call = if is_active { snapshot.last_tool_call.clone() } else { None };
+            let run_state = if is_active {
+                snapshot.state.as_ref().and_then(|s| s.run_state.clone())
+            } else {
+                None
+            };
+            let last_tool_call = if is_active {
+                snapshot.last_tool_call.clone()
+            } else {
+                None
+            };
             // kanban-live-signals D3: unlike the three fields above, deferred
             // debt carries its own `feature` per entry, so every In Progress
             // card gets exactly its own debt regardless of which feature is
@@ -2762,8 +2818,12 @@ fn bee_classify_features(
                 .filter(|e| e.feature.as_deref() == Some(f.feature.as_str()))
                 .cloned()
                 .collect();
-            let worktree_label =
-                bee_hub_worktree_label(&f.feature, &snapshot.worktrees, &snapshot.workspaces, false);
+            let worktree_label = bee_hub_worktree_label(
+                &f.feature,
+                &snapshot.worktrees,
+                &snapshot.workspaces,
+                false,
+            );
             let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
             placements.push(BeeHubPlacement::InProgress(BeeHubCardData {
                 feature: f.feature.clone(),
@@ -2779,7 +2839,10 @@ fn bee_classify_features(
             }));
         } else if is_finished {
             let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
-            placements.push(BeeHubPlacement::Finished(BeeHubFinishedData { feature: f.feature.clone(), docs }));
+            placements.push(BeeHubPlacement::Finished(BeeHubFinishedData {
+                feature: f.feature.clone(),
+                docs,
+            }));
         } else if snapshot
             .review
             .candidates
@@ -2787,16 +2850,25 @@ fn bee_classify_features(
             .any(|c| c.feature == f.feature && c.status != BeeReviewStatus::Settled)
         {
             let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
-            placements.push(BeeHubPlacement::Review(BeeHubFinishedData { feature: f.feature.clone(), docs }));
+            placements.push(BeeHubPlacement::Review(BeeHubFinishedData {
+                feature: f.feature.clone(),
+                docs,
+            }));
         } else if f.phase.as_deref() == Some("compounding") {
             let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
-            placements.push(BeeHubPlacement::Compound(BeeHubFinishedData { feature: f.feature.clone(), docs }));
+            placements.push(BeeHubPlacement::Compound(BeeHubFinishedData {
+                feature: f.feature.clone(),
+                docs,
+            }));
         } else if f.cell_counts.waiting > 0 && f.cell_counts.doing == 0 {
             // (D2) Cells exist, are all still `open`, and none is
             // `claimed` -- the Todo condition D10's narrowing exists to
             // keep reachable.
             let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
-            placements.push(BeeHubPlacement::Todo(BeeHubFinishedData { feature: f.feature.clone(), docs }));
+            placements.push(BeeHubPlacement::Todo(BeeHubFinishedData {
+                feature: f.feature.clone(),
+                docs,
+            }));
         }
         // else: no live work, not finished, no unresolved candidate, not
         // compounding, and either no cells at all or some already claimed
@@ -2805,12 +2877,17 @@ fn bee_classify_features(
         // precedent for a feature with nothing yet to show.
     }
 
-    let mut archive_only: Vec<&String> =
-        archived_features.iter().filter(|name| !placed.contains(name.as_str())).collect();
+    let mut archive_only: Vec<&String> = archived_features
+        .iter()
+        .filter(|name| !placed.contains(name.as_str()))
+        .collect();
     archive_only.sort();
     for feature in archive_only {
         let docs = snapshot.feature_docs.get(feature.as_str()).cloned();
-        placements.push(BeeHubPlacement::Finished(BeeHubFinishedData { feature: feature.clone(), docs }));
+        placements.push(BeeHubPlacement::Finished(BeeHubFinishedData {
+            feature: feature.clone(),
+            docs,
+        }));
     }
 
     placements
@@ -2904,7 +2981,8 @@ fn bee_render_hub_section(
     // straight into a String -- placements arrive in name order
     // (`bee_classify_features`), so the cards must be re-sorted by
     // `bee_hub_in_progress_cmp` once every card is built, then flattened.
-    let mut in_progress_entries: Vec<((u8, Option<time::OffsetDateTime>, String), String)> = Vec::new();
+    type InProgressEntry = ((u8, Option<time::OffsetDateTime>, String), String);
+    let mut in_progress_entries: Vec<InProgressEntry> = Vec::new();
     let mut review_rows: Vec<String> = Vec::new();
     let mut compound_rows: Vec<String> = Vec::new();
     let mut finished_rows: Vec<String> = Vec::new();
@@ -2919,8 +2997,14 @@ fn bee_render_hub_section(
         match placement {
             BeeHubPlacement::InProgress(data) => {
                 in_progress_count += 1;
-                let panes = feature_panes.get(data.feature.as_str()).unwrap_or(&no_panes);
-                let key = bee_hub_in_progress_sort_key(&data.feature, data.last_activity.as_deref(), panes);
+                let panes = feature_panes
+                    .get(data.feature.as_str())
+                    .unwrap_or(&no_panes);
+                let key = bee_hub_in_progress_sort_key(
+                    &data.feature,
+                    data.last_activity.as_deref(),
+                    panes,
+                );
                 let html = bee_hub_card(
                     &project.id,
                     &data.feature,
@@ -3012,7 +3096,10 @@ fn bee_render_hub_section(
     // D7: sorted once, right before rendering -- blocked first, then
     // working, then the rest, newest activity breaking ties within a tier.
     in_progress_entries.sort_by(|a, b| bee_hub_in_progress_cmp(&a.0, &b.0));
-    let in_progress_cards: String = in_progress_entries.into_iter().map(|(_, html)| html).collect();
+    let in_progress_cards: String = in_progress_entries
+        .into_iter()
+        .map(|(_, html)| html)
+        .collect();
     let todo_cards = bee_hub_finished_rows(&todo_rows);
     let review_cards = bee_hub_finished_rows(&review_rows);
     let compound_cards = bee_hub_finished_rows(&compound_rows);
@@ -3037,9 +3124,20 @@ fn bee_render_hub_section(
             &in_progress_cards,
             "Nothing in progress."
         ),
-        review_group = bee_hub_group("Review", "review", review_count, &review_cards, "Nothing in Review."),
-        compound_group =
-            bee_hub_group("Compound", "compound", compound_count, &compound_cards, "Nothing in Compound."),
+        review_group = bee_hub_group(
+            "Review",
+            "review",
+            review_count,
+            &review_cards,
+            "Nothing in Review."
+        ),
+        compound_group = bee_hub_group(
+            "Compound",
+            "compound",
+            compound_count,
+            &compound_cards,
+            "Nothing in Compound."
+        ),
         finished_group = bee_hub_group(
             "Finished",
             "finished",
@@ -3100,7 +3198,10 @@ fn bee_render_hub_section(
 /// column, not just within one project.
 pub fn bee_cross_project_features_section(
     rollups: &[(&Project, &BeeProjectRollup)],
-    feature_panes: &std::collections::HashMap<String, std::collections::HashMap<String, Vec<TerminalPaneView>>>,
+    feature_panes: &std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, Vec<TerminalPaneView>>,
+    >,
 ) -> String {
     let mut todo_rows: Vec<String> = Vec::new();
     let mut todo_pbi_rows: Vec<String> = Vec::new();
@@ -3108,7 +3209,8 @@ pub fn bee_cross_project_features_section(
     // (sort key, project id, rendered html) rather than one block per
     // project -- a global sort cannot follow a per-project append order,
     // so this stops appending project-by-project and merges instead.
-    let mut in_progress_entries: Vec<((u8, Option<time::OffsetDateTime>, String), String)> = Vec::new();
+    type InProgressEntry = ((u8, Option<time::OffsetDateTime>, String), String);
+    let mut in_progress_entries: Vec<InProgressEntry> = Vec::new();
     let mut review_rows: Vec<String> = Vec::new();
     let mut compound_rows: Vec<String> = Vec::new();
     let mut todo_count = 0usize;
@@ -3123,8 +3225,11 @@ pub fn bee_cross_project_features_section(
     let classified: Vec<(&Project, &BeeProjectRollup, Vec<BeeHubPlacement>)> = rollups
         .iter()
         .map(|(project, rollup)| {
-            let archived_names: std::collections::HashSet<String> =
-                rollup.archived_features.iter().map(|a| a.feature.clone()).collect();
+            let archived_names: std::collections::HashSet<String> = rollup
+                .archived_features
+                .iter()
+                .map(|a| a.feature.clone())
+                .collect();
             let placements = bee_classify_features(&rollup.snapshot, &archived_names);
             (*project, *rollup, placements)
         })
@@ -3160,7 +3265,11 @@ pub fn bee_cross_project_features_section(
                     let panes = project_panes
                         .and_then(|m| m.get(data.feature.as_str()))
                         .unwrap_or(&no_panes);
-                    let key = bee_hub_in_progress_sort_key(&data.feature, data.last_activity.as_deref(), panes);
+                    let key = bee_hub_in_progress_sort_key(
+                        &data.feature,
+                        data.last_activity.as_deref(),
+                        panes,
+                    );
                     let html = bee_hub_card(
                         &project.id,
                         &data.feature,
@@ -3181,8 +3290,12 @@ pub fn bee_cross_project_features_section(
                     in_progress_entries.push((key, html));
                 }
                 BeeHubPlacement::Finished(data) => {
-                    let shipped_at_str = shipped_by_feature.get(data.feature.as_str()).copied().flatten();
-                    let parsed = shipped_at_str.and_then(|s| time::OffsetDateTime::parse(s, &rfc3339).ok());
+                    let shipped_at_str = shipped_by_feature
+                        .get(data.feature.as_str())
+                        .copied()
+                        .flatten();
+                    let parsed =
+                        shipped_at_str.and_then(|s| time::OffsetDateTime::parse(s, &rfc3339).ok());
                     let html = bee_hub_finished_row(
                         "finished",
                         &bee_hub_feature_href(&project.id, &data.feature),
@@ -3192,7 +3305,11 @@ pub fn bee_cross_project_features_section(
                         project_color,
                         parsed.and(shipped_at_str),
                     );
-                    finished.push(FinishedEntry { shipped_at: parsed, feature: data.feature.clone(), html });
+                    finished.push(FinishedEntry {
+                        shipped_at: parsed,
+                        feature: data.feature.clone(),
+                        html,
+                    });
                 }
                 BeeHubPlacement::Review(data) => {
                     review_count += 1;
@@ -3272,7 +3389,10 @@ pub fn bee_cross_project_features_section(
     // the same comparator the per-project board uses, so the merged column
     // reads as one list rather than project-by-project blocks.
     in_progress_entries.sort_by(|a, b| bee_hub_in_progress_cmp(&a.0, &b.0));
-    let in_progress_cards: String = in_progress_entries.into_iter().map(|(_, html)| html).collect();
+    let in_progress_cards: String = in_progress_entries
+        .into_iter()
+        .map(|(_, html)| html)
+        .collect();
     let todo_cards = bee_hub_finished_rows(&todo_rows);
     let review_cards = bee_hub_finished_rows(&review_rows);
     let compound_cards = bee_hub_finished_rows(&compound_rows);
@@ -3297,9 +3417,20 @@ pub fn bee_cross_project_features_section(
             &in_progress_cards,
             "Nothing in progress."
         ),
-        review_group = bee_hub_group("Review", "review", review_count, &review_cards, "Nothing in Review."),
-        compound_group =
-            bee_hub_group("Compound", "compound", compound_count, &compound_cards, "Nothing in Compound."),
+        review_group = bee_hub_group(
+            "Review",
+            "review",
+            review_count,
+            &review_cards,
+            "Nothing in Review."
+        ),
+        compound_group = bee_hub_group(
+            "Compound",
+            "compound",
+            compound_count,
+            &compound_cards,
+            "Nothing in Compound."
+        ),
         finished_group = bee_hub_group(
             "Finished",
             "finished",
@@ -3375,11 +3506,20 @@ fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static s
 /// D5's "sections never disappear" rule) — an empty group renders its own
 /// wording, never a shared "Nothing here." that could not tell a reader
 /// which group came up empty.
-fn bee_hub_group(label: &str, key: &str, count: usize, cards_html: &str, empty_line: &str) -> String {
+fn bee_hub_group(
+    label: &str,
+    key: &str,
+    count: usize,
+    cards_html: &str,
+    empty_line: &str,
+) -> String {
     let body = if cards_html.is_empty() {
         format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_line))
     } else {
-        format!(r#"<div class="bee-hub__cards">{cards_html}</div>"#, cards_html = cards_html)
+        format!(
+            r#"<div class="bee-hub__cards">{cards_html}</div>"#,
+            cards_html = cards_html
+        )
     };
     format!(
         r#"<div class="bee-hub__group" data-hub-group="{key}" data-hub-count="{count}"><h4 class="bee-panel__subhead">{label} <span class="fg-chip fg-chip--neutral">{count}</span></h4>{body}</div>"#,
@@ -3530,7 +3670,9 @@ fn bee_hub_card(
     last_tool_call: Option<&str>,
     deferred: &[BeeDeferredEntry],
 ) -> String {
-    let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
+    let title = docs
+        .and_then(|d| d.title.as_deref())
+        .filter(|t| !t.is_empty());
     // project-color-identity: `project_label: Some` swaps the slug subtitle
     // for the project name plus its worktree state -- and, unlike the old
     // slug-only subtitle (which only ever showed beside a human title),
@@ -3574,10 +3716,19 @@ fn bee_hub_card(
     // below instead of riding along with the title the way the old
     // `name_html` bundled them.
     let title_html = match title {
-        Some(t) => format!(r#"<div class="fg-card__title">{title}</div>"#, title = esc(t)),
-        None => format!(r#"<div class="fg-card__title">{feature}</div>"#, feature = esc(feature)),
+        Some(t) => format!(
+            r#"<div class="fg-card__title">{title}</div>"#,
+            title = esc(t)
+        ),
+        None => format!(
+            r#"<div class="fg-card__title">{feature}</div>"#,
+            feature = esc(feature)
+        ),
     };
-    let desc_html = match docs.and_then(|d| d.description.as_deref()).filter(|d| !d.is_empty()) {
+    let desc_html = match docs
+        .and_then(|d| d.description.as_deref())
+        .filter(|d| !d.is_empty())
+    {
         Some(d) => format!(r#"<p class="bee-hub__desc">{}</p>"#, esc(d)),
         None => String::new(),
     };
@@ -3587,7 +3738,7 @@ fn bee_hub_card(
         // with genuinely nothing to report needs no line saying so.
         String::new()
     } else {
-        let percent = (done * 100) / total;
+        let percent = (done * 100).checked_div(total).unwrap_or(0);
         format!(
             r#"<div class="bee-progress"><div class="bee-progress__bar" style="width: {percent}%"></div></div><p class="bee-hub__progress-label">{done}/{total} cell{plural} done</p>"#,
             percent = percent,
@@ -3611,7 +3762,10 @@ fn bee_hub_card(
             esc(&bee_fmt_trace_time(iso)),
             pulse = pulse_html,
         ),
-        None => format!(r#"<p class="bee-cell__meta">No activity recorded.{pulse}</p>"#, pulse = pulse_html),
+        None => format!(
+            r#"<p class="bee-cell__meta">No activity recorded.{pulse}</p>"#,
+            pulse = pulse_html
+        ),
     };
     // kanban-live-signals D2: rendered in the collapsed `<summary>` itself
     // (see this function's own doc comment) so the badge stays visible
@@ -3624,7 +3778,10 @@ fn bee_hub_card(
     // other "needs a look" lines above the plain activity timestamp.
     let deferred_html = bee_hub_deferred_badge(deferred);
     let reason_html = match reason {
-        Some(r) if !r.is_empty() => format!(r#"<p class="bee-cell__meta bee-hub__reason">{}</p>"#, esc(r)),
+        Some(r) if !r.is_empty() => format!(
+            r#"<p class="bee-cell__meta bee-hub__reason">{}</p>"#,
+            esc(r)
+        ),
         _ => String::new(),
     };
     // D8: a second, independent reason line -- appended after any existing
@@ -3633,7 +3790,8 @@ fn bee_hub_card(
     // at once. Exact wording, matching the existing gate line's own em-dash
     // punctuation (`server.rs`'s `Waiting on you — {label} gate ...`).
     let blocked_reason_html = if panes.iter().any(|p| p.status == "blocked") {
-        r#"<p class="bee-cell__meta bee-hub__reason">Waiting on you — a terminal is blocked</p>"#.to_string()
+        r#"<p class="bee-cell__meta bee-hub__reason">Waiting on you — a terminal is blocked</p>"#
+            .to_string()
     } else {
         String::new()
     };
@@ -3655,8 +3813,12 @@ fn bee_hub_card(
     // `<nav>` at all. card-badge-inside: the extra `bee-hub__badges` class
     // draws the hairline rule that separates the badges from the card's
     // own content while both sit inside the shared `bee-hub__shell` box.
-    let terminal_badges_html =
-        terminal_badges_nav(project_id, panes, "Terminals in this checkout", "bee-hub__badges");
+    let terminal_badges_html = terminal_badges_nav(
+        project_id,
+        panes,
+        "Terminals in this checkout",
+        "bee-hub__badges",
+    );
     // card-collapse-inprogress D1/D3/D6: a native `<details>` with no
     // `open` attribute renders every card collapsed on every page load,
     // with no persisted state and no JavaScript -- clicking the
@@ -3688,7 +3850,11 @@ fn bee_hub_card(
 /// the four dense columns (kanban-columns D12) all link the same way
 /// [`bee_hub_card`] already does.
 fn bee_hub_feature_href(project_id: &str, feature: &str) -> String {
-    format!("/p/{pid}/_bee/feature/{feature_href}", pid = esc(project_id), feature_href = esc(feature))
+    format!(
+        "/p/{pid}/_bee/feature/{feature_href}",
+        pid = esc(project_id),
+        feature_href = esc(feature)
+    )
 }
 
 /// (pbi-detail-1) A proposed PBI's own detail-page href
@@ -3697,7 +3863,11 @@ fn bee_hub_feature_href(project_id: &str, feature: &str) -> String {
 /// (the per-project board and the homepage Kanban tab) build their row's
 /// href through this one function, so they can never drift apart.
 fn bee_hub_pbi_href(project_id: &str, pbi_id: &str) -> String {
-    format!("/p/{pid}/_bee/pbi/{pbi_href}", pid = esc(project_id), pbi_href = esc(pbi_id))
+    format!(
+        "/p/{pid}/_bee/pbi/{pbi_href}",
+        pid = esc(project_id),
+        pbi_href = esc(pbi_id)
+    )
 }
 
 /// (pbi-detail-1) The owning project's whole bee board href
@@ -3745,7 +3915,9 @@ fn bee_hub_finished_row(
     project_color: Option<u8>,
     shipped_at: Option<&str>,
 ) -> String {
-    let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
+    let title = docs
+        .and_then(|d| d.title.as_deref())
+        .filter(|t| !t.is_empty());
     let name = title.unwrap_or(feature);
     let project_html = match (project_label, project_color) {
         (Some(label), Some(idx)) => format!(
@@ -3754,12 +3926,18 @@ fn bee_hub_finished_row(
             label = esc(label),
         ),
         (Some(label), None) => {
-            format!(r#"<span class="bee-hub__row-project">{label}</span> "#, label = esc(label))
+            format!(
+                r#"<span class="bee-hub__row-project">{label}</span> "#,
+                label = esc(label)
+            )
         }
         (None, _) => String::new(),
     };
     let time_html = match shipped_at {
-        Some(iso) => format!(r#" <span class="bee-hub__row-time">{}</span>"#, esc(&bee_fmt_trace_time(iso))),
+        Some(iso) => format!(
+            r#" <span class="bee-hub__row-time">{}</span>"#,
+            esc(&bee_fmt_trace_time(iso))
+        ),
         None => String::new(),
     };
     format!(
@@ -3838,7 +4016,10 @@ fn bee_hub_worktree_chip(
     workspaces: &[BeeWorkspace],
     finished: bool,
 ) -> (String, &'static str) {
-    if let Some(w) = worktrees.iter().find(|w| w.feature.as_deref() == Some(feature)) {
+    if let Some(w) = worktrees
+        .iter()
+        .find(|w| w.feature.as_deref() == Some(feature))
+    {
         let label = match w.branch.as_deref() {
             Some(b) if !b.is_empty() => format!("Open · {b}"),
             _ => "Open worktree".to_string(),
@@ -3846,7 +4027,9 @@ fn bee_hub_worktree_chip(
         return (label, "info");
     }
     let feature_branch = format!("wt/{feature}");
-    let grant_existed = workspaces.iter().any(|w| w.branch.as_deref() == Some(feature_branch.as_str()));
+    let grant_existed = workspaces
+        .iter()
+        .any(|w| w.branch.as_deref() == Some(feature_branch.as_str()));
     if finished && grant_existed {
         ("Merged".to_string(), "success")
     } else {
@@ -3871,15 +4054,25 @@ fn bee_hub_worktree_chip(
 /// backs the feature detail page's own worktree chip
 /// (`bee_feature_chip_row`), which is out of this cell's scope and keeps
 /// its existing "Open · <branch>"/"Merged" spellings untouched.
-fn bee_hub_worktree_label(feature: &str, worktrees: &[BeeWorktree], workspaces: &[BeeWorkspace], finished: bool) -> String {
-    if let Some(w) = worktrees.iter().find(|w| w.feature.as_deref() == Some(feature)) {
+fn bee_hub_worktree_label(
+    feature: &str,
+    worktrees: &[BeeWorktree],
+    workspaces: &[BeeWorkspace],
+    finished: bool,
+) -> String {
+    if let Some(w) = worktrees
+        .iter()
+        .find(|w| w.feature.as_deref() == Some(feature))
+    {
         return match w.branch.as_deref() {
             Some(b) if !b.is_empty() => b.to_string(),
             _ => "worktree".to_string(),
         };
     }
     let feature_branch = format!("wt/{feature}");
-    let grant_existed = workspaces.iter().any(|w| w.branch.as_deref() == Some(feature_branch.as_str()));
+    let grant_existed = workspaces
+        .iter()
+        .any(|w| w.branch.as_deref() == Some(feature_branch.as_str()));
     if finished && grant_existed {
         "merged".to_string()
     } else {
@@ -3900,8 +4093,13 @@ fn bee_hub_worktree_label(feature: &str, worktrees: &[BeeWorktree], workspaces: 
 fn bee_hub_latest_activity<'a>(cells: impl Iterator<Item = &'a BeeCell>) -> Option<String> {
     let mut latest: Option<(time::OffsetDateTime, String)> = None;
     for c in cells {
-        for ts in [c.claimed_at.as_deref(), c.capped_at.as_deref()].into_iter().flatten() {
-            if let Ok(t) = time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339) {
+        for ts in [c.claimed_at.as_deref(), c.capped_at.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Ok(t) =
+                time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339)
+            {
                 let newer = latest.as_ref().map(|(lt, _)| t > *lt).unwrap_or(true);
                 if newer {
                     latest = Some((t, ts.to_string()));
@@ -3922,7 +4120,10 @@ fn bee_hub_latest_activity<'a>(cells: impl Iterator<Item = &'a BeeCell>) -> Opti
 /// is exactly the CONTEXT.md D1 exception for a bee version whose
 /// `state.json` predates `last_activity` — that project must keep reading a
 /// real timestamp off its cells rather than going blank.
-fn bee_hub_effective_activity(cell_activity: Option<&str>, state_activity: Option<&str>) -> Option<String> {
+fn bee_hub_effective_activity(
+    cell_activity: Option<&str>,
+    state_activity: Option<&str>,
+) -> Option<String> {
     let rfc3339 = time::format_description::well_known::Rfc3339;
     let parse = |s: &str| time::OffsetDateTime::parse(s, &rfc3339).ok();
     let cell = cell_activity.and_then(|s| parse(s).map(|t| (t, s)));
@@ -3949,8 +4150,12 @@ const TOOL_CALL_PULSE_MINUTES: i64 = 2;
 /// a one-sided "not yet" test. A missing or unparsable timestamp never
 /// pulses.
 fn bee_hub_is_working_now(last_tool_call: Option<&str>, now: time::OffsetDateTime) -> bool {
-    let Some(ts) = last_tool_call else { return false };
-    let Ok(parsed) = time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339) else {
+    let Some(ts) = last_tool_call else {
+        return false;
+    };
+    let Ok(parsed) =
+        time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339)
+    else {
         return false;
     };
     (now - parsed).abs() <= time::Duration::minutes(TOOL_CALL_PULSE_MINUTES)
@@ -4306,13 +4511,22 @@ fn bee_relative_minutes(minutes: f64) -> String {
         "just now".to_string()
     } else if mins < 60.0 {
         let m = mins.round().max(1.0) as i64;
-        format!("{m} minute{plural} ago", plural = if m == 1 { "" } else { "s" })
+        format!(
+            "{m} minute{plural} ago",
+            plural = if m == 1 { "" } else { "s" }
+        )
     } else if mins < 60.0 * 24.0 {
         let h = (mins / 60.0).round().max(1.0) as i64;
-        format!("{h} hour{plural} ago", plural = if h == 1 { "" } else { "s" })
+        format!(
+            "{h} hour{plural} ago",
+            plural = if h == 1 { "" } else { "s" }
+        )
     } else {
         let d = (mins / (60.0 * 24.0)).round().max(1.0) as i64;
-        format!("{d} day{plural} ago", plural = if d == 1 { "" } else { "s" })
+        format!(
+            "{d} day{plural} ago",
+            plural = if d == 1 { "" } else { "s" }
+        )
     }
 }
 
@@ -4387,7 +4601,10 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
         if items.is_empty() {
             format!("<p class=\"fg-empty\">{}</p>", esc(empty))
         } else {
-            let lis: String = items.iter().map(|i| format!("<li>{}</li>", esc(i))).collect();
+            let lis: String = items
+                .iter()
+                .map(|i| format!("<li>{}</li>", esc(i)))
+                .collect();
             format!("<ul>{lis}</ul>")
         }
     };
@@ -4398,7 +4615,12 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
         let chips: String = cell
             .decisions
             .iter()
-            .map(|d| format!(r#"<span class="fg-chip fg-chip--neutral">{}</span>"#, esc(d)))
+            .map(|d| {
+                format!(
+                    r#"<span class="fg-chip fg-chip--neutral">{}</span>"#,
+                    esc(d)
+                )
+            })
             .collect();
         format!(r#"<div class="bee-panel__chips">{chips}</div>"#)
     };
@@ -4406,7 +4628,12 @@ pub fn bee_cell_page(project: &Project, cell: &BeeCellFull) -> String {
     let tier_chip = cell
         .tier
         .as_deref()
-        .map(|t| format!(r#"<span class="fg-chip fg-chip--neutral">tier: {}</span>"#, esc(t)))
+        .map(|t| {
+            format!(
+                r#"<span class="fg-chip fg-chip--neutral">tier: {}</span>"#,
+                esc(t)
+            )
+        })
         .unwrap_or_default();
 
     let worker = cell.worker.as_deref().unwrap_or("—");
@@ -4634,16 +4861,24 @@ pub fn bee_feature_page(
         &bee_feature_terminal_tab(&project.id, panes),
     );
 
-    let title = docs.and_then(|d| d.title.as_deref()).filter(|t| !t.is_empty());
+    let title = docs
+        .and_then(|d| d.title.as_deref())
+        .filter(|t| !t.is_empty());
     let head_name_html = match title {
         Some(t) => format!(
             r#"<h2 class="fg-pagehead__title">{title}</h2><p class="bee-detail-slug">{feature}</p>"#,
             title = esc(t),
             feature = esc(feature),
         ),
-        None => format!(r#"<h2 class="fg-pagehead__title">{feature}</h2>"#, feature = esc(feature)),
+        None => format!(
+            r#"<h2 class="fg-pagehead__title">{feature}</h2>"#,
+            feature = esc(feature)
+        ),
     };
-    let desc_html = match docs.and_then(|d| d.description.as_deref()).filter(|d| !d.is_empty()) {
+    let desc_html = match docs
+        .and_then(|d| d.description.as_deref())
+        .filter(|d| !d.is_empty())
+    {
         Some(d) => format!(r#"<p class="bee-detail-desc">{}</p>"#, esc(d)),
         None => String::new(),
     };
@@ -4688,8 +4923,15 @@ pub fn bee_feature_page(
 /// feature only links when the caller has already confirmed the snapshot
 /// knows it — `feature_known` false leaves it named, plain text, exactly
 /// like a PBI whose `feature` field is blank.
-pub fn bee_pbi_page(project: &Project, pbi: &waggledance_core::bee::BeePbi, feature_known: bool) -> String {
-    let status_chip = format!(r#"<span class="fg-chip fg-chip--neutral">{}</span>"#, esc(&pbi.status));
+pub fn bee_pbi_page(
+    project: &Project,
+    pbi: &waggledance_core::bee::BeePbi,
+    feature_known: bool,
+) -> String {
+    let status_chip = format!(
+        r#"<span class="fg-chip fg-chip--neutral">{}</span>"#,
+        esc(&pbi.status)
+    );
     let feature_html = if pbi.feature.is_empty() {
         String::new()
     } else if feature_known {
@@ -4699,7 +4941,10 @@ pub fn bee_pbi_page(project: &Project, pbi: &waggledance_core::bee::BeePbi, feat
             feature = esc(&pbi.feature),
         )
     } else {
-        format!(r#"<p class="bee-cell__meta">feature: {}</p>"#, esc(&pbi.feature))
+        format!(
+            r#"<p class="bee-cell__meta">feature: {}</p>"#,
+            esc(&pbi.feature)
+        )
     };
     let cos_html = if pbi.cos.is_empty() {
         String::new()
@@ -4744,7 +4989,11 @@ pub fn bee_pbi_page(project: &Project, pbi: &waggledance_core::bee::BeePbi, feat
 /// `docs` list is empty: a feature with no markdown file under its docs
 /// dir at all has nothing to link, whether or not it has a title or
 /// description from another fallback tier.
-fn bee_feature_docs_row(project_id: &str, feature: &str, docs: Option<&waggledance_core::bee::BeeFeatureDocs>) -> String {
+fn bee_feature_docs_row(
+    project_id: &str,
+    feature: &str,
+    docs: Option<&waggledance_core::bee::BeeFeatureDocs>,
+) -> String {
     let Some(docs) = docs else {
         return String::new();
     };
@@ -4763,7 +5012,10 @@ fn bee_feature_docs_row(project_id: &str, feature: &str, docs: Option<&waggledan
             file_href = file_href,
         ));
     }
-    format!(r#"<div class="bee-detail-docs">{links}</div>"#, links = links)
+    format!(
+        r#"<div class="bee-detail-docs">{links}</div>"#,
+        links = links
+    )
 }
 
 /// D2's chip row: this feature's own lane classification when known, its
@@ -4782,7 +5034,10 @@ fn bee_feature_chip_row(
     total: usize,
 ) -> String {
     let lane_chip = match lane_label.filter(|l| !l.is_empty()) {
-        Some(l) => format!(r#"<span class="fg-chip fg-chip--neutral">lane: {}</span>"#, esc(l)),
+        Some(l) => format!(
+            r#"<span class="fg-chip fg-chip--neutral">lane: {}</span>"#,
+            esc(l)
+        ),
         None => String::new(),
     };
     let (wt_label, wt_tone) = worktree;
@@ -4863,14 +5118,22 @@ fn bee_feature_activity_tab(
 
     let gates_html = match gates {
         Some(g) => {
-            let pairs: [(&str, Option<bool>); 4] =
-                [("Context", g.context), ("Shape", g.shape), ("Execution", g.execution), ("Review", g.review)];
+            let pairs: [(&str, Option<bool>); 4] = [
+                ("Context", g.context),
+                ("Shape", g.shape),
+                ("Execution", g.execution),
+                ("Review", g.review),
+            ];
             pairs
                 .iter()
                 .map(|(label, approved)| {
                     let approved = approved.unwrap_or(false);
                     let tone = if approved { "success" } else { "neutral" };
-                    let word = if approved { "approved" } else { "not yet approved" };
+                    let word = if approved {
+                        "approved"
+                    } else {
+                        "not yet approved"
+                    };
                     format!(
                         r#"<span class="fg-chip fg-chip--{tone}">{label} {word}</span>"#,
                         tone = tone,
@@ -4899,9 +5162,17 @@ fn bee_feature_activity_tab(
             let tests = c.tests.as_deref().unwrap_or("—");
             format!(
                 r#"<p class="bee-cell__meta">Latest verify: <span class="fg-chip fg-chip--{tone}">{tests}</span> ({when})</p>"#,
-                tone = if tests == "green" { "success" } else { "danger" },
+                tone = if tests == "green" {
+                    "success"
+                } else {
+                    "danger"
+                },
                 tests = esc(tests),
-                when = esc(&c.capped_at.as_deref().map(bee_fmt_trace_time).unwrap_or_default()),
+                when = esc(&c
+                    .capped_at
+                    .as_deref()
+                    .map(bee_fmt_trace_time)
+                    .unwrap_or_default()),
             )
         }
         None => r#"<p class="fg-empty">No verification recorded yet.</p>"#.to_string(),
@@ -4910,7 +5181,11 @@ fn bee_feature_activity_tab(
     let mut entries: Vec<(Option<time::OffsetDateTime>, String, String)> = Vec::new();
     for d in decisions {
         let parsed = time::OffsetDateTime::parse(&d.date, &rfc3339).ok();
-        let when = if parsed.is_some() { bee_fmt_trace_time(&d.date) } else { d.date.clone() };
+        let when = if parsed.is_some() {
+            bee_fmt_trace_time(&d.date)
+        } else {
+            d.date.clone()
+        };
         entries.push((
             parsed,
             d.date.clone(),
@@ -4922,7 +5197,9 @@ fn bee_feature_activity_tab(
         ));
     }
     for c in &buckets.done {
-        let Some(capped_at) = c.capped_at.as_deref() else { continue };
+        let Some(capped_at) = c.capped_at.as_deref() else {
+            continue;
+        };
         let parsed = time::OffsetDateTime::parse(capped_at, &rfc3339).ok();
         let worker = c.worker.as_deref().unwrap_or("unknown worker");
         let outcome = c.outcome.as_deref().unwrap_or("No outcome recorded.");
@@ -4980,7 +5257,10 @@ fn bee_feature_todos_tab(project_id: &str, buckets: &BeeBuckets) -> String {
         return r#"<p class="fg-empty">No cells recorded for this feature.</p>"#.to_string();
     }
     cells.sort_by(|a, b| a.id.cmp(&b.id));
-    let items: String = cells.into_iter().map(|c| bee_todo_item(project_id, c)).collect();
+    let items: String = cells
+        .into_iter()
+        .map(|c| bee_todo_item(project_id, c))
+        .collect();
     format!(r#"<ul class="bee-todos">{items}</ul>"#)
 }
 
@@ -4998,7 +5278,10 @@ fn bee_todo_item(project_id: &str, cell: &BeeCell) -> String {
     let badge = if cell.status == "claimed" {
         match cell.worker.as_deref() {
             Some(w) => {
-                format!(r#"<span class="fg-chip fg-chip--accent bee-todo__badge">{}</span>"#, esc(w))
+                format!(
+                    r#"<span class="fg-chip fg-chip--accent bee-todo__badge">{}</span>"#,
+                    esc(w)
+                )
             }
             None => String::new(),
         }
@@ -5032,7 +5315,8 @@ fn bee_todo_item(project_id: &str, cell: &BeeCell) -> String {
 /// tab draws no distinction between them.
 fn bee_feature_terminal_tab(project_id: &str, panes: &[TerminalPaneView]) -> String {
     if panes.is_empty() {
-        return r#"<p class="fg-empty">No terminal panes running for this project right now.</p>"#.to_string();
+        return r#"<p class="fg-empty">No terminal panes running for this project right now.</p>"#
+            .to_string();
     }
 
     let mut rows = String::new();
@@ -5778,7 +6062,10 @@ pub fn settings_page(
             "Paste the bot token".to_string(),
         ),
         NotifyCredentialView::Masked(masked) => (
-            format!("Bot token: {masked} — leave blank to keep it.", masked = esc(&masked)),
+            format!(
+                "Bot token: {masked} — leave blank to keep it.",
+                masked = esc(&masked)
+            ),
             "Leave blank to keep the current token".to_string(),
         ),
     };
@@ -6134,7 +6421,8 @@ mod tests {
     /// working, then neither: the terminal tier beats activity outright,
     /// never the other way around.
     #[test]
-    fn bee_render_hub_section_orders_in_progress_blocked_then_working_then_rest_regardless_of_activity() {
+    fn bee_render_hub_section_orders_in_progress_blocked_then_working_then_rest_regardless_of_activity(
+    ) {
         let project = sample_project();
         let placements = vec![
             in_progress_card("feat-blocked", Some("2020-01-01T00:00:00.000Z")),
@@ -6143,8 +6431,14 @@ mod tests {
         ];
         let mut feature_panes: std::collections::HashMap<String, Vec<TerminalPaneView>> =
             std::collections::HashMap::new();
-        feature_panes.insert("feat-blocked".to_string(), vec![pane_with_status("blocked")]);
-        feature_panes.insert("feat-working".to_string(), vec![pane_with_status("working")]);
+        feature_panes.insert(
+            "feat-blocked".to_string(),
+            vec![pane_with_status("blocked")],
+        );
+        feature_panes.insert(
+            "feat-working".to_string(),
+            vec![pane_with_status("working")],
+        );
 
         let html = bee_render_hub_section(&project, &placements, &[], &feature_panes);
 
@@ -6190,10 +6484,18 @@ mod tests {
         let html = bee_render_hub_section(&project, &placements, &[], &feature_panes);
 
         let at = |feature: &str| {
-            html.find(&format!(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/{feature}""#))
-                .unwrap_or_else(|| panic!("{feature}'s own card must render: {html}"))
+            html.find(&format!(
+                r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/{feature}""#
+            ))
+            .unwrap_or_else(|| panic!("{feature}'s own card must render: {html}"))
         };
-        let (e, d, c, b, a) = (at("e-working"), at("d-idle"), at("c-done"), at("b-unknown"), at("a-shell"));
+        let (e, d, c, b, a) = (
+            at("e-working"),
+            at("d-idle"),
+            at("c-done"),
+            at("b-unknown"),
+            at("a-shell"),
+        );
         assert!(
             e < d && d < c && c < b && b < a,
             "the working card must lead despite the oldest activity, and idle/done/unknown/shell must fall back to plain newest-first activity order among themselves: {html}"
@@ -6220,8 +6522,10 @@ mod tests {
         let html = bee_render_hub_section(&project, &placements, &[], &feature_panes);
 
         let at = |feature: &str| {
-            html.find(&format!(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/{feature}""#))
-                .unwrap_or_else(|| panic!("{feature}'s own card must render: {html}"))
+            html.find(&format!(
+                r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/{feature}""#
+            ))
+            .unwrap_or_else(|| panic!("{feature}'s own card must render: {html}"))
         };
         let (bravo, charlie, alpha) = (at("bravo"), at("charlie"), at("alpha"));
         assert!(
@@ -6244,11 +6548,22 @@ mod tests {
         let project = sample_project();
         let presets = vec!["Claude".to_string(), "Codex".to_string()];
         let html = terminal_page(&project, &[], None, &presets);
-        assert!(html.contains(r#"data-preset="Claude">Claude</button>"#), "{html}");
-        assert!(html.contains(r#"data-preset="Codex">Codex</button>"#), "{html}");
-        assert!(!html.contains("data-preset=\"Aider\""), "an unconfigured label must never render: {html}");
+        assert!(
+            html.contains(r#"data-preset="Claude">Claude</button>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"data-preset="Codex">Codex</button>"#),
+            "{html}"
+        );
+        assert!(
+            !html.contains("data-preset=\"Aider\""),
+            "an unconfigured label must never render: {html}"
+        );
         // The plain-shell control is unconditional — it needs no preset.
-        assert!(html.contains(r#"<button type="button" class="term-create__pane">New shell</button>"#));
+        assert!(
+            html.contains(r#"<button type="button" class="term-create__pane">New shell</button>"#)
+        );
     }
 
     /// terminal-image-attach: the attach control (picker button, hidden file
@@ -6386,8 +6701,9 @@ mod tests {
         // page whose script never loaded. A plain button plus a handler
         // would leave it dead there.
         assert!(
-            menu.contains(r#"<input type="checkbox" id="topbar-menu-toggle" class="topbar-menu__toggle">"#)
-                && menu.contains(r#"<label class="topbar-menu__button" for="topbar-menu-toggle""#),
+            menu.contains(
+                r#"<input type="checkbox" id="topbar-menu-toggle" class="topbar-menu__toggle">"#
+            ) && menu.contains(r#"<label class="topbar-menu__button" for="topbar-menu-toggle""#),
             "the menu must open from its own checkbox, not from script: {html}"
         );
     }
@@ -6442,11 +6758,14 @@ mod tests {
             "every pane must be reachable from the menu: {html}"
         );
         assert!(
-            after.contains("class=\"term-create__pane\"") && after.contains(r#"data-preset="Claude""#),
+            after.contains("class=\"term-create__pane\"")
+                && after.contains(r#"data-preset="Claude""#),
             "the creation controls must move into the menu: {html}"
         );
         assert!(
-            html.contains(r#"<input type="checkbox" id="pane-menu-toggle" class="pane-menu__toggle">"#),
+            html.contains(
+                r#"<input type="checkbox" id="pane-menu-toggle" class="pane-menu__toggle">"#
+            ),
             "the pane menu must open from its own checkbox, not from script: {html}"
         );
     }
@@ -6574,7 +6893,8 @@ mod tests {
     /// module follows.
     #[test]
     fn terminal_create_controls_escapes_preset_labels() {
-        let html = terminal_create_controls("proj-1", &["<script>alert(1)</script>".to_string()], true);
+        let html =
+            terminal_create_controls("proj-1", &["<script>alert(1)</script>".to_string()], true);
         assert!(!html.contains("<script>alert(1)</script>"), "{html}");
         assert!(html.contains("&lt;script&gt;"), "{html}");
     }
@@ -6591,12 +6911,19 @@ mod tests {
         let presets = vec!["Claude".to_string()];
 
         let with_shell = terminal_create_controls("proj-1", &presets, true);
-        assert!(with_shell.contains("class=\"term-create__pane\""), "{with_shell}");
-        assert!(with_shell.contains(r#"data-preset="Claude""#), "{with_shell}");
+        assert!(
+            with_shell.contains("class=\"term-create__pane\""),
+            "{with_shell}"
+        );
+        assert!(
+            with_shell.contains(r#"data-preset="Claude""#),
+            "{with_shell}"
+        );
 
         let without_shell = terminal_create_controls("proj-1", &presets, false);
         assert!(
-            !without_shell.contains("class=\"term-create__pane\"") && !without_shell.contains(">New shell<"),
+            !without_shell.contains("class=\"term-create__pane\"")
+                && !without_shell.contains(">New shell<"),
             "the plain-shell button must not render when it was not asked for: {without_shell}"
         );
         assert!(
@@ -6630,11 +6957,15 @@ mod tests {
         let project = sample_project();
         let html = terminal_page(&project, &[], None, &[]);
         assert!(
-            html.contains(".term-keys button { padding: var(--space-1) var(--space-2); min-height: 44px;"),
+            html.contains(
+                ".term-keys button { padding: var(--space-1) var(--space-2); min-height: 44px;"
+            ),
             "the whole key row must stand 44px tall: {html}"
         );
         assert!(
-            html.contains(".term-keys--move button { min-width: 44px; font-size: var(--type-body-size); }"),
+            html.contains(
+                ".term-keys--move button { min-width: 44px; font-size: var(--type-body-size); }"
+            ),
             "the arrow group must keep its 44px minimum width at body-size type: {html}"
         );
         // The markup carrying that modifier is pinned by the route test
@@ -6646,11 +6977,13 @@ mod tests {
             "a positional rule would reach the named keys too, so it must not exist: {html}"
         );
         assert!(
-            !html.contains(".term-scroll button { min-width: 44px") && !html.contains(".term-scroll { min-width: 44px"),
+            !html.contains(".term-scroll button { min-width: 44px")
+                && !html.contains(".term-scroll { min-width: 44px"),
             "the scroll pair must carry no such rule: {html}"
         );
         assert!(
-            !html.contains(".term-reply__send { min-width: 44px") && !html.contains(".term-reply__stage { min-width: 44px"),
+            !html.contains(".term-reply__send { min-width: 44px")
+                && !html.contains(".term-reply__stage { min-width: 44px"),
             "the reply buttons must carry no such rule: {html}"
         );
     }
@@ -6665,9 +6998,15 @@ mod tests {
             html.contains(r#"<button type="button" class="term-reply__approve">Approve</button>"#),
             "the Approve button must render: {html}"
         );
-        let approve_at = html.find("term-reply__approve").expect("Approve button must render");
-        let stage_at = html.find("term-reply__stage").expect("Stage button must render");
-        let send_at = html.find("term-reply__send").expect("Send button must render");
+        let approve_at = html
+            .find("term-reply__approve")
+            .expect("Approve button must render");
+        let stage_at = html
+            .find("term-reply__stage")
+            .expect("Stage button must render");
+        let send_at = html
+            .find("term-reply__send")
+            .expect("Send button must render");
         assert!(
             approve_at < stage_at && stage_at < send_at,
             "the row must read Approve, Stage, Send: {html}"
@@ -6686,7 +7025,9 @@ mod tests {
             "the shared reply-button rule must include term-reply__approve: {html}"
         );
         assert!(
-            html.contains(".term-keys button, .term-reply__send, .term-reply__stage, .term-reply__approve {"),
+            html.contains(
+                ".term-keys button, .term-reply__send, .term-reply__stage, .term-reply__approve {"
+            ),
             "the mobile sizing tweak must include term-reply__approve: {html}"
         );
     }
@@ -6703,7 +7044,8 @@ mod tests {
             "app.js must read the Approve button: {script}"
         );
         assert!(
-            script.contains(r#"postJson(inputUrl(paneId, base), { text: "Approve", submit: true })"#),
+            script
+                .contains(r#"postJson(inputUrl(paneId, base), { text: "Approve", submit: true })"#),
             "app.js's Approve handler must post the exact text Approve with submit true: {script}"
         );
     }
@@ -6715,7 +7057,8 @@ mod tests {
     #[test]
     fn unassigned_terminal_script_wires_the_approve_button() {
         assert!(
-            UNASSIGNED_TERMINAL_SCRIPT.contains(r#"var approveBtn = form.querySelector(".term-reply__approve");"#),
+            UNASSIGNED_TERMINAL_SCRIPT
+                .contains(r#"var approveBtn = form.querySelector(".term-reply__approve");"#),
             "UNASSIGNED_TERMINAL_SCRIPT must read the Approve button: {UNASSIGNED_TERMINAL_SCRIPT}"
         );
         assert!(
@@ -6835,7 +7178,10 @@ mod tests {
     /// that line only ever decorates an In Progress card.
     #[test]
     fn hub_sends_a_closed_feature_to_finished_even_while_a_pause_handoff_names_it() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-closed-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-closed-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -6916,8 +7262,10 @@ mod tests {
     /// feature.
     #[test]
     fn hub_places_a_zero_cell_feature_with_a_live_session_bound_under_in_progress() {
-        let root =
-            std::env::temp_dir().join(format!("waggledance-views-hub-session-bound-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-session-bound-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -6939,7 +7287,9 @@ mod tests {
             .unwrap();
         write(
             ".bee/sessions/live.json",
-            &format!(r#"{{"id": "live", "last_heartbeat": "{now}", "lane": "session-bound-feat"}}"#),
+            &format!(
+                r#"{{"id": "live", "last_heartbeat": "{now}", "lane": "session-bound-feat"}}"#
+            ),
         );
 
         let snapshot = waggledance_core::bee::read_snapshot(&root);
@@ -6966,8 +7316,14 @@ mod tests {
     /// session, never a cell.
     #[test]
     fn hub_places_a_zero_cell_feature_named_by_a_granted_worktree_under_in_progress() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-wt-bound-{}", std::process::id()));
-        let sibling = std::env::temp_dir().join(format!("waggledance-views-hub-wt-bound-sibling-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-wt-bound-{}",
+            std::process::id()
+        ));
+        let sibling = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-wt-bound-sibling-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&sibling);
         let write = |dir: &std::path::Path, rel: &str, body: &str| {
@@ -6987,9 +7343,17 @@ mod tests {
             }"#,
         );
         std::fs::create_dir_all(&sibling).unwrap();
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"wt-bound-feat","mode":"standard"}"#);
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"wt-bound-feat","mode":"standard"}"#,
+        );
         let grant_id = sibling.file_name().unwrap().to_string_lossy().to_string();
-        write(&root, ".bee/runtime/worktree-grants.json", &format!(r#"{{"{grant_id}": true}}"#));
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &format!(r#"{{"{grant_id}": true}}"#),
+        );
 
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
@@ -7012,21 +7376,28 @@ mod tests {
     /// awaiting your decision" and sat under Waiting on you.
     #[test]
     fn gate_stop_skips_a_gate_a_later_approval_already_passed() {
-        let gates = |c: Option<bool>, s: Option<bool>, e: Option<bool>, r: Option<bool>| BeeApprovedGates {
-            context: c,
-            shape: s,
-            execution: e,
-            review: r,
-        };
+        let gates =
+            |c: Option<bool>, s: Option<bool>, e: Option<bool>, r: Option<bool>| BeeApprovedGates {
+                context: c,
+                shape: s,
+                execution: e,
+                review: r,
+            };
 
         // The reported shape: explore unstamped, but shape and execution
         // both approved — nothing is owed before review.
         let g = gates(Some(false), Some(true), Some(true), Some(false));
-        assert_eq!(bee_gate_current_stop(Some(&g)), Some(("review", "Independent review")));
+        assert_eq!(
+            bee_gate_current_stop(Some(&g)),
+            Some(("review", "Independent review"))
+        );
 
         // A feature that really did stop at its interview still reports it.
         let g = gates(Some(false), Some(false), Some(false), Some(false));
-        assert_eq!(bee_gate_current_stop(Some(&g)), Some(("context", "Explore")));
+        assert_eq!(
+            bee_gate_current_stop(Some(&g)),
+            Some(("context", "Explore"))
+        );
 
         // Context approved, shape not: the shape gate is the stop.
         let g = gates(Some(true), Some(false), Some(false), Some(false));
@@ -7034,7 +7405,10 @@ mod tests {
 
         // Execution approved past an unstamped shape: review is next.
         let g = gates(Some(true), Some(false), Some(true), Some(false));
-        assert_eq!(bee_gate_current_stop(Some(&g)), Some(("review", "Independent review")));
+        assert_eq!(
+            bee_gate_current_stop(Some(&g)),
+            Some(("review", "Independent review"))
+        );
 
         // Everything approved: nothing owed at all.
         let g = gates(Some(true), Some(true), Some(true), Some(true));
@@ -7052,7 +7426,10 @@ mod tests {
     /// right now" and keeps the card in In Progress instead.
     #[test]
     fn hub_keeps_a_gate_stopped_feature_working_right_now_under_in_progress() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-working-now-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-working-now-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7105,7 +7482,10 @@ mod tests {
     /// feature's own waiting pull is untouched.
     #[test]
     fn hub_counts_a_lane_less_session_as_working_the_active_feature_only() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-working-default-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-working-default-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7202,7 +7582,10 @@ mod tests {
     /// unapproved gate is owed the owner a decision again.
     #[test]
     fn hub_gives_the_active_feature_its_waiting_on_you_line_once_its_lane_less_session_goes_cold() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-working-default-cold-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-working-default-cold-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7250,8 +7633,12 @@ mod tests {
     /// session itself — still live per the 30-minute window — keeps its own
     /// row on the Live strip.
     #[test]
-    fn hub_gives_a_gate_stopped_feature_its_waiting_on_you_line_once_its_session_goes_stale_enough() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-working-stale-{}", std::process::id()));
+    fn hub_gives_a_gate_stopped_feature_its_waiting_on_you_line_once_its_session_goes_stale_enough()
+    {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-working-stale-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7283,7 +7670,9 @@ mod tests {
         let strip_html = bee_live_strip_section(&snapshot);
 
         assert!(
-            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/stale-working-feat""#),
+            html.contains(
+                r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/stale-working-feat""#
+            ),
             "the feature still has live work, so it stays under In Progress: {html}"
         );
         assert!(
@@ -7304,7 +7693,10 @@ mod tests {
     /// only ever suppresses the pull when an agent really is on it.
     #[test]
     fn hub_gives_a_pause_handoff_feature_its_waiting_on_you_line_when_nobody_is_working_it() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-handoff-idle-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-handoff-idle-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7340,7 +7732,9 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/handoff-idle-feat""#),
+            html.contains(
+                r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/handoff-idle-feat""#
+            ),
             "the active feature keeps live work and stays under In Progress: {html}"
         );
         assert!(
@@ -7357,9 +7751,14 @@ mod tests {
     /// the case that line exists for.
     #[test]
     fn hub_worktree_grant_alone_does_not_suppress_the_waiting_on_you_line() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-wt-no-working-{}", std::process::id()));
-        let sibling =
-            std::env::temp_dir().join(format!("waggledance-views-hub-wt-no-working-sibling-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-wt-no-working-{}",
+            std::process::id()
+        ));
+        let sibling = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-wt-no-working-sibling-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&sibling);
         let write = |dir: &std::path::Path, rel: &str, body: &str| {
@@ -7379,9 +7778,17 @@ mod tests {
             }"#,
         );
         std::fs::create_dir_all(&sibling).unwrap();
-        write(&sibling, ".bee/state.json", r#"{"phase":"executing","feature":"wt-gate-owed-feat","mode":"standard"}"#);
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"executing","feature":"wt-gate-owed-feat","mode":"standard"}"#,
+        );
         let grant_id = sibling.file_name().unwrap().to_string_lossy().to_string();
-        write(&root, ".bee/runtime/worktree-grants.json", &format!(r#"{{"{grant_id}": true}}"#));
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &format!(r#"{{"{grant_id}": true}}"#),
+        );
 
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let mut project = sample_project();
@@ -7389,7 +7796,9 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#),
+            html.contains(
+                r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/wt-gate-owed-feat""#
+            ),
             "the granted worktree's own liveness pull keeps the card under In Progress: {html}"
         );
         assert!(
@@ -7411,7 +7820,10 @@ mod tests {
     /// (`bee_relative_minutes`), and its workspace's own `root`.
     #[test]
     fn live_strip_names_a_live_sessions_lane_phase_and_heartbeat_age() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-strip-session-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-strip-session-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7431,7 +7843,9 @@ mod tests {
             .unwrap();
         write(
             ".bee/sessions/live.json",
-            &format!(r#"{{"id": "live", "last_heartbeat": "{hb}", "lane": "strip-feat", "workspace_id": "ws-1"}}"#),
+            &format!(
+                r#"{{"id": "live", "last_heartbeat": "{hb}", "lane": "strip-feat", "workspace_id": "ws-1"}}"#
+            ),
         );
         write(
             ".bee/runtime/workspaces/ws-1.json",
@@ -7441,10 +7855,22 @@ mod tests {
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let html = bee_live_strip_section(&snapshot);
 
-        assert!(html.contains("strip-feat"), "the row must name the session's own lane: {html}");
-        assert!(html.contains("executing"), "the row must name that lane's phase: {html}");
-        assert!(html.contains("4 minutes ago"), "the row must state the heartbeat age: {html}");
-        assert!(html.contains("sibling-dir"), "the row must name the session's own workspace: {html}");
+        assert!(
+            html.contains("strip-feat"),
+            "the row must name the session's own lane: {html}"
+        );
+        assert!(
+            html.contains("executing"),
+            "the row must name that lane's phase: {html}"
+        );
+        assert!(
+            html.contains("4 minutes ago"),
+            "the row must state the heartbeat age: {html}"
+        );
+        assert!(
+            html.contains("sibling-dir"),
+            "the row must name the session's own workspace: {html}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -7458,7 +7884,10 @@ mod tests {
     /// when the session records no workspace at all.
     #[test]
     fn live_strip_names_the_main_workspace_rather_than_trailing_an_empty_separator() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-strip-main-ws-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-strip-main-ws-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7470,7 +7899,9 @@ mod tests {
             .unwrap();
         write(
             ".bee/sessions/main-ws.json",
-            &format!(r#"{{"id": "main-ws", "last_heartbeat": "{hb}", "lane": "main-feat", "workspace_id": "main"}}"#),
+            &format!(
+                r#"{{"id": "main-ws", "last_heartbeat": "{hb}", "lane": "main-feat", "workspace_id": "main"}}"#
+            ),
         );
         // The main workspace's own root is the project root itself, which is
         // exactly what relativizes away to "".
@@ -7511,8 +7942,12 @@ mod tests {
     /// live session in the fixture at all.
     #[test]
     fn live_strip_names_a_resolved_worktrees_branch_and_active_feature() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-strip-wt-{}", std::process::id()));
-        let sibling = std::env::temp_dir().join(format!("waggledance-views-strip-wt-sibling-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("waggledance-views-strip-wt-{}", std::process::id()));
+        let sibling = std::env::temp_dir().join(format!(
+            "waggledance-views-strip-wt-sibling-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&sibling);
         let write = |dir: &std::path::Path, rel: &str, body: &str| {
@@ -7521,20 +7956,36 @@ mod tests {
             std::fs::write(p, body).unwrap();
         };
         std::fs::create_dir_all(&sibling).unwrap();
-        write(&sibling, ".bee/state.json", r#"{"phase":"swarming","feature":"wt-strip-feat","mode":"standard"}"#);
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"wt-strip-feat","mode":"standard"}"#,
+        );
         let grant_id = sibling.file_name().unwrap().to_string_lossy().to_string();
         write(
             &root,
             &format!(".bee/runtime/workspaces/{grant_id}.json"),
-            &format!(r#"{{"id": "{grant_id}", "type": "worktree", "root": "wt-root", "branch": "wt/wt-strip-feat", "attached_sessions": []}}"#),
+            &format!(
+                r#"{{"id": "{grant_id}", "type": "worktree", "root": "wt-root", "branch": "wt/wt-strip-feat", "attached_sessions": []}}"#
+            ),
         );
-        write(&root, ".bee/runtime/worktree-grants.json", &format!(r#"{{"{grant_id}": true}}"#));
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &format!(r#"{{"{grant_id}": true}}"#),
+        );
 
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let html = bee_live_strip_section(&snapshot);
 
-        assert!(html.contains("wt/wt-strip-feat"), "the row must name the worktree's own branch: {html}");
-        assert!(html.contains("wt-strip-feat"), "the row must name the worktree's own active feature: {html}");
+        assert!(
+            html.contains("wt/wt-strip-feat"),
+            "the row must name the worktree's own branch: {html}"
+        );
+        assert!(
+            html.contains("wt-strip-feat"),
+            "the row must name the worktree's own active feature: {html}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&sibling);
@@ -7546,7 +7997,10 @@ mod tests {
     /// in its own row rather than rendering nothing for that grant.
     #[test]
     fn live_strip_names_an_unresolved_worktree_grants_reason_rather_than_dropping_it() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-strip-wt-unresolved-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-strip-wt-unresolved-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let dangling_id = format!("waggledance-views-strip-wt-ghost-{}", std::process::id());
         let _ = std::fs::remove_dir_all(std::env::temp_dir().join(&dangling_id));
@@ -7555,7 +8009,10 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         };
-        write(".bee/runtime/worktree-grants.json", &format!(r#"{{"{dangling_id}": true}}"#));
+        write(
+            ".bee/runtime/worktree-grants.json",
+            &format!(r#"{{"{dangling_id}": true}}"#),
+        );
 
         let snapshot = waggledance_core::bee::read_snapshot(&root);
         let html = bee_live_strip_section(&snapshot);
@@ -7564,7 +8021,10 @@ mod tests {
             html.contains("could not be read"),
             "an unresolved grant's own row must say it could not be read, never disappear silently: {html}"
         );
-        assert!(html.contains(&dangling_id), "the unresolved row must still name the dangling grant: {html}");
+        assert!(
+            html.contains(&dangling_id),
+            "the unresolved row must still name the dangling grant: {html}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -7573,7 +8033,10 @@ mod tests {
     /// strip renders one honest empty line rather than an absent section.
     #[test]
     fn live_strip_renders_one_honest_line_when_nothing_is_live() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-strip-empty-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-strip-empty-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".bee")).unwrap();
 
@@ -7595,7 +8058,10 @@ mod tests {
     /// resurrect by going phase-based instead of liveness-based.
     #[test]
     fn hub_renders_no_entry_for_a_parked_lane_with_no_liveness_signal_at_all() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-parked-lane-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-parked-lane-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7632,8 +8098,10 @@ mod tests {
     /// signal drags a feature with no live cells left back out of Finished.
     #[test]
     fn hub_keeps_a_closed_feature_in_finished_even_with_a_bound_session_and_a_pause_handoff() {
-        let root =
-            std::env::temp_dir().join(format!("waggledance-views-hub-closed-session-bound-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-closed-session-bound-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7679,7 +8147,9 @@ mod tests {
             .unwrap();
         write(
             ".bee/sessions/live.json",
-            &format!(r#"{{"id": "live", "last_heartbeat": "{now}", "lane": "closed-session-feat"}}"#),
+            &format!(
+                r#"{{"id": "live", "last_heartbeat": "{now}", "lane": "closed-session-feat"}}"#
+            ),
         );
 
         let snapshot = waggledance_core::bee::read_snapshot(&root);
@@ -7688,7 +8158,9 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/closed-session-feat""#),
+            html.contains(
+                r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/closed-session-feat""#
+            ),
             "a closed feature must stay under Finished even with a bound live session: {html}"
         );
         assert!(
@@ -7696,7 +8168,9 @@ mod tests {
             "a closed feature owes no decision even while a session is bound to its lane: {html}"
         );
         assert!(
-            !html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/closed-session-feat""#),
+            !html.contains(
+                r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/closed-session-feat""#
+            ),
             "a bound live session must never drag a finished feature back into In Progress: {html}"
         );
 
@@ -7709,8 +8183,10 @@ mod tests {
     /// while it still carries an unresolved review candidate.
     #[test]
     fn hub_keeps_a_closed_feature_in_finished_even_with_an_unresolved_review_candidate() {
-        let root =
-            std::env::temp_dir().join(format!("waggledance-views-hub-finished-over-review-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-finished-over-review-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7741,7 +8217,9 @@ mod tests {
             "a closed feature must stay under Finished even carrying an unresolved review candidate: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="review" href="/p/proj-1/_bee/feature/closed-reviewed-feat""#),
+            !html.contains(
+                r#"data-hub-group="review" href="/p/proj-1/_bee/feature/closed-reviewed-feat""#
+            ),
             "the same feature must never also render under Review: {html}"
         );
 
@@ -7754,7 +8232,10 @@ mod tests {
     /// left and the candidate is still unresolved.
     #[test]
     fn hub_places_live_work_in_progress_over_an_unresolved_review_candidate() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-live-over-review-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-live-over-review-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7771,8 +8252,9 @@ mod tests {
                 "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
             }"#,
         );
-        write(".bee/cells/a.json", &format!(
-            r#"{{
+        write(
+            ".bee/cells/a.json",
+            r#"{
                 "id": "lr-1",
                 "feature": "live-reviewed-feat",
                 "lane": "tiny",
@@ -7783,15 +8265,15 @@ mod tests {
                 "read_first": [],
                 "deps": [],
                 "decisions": [],
-                "must_haves": {{}},
+                "must_haves": {},
                 "behavior_change": false,
                 "change_class": "behavior",
                 "pbi": null,
                 "status": "claimed",
                 "tier": "generation",
-                "trace": {{"worker": "w1", "claimed_at": "2026-08-10T08:00:00Z", "capped_at": null}}
-            }}"#
-        ));
+                "trace": {"worker": "w1", "claimed_at": "2026-08-10T08:00:00Z", "capped_at": null}
+            }"#,
+        );
         write(
             ".bee/review-candidates.jsonl",
             "{\"id\":\"rc-2\",\"type\":\"candidate\",\"date\":\"2026-08-01T00:00:00.000Z\",\"feature\":\"live-reviewed-feat\",\"head\":\"h1\",\"mode\":\"standard\",\"baseline\":null,\"cells\":[\"cell-y\"]}\n",
@@ -7819,7 +8301,10 @@ mod tests {
     /// a `"compounding"` phase, lands in Review.
     #[test]
     fn hub_places_an_unresolved_candidate_in_review_over_a_compounding_phase() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-review-over-compound-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-review-over-compound-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7846,11 +8331,15 @@ mod tests {
         let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
         assert!(
-            html.contains(r#"data-hub-group="review" href="/p/proj-1/_bee/feature/both-signal-feat""#),
+            html.contains(
+                r#"data-hub-group="review" href="/p/proj-1/_bee/feature/both-signal-feat""#
+            ),
             "a feature carrying both signals must stop at Review, its earlier branch: {html}"
         );
         assert!(
-            !html.contains(r#"data-hub-group="compound" href="/p/proj-1/_bee/feature/both-signal-feat""#),
+            !html.contains(
+                r#"data-hub-group="compound" href="/p/proj-1/_bee/feature/both-signal-feat""#
+            ),
             "the same feature must never also render under Compound: {html}"
         );
 
@@ -7862,7 +8351,10 @@ mod tests {
     /// pull a feature into Review.
     #[test]
     fn hub_a_settled_review_candidate_does_not_pull_a_feature_into_review() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-settled-review-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-settled-review-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -7949,7 +8441,8 @@ mod tests {
             live: false,
             heartbeat_age_minutes: None,
         };
-        let (label, tone) = bee_hub_worktree_chip("wt-feat", std::slice::from_ref(&grant), &[], true);
+        let (label, tone) =
+            bee_hub_worktree_chip("wt-feat", std::slice::from_ref(&grant), &[], true);
         assert_eq!((label.as_str(), tone), ("Open · wt/wt-feat", "info"));
     }
 
@@ -7962,10 +8455,12 @@ mod tests {
     #[test]
     fn bee_hub_worktree_chip_reads_merged_only_when_finished_and_a_grant_history_exists() {
         let workspace = sample_workspace("wt/shipped-feat");
-        let (label, tone) = bee_hub_worktree_chip("shipped-feat", &[], std::slice::from_ref(&workspace), true);
+        let (label, tone) =
+            bee_hub_worktree_chip("shipped-feat", &[], std::slice::from_ref(&workspace), true);
         assert_eq!((label.as_str(), tone), ("Merged", "success"));
 
-        let (label, tone) = bee_hub_worktree_chip("shipped-feat", &[], std::slice::from_ref(&workspace), false);
+        let (label, tone) =
+            bee_hub_worktree_chip("shipped-feat", &[], std::slice::from_ref(&workspace), false);
         assert_eq!(
             (label.as_str(), tone),
             ("Main", "neutral"),
@@ -8040,7 +8535,10 @@ mod tests {
             None,
         );
         assert!(row.contains(">Human Title</a>"), "{row}");
-        assert!(!row.contains(">slug-feat<"), "the slug must not also render once a title exists: {row}");
+        assert!(
+            !row.contains(">slug-feat<"),
+            "the slug must not also render once a title exists: {row}"
+        );
     }
 
     /// (hub-finished-compact) Ten or fewer rows render entirely in the open
@@ -8065,11 +8563,18 @@ mod tests {
         let rows: Vec<String> = (0..25).map(|i| format!("<a>{i}</a>")).collect();
         let html = bee_hub_finished_rows(&rows);
 
-        let first_details = html.find("<details").expect("expected a details block for the overflow");
+        let first_details = html
+            .find("<details")
+            .expect("expected a details block for the overflow");
         for i in 0..10 {
             let marker = format!("<a>{i}</a>");
-            let pos = html.find(&marker).unwrap_or_else(|| panic!("missing {marker}: {html}"));
-            assert!(pos < first_details, "row {i} must render open, ahead of the first <details>: {html}");
+            let pos = html
+                .find(&marker)
+                .unwrap_or_else(|| panic!("missing {marker}: {html}"));
+            assert!(
+                pos < first_details,
+                "row {i} must render open, ahead of the first <details>: {html}"
+            );
         }
         for i in 10..25 {
             assert!(html.contains(&format!("<a>{i}</a>")), "{html}");
@@ -8098,7 +8603,9 @@ mod tests {
     /// test helper (not reusable across crates) so an archived feature can
     /// carry, or deliberately lack, a D10 ship time.
     fn cross_board_archived_cell_json(id: &str, feature: &str, capped_at: Option<&str>) -> String {
-        let capped_json = capped_at.map(|s| format!("\"{s}\"")).unwrap_or_else(|| "null".to_string());
+        let capped_json = capped_at
+            .map(|s| format!("\"{s}\""))
+            .unwrap_or_else(|| "null".to_string());
         format!(
             r#"{{
                 "id": "{id}",
@@ -8131,9 +8638,12 @@ mod tests {
     /// in, and must carry that project's own name.
     #[test]
     fn cross_project_places_each_feature_in_the_column_its_own_project_would_and_labels_it() {
-        let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-a-{}", std::process::id()));
-        let root_b = std::env::temp_dir().join(format!("waggledance-views-cross-b-{}", std::process::id()));
-        let root_c = std::env::temp_dir().join(format!("waggledance-views-cross-c-{}", std::process::id()));
+        let root_a =
+            std::env::temp_dir().join(format!("waggledance-views-cross-a-{}", std::process::id()));
+        let root_b =
+            std::env::temp_dir().join(format!("waggledance-views-cross-b-{}", std::process::id()));
+        let root_c =
+            std::env::temp_dir().join(format!("waggledance-views-cross-c-{}", std::process::id()));
         for r in [&root_a, &root_b, &root_c] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -8185,14 +8695,20 @@ mod tests {
         write(
             &root_b,
             ".bee/sessions/live.json",
-            &format!(r#"{{"id": "live", "last_heartbeat": "{fresh_hb}", "lane": "progress-feat"}}"#),
+            &format!(
+                r#"{{"id": "live", "last_heartbeat": "{fresh_hb}", "lane": "progress-feat"}}"#
+            ),
         );
 
         // Project C: one archived feature, no lane and no session -> Finished.
         write(
             &root_c,
             ".bee/cells/archive/finished-feat/c-1.json",
-            &cross_board_archived_cell_json("c-1", "finished-feat", Some("2026-08-01T05:00:00.000Z")),
+            &cross_board_archived_cell_json(
+                "c-1",
+                "finished-feat",
+                Some("2026-08-01T05:00:00.000Z"),
+            ),
         );
 
         let mut project_a = sample_project();
@@ -8208,9 +8724,13 @@ mod tests {
         project_c.name = "Project C".into();
         project_c.root_path = root_c.clone();
 
-        let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone(), root_c.clone()]);
-        let pairs: Vec<(&Project, &BeeProjectRollup)> =
-            vec![(&project_a, &rollups[0]), (&project_b, &rollups[1]), (&project_c, &rollups[2])];
+        let rollups =
+            waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone(), root_c.clone()]);
+        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![
+            (&project_a, &rollups[0]),
+            (&project_b, &rollups[1]),
+            (&project_c, &rollups[2]),
+        ];
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         assert!(
@@ -8221,17 +8741,28 @@ mod tests {
             html.contains("Waiting on you — Shape gate awaiting your decision"),
             "waiting-feat's card must still carry its own Waiting on you line: {html}"
         );
-        assert!(html.contains("Project A"), "the card must carry its own project's name: {html}");
+        assert!(
+            html.contains("Project A"),
+            "the card must carry its own project's name: {html}"
+        );
         assert!(
             html.contains(r#"bee-hub__detail-link" href="/p/proj-b/_bee/feature/progress-feat""#),
             "progress-feat must land under In Progress: {html}"
         );
-        assert!(html.contains("Project B"), "the in-progress card must carry its own project's name: {html}");
         assert!(
-            html.contains(r#"data-hub-group="finished" href="/p/proj-c/_bee/feature/finished-feat""#),
+            html.contains("Project B"),
+            "the in-progress card must carry its own project's name: {html}"
+        );
+        assert!(
+            html.contains(
+                r#"data-hub-group="finished" href="/p/proj-c/_bee/feature/finished-feat""#
+            ),
             "finished-feat must land under Finished: {html}"
         );
-        assert!(html.contains("Project C"), "the finished row must carry its own project's name: {html}");
+        assert!(
+            html.contains("Project C"),
+            "the finished row must carry its own project's name: {html}"
+        );
         assert!(
             html.contains(r#"data-hub-group="in-progress" data-hub-count="2""#),
             "the In Progress count must be the sum across projects, both waiting-feat and progress-feat: {html}"
@@ -8259,10 +8790,14 @@ mod tests {
     /// through the new comparator at all.
     #[test]
     fn cross_project_in_progress_interleaves_by_comparator_while_todo_keeps_its_project_grouping() {
-        let root_a =
-            std::env::temp_dir().join(format!("waggledance-views-cross-d4-a-{}", std::process::id()));
-        let root_b =
-            std::env::temp_dir().join(format!("waggledance-views-cross-d4-b-{}", std::process::id()));
+        let root_a = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-d4-a-{}",
+            std::process::id()
+        ));
+        let root_b = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-d4-b-{}",
+            std::process::id()
+        ));
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -8327,7 +8862,11 @@ mod tests {
                 "approved_gates": {"context": false, "shape": false, "execution": false, "review": false}
             }"#,
         );
-        write(&root_a, ".bee/cells/zzz-todo-a-1.json", &open_cell_json("zzz-todo-a-1", "zzz-todo-a"));
+        write(
+            &root_a,
+            ".bee/cells/zzz-todo-a-1.json",
+            &open_cell_json("zzz-todo-a-1", "zzz-todo-a"),
+        );
 
         // Project B: "zzz-blocked" is In Progress and will carry a
         // `"blocked"` pane through `feature_panes` below (D7's top tier);
@@ -8348,7 +8887,9 @@ mod tests {
         write(
             &root_b,
             ".bee/sessions/live-b.json",
-            &format!(r#"{{"id": "live-b", "last_heartbeat": "{fresh_hb}", "lane": "zzz-blocked"}}"#),
+            &format!(
+                r#"{{"id": "live-b", "last_heartbeat": "{fresh_hb}", "lane": "zzz-blocked"}}"#
+            ),
         );
         write(
             &root_b,
@@ -8361,7 +8902,11 @@ mod tests {
                 "approved_gates": {"context": false, "shape": false, "execution": false, "review": false}
             }"#,
         );
-        write(&root_b, ".bee/cells/aaa-todo-b-1.json", &open_cell_json("aaa-todo-b-1", "aaa-todo-b"));
+        write(
+            &root_b,
+            ".bee/cells/aaa-todo-b-1.json",
+            &open_cell_json("aaa-todo-b-1", "aaa-todo-b"),
+        );
 
         let mut project_a = sample_project();
         project_a.id = "proj-a".into();
@@ -8373,7 +8918,8 @@ mod tests {
         project_b.root_path = root_b.clone();
 
         let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
-        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+        let pairs: Vec<(&Project, &BeeProjectRollup)> =
+            vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
 
         let blocked_pane = TerminalPaneView {
             pane_id: "w1:blocked-pane".into(),
@@ -8430,8 +8976,14 @@ mod tests {
     /// by feature name across both projects, not grouped by project.
     #[test]
     fn cross_project_finished_orders_timed_newest_first_then_untimed_alphabetically() {
-        let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-d10-a-{}", std::process::id()));
-        let root_b = std::env::temp_dir().join(format!("waggledance-views-cross-d10-b-{}", std::process::id()));
+        let root_a = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-d10-a-{}",
+            std::process::id()
+        ));
+        let root_b = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-d10-b-{}",
+            std::process::id()
+        ));
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -8456,7 +9008,11 @@ mod tests {
         );
         // Untimed: one cell missing capped_at (mixed capped_at makes the
         // whole feature untimed, per cross-board-1's own rule).
-        write(&root_a, ".bee/cells/archive/zeta-feat/c-1.json", &cross_board_archived_cell_json("c-1", "zeta-feat", None));
+        write(
+            &root_a,
+            ".bee/cells/archive/zeta-feat/c-1.json",
+            &cross_board_archived_cell_json("c-1", "zeta-feat", None),
+        );
         write(
             &root_b,
             ".bee/cells/archive/alpha-feat/c-1.json",
@@ -8473,7 +9029,8 @@ mod tests {
         project_b.root_path = root_b.clone();
 
         let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
-        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+        let pairs: Vec<(&Project, &BeeProjectRollup)> =
+            vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         let pos_newer = html.find("newer-feat").expect("newer-feat must render");
@@ -8481,8 +9038,14 @@ mod tests {
         let pos_alpha = html.find("alpha-feat").expect("alpha-feat must render");
         let pos_zeta = html.find("zeta-feat").expect("zeta-feat must render");
 
-        assert!(pos_newer < pos_older, "the most recently shipped feature must render first: {html}");
-        assert!(pos_older < pos_alpha, "every timed feature must render ahead of every untimed one: {html}");
+        assert!(
+            pos_newer < pos_older,
+            "the most recently shipped feature must render first: {html}"
+        );
+        assert!(
+            pos_older < pos_alpha,
+            "every timed feature must render ahead of every untimed one: {html}"
+        );
         assert!(
             pos_alpha < pos_zeta,
             "untimed features must follow, alphabetically by feature name across projects: {html}"
@@ -8503,8 +9066,14 @@ mod tests {
     /// computed, and never paged, per project.
     #[test]
     fn cross_project_finished_pages_more_than_ten_combined_entries_behind_show_10_more() {
-        let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-cap-a-{}", std::process::id()));
-        let root_b = std::env::temp_dir().join(format!("waggledance-views-cross-cap-b-{}", std::process::id()));
+        let root_a = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-cap-a-{}",
+            std::process::id()
+        ));
+        let root_b = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-cap-b-{}",
+            std::process::id()
+        ));
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -8540,7 +9109,8 @@ mod tests {
         project_b.root_path = root_b.clone();
 
         let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
-        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+        let pairs: Vec<(&Project, &BeeProjectRollup)> =
+            vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         assert!(
@@ -8562,8 +9132,14 @@ mod tests {
     /// labels, different links -- never merged or deduplicated into one.
     #[test]
     fn cross_project_same_feature_slug_in_two_projects_renders_two_distinct_rows() {
-        let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-dup-a-{}", std::process::id()));
-        let root_b = std::env::temp_dir().join(format!("waggledance-views-cross-dup-b-{}", std::process::id()));
+        let root_a = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-dup-a-{}",
+            std::process::id()
+        ));
+        let root_b = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-dup-b-{}",
+            std::process::id()
+        ));
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -8593,7 +9169,8 @@ mod tests {
         project_b.root_path = root_b.clone();
 
         let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
-        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+        let pairs: Vec<(&Project, &BeeProjectRollup)> =
+            vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         assert!(
@@ -8609,7 +9186,10 @@ mod tests {
             2,
             "the same feature slug in two projects must render as two rows, never merged into one: {html}"
         );
-        assert!(html.contains("Project A") && html.contains("Project B"), "each row must carry its own project's name: {html}");
+        assert!(
+            html.contains("Project A") && html.contains("Project B"),
+            "each row must carry its own project's name: {html}"
+        );
 
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
@@ -8621,8 +9201,14 @@ mod tests {
     /// merged section reads exactly as if that project were absent.
     #[test]
     fn cross_project_a_project_contributing_no_features_changes_nothing() {
-        let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-empty-a-{}", std::process::id()));
-        let root_b = std::env::temp_dir().join(format!("waggledance-views-cross-empty-b-{}", std::process::id()));
+        let root_a = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-empty-a-{}",
+            std::process::id()
+        ));
+        let root_b = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-empty-b-{}",
+            std::process::id()
+        ));
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -8652,8 +9238,10 @@ mod tests {
             vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
         let without_empty: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_b, &rollups[1])];
 
-        let html_with = bee_cross_project_features_section(&with_empty, &std::collections::HashMap::new());
-        let html_without = bee_cross_project_features_section(&without_empty, &std::collections::HashMap::new());
+        let html_with =
+            bee_cross_project_features_section(&with_empty, &std::collections::HashMap::new());
+        let html_without =
+            bee_cross_project_features_section(&without_empty, &std::collections::HashMap::new());
 
         assert_eq!(
             html_with, html_without,
@@ -8672,8 +9260,14 @@ mod tests {
     /// renderer.
     #[test]
     fn cross_project_same_project_gets_the_same_slot_on_its_card_and_its_finished_row() {
-        let root_a = std::env::temp_dir().join(format!("waggledance-views-cross-color-a-{}", std::process::id()));
-        let root_b = std::env::temp_dir().join(format!("waggledance-views-cross-color-b-{}", std::process::id()));
+        let root_a = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-color-a-{}",
+            std::process::id()
+        ));
+        let root_b = std::env::temp_dir().join(format!(
+            "waggledance-views-cross-color-b-{}",
+            std::process::id()
+        ));
         for r in [&root_a, &root_b] {
             let _ = std::fs::remove_dir_all(r);
         }
@@ -8727,7 +9321,8 @@ mod tests {
         project_b.root_path = root_b.clone();
 
         let rollups = waggledance_core::bee::read_rollup(&[root_a.clone(), root_b.clone()]);
-        let pairs: Vec<(&Project, &BeeProjectRollup)> = vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
+        let pairs: Vec<(&Project, &BeeProjectRollup)> =
+            vec![(&project_a, &rollups[0]), (&project_b, &rollups[1])];
         let html = bee_cross_project_features_section(&pairs, &std::collections::HashMap::new());
 
         let card_slot = (1..=10)
@@ -8739,7 +9334,9 @@ mod tests {
             .unwrap_or_else(|| panic!("proj-a's own In Progress card must carry a colour modifier: {html}"));
         let row_slot = (1..=10)
             .find(|n| html.contains(&format!("bee-hub__row-project--p{n}\">Project A</span>")))
-            .unwrap_or_else(|| panic!("proj-a's own Finished row must carry a colour modifier: {html}"));
+            .unwrap_or_else(|| {
+                panic!("proj-a's own Finished row must carry a colour modifier: {html}")
+            });
         assert_eq!(
             card_slot, row_slot,
             "the same project must get the same colour slot on its card and its Finished row: {html}"
@@ -8777,7 +9374,18 @@ mod tests {
             tab: "t1".into(),
         }];
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &panes,
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &panes,
             None,
             None,
             &[],
@@ -8826,7 +9434,9 @@ mod tests {
             !card_html.contains("agent-name-must-not-appear"),
             "the pane's own agent name must never reach this markup (D1a's rule, reused here): {card_html}"
         );
-        let details_end = card_html.find("</details>").expect("the card's own details must close");
+        let details_end = card_html
+            .find("</details>")
+            .expect("the card's own details must close");
         let badge_nav_start = card_html
             .find(r#"<nav class="proj-row__badges"#)
             .expect("badges must render");
@@ -8846,7 +9456,18 @@ mod tests {
     #[test]
     fn bee_hub_card_with_no_panes_renders_no_badge_container() {
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &[],
             None,
             None,
             &[],
@@ -8877,7 +9498,18 @@ mod tests {
     fn bee_hub_card_with_a_blocked_pane_carries_its_own_waiting_on_you_line() {
         let panes = vec![pane_with_status("blocked")];
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &panes,
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &panes,
             None,
             None,
             &[],
@@ -8896,17 +9528,30 @@ mod tests {
         let panes = vec![pane_with_status("blocked")];
         let gate_reason = "Waiting on you — Shape gate awaiting your decision";
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", Some(gate_reason), None, None, None, &panes,
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            Some(gate_reason),
+            None,
+            None,
+            None,
+            &panes,
             None,
             None,
             &[],
         );
-        let gate_at = card_html
-            .find(gate_reason)
-            .unwrap_or_else(|| panic!("the existing gate reason line must still render: {card_html}"));
+        let gate_at = card_html.find(gate_reason).unwrap_or_else(|| {
+            panic!("the existing gate reason line must still render: {card_html}")
+        });
         let blocked_at = card_html
             .find("Waiting on you — a terminal is blocked")
-            .unwrap_or_else(|| panic!("the blocked pane's own reason line must also render: {card_html}"));
+            .unwrap_or_else(|| {
+                panic!("the blocked pane's own reason line must also render: {card_html}")
+            });
         assert!(
             gate_at < blocked_at,
             "the gate line must come first, the blocked line after it, never the other way round: {card_html}"
@@ -8919,7 +9564,18 @@ mod tests {
     fn bee_hub_card_with_no_blocked_pane_and_no_gate_reason_carries_neither_line() {
         let panes = vec![pane_with_status("working")];
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &panes,
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &panes,
             None,
             None,
             &[],
@@ -8937,7 +9593,18 @@ mod tests {
     #[test]
     fn bee_hub_card_renders_collapsed_with_no_open_attribute() {
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &[],
             None,
             None,
             &[],
@@ -8963,7 +9630,18 @@ mod tests {
     #[test]
     fn bee_hub_card_body_opens_with_the_feature_detail_link() {
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &[],
             None,
             None,
             &[],
@@ -9035,8 +9713,21 @@ mod tests {
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap();
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, Some("2026-08-15T15:48:08.674Z"), "Main", None, None,
-            None, None, &[], None, Some(&recent), &[],
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            Some("2026-08-15T15:48:08.674Z"),
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            Some(&recent),
+            &[],
         );
         assert!(
             card_html.contains(r#"<span class="bee-hub__pulse""#),
@@ -9052,8 +9743,21 @@ mod tests {
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap();
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, Some("2026-08-15T15:48:08.674Z"), "Main", None, None,
-            None, None, &[], None, Some(&old), &[],
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            Some("2026-08-15T15:48:08.674Z"),
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            Some(&old),
+            &[],
         );
         assert!(
             !card_html.contains("bee-hub__pulse"),
@@ -9067,9 +9771,26 @@ mod tests {
     #[test]
     fn bee_hub_card_with_no_tool_call_renders_no_pulse_dot() {
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[], None, None, &[],
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
+            &[],
         );
-        assert!(!card_html.contains("bee-hub__pulse"), "no last_tool_call must render no pulse dot: {card_html}");
+        assert!(
+            !card_html.contains("bee-hub__pulse"),
+            "no last_tool_call must render no pulse dot: {card_html}"
+        );
     }
 
     /// kanban-live-signals D2: `awaiting-approval` renders the run_state
@@ -9078,16 +9799,34 @@ mod tests {
     #[test]
     fn bee_hub_card_awaiting_approval_run_state_renders_prominent_badge() {
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
-            Some("awaiting-approval"), None, &[],
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &[],
+            Some("awaiting-approval"),
+            None,
+            &[],
         );
         assert!(
             card_html.contains(r#"<span class="fg-chip fg-chip--danger bee-hub__run-state">Awaiting approval</span>"#),
             "awaiting-approval must render its own prominent danger-toned badge: {card_html}"
         );
         let summary_end = card_html.find("</summary>").expect("summary must close");
-        let badge_at = card_html.find("bee-hub__run-state").expect("badge must render");
-        assert!(badge_at < summary_end, "the run_state badge must render inside the collapsed summary: {card_html}");
+        let badge_at = card_html
+            .find("bee-hub__run-state")
+            .expect("badge must render");
+        assert!(
+            badge_at < summary_end,
+            "the run_state badge must render inside the collapsed summary: {card_html}"
+        );
     }
 
     /// kanban-live-signals D2: distinct run_state values get distinct
@@ -9095,8 +9834,21 @@ mod tests {
     #[test]
     fn bee_hub_card_running_run_state_renders_its_own_distinct_tone() {
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[],
-            Some("running"), None, &[],
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &[],
+            Some("running"),
+            None,
+            &[],
         );
         assert!(
             card_html.contains(r#"<span class="fg-chip fg-chip--accent bee-hub__run-state">Running</span>"#),
@@ -9110,7 +9862,21 @@ mod tests {
     #[test]
     fn bee_hub_card_with_no_run_state_renders_no_badge() {
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[], None, None, &[],
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
+            &[],
         );
         assert!(
             !card_html.contains("bee-hub__run-state"),
@@ -9138,7 +9904,20 @@ mod tests {
             },
         ];
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[], None, None,
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
             &deferred,
         );
         assert!(
@@ -9160,7 +9939,21 @@ mod tests {
     #[test]
     fn bee_hub_card_with_zero_deferred_debt_renders_nothing() {
         let card_html = bee_hub_card(
-            "proj-a", "feat-a", "in-progress", 1, 2, None, "Main", None, None, None, None, &[], None, None, &[],
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "Main",
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
+            &[],
         );
         assert!(
             !card_html.contains("bee-hub__deferred") && !card_html.contains("deferred"),
@@ -9176,9 +9969,12 @@ mod tests {
     /// project. D3's deferred debt carries no such restriction: each entry
     /// already names its own feature, so both cards get their own.
     #[test]
-    fn hub_scopes_state_json_signals_to_the_active_feature_only_but_deferred_debt_to_each_own_feature() {
-        let root = std::env::temp_dir()
-            .join(format!("waggledance-views-hub-active-feature-scope-{}", std::process::id()));
+    fn hub_scopes_state_json_signals_to_the_active_feature_only_but_deferred_debt_to_each_own_feature(
+    ) {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-active-feature-scope-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, body: &str| {
             let p = root.join(rel);
@@ -9194,7 +9990,10 @@ mod tests {
                 r#"{{"feature": "active-feat", "phase": "swarming", "last_activity": "{now}", "run_state": "awaiting-approval"}}"#
             ),
         );
-        write(".bee/logs/tools.jsonl", &format!(r#"{{"ts":"{now}","tool_name":"Bash"}}"#));
+        write(
+            ".bee/logs/tools.jsonl",
+            &format!(r#"{{"ts":"{now}","tool_name":"Bash"}}"#),
+        );
         write(
             ".bee/lanes/active-feat.json",
             r#"{"feature": "active-feat", "phase": "swarming", "mode": "standard", "next_action": "keep going"}"#,
@@ -9224,7 +10023,9 @@ mod tests {
 
         let active_link = "href=\"/p/proj-1/_bee/feature/active-feat\"";
         let other_link = "href=\"/p/proj-1/_bee/feature/other-feat\"";
-        let active_start = html.find(active_link).expect("active-feat card must render");
+        let active_start = html
+            .find(active_link)
+            .expect("active-feat card must render");
         let other_start = html.find(other_link).expect("other-feat card must render");
         let (active_card, other_card) = if active_start < other_start {
             (&html[..other_start], &html[other_start..])
@@ -9233,7 +10034,8 @@ mod tests {
         };
 
         assert!(
-            active_card.contains("bee-hub__run-state") && active_card.contains(r#"fg-chip--danger"#),
+            active_card.contains("bee-hub__run-state")
+                && active_card.contains(r#"fg-chip--danger"#),
             "the active feature's card must carry the awaiting-approval badge: {active_card}"
         );
         assert!(
@@ -9269,11 +10071,22 @@ mod tests {
     fn cross_project_board_project_colors_ten_projects_get_ten_distinct_slots() {
         let ids: Vec<String> = (0..10).map(|n| format!("proj-{n:02}")).collect();
         let colors = bee_cross_project_board_project_colors(ids.iter().map(String::as_str));
-        assert_eq!(colors.len(), 10, "every one of the ten projects must land in the map: {colors:?}");
+        assert_eq!(
+            colors.len(),
+            10,
+            "every one of the ten projects must land in the map: {colors:?}"
+        );
         let slots: std::collections::HashSet<u8> = colors.values().copied().collect();
-        assert_eq!(slots.len(), 10, "ten distinct projects must land on ten distinct slots: {colors:?}");
+        assert_eq!(
+            slots.len(),
+            10,
+            "ten distinct projects must land on ten distinct slots: {colors:?}"
+        );
         for slot in slots {
-            assert!((1..=10).contains(&slot), "every slot must land in 1..=10: {slot}");
+            assert!(
+                (1..=10).contains(&slot),
+                "every slot must land in 1..=10: {slot}"
+            );
         }
     }
 
@@ -9283,8 +10096,9 @@ mod tests {
     /// slots under the widened, position-based map.
     #[test]
     fn cross_project_board_project_colors_three_real_ids_get_three_different_slots() {
-        let colors =
-            bee_cross_project_board_project_colors(["anphabe-gogl", "beedashboard", "beehive"].into_iter());
+        let colors = bee_cross_project_board_project_colors(
+            ["anphabe-gogl", "beedashboard", "beehive"].into_iter(),
+        );
         let slots: std::collections::HashSet<u8> = colors.values().copied().collect();
         assert_eq!(
             slots.len(),
@@ -9301,9 +10115,21 @@ mod tests {
     #[test]
     fn cross_project_board_project_colors_sorted_position_decides_the_slot() {
         let colors = bee_cross_project_board_project_colors(["beta", "alpha", "gamma"].into_iter());
-        assert_eq!(colors.get("alpha"), Some(&1), "sorted first must land on slot 1: {colors:?}");
-        assert_eq!(colors.get("beta"), Some(&2), "sorted second must land on slot 2: {colors:?}");
-        assert_eq!(colors.get("gamma"), Some(&3), "sorted third must land on slot 3: {colors:?}");
+        assert_eq!(
+            colors.get("alpha"),
+            Some(&1),
+            "sorted first must land on slot 1: {colors:?}"
+        );
+        assert_eq!(
+            colors.get("beta"),
+            Some(&2),
+            "sorted second must land on slot 2: {colors:?}"
+        );
+        assert_eq!(
+            colors.get("gamma"),
+            Some(&3),
+            "sorted third must land on slot 3: {colors:?}"
+        );
     }
 
     /// A card rendered with a project label carries the project name and
@@ -9335,9 +10161,18 @@ mod tests {
             ),
             "the project name and its worktree branch must render in the subtitle: {card_html}"
         );
-        assert!(!card_html.contains("bee-hub__slug"), "the slug subtitle must not also render: {card_html}");
-        assert!(!card_html.contains("bee-hub__chips"), "the chip row must be gone entirely: {card_html}");
-        assert!(!card_html.contains("fg-chip"), "no chip markup of any kind may remain: {card_html}");
+        assert!(
+            !card_html.contains("bee-hub__slug"),
+            "the slug subtitle must not also render: {card_html}"
+        );
+        assert!(
+            !card_html.contains("bee-hub__chips"),
+            "the chip row must be gone entirely: {card_html}"
+        );
+        assert!(
+            !card_html.contains("fg-chip"),
+            "no chip markup of any kind may remain: {card_html}"
+        );
         assert!(
             card_html.contains("bee-hub__shell--p3"),
             "the shell must carry the colour modifier the caller handed it: {card_html}"
@@ -9417,9 +10252,18 @@ mod tests {
             r#"<div class="fg-card bee-hub__shell"><details class="bee-hub__card" data-hub-group="in-progress"><summary class="bee-hub__summary"><div class="fg-card__title">Human Title</div><span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/proj-a/_bee/feature/feat-a">Feature detail<span aria-hidden="true"> →</span></a><div class="bee-hub__slug">feat-a<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></div></details></div>"#,
             "a card with no project label must keep the byte-identical shell/colour and now carry its worktree state in the slug subtitle: {card_html}"
         );
-        assert!(!card_html.contains("bee-hub__shell--p"), "no project label must mean no colour modifier: {card_html}");
-        assert!(!card_html.contains("bee-hub__chips"), "the chip row must be gone entirely: {card_html}");
-        assert!(!card_html.contains("bee-hub__project\""), "the project subtitle class must not render here: {card_html}");
+        assert!(
+            !card_html.contains("bee-hub__shell--p"),
+            "no project label must mean no colour modifier: {card_html}"
+        );
+        assert!(
+            !card_html.contains("bee-hub__chips"),
+            "the chip row must be gone entirely: {card_html}"
+        );
+        assert!(
+            !card_html.contains("bee-hub__project\""),
+            "the project subtitle class must not render here: {card_html}"
+        );
     }
 
     /// (hub-fallbacks, project-color-identity-4) A title-less card with no
@@ -9430,8 +10274,23 @@ mod tests {
     /// so no separator.
     #[test]
     fn bee_hub_card_with_no_project_label_and_no_title_names_its_worktree_alone() {
-        let card_html =
-            bee_hub_card("proj-a", "feat-a", "in-progress", 1, 2, None, "merged", None, None, None, None, &[], None, None, &[]);
+        let card_html = bee_hub_card(
+            "proj-a",
+            "feat-a",
+            "in-progress",
+            1,
+            2,
+            None,
+            "merged",
+            None,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            None,
+            &[],
+        );
         assert!(
             card_html.contains(
                 r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">merged</span></div>"#
@@ -9477,7 +10336,8 @@ mod tests {
                 None,
                 &[],
             );
-            let expected = format!(r#"<span class="bee-hub__project-worktree"> / {worktree_label}</span>"#);
+            let expected =
+                format!(r#"<span class="bee-hub__project-worktree"> / {worktree_label}</span>"#);
             assert!(
                 card_html.contains(&expected),
                 "the {worktree_label} spelling must render verbatim in the slug subtitle: {card_html}"
@@ -9500,7 +10360,9 @@ mod tests {
             None,
         );
         assert!(
-            row.contains(r#"<span class="bee-hub__row-project bee-hub__row-project--p3">Project A</span>"#),
+            row.contains(
+                r#"<span class="bee-hub__row-project bee-hub__row-project--p3">Project A</span>"#
+            ),
             "the Finished row's project span must carry the colour modifier it was handed: {row}"
         );
     }
@@ -9513,7 +10375,9 @@ mod tests {
         let css = bee_hub_style();
         for n in 1..=10 {
             assert!(
-                css.contains(&format!(".bee-hub__shell--p{n} {{ --project-accent: var(--bee-hub-project-{n}); }}")),
+                css.contains(&format!(
+                    ".bee-hub__shell--p{n} {{ --project-accent: var(--bee-hub-project-{n}); }}"
+                )),
                 "missing shell accent rule for p{n}: {css}"
             );
             assert!(
@@ -9528,7 +10392,9 @@ mod tests {
             "missing the shell's own left border rule: {css}"
         );
         assert!(
-            css.contains(r#".bee-hub__project, .bee-hub__row-project { color: var(--project-accent); }"#),
+            css.contains(
+                r#".bee-hub__project, .bee-hub__row-project { color: var(--project-accent); }"#
+            ),
             "missing the subtitle/Finished-span colour rule: {css}"
         );
         assert!(
@@ -9545,9 +10411,9 @@ mod tests {
     #[test]
     fn bee_hub_style_puts_in_progress_order_rule_only_inside_the_narrow_media_query() {
         let css = bee_hub_style();
-        let media_at = css
-            .find("@media (max-width: 700px)")
-            .unwrap_or_else(|| panic!("the existing narrow-screen breakpoint must still exist: {css}"));
+        let media_at = css.find("@media (max-width: 700px)").unwrap_or_else(|| {
+            panic!("the existing narrow-screen breakpoint must still exist: {css}")
+        });
         assert!(
             css.matches("@media (max-width: 700px)").count() == 1,
             "D1 must reuse the existing breakpoint, never add a second one: {css}"
@@ -9615,7 +10481,8 @@ mod tests {
     #[test]
     fn bee_hub_worktree_label_reads_merged_when_finished_and_a_grant_history_exists() {
         let workspace = sample_workspace("wt/shipped-feat");
-        let label = bee_hub_worktree_label("shipped-feat", &[], std::slice::from_ref(&workspace), true);
+        let label =
+            bee_hub_worktree_label("shipped-feat", &[], std::slice::from_ref(&workspace), true);
         assert_eq!(label, "merged");
     }
 
@@ -9634,7 +10501,10 @@ mod tests {
     /// archived feature into the open flow.
     #[test]
     fn hub_finished_group_pages_more_than_ten_archived_features_behind_a_details() {
-        let root = std::env::temp_dir().join(format!("waggledance-views-hub-finished-paged-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-finished-paged-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&root);
         for n in 0..12 {
             let feature = format!("finished-feat-{n:02}");
@@ -9672,7 +10542,10 @@ mod tests {
         project.root_path = root.clone();
         let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
 
-        assert!(html.contains(r#"data-hub-group="finished" data-hub-count="12""#), "{html}");
+        assert!(
+            html.contains(r#"data-hub-group="finished" data-hub-count="12""#),
+            "{html}"
+        );
         assert_eq!(
             html.matches("<details").count(),
             1,
@@ -9780,7 +10653,8 @@ mod tests {
     #[test]
     fn served_html_and_js_never_mention_mdview_outside_the_storage_fallback() {
         let html = layout("t", "", "<p>body</p>");
-        let sources: [(&str, &str); 2] = [("layout() HTML", html.as_str()), ("assets/app.js", APP_JS)];
+        let sources: [(&str, &str); 2] =
+            [("layout() HTML", html.as_str()), ("assets/app.js", APP_JS)];
         for (label, text) in sources {
             for line in text.lines() {
                 if line.contains("mdview") {

@@ -526,11 +526,7 @@ mod tests {
         );
         // a legitimately-emitted data-* attribute (data-sourcepos, added by the
         // renderer itself) still survives
-        assert!(
-            page.html.contains("data-sourcepos=\""),
-            "{}",
-            page.html
-        );
+        assert!(page.html.contains("data-sourcepos=\""), "{}", page.html);
     }
 
     #[test]

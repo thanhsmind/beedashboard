@@ -5,12 +5,12 @@
 //! `bound-port-truth-1`'s own unit tests separately cover D2's stale-lock
 //! fallback, which this test does not hit.
 
-use waggledance_core::daemon::{health_check, DaemonInfo};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+use waggledance_core::daemon::{health_check, DaemonInfo};
 
 /// Kills and reaps the spawned daemon on drop, even if an assertion above
 /// panics — a leaked daemon process would otherwise strand a listening port
@@ -131,8 +131,9 @@ fn cmd_open_json_url_port_matches_real_daemon_bound_port() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("waggledance open --json did not print valid JSON ({e}): {stdout}"));
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("waggledance open --json did not print valid JSON ({e}): {stdout}")
+    });
 
     let url = json["url"].as_str().expect("url field present");
     let urls = json["urls"].as_array().expect("urls field present");
@@ -374,11 +375,7 @@ fn code_view_sidebar_splits_folders_files_and_breadcrumb_shows_type_and_size() {
     //    disclosure (with a count and a `chap-subfolder` icon per entry —
     //    "docs", "only-dirs" and "src" all at root, so count is 3), followed
     //    by a separate Files section, folders first.
-    let (status, body) = http_get(
-        &info.host,
-        info.port,
-        &format!("/p/{project_id}/_code/"),
-    );
+    let (status, body) = http_get(&info.host, info.port, &format!("/p/{project_id}/_code/"));
     assert_eq!(status, 200);
     // Sidebar breadcrumb sits right below the search box, before anything
     // else — just the project root at the top level (no ancestor segments).

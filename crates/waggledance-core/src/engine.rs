@@ -450,8 +450,8 @@ mod tests {
             // pointing at a readable file *outside* the project root. Its
             // extension passes, so only the containment guard (starts_with on
             // the canonical path) rejects it — lock that in.
-            let outside =
-                std::env::temp_dir().join(format!("waggledance-outside-{}.png", std::process::id()));
+            let outside = std::env::temp_dir()
+                .join(format!("waggledance-outside-{}.png", std::process::id()));
             std::fs::write(&outside, "out-of-root-bytes").unwrap();
             let esc_link = dir.join("images/escape.png");
             std::os::unix::fs::symlink(&outside, &esc_link).unwrap();

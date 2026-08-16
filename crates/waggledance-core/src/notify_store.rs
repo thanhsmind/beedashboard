@@ -195,7 +195,12 @@ mod tests {
         // write into. A future column named any of these must fail this test
         // before it can ship.
         let forbidden = [
-            "screen", "transcript", "token", "credential", "password", "secret",
+            "screen",
+            "transcript",
+            "token",
+            "credential",
+            "password",
+            "secret",
         ];
         let schema_lower = SCHEMA.to_lowercase();
         for word in forbidden {

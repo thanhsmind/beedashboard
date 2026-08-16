@@ -3,13 +3,13 @@
 //! (PRD FR-08/FR-09/FR-09b).
 
 use anyhow::Result;
-use waggledance_core::Engine;
 use notify::{RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
+use waggledance_core::Engine;
 
 pub type WatchHandle = Debouncer<notify::RecommendedWatcher, FileIdMap>;
 
