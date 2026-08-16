@@ -180,9 +180,10 @@ on your machine — it never writes config for a tool you don't have — exposin
   file, **auto-registering** the project and indexing it on first use.
 - **`waggledance_search(query, project?, limit?)`** → full-text hits across every registered
   project's indexed markdown, or just `project` when given. Re-indexes changed files in the
-  searched project(s) first, so results never lag disk. Each hit carries a `<mark>`-highlighted
-  excerpt — enough to answer without a follow-up read, never a bare path list or a whole file.
-  `limit` caps hit count (default 10).
+  searched project(s) first and reports any project whose refresh failed (`structuredContent.refresh`)
+  — search still returns hits either way, flagged rather than silently stale. Each hit carries a
+  `<mark>`-highlighted excerpt — enough to answer without a follow-up read, never a bare path list
+  or a whole file. `limit` caps hit count (default 10).
 - **`waggledance_projects()`** → every registered project's `id`, `name`, `root_path`,
   `file_count`, and `last_seen_at`. `file_count` reflects the index as-is and may lag until the
   next search touches that project.

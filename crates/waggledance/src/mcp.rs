@@ -12,7 +12,7 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 use waggledance_core::bee;
 use waggledance_core::config::registry_db_path;
-use waggledance_core::{Config, Engine, SqliteStore};
+use waggledance_core::{Config, Engine, Error, SqliteStore};
 
 /// Default `waggledance_search` hit cap when the caller does not pass `limit`.
 const DEFAULT_SEARCH_LIMIT: usize = 10;
@@ -93,9 +93,11 @@ fn search_schema() -> Value {
         "name": "waggledance_search",
         "description": "Full-text search across every registered project's indexed markdown \
     (or one project, when `project` is given). Re-indexes changed files in the \
-    searched project(s) before answering, so results never lag disk. Each hit \
-    carries a rich, <mark>-highlighted excerpt — enough to answer without a \
-    follow-up read, never a bare path list or a whole file.",
+    searched project(s) before answering and reports any project whose refresh \
+    failed in `structuredContent.refresh` — hits still return, but a failed \
+    project's results may lag disk. Each hit carries a rich, <mark>-highlighted \
+    excerpt — enough to answer without a follow-up read, never a bare path list \
+    or a whole file.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -209,11 +211,13 @@ fn handle_view_file(id: Option<Value>, engine: &Engine, args: &Value) -> Value {
 
 /// `waggledance_search`: FTS5 hits over one or every registered project.
 ///
-/// D4 (never stale): re-indexes the searched project(s) before querying —
-/// just the filtered project, or every registered project when unfiltered
-/// (D1). D2 (rich, not bare): each hit carries `project_id`, `rel_path`,
-/// `title`, a `<mark>`-highlighted `excerpt`, and `score` — no whole-file
-/// content, no bare path list.
+/// D4 (never silently stale): re-indexes the searched project(s) before
+/// querying — just the filtered project, or every registered project when
+/// unfiltered (D1) — and reports which projects refreshed cleanly and which
+/// failed (review P1-2: a refresh failure must surface, never masquerade as
+/// a fresh result). D2 (rich, not bare): each hit carries `project_id`,
+/// `rel_path`, `title`, a `<mark>`-highlighted `excerpt`, and `score` — no
+/// whole-file content, no bare path list.
 fn handle_search(id: Option<Value>, engine: &Engine, args: &Value) -> Value {
     let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
     if query.trim().is_empty() {
@@ -230,32 +234,39 @@ fn handle_search(id: Option<Value>, engine: &Engine, args: &Value) -> Value {
         .filter(|&n| n > 0)
         .unwrap_or(DEFAULT_SEARCH_LIMIT);
 
-    match project {
+    let refresh_results: Vec<(String, Result<usize, Error>)> = match project {
         Some(project_id) => {
             if engine.get_project(project_id).ok().flatten().is_none() {
                 return tool_error(id, &format!("no such project: {project_id}"));
             }
-            // Best-effort: a refresh failure must not sink the search itself
-            // (results just stay as fresh as the last successful index).
-            let _ = engine.refresh_stale(project_id);
+            // The search itself still runs either way — a refresh failure is
+            // reported, not fatal (results just stay as fresh as the last
+            // successful index for that project).
+            vec![(project_id.to_string(), engine.refresh_stale(project_id))]
         }
         None => {
             let Ok(projects) = engine.list_projects() else {
                 return tool_error(id, "could not list registered projects");
             };
-            for p in &projects {
-                let _ = engine.refresh_stale(&p.id);
-            }
+            projects
+                .iter()
+                .map(|p| (p.id.clone(), engine.refresh_stale(&p.id)))
+                .collect()
         }
-    }
+    };
+    let refresh = summarize_refresh(refresh_results);
 
     match engine.search(query, project, limit) {
         Ok(hits) => {
-            let text = if hits.is_empty() {
+            let mut text = if hits.is_empty() {
                 format!("No hits for {query:?}.")
             } else {
                 format!("{} hit(s) for {query:?}.", hits.len())
             };
+            if let Some(warning) = &refresh.warning {
+                text.push_str("; ");
+                text.push_str(warning);
+            }
             let structured_hits: Vec<Value> = hits
                 .iter()
                 .map(|h| {
@@ -272,11 +283,52 @@ fn handle_search(id: Option<Value>, engine: &Engine, args: &Value) -> Value {
                 id,
                 json!({
                     "content": [{ "type": "text", "text": text }],
-                    "structuredContent": { "hits": structured_hits }
+                    "structuredContent": { "hits": structured_hits, "refresh": refresh.structured }
                 }),
             )
         }
         Err(e) => tool_error(id, &format!("search failed: {e}")),
+    }
+}
+
+/// The per-project refresh outcome for a `waggledance_search` call, folded
+/// into the shape the response carries and the one-line warning appended to
+/// the human-readable text when at least one project's refresh failed
+/// (review P1-2 — a stale-serving refresh failure must never be silent).
+struct RefreshSummary {
+    /// `structuredContent.refresh`: `{"refreshed": <ok count>, "failed": [...]}`.
+    structured: Value,
+    /// `Some` only when `failed` is non-empty.
+    warning: Option<String>,
+}
+
+/// Pure so the failure shape is testable without a real store error: fold a
+/// project id + its `refresh_stale` outcome into the response's `refresh`
+/// field and, when any project failed, the warning appended to the text.
+fn summarize_refresh(results: Vec<(String, Result<usize, Error>)>) -> RefreshSummary {
+    let mut refreshed = 0usize;
+    let mut failed: Vec<Value> = Vec::new();
+    let mut failed_ids: Vec<String> = Vec::new();
+    for (project_id, result) in results {
+        match result {
+            Ok(_) => refreshed += 1,
+            Err(e) => {
+                failed.push(json!({ "project_id": project_id, "error": e.to_string() }));
+                failed_ids.push(project_id);
+            }
+        }
+    }
+    let warning = if failed_ids.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "warning: refresh failed for {} — results may lag disk for those projects",
+            failed_ids.join(", ")
+        ))
+    };
+    RefreshSummary {
+        structured: json!({ "refreshed": refreshed, "failed": failed }),
+        warning,
     }
 }
 
@@ -697,6 +749,61 @@ mod tests {
 
         std::fs::remove_dir_all(&pa.root_path).ok();
         std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    /// Happy path (review P1-2): a clean unfiltered search reports both
+    /// registered projects refreshed and names none as failed.
+    #[test]
+    fn search_reports_a_clean_refresh_outcome() {
+        let (engine, pa, pb) = two_project_engine("search-refresh-happy");
+        let resp = call_tool(
+            &engine,
+            "waggledance_search",
+            json!({ "query": "grapefruit" }),
+        );
+        let refresh = &resp["result"]["structuredContent"]["refresh"];
+        assert!(
+            refresh["refreshed"].as_u64().unwrap() >= 1,
+            "expected at least one project refreshed: {resp}"
+        );
+        assert_eq!(refresh["failed"].as_array().unwrap().len(), 0, "{resp}");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("warning"), "{text}");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    /// Failure path (review P1-2): `summarize_refresh` is the seam a real
+    /// `refresh_stale` error (DB locked past busy_timeout, store error
+    /// mid-walk) folds through — asserted directly since inducing a real
+    /// store failure from this test would be unreliable.
+    #[test]
+    fn summarize_refresh_surfaces_a_failed_project_and_a_warning() {
+        let summary = summarize_refresh(vec![
+            ("ok-project".to_string(), Ok(3)),
+            (
+                "broken-project".to_string(),
+                Err(Error::Other("db locked".to_string())),
+            ),
+        ]);
+        assert_eq!(summary.structured["refreshed"], 1);
+        let failed = summary.structured["failed"].as_array().unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0]["project_id"], "broken-project");
+        assert_eq!(failed[0]["error"], "db locked");
+        let warning = summary.warning.expect("a failed project must warn");
+        assert!(warning.contains("broken-project"), "{warning}");
+        assert!(warning.contains("may lag disk"), "{warning}");
+    }
+
+    /// A search response with no failed projects carries no warning.
+    #[test]
+    fn summarize_refresh_is_silent_when_nothing_failed() {
+        let summary = summarize_refresh(vec![("a".to_string(), Ok(1)), ("b".to_string(), Ok(0))]);
+        assert_eq!(summary.structured["refreshed"], 2);
+        assert_eq!(summary.structured["failed"].as_array().unwrap().len(), 0);
+        assert!(summary.warning.is_none());
     }
 
     #[test]
