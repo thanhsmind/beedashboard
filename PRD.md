@@ -209,9 +209,9 @@ Thay đổi được validate và ghi **atomic** xuống `~/.waggledance/config.
 
 ### 5.5 MCP Server Interface
 
-App chạy kèm một **MCP server** (stdio hoặc HTTP/SSE transport). Bề mặt MCP được giữ **tối thiểu — đúng 1 tool** cho workflow chính; mọi thứ khác server tự lo. Nguyên tắc thiết kế: agent KHÔNG quản project, KHÔNG quản index, KHÔNG gọi nhiều bước — chỉ báo "file này, ở project root này".
+App chạy kèm một **MCP server** (stdio hoặc HTTP/SSE transport). Bề mặt MCP gồm **bốn tool**: một tool ghi (`waggledance_view_file`) cho workflow chính, và ba tool truy vấn read-only (`waggledance_search`, `waggledance_projects`, `waggledance_ask_state` — mcp-query-surface D3) để agent hỏi thẳng waggledance thay vì tự đọc file/`.bee/` rồi re-read lại. Nguyên tắc thiết kế giữ nguyên: agent KHÔNG quản project, KHÔNG quản index, KHÔNG gọi nhiều bước — chỉ báo "file này, ở project root này" (write) hoặc "tìm/hỏi cái này" (query).
 
-**FR-23 (Core — tool DUY NHẤT).** `waggledance_view_file` — làm một file xem được và trả link. Gộp thay thế `register_project` + `notify_file` + `open_file`.
+**FR-23 (Core — tool ghi).** `waggledance_view_file` — làm một file xem được và trả link. Gộp thay thế `register_project` + `notify_file` + `open_file`.
 ```
 Input:
   - project_root:  string (absolute path đến thư mục gốc project)
@@ -230,19 +230,52 @@ Server tự xử lý (agent không cần biết):
 
 Một lời gọi, hai tham số, không tiền-đăng-ký. Đây là 90% workflow: agent tạo/sửa file → có link → show cho user.
 
-**FR-24.** Transport & bind: MCP mặc định `stdio`; khi bật HTTP/SSE thì bind `127.0.0.1` mặc định (NFR-05), phải config rõ ràng mới expose ra network.
+**FR-25.** `waggledance_search` — full-text search FTS5 trên mọi project đã đăng ký (mặc định), hoặc thu hẹp về một project (mcp-query-surface D1).
+```
+Input:
+  - query:   string, required (full-text query)
+  - project: string, optional (project id để thu hẹp search)
+  - limit:   integer, optional (số hit tối đa, mặc định 10)
+Output (structuredContent.hits[]):
+  - project_id, rel_path, title, excerpt (có <mark>), score
+```
+Trước khi search, server re-index các file đã đổi trên đĩa của (các) project bị đụng tới —
+lọc theo `project` nếu có, ngược lại mọi project đã đăng ký — nên kết quả không bao giờ lag so
+với đĩa (mcp-query-surface D4). Mỗi hit mang một excerpt đủ ngữ cảnh để trả lời tại chỗ, không
+phải danh sách path trơn, không phải nguyên file (mcp-query-surface D2).
+
+**FR-26.** `waggledance_projects` — liệt kê registry.
+```
+Input: (không tham số)
+Output (structuredContent.projects[]):
+  - id, name, root_path, file_count, last_seen_at
+```
+`file_count` phản ánh index như hiện trạng, có thể lag tới lần `waggledance_search` kế tiếp
+chạm vào project đó.
+
+**FR-27.** `waggledance_ask_state` — trả state `.bee/` đã parse sẵn, agent không cần tự đọc file `.bee/*`.
+```
+Input:
+  - project: string, optional (project id để lấy snapshot đầy đủ của riêng project đó)
+Output:
+  - Có project → structuredContent.project: digest đầy đủ (feature, phase, mode,
+    waiting_on_live, active, cell_counts + danh sách doing/stuck, recent_decisions, sessions,
+    handoff, attention). Project không có `.bee/` → present=false, không phải lỗi.
+  - Không có project → structuredContent.projects[]: rollup cùng shape digest, một phần tử
+    mỗi project đã đăng ký (mcp-query-surface D1).
+```
+
+**FR-24.** Transport & bind: MCP mặc định `stdio`; khi bật HTTP/SSE thì bind `127.0.0.1` mặc định (NFR-05), phải config rõ ràng mới expose ra network. Áp dụng cho cả bốn tool.
 
 #### 5.5.1 Deferred MCP tools (future — NGOÀI scope hiện tại)
 
-Các tool dưới đây **cố tình để dành** (YAGNI): chỉ thêm lại khi có nhu cầu thật, không implement ở các phase đầu. Chức năng của chúng hoặc đã gộp vào `waggledance_view_file`, hoặc đã có qua CLI (§5.6) cho người dùng ở terminal.
+Các tool dưới đây **cố tình để dành** (YAGNI): chỉ thêm lại khi có nhu cầu thật, không implement ở các phase đầu. Chức năng của chúng hoặc đã gộp vào `waggledance_view_file`, hoặc đã có qua CLI (§5.6) cho người dùng ở terminal. `waggledance_list_projects` và `waggledance_search` đã ra khỏi danh sách này — chúng đã ship làm `waggledance_projects` / `waggledance_search` (FR-25, FR-26).
 
 | Deferred tool | Vì sao hoãn / thay thế bằng |
 |---|---|
 | `waggledance_register_project` | Gộp vào `waggledance_view_file` (auto-create). Explicit vẫn có qua CLI `waggledance register`. |
 | `waggledance_notify_file` | Gộp vào `waggledance_view_file` (index ngay). Sự kiện delete/update do filesystem watcher lo (FR-08). |
 | `waggledance_open_file` | Url đã trả sẵn trong `waggledance_view_file`. Side-effect auto-navigate browser để hoãn. |
-| `waggledance_list_projects` | Có qua CLI `waggledance list` / web `/` / REST `/api/projects`. |
-| `waggledance_search` | Có qua CLI `waggledance search` / web `/search`. |
 | `waggledance_status` | Có qua CLI `waggledance status` / `/health`. Lỗi khi gọi `waggledance_view_file` cũng đủ báo server sống/chết. |
 | `waggledance_unregister_project` | Có qua CLI `waggledance unregister`. |
 

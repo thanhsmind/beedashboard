@@ -48,7 +48,7 @@ type code here.**
 | 🗂️ **Every agent, one drawer** | A slide-in list of every agent across every project, grouped by status. Switch panes without switching windows. |
 | 📖 **Read the docs** | Whole-project markdown: cross-folder links that never 404, full-text search (SQLite FTS5), Mermaid you can pan and zoom, live reload on save. |
 | 💻 **Read the code** | A second reading surface: the project's source as it sits on disk, syntax-coloured, line-numbered. For pointing at a line, not for changing it. |
-| 🤖 **Agent-native** | One MCP tool, `waggledance_view_file`, hands an agent a clickable URL the moment it writes a doc. |
+| 🤖 **Agent-native** | Four MCP tools: `waggledance_view_file` hands a clickable URL the moment an agent writes a doc; `waggledance_search`, `waggledance_projects`, and `waggledance_ask_state` let it query docs and bee state cross-project instead of re-reading files. |
 | 📱 **Conduct from a phone** | Responsive layout, sidebar drawer, light & dark. Over the LAN or an SSH tunnel. |
 | 🦀 **One binary** | Rust. No runtime, no Node, no Docker. |
 
@@ -174,14 +174,27 @@ waggledance doctor --fix
 ```
 
 Registers an MCP server for whichever of **Claude Code, Codex, and Antigravity** it detects
-on your machine — it never writes config for a tool you don't have — exposing one tool:
+on your machine — it never writes config for a tool you don't have — exposing four tools:
 
 - **`waggledance_view_file(project_root, relative_path)`** → a clickable `url` to the rendered
   file, **auto-registering** the project and indexing it on first use.
+- **`waggledance_search(query, project?, limit?)`** → full-text hits across every registered
+  project's indexed markdown, or just `project` when given. Re-indexes changed files in the
+  searched project(s) first, so results never lag disk. Each hit carries a `<mark>`-highlighted
+  excerpt — enough to answer without a follow-up read, never a bare path list or a whole file.
+  `limit` caps hit count (default 10).
+- **`waggledance_projects()`** → every registered project's `id`, `name`, `root_path`,
+  `file_count`, and `last_seen_at`. `file_count` reflects the index as-is and may lag until the
+  next search touches that project.
+- **`waggledance_ask_state(project?)`** → parsed `.bee/` state, no file reads required. Omit
+  `project` for a rollup across every registered project; pass it for one project's full
+  snapshot (feature, phase, mode, open/blocked/stuck cells, recent decisions, sessions,
+  handoff, attention). A project with no `.bee/` reports absent, never an error.
 
 Drop the snippet from [`docs/waggledance-agents-template.md`](docs/waggledance-agents-template.md)
 into your project's `AGENTS.md` / `CLAUDE.md` and your agents will hand you a viewable URL
-the moment they finish writing.
+the moment they finish writing, and can query docs and bee state cross-project instead of
+re-reading files.
 
 ---
 
