@@ -613,15 +613,6 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 .pane-strip__tab { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: var(--border-width-hairline) solid var(--color-border); border-radius: var(--radius-sm); color: var(--color-text-muted); text-decoration: none; background: var(--color-surface-raised); }
 .pane-strip__tab--active { color: var(--color-text); border-color: var(--color-action); font-weight: var(--weight-semibold); }
 .term-pane__meta { flex: 0 0 auto; color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
-/* home-terminal-header: the homepage tab's selected pane names itself in a
-   real header, not a caption. The old single muted line read as one more
-   piece of chrome above the screen; a reader scanning the tab could not tell
-   at a glance which terminal they were watching. Two lines, weighted apart —
-   who this is, then what it is running — with a hairline closing the block so
-   the header stops where the screen starts. */
-.term-pane__head { display: flex; flex-direction: column; gap: var(--space-1); padding-bottom: var(--space-2); margin-bottom: var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); }
-.term-pane__title { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; color: var(--color-text); font-size: var(--type-heading-sm-size); font-weight: var(--weight-semibold); }
-.term-pane__sub { color: var(--color-text-muted); font-size: var(--type-body-sm-size); }
 /* A pane's frame is a grid, not prose: `pre-wrap` + `word-break` re-flowed
    every long line and broke the box drawing of any TUI agent, and a fixed
    height cut the frame off behind an inner scrollbar. `pre` keeps the grid;
@@ -989,7 +980,6 @@ pub struct TerminalPaneView {
     pub kind: String,
     pub name: String,
     pub status: String,
-    pub title: String,
     pub cwd: String,
     pub workspace: String,
     pub tab: String,
@@ -1172,35 +1162,15 @@ fn terminals_tab(
 /// scroll wiring build this pane's URLs without a `data-project-id` on this
 /// page — see plan "Technical design" 2 and each function's own doc.
 ///
-/// home-terminal-parity: the identity line above the screen — project
-/// label, [`status_pill`], program and (when non-empty) title — is the same
-/// text the switcher's own `<option>` already carries (`terminals_tab`), now
-/// also readable once a pane is selected and its screen fills the tab,
-/// instead of living only inside the closed dropdown.
-///
-/// home-terminal-header: that line is now a header block, not a caption. One
-/// muted run of text set in the same small grey as every other `.term-pane__meta`
-/// on the page did not read as the name of the thing below it, and the
-/// homepage tab is the one surface where the pane's own name is the only
-/// thing telling a reader which of several terminals they are watching.
-/// `.term-pane__title` carries the identity — [`status_pill`], the project
-/// label and the pane's `workspace · tab` pair — at heading weight;
-/// `.term-pane__sub` keeps the program and (when non-empty) title in the old
-/// muted tone underneath. The `workspace · tab` pair is deliberately the same
-/// one [`pane_tab`] prints as `.term-pane__id`, so a pane reads identically
-/// whether it is named on the project page's strip or here.
+/// terminals-pane-head-dedupe: the card carries no identity header of its
+/// own — the switcher directly above it (`pane_bar`) already names the
+/// selected pane (project, `workspace · tab`, status, program), and
+/// repeating that line inside the card only pushed the screen further down
+/// a handset's viewport, the same reasoning [`pane_cards`] records for the
+/// project page.
 fn screen_frame(pane: &TerminalsMenuPane) -> String {
-    let title_suffix = if pane.view.title.is_empty() {
-        String::new()
-    } else {
-        format!(" — {}", esc(&pane.view.title))
-    };
     format!(
         r#"<div class="fg-card term-pane" data-pane-id="{pane_id}">
-  <div class="term-pane__head">
-    <div class="term-pane__title">{status_pill}<span>{project} · {workspace} · {tab}</span></div>
-    <div class="term-pane__sub">{program}{title}</div>
-  </div>
   <div class="term-screen-wrap">
     <pre class="term-screen" data-pane-id="{pane_id}" data-term-base="{base}" aria-live="polite">Loading screen…</pre>
     <div class="term-scroll" data-pane-id="{pane_id}" aria-label="Scroll {name}'s history">
@@ -1214,12 +1184,6 @@ fn screen_frame(pane: &TerminalsMenuPane) -> String {
   {controls}
 </div>"#,
         pane_id = esc(&pane.view.pane_id),
-        project = esc(&pane.project_label),
-        workspace = esc(&pane.view.workspace),
-        tab = esc(&pane.view.tab),
-        status_pill = status_pill(&pane.view.status),
-        program = esc(&pane.view.kind),
-        title = title_suffix,
         name = esc(&pane.view.name),
         base = esc(&pane.base),
         controls = pane_controls(
@@ -6474,7 +6438,6 @@ mod tests {
             kind: "claude".into(),
             name: "agent".into(),
             status: status.into(),
-            title: String::new(),
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
@@ -6647,7 +6610,6 @@ mod tests {
             kind: "claude".into(),
             name: "one".into(),
             status: "working".into(),
-            title: String::new(),
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
@@ -6718,7 +6680,6 @@ mod tests {
             kind: "claude".into(),
             name: "one".into(),
             status: "working".into(),
-            title: String::new(),
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
@@ -6740,7 +6701,6 @@ mod tests {
             kind: "claude".into(),
             name: "one".into(),
             status: "working".into(),
-            title: String::new(),
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
@@ -6765,7 +6725,6 @@ mod tests {
             kind: "claude".into(),
             name: "one".into(),
             status: "working".into(),
-            title: String::new(),
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
@@ -6797,7 +6756,6 @@ mod tests {
             kind: "claude".into(),
             name: "one".into(),
             status: "working".into(),
-            title: String::new(),
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
@@ -6859,7 +6817,6 @@ mod tests {
                 kind: "claude".into(),
                 name: "one".into(),
                 status: "working".into(),
-                title: String::new(),
                 cwd: String::new(),
                 workspace: "w1".into(),
                 tab: "t1".into(),
@@ -6869,7 +6826,6 @@ mod tests {
                 kind: "shell".into(),
                 name: String::new(),
                 status: "shell".into(),
-                title: String::new(),
                 cwd: String::new(),
                 workspace: "w1".into(),
                 tab: "t2".into(),
@@ -7293,7 +7249,6 @@ mod tests {
                 kind: "claude".into(),
                 name: "agent".into(),
                 status: "working".into(),
-                title: String::new(),
                 cwd: String::new(),
                 workspace: "w1".into(),
                 tab: pane_id.into(),
@@ -9440,7 +9395,6 @@ mod tests {
             kind: "codex".into(),
             name: "agent".into(),
             status: "blocked".into(),
-            title: String::new(),
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
@@ -9882,7 +9836,6 @@ mod tests {
             kind: "claude".into(),
             name: "agent-name-must-not-appear".into(),
             status: "working".into(),
-            title: String::new(),
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
