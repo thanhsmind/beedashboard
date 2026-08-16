@@ -76,6 +76,18 @@ pub struct AppState {
     /// way `terminal_background` guards its own interior state, one shared
     /// instance per `AppState`, cloned cheaply into every clone.
     pub scroll_tracker: Arc<PaneScrollTracker>,
+    /// home-board-perf D1: per-project cache of `read_snapshot`/`read_rollup`'s
+    /// result, keyed by a cheap stat-only fingerprint of that project's
+    /// `.bee/` and `docs/history/` trees — a repeat render with no
+    /// filesystem change under either tree reuses the previous parse
+    /// instead of re-walking every project's `.bee/**` on every `/` or
+    /// board render. `read_snapshot`/`read_rollup` themselves
+    /// (`waggledance-core::bee`) stay pure and unchanged; this cache lives
+    /// entirely in the server layer. One instance per `AppState`, shared
+    /// via its own internal `Mutex` across every clone, the same shape
+    /// `terminal_background`/`scroll_tracker` already use for their own
+    /// interior state.
+    pub bee_cache: BeeSnapshotCache,
 }
 
 /// scroll-keep-position: one pane's remembered position in the
@@ -259,6 +271,7 @@ pub async fn serve() -> Result<()> {
         terminal_background: Arc::new(crate::TerminalBackground::new()),
         notify_store,
         scroll_tracker: Arc::new(PaneScrollTracker::new()),
+        bee_cache: BeeSnapshotCache::default(),
     };
 
     // D7: reconcile the live background against whatever the config already
@@ -820,7 +833,7 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
                 // "render exactly `project_list_page`'s own output".
                 String::new()
             } else {
-                let rollups = cross_project_rollup(bee_projects).await;
+                let rollups = cross_project_rollup(st.bee_cache.clone(), bee_projects).await;
                 // card-terminals-1: the JOIN between a feature and the
                 // terminals running in its own checkout lives here, never in
                 // the view — `views::TerminalPaneView.cwd` is resolved
@@ -866,6 +879,131 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
     }
 }
 
+/// home-board-perf D1: a cheap stat-only measure of a project's `.bee/`
+/// and `docs/history/` trees, used to decide whether a cached
+/// `BeeProjectRollup` for that root is still fresh, without re-walking and
+/// re-parsing every file underneath. Two components rather than one:
+/// `entry_count` alone misses a same-count in-place edit (nothing added or
+/// removed); `max_mtime_nanos` alone misses an add+remove pair that nets
+/// back to the same latest mtime. Either changing invalidates the cache —
+/// this can only ever be stricter than a real change (a spurious miss on a
+/// filesystem whose mtime granularity is coarser than the edit), never
+/// miss one, matching D1's "never serve a stale board" correctness rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct BeeFingerprint {
+    max_mtime_nanos: i128,
+    entry_count: u64,
+}
+
+/// Recursively stats every entry under `dir` — never opens or reads a
+/// file's contents, only its directory-entry and metadata — folding each
+/// one into `count` and `max_mtime`. A directory that doesn't exist (no
+/// `.bee/`, no `docs/history/`, or a project too fresh to have either yet)
+/// or that can't be listed leaves both untouched, matching
+/// `read_snapshot`'s own "absent means empty, never an error" precedent.
+fn fingerprint_dir(dir: &std::path::Path, count: &mut u64, max_mtime: &mut i128) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        *count += 1;
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(modified) = meta.modified() {
+                if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
+                    let nanos = dur.as_nanos() as i128;
+                    if nanos > *max_mtime {
+                        *max_mtime = nanos;
+                    }
+                }
+            }
+            if meta.is_dir() {
+                fingerprint_dir(&path, count, max_mtime);
+            }
+        }
+    }
+}
+
+/// `root`'s current [`BeeFingerprint`] — `.bee/` and `docs/history/`, the
+/// only two trees `waggledance_core::bee::read_snapshot` ever reads
+/// (bee.rs:1009), stat-walked together into one fingerprint since either
+/// changing must invalidate the same cached
+/// `waggledance_core::bee::BeeProjectRollup`.
+fn compute_bee_fingerprint(root: &std::path::Path) -> BeeFingerprint {
+    let mut count = 0u64;
+    let mut max_mtime = 0i128;
+    fingerprint_dir(&root.join(".bee"), &mut count, &mut max_mtime);
+    fingerprint_dir(
+        &root.join("docs").join("history"),
+        &mut count,
+        &mut max_mtime,
+    );
+    BeeFingerprint {
+        max_mtime_nanos: max_mtime,
+        entry_count: count,
+    }
+}
+
+/// One cached entry's value half: the fingerprint it was stored under,
+/// paired with the rollup read at that moment — factored out of
+/// `BeeSnapshotCache::inner`'s type only to keep that field's own
+/// declaration readable (clippy's `type_complexity`).
+type BeeCacheEntry = (BeeFingerprint, Arc<waggledance_core::bee::BeeProjectRollup>);
+
+/// home-board-perf D1: per-project cache of
+/// `waggledance_core::bee::BeeProjectRollup`, keyed by root and guarded by
+/// its [`BeeFingerprint`] — read through [`cached_read_rollup`], never
+/// written to directly. `waggledance_core::bee::read_snapshot`/`read_rollup`
+/// stay pure and unchanged; this cache lives entirely in the server layer,
+/// the same shape `PaneScrollTracker` already gives the `/screen` routes'
+/// own per-request state.
+#[derive(Clone, Default)]
+pub struct BeeSnapshotCache {
+    inner: Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, BeeCacheEntry>>>,
+}
+
+/// Read-through cache for one project's `waggledance_core::bee::BeeProjectRollup`
+/// (`read_rollup`'s own per-root read): computes `root`'s current
+/// [`BeeFingerprint`] once, reuses the cached rollup on a match with NO
+/// filesystem walk beyond that fingerprint, and otherwise falls through to
+/// `waggledance_core::bee::read_rollup` — the exact same call
+/// `cross_project_rollup`/`bee_board` made directly before this cache
+/// existed — and caches the fresh result under the fingerprint just
+/// computed. Correctness first (D1): the fingerprint is computed BEFORE the
+/// freshness check and reused for the write below, so a cache hit and a
+/// cache store are never keyed by two different moments in time.
+fn cached_read_rollup(
+    cache: &BeeSnapshotCache,
+    root: &std::path::Path,
+) -> Arc<waggledance_core::bee::BeeProjectRollup> {
+    let fp = compute_bee_fingerprint(root);
+    {
+        let map = cache
+            .inner
+            .lock()
+            .expect("bee snapshot cache mutex poisoned");
+        if let Some((cached_fp, rollup)) = map.get(root) {
+            if *cached_fp == fp {
+                return rollup.clone();
+            }
+        }
+    }
+    let rollup = waggledance_core::bee::read_rollup(&[root.to_path_buf()])
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| waggledance_core::bee::BeeProjectRollup {
+            snapshot: waggledance_core::bee::BeeSnapshot::absent(),
+            archived_features: Vec::new(),
+        });
+    let arc = Arc::new(rollup);
+    cache
+        .inner
+        .lock()
+        .expect("bee snapshot cache mutex poisoned")
+        .insert(root.to_path_buf(), (fp, arc.clone()));
+    arc
+}
+
 /// cross-board-3: `waggledance_core::bee::read_rollup` is strictly synchronous
 /// filesystem work — `waggledance-core` deliberately forbids tokio/axum/hyper
 /// (`bee.rs:3604`), so running it directly on `index_page`'s async task
@@ -887,6 +1025,7 @@ async fn index_page(State(st): State<AppState>, Query(flag): Query<RegisterFlag>
 /// reaches the page via `read_errors`; only a wholesale panic/refusal of the
 /// task itself is dropped here).
 async fn cross_project_rollup(
+    cache: BeeSnapshotCache,
     projects: Vec<waggledance_core::domain::Project>,
 ) -> Vec<(
     waggledance_core::domain::Project,
@@ -896,19 +1035,16 @@ async fn cross_project_rollup(
         .into_iter()
         .map(|project| {
             let root = project.root_path.clone();
-            let handle = tokio::task::spawn_blocking(move || {
-                waggledance_core::bee::read_rollup(&[root])
-                    .into_iter()
-                    .next()
-            });
+            let cache = cache.clone();
+            let handle = tokio::task::spawn_blocking(move || cached_read_rollup(&cache, &root));
             (project, handle)
         })
         .collect();
 
     let mut out = Vec::with_capacity(handles.len());
     for (project, handle) in handles {
-        if let Ok(Some(rollup)) = handle.await {
-            out.push((project, rollup));
+        if let Ok(rollup) = handle.await {
+            out.push((project, (*rollup).clone()));
         }
     }
     out
@@ -1563,15 +1699,11 @@ async fn bee_board(State(st): State<AppState>, Path(id): Path<String>) -> Respon
     };
     let herdr_snapshot = st.herdr.snapshot().await.ok();
     let root = project.root_path.clone();
-    let rollup = match tokio::task::spawn_blocking(move || {
-        waggledance_core::bee::read_rollup(&[root])
-            .into_iter()
-            .next()
-    })
-    .await
+    let cache = st.bee_cache.clone();
+    let rollup = match tokio::task::spawn_blocking(move || cached_read_rollup(&cache, &root)).await
     {
-        Ok(Some(rollup)) => rollup,
-        Ok(None) | Err(_) => return not_found("this project has no .bee/ store"),
+        Ok(rollup) => rollup,
+        Err(_) => return not_found("this project has no .bee/ store"),
     };
     if !rollup.snapshot.present {
         return not_found("this project has no .bee/ store");
@@ -4666,6 +4798,10 @@ mod bee_route_tests {
             // A fresh tracker per state — no route test shares a remembered
             // scroll depth across states.
             scroll_tracker: Arc::new(PaneScrollTracker::new()),
+            // A fresh, empty bee-snapshot cache per state — no route test
+            // shares a cached rollup across states, matching every other
+            // per-state fixture above.
+            bee_cache: BeeSnapshotCache::default(),
         }
     }
 
@@ -18708,6 +18844,132 @@ mod bee_route_tests {
             spawn_blocking_at < read_rollup_at,
             "read_rollup must be called from inside the spawn_blocking closure, not before it: {body}"
         );
+    }
+
+    // --- home-board-perf D1: the per-project bee-snapshot cache ---
+
+    /// Two consecutive `cached_read_rollup` calls against an unchanged
+    /// fixture project return the identical cached `Arc` — proof that the
+    /// second call never re-ran `read_rollup`'s own full `.bee/` walk and
+    /// parse at all (a rebuild would allocate a fresh `Arc`, breaking
+    /// `Arc::ptr_eq`), only the cheap fingerprint stat-walk.
+    #[test]
+    fn cached_read_rollup_reuses_the_same_arc_when_nothing_changed() {
+        let root = fresh_root("cache-hit");
+        write_bee_project_fixture(&root, "feat-a");
+
+        let cache = BeeSnapshotCache::default();
+        let first = cached_read_rollup(&cache, &root);
+        let second = cached_read_rollup(&cache, &root);
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "an unchanged project must be served from cache, not re-walked"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Adding a new `.bee/` file (a second lane, here) changes the
+    /// fingerprint's entry count even though it may not move the tree's max
+    /// mtime forward past what a same-second edit already set — the third
+    /// call after the add must be a fresh, distinct `Arc` from the first
+    /// two, and must actually reflect the new file's content.
+    #[test]
+    fn cached_read_rollup_invalidates_on_a_bee_file_added() {
+        let root = fresh_root("cache-invalidate-bee-add");
+        write_bee_project_fixture(&root, "feat-a");
+
+        let cache = BeeSnapshotCache::default();
+        let first = cached_read_rollup(&cache, &root);
+        let second = cached_read_rollup(&cache, &root);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "no change yet: the second call must still be a cache hit"
+        );
+
+        write_bee_project_fixture(&root, "feat-b");
+        let third = cached_read_rollup(&cache, &root);
+        assert!(
+            !Arc::ptr_eq(&first, &third),
+            "adding a .bee/ file must invalidate the cache, not reuse the stale rollup"
+        );
+        assert!(
+            third.snapshot.lanes.iter().any(|l| l.feature == "feat-b"),
+            "the re-read after invalidation must see the newly added lane"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Removing a `.bee/` file (a lane deleted) is exactly the invalidation
+    /// direction an mtime-only fingerprint could miss (deletion moves
+    /// nothing's mtime forward) — the entry-count half of the fingerprint is
+    /// what must catch it here.
+    #[test]
+    fn cached_read_rollup_invalidates_on_a_bee_file_removed() {
+        let root = fresh_root("cache-invalidate-bee-remove");
+        write_bee_project_fixture(&root, "feat-a");
+        write_bee_project_fixture(&root, "feat-b");
+
+        let cache = BeeSnapshotCache::default();
+        let first = cached_read_rollup(&cache, &root);
+        assert!(
+            first.snapshot.lanes.iter().any(|l| l.feature == "feat-b"),
+            "sanity: the first read must see both lanes before either is removed"
+        );
+
+        std::fs::remove_file(root.join(".bee/lanes/feat-b.json")).unwrap();
+        let second = cached_read_rollup(&cache, &root);
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "removing a .bee/ file must invalidate the cache"
+        );
+        assert!(
+            !second.snapshot.lanes.iter().any(|l| l.feature == "feat-b"),
+            "the re-read after invalidation must no longer see the removed lane"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A change under `docs/history/<feature>/CONTEXT.md` — the other tree
+    /// `read_snapshot` reads (`feature_docs`) — must invalidate the cache
+    /// exactly like a `.bee/` change, even though it sits outside `.bee/`
+    /// entirely.
+    #[test]
+    fn cached_read_rollup_invalidates_on_a_docs_history_file_changed() {
+        let root = fresh_root("cache-invalidate-docs-history");
+        write_bee_project_fixture(&root, "feat-a");
+        write(
+            &root,
+            "docs/history/feat-a/CONTEXT.md",
+            "# Feat A\n\noriginal context body\n",
+        );
+
+        let cache = BeeSnapshotCache::default();
+        let first = cached_read_rollup(&cache, &root);
+        let second = cached_read_rollup(&cache, &root);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "no change yet: the second call must still be a cache hit"
+        );
+
+        // A same-content-length rewrite still bumps the file's mtime, which
+        // is exactly what the fingerprint's max-mtime half exists to catch.
+        std::thread::sleep(Duration::from_millis(10));
+        write(
+            &root,
+            "docs/history/feat-a/CONTEXT.md",
+            "# Feat A\n\nEDITED context body\n",
+        );
+        let third = cached_read_rollup(&cache, &root);
+        assert!(
+            !Arc::ptr_eq(&first, &third),
+            "a docs/history/ CONTEXT.md edit must invalidate the cache"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// D5/D4's core resolution, on the home page itself: an unauthenticated
