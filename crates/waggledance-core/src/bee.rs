@@ -200,6 +200,20 @@ pub struct BeeState {
     /// when the key is absent, including on an older bee version's
     /// `state.json` that never wrote it.
     pub run_state: Option<String>,
+    /// `state.json`'s `waiting_on` reduced to a single live/not-live flag
+    /// (waiting-on-badge decision) — a lenient mirror of bee's own
+    /// `waiting_on_is_live`: `true` only when `waiting_on` is a JSON object
+    /// carrying a non-empty (after trim) string `kind` AND a non-empty
+    /// (after trim) string `subject`; `null`, an absent key, a non-object
+    /// value, or an empty field all read `false`. Deliberately carries no
+    /// whitelist of `kind` values, so a `kind` bee introduces later still
+    /// reads live here. Badge semantics: a live mark means "a human is
+    /// being waited on right now" — `run_state == "awaiting-approval"`
+    /// alone must not earn the danger badge, because bee derives that
+    /// run_state whenever any gate is pending with none later approved,
+    /// and the user-invoked review gate routinely sits pending with nobody
+    /// actually waiting.
+    pub waiting_on_live: bool,
 }
 
 /// `.bee/state.json`'s or a `.bee/lanes/<feature>.json`'s
@@ -1684,6 +1698,7 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
                 .and_then(Value::as_str)
                 .map(String::from),
             run_state: v.get("run_state").and_then(Value::as_str).map(String::from),
+            waiting_on_live: waiting_on_is_live(&v),
         }),
         Err(e) => {
             read_errors.push(format!("{}: could not parse ({e})", rel_str(&path, root)));
@@ -1706,6 +1721,23 @@ fn parse_approved_gates(v: &Value) -> Option<BeeApprovedGates> {
             execution: g.get("execution").and_then(Value::as_bool),
             review: g.get("review").and_then(Value::as_bool),
         })
+}
+
+/// Reduce `state.json`'s `waiting_on` to the live/not-live flag stored on
+/// [`BeeState::waiting_on_live`] — see that field's doc comment for the
+/// exact predicate this mirrors from bee's own `waiting_on_is_live`.
+fn waiting_on_is_live(v: &Value) -> bool {
+    v.get("waiting_on")
+        .and_then(Value::as_object)
+        .map(|w| {
+            let non_empty = |key: &str| {
+                w.get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty())
+            };
+            non_empty("kind") && non_empty("subject")
+        })
+        .unwrap_or(false)
 }
 
 /// Parse a `route` object shared by `.bee/state.json` and every
@@ -9408,7 +9440,7 @@ mod tests {
         write(
             &root,
             ".bee/state.json",
-            r#"{"phase":"swarming","last_activity":"2026-08-15T15:48:08.674Z","run_state":"running"}"#,
+            r#"{"phase":"swarming","last_activity":"2026-08-15T15:48:08.674Z","run_state":"running","waiting_on":{"kind":"question","subject":"why?","session":"s1"}}"#,
         );
 
         let snap = read_snapshot(&root);
@@ -9418,6 +9450,10 @@ mod tests {
             Some("2026-08-15T15:48:08.674Z")
         );
         assert_eq!(state.run_state.as_deref(), Some("running"));
+        assert!(
+            state.waiting_on_live,
+            "a waiting_on object with a non-empty kind and subject is live"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -9434,7 +9470,40 @@ mod tests {
             .expect("an older state.json missing the new keys must still parse");
         assert!(state.last_activity.is_none());
         assert!(state.run_state.is_none());
+        assert!(
+            !state.waiting_on_live,
+            "an absent waiting_on key must never read as live"
+        );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn state_json_waiting_on_null_or_malformed_reads_not_live() {
+        let root = fresh_root("state-waiting-on-not-live");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"phase":"swarming","waiting_on":null}"#,
+        );
+        let snap = read_snapshot(&root);
+        assert!(
+            !snap.state.as_ref().unwrap().waiting_on_live,
+            "an explicit null waiting_on must read not-live"
+        );
+        std::fs::remove_dir_all(&root).ok();
+
+        let root = fresh_root("state-waiting-on-malformed");
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"phase":"swarming","waiting_on":{"kind":"question","subject":"  "}}"#,
+        );
+        let snap = read_snapshot(&root);
+        assert!(
+            !snap.state.as_ref().unwrap().waiting_on_live,
+            "a whitespace-only subject must never read as live"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
