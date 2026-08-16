@@ -10,7 +10,10 @@ use crate::fuzzy::{self, FuzzyHit};
 use crate::indexer::{self, IndexService};
 use crate::render::{self, HighlightedSource, RenderService};
 use crate::repository::SqliteStore;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 pub struct Engine {
     pub store: SqliteStore,
@@ -137,6 +140,99 @@ impl Engine {
             self.max_bytes(),
         )?;
         self.reindex_links(&project)?;
+        Ok(n)
+    }
+
+    /// Selective re-index of files whose fs mtime or size differs from the
+    /// stored `files` row (D4): re-reads/upserts only what changed, indexes
+    /// new files, and removes files that vanished from disk. Reuses the same
+    /// walk (`scan_markdown_files`) and per-file indexing
+    /// (`IndexService::index_file`/`remove_file`) `index_project` uses, so
+    /// there is exactly one walk/index code path.
+    ///
+    /// Returns the number of files actually re-read (excludes untouched
+    /// files, which are compared by metadata only — never content-read).
+    ///
+    /// Two guards keep a bad or empty scan from being read as "everything
+    /// was deleted" (plan.md Approach 1b, review finding 8): a project whose
+    /// `root_path` no longer exists on disk short-circuits before any delete
+    /// happens, and a walk that finds zero files against a non-empty index
+    /// skips the delete pass entirely (a permissions glitch or unmounted
+    /// root must never empty the index).
+    ///
+    /// Skip rule for files `index_file` would decline to store (finding 9):
+    /// an oversize file is skipped by the same `size > max_bytes` metadata
+    /// check `index_file` itself gates on, so its content is never read here
+    /// either; an unreadable path fails at the metadata stat, before any
+    /// read is attempted. A file whose content turns out to be invalid UTF-8
+    /// still costs one read attempt per stale-check while it lacks a stored
+    /// row — remembering that failure across calls would need a persisted
+    /// marker (a schema change out of scope here), so this is the cheapest
+    /// correct rule without one.
+    pub fn refresh_stale(&self, project_id: &str) -> Result<usize> {
+        let project = self
+            .store
+            .get_project(project_id)?
+            .ok_or_else(|| Error::ProjectNotFound(project_id.to_string()))?;
+
+        if !project.root_path.exists() {
+            return Ok(0);
+        }
+
+        let max_bytes = self.max_bytes();
+        let found =
+            indexer::scan_markdown_files(&project.root_path, &self.config.indexing.exclude_patterns);
+        let existing = self.store.list_files(&project.id)?;
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut n = 0usize;
+        for abs in &found {
+            let rel = indexer::rel_path_str(&project.root_path, abs);
+            if rel.is_empty() {
+                continue;
+            }
+            seen.insert(rel.clone());
+
+            // Metadata-only stat: same cost class as the mtime/size we
+            // already store, no content read.
+            let meta = match std::fs::metadata(abs) {
+                Ok(m) => m,
+                Err(_) => continue, // unreadable — no read attempted
+            };
+            if meta.len() > max_bytes {
+                continue; // oversize — mirrors index_file's own gate, no read
+            }
+            // MUST format through the identical path index_file uses
+            // (indexer.rs), or every file compares as changed (D4 review
+            // finding 10).
+            let modified_at = meta
+                .modified()
+                .ok()
+                .and_then(|t| OffsetDateTime::from(t).format(&Rfc3339).ok())
+                .unwrap_or_default();
+
+            let stale = match existing.iter().find(|f| f.rel_path == rel) {
+                None => true,
+                Some(f) => f.size_bytes != meta.len() || f.modified_at != modified_at,
+            };
+            if !stale {
+                continue;
+            }
+            if IndexService::index_file(&self.store, &project, abs, max_bytes)?.is_some() {
+                self.compute_file_links(&project, abs)?;
+                n += 1;
+            }
+        }
+
+        let vanished_root_scan = found.is_empty() && !existing.is_empty();
+        if !vanished_root_scan {
+            for f in &existing {
+                if !seen.contains(&f.rel_path) {
+                    self.remove_file(&project, &f.abs_path)?;
+                }
+            }
+        }
+
         Ok(n)
     }
 
@@ -522,5 +618,148 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- refresh_stale matrix (D4) ----
+
+    #[test]
+    fn refresh_stale_reindexes_a_modified_file() {
+        let dir = std::env::temp_dir().join(format!("waggledance-stale-mod-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "docs/a.md", "# A\noriginal body");
+
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let project = engine.register(&dir, None).unwrap();
+        assert_eq!(
+            engine.store.file_content(&project.id, "docs/a.md").unwrap(),
+            Some("# A\noriginal body".to_string())
+        );
+
+        // A different length changes size_bytes even at the same wall-clock
+        // second, so the test never depends on mtime resolution.
+        std::fs::write(dir.join("docs/a.md"), "# A\nchanged body, much longer now").unwrap();
+
+        let n = engine.refresh_stale(&project.id).unwrap();
+        assert_eq!(n, 1, "the one modified file must be re-indexed");
+        assert_eq!(
+            engine.store.file_content(&project.id, "docs/a.md").unwrap(),
+            Some("# A\nchanged body, much longer now".to_string())
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_stale_leaves_an_untouched_file_content_unread() {
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-stale-untouched-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "docs/a.md", "# A\nbody");
+
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let project = engine.register(&dir, None).unwrap();
+        let stored = engine
+            .store
+            .get_file(&project.id, "docs/a.md")
+            .unwrap()
+            .unwrap();
+
+        // Overwrite the stored *content* with a marker while keeping the
+        // stored size_bytes/modified_at exactly as they were — simulating
+        // "index says this file's fs stat is X" without touching the file on
+        // disk. If refresh_stale re-reads this file despite the metadata
+        // matching, the marker is clobbered back to the real disk content;
+        // if it correctly skips the content read, the marker survives.
+        engine
+            .store
+            .upsert_file(&stored, "MARKER_UNTOUCHED_NOT_REREAD")
+            .unwrap();
+
+        let n = engine.refresh_stale(&project.id).unwrap();
+        assert_eq!(n, 0, "an untouched file must not count as re-indexed");
+        assert_eq!(
+            engine.store.file_content(&project.id, "docs/a.md").unwrap(),
+            Some("MARKER_UNTOUCHED_NOT_REREAD".to_string()),
+            "content must not have been re-read from disk"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_stale_indexes_a_new_file() {
+        let dir = std::env::temp_dir().join(format!("waggledance-stale-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "docs/a.md", "# A\nbody");
+
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let project = engine.register(&dir, None).unwrap();
+        assert_eq!(engine.file_count(&project.id).unwrap(), 1);
+
+        write(&dir, "docs/b.md", "# B\nbrand new file");
+        let n = engine.refresh_stale(&project.id).unwrap();
+        assert_eq!(n, 1, "the one new file must be indexed");
+        assert_eq!(engine.file_count(&project.id).unwrap(), 2);
+        assert!(engine
+            .store
+            .get_file(&project.id, "docs/b.md")
+            .unwrap()
+            .is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_stale_removes_a_deleted_file() {
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-stale-del-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "docs/a.md", "# A\nbody");
+        write(&dir, "docs/b.md", "# B\nbody");
+
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let project = engine.register(&dir, None).unwrap();
+        assert_eq!(engine.file_count(&project.id).unwrap(), 2);
+
+        std::fs::remove_file(dir.join("docs/b.md")).unwrap();
+        engine.refresh_stale(&project.id).unwrap();
+
+        assert_eq!(engine.file_count(&project.id).unwrap(), 1);
+        assert!(engine
+            .store
+            .get_file(&project.id, "docs/b.md")
+            .unwrap()
+            .is_none());
+        assert!(engine
+            .store
+            .get_file(&project.id, "docs/a.md")
+            .unwrap()
+            .is_some());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refresh_stale_leaves_the_index_untouched_when_the_root_vanishes() {
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-stale-vanish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "docs/a.md", "# A\nbody");
+        write(&dir, "docs/b.md", "# B\nbody");
+
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let project = engine.register(&dir, None).unwrap();
+        assert_eq!(engine.file_count(&project.id).unwrap(), 2);
+
+        // The whole root disappears (unmounted volume, deleted checkout).
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let n = engine.refresh_stale(&project.id).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(
+            engine.file_count(&project.id).unwrap(),
+            2,
+            "a vanished root must never empty the index"
+        );
     }
 }

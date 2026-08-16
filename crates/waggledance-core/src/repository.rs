@@ -31,6 +31,10 @@ impl SqliteStore {
     fn from_conn(conn: Connection) -> Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL").ok();
         conn.pragma_update(None, "foreign_keys", "ON").ok();
+        // The MCP process and the daemon both open registry.db; WAL is on but
+        // without a busy_timeout a writer racing the watcher's reindex hits
+        // SQLITE_BUSY immediately instead of waiting (plan.md Approach 7).
+        conn.pragma_update(None, "busy_timeout", 5000).ok();
         conn.execute_batch(SCHEMA)?;
         migrate(&conn)?;
         Ok(Self {
@@ -303,7 +307,7 @@ impl SqliteStore {
             return Ok(vec![]);
         }
         let sql = "SELECT project_id, rel_path, title,
-                     snippet(files_fts, 3, '<mark>', '</mark>', '…', 12) AS excerpt,
+                     snippet(files_fts, 3, '<mark>', '</mark>', '…', 64) AS excerpt,
                      bm25(files_fts) AS score
                    FROM files_fts
                    WHERE files_fts MATCH ?1
@@ -751,5 +755,39 @@ mod tests {
 
         let by_title = s.search("deployment", None, 10).unwrap();
         assert_eq!(by_title.len(), 1);
+    }
+
+    /// D2: the snippet window is 64 tokens, not the old 12. A `>= 12`
+    /// assertion is green before this change too and proves nothing (plan.md
+    /// finding 14) — this instead counts the actual excerpt tokens against a
+    /// document long enough that the old 12-token window and the new
+    /// 64-token window produce visibly different excerpt sizes.
+    #[test]
+    fn search_snippet_window_is_wider_than_the_old_twelve_tokens() {
+        let s = SqliteStore::open_in_memory().unwrap();
+        s.upsert_project(&sample_project()).unwrap();
+        let mut words: Vec<String> = (0..80).map(|i| format!("filler{i}")).collect();
+        words.insert(40, "matchterm".to_string());
+        let content = words.join(" ");
+        s.upsert_file(&file("docs/long.md", "Long Doc"), &content)
+            .unwrap();
+
+        let hits = s.search("matchterm", Some("p1"), 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        let token_count = hits[0]
+            .excerpt
+            .replace("<mark>", "")
+            .replace("</mark>", "")
+            .split_whitespace()
+            .filter(|w| *w != "…")
+            .count();
+        // The old 12-token window could never produce more than ~13 tokens
+        // (12 plus the matched term); the new 64-token window comfortably
+        // clears 20 against this 81-word document.
+        assert!(
+            token_count > 20,
+            "excerpt should carry far more than the old 12-token window, got {token_count} tokens: {:?}",
+            hits[0].excerpt
+        );
     }
 }
