@@ -857,10 +857,19 @@
   // rule is the reason itself, not the path: a document showing a live screen
   // never force-reloads, wherever it is served from. The Kanban and Projects
   // tabs carry no `.term-screen` and keep reloading exactly as before.
+  // home-board-perf: the root index only renders `docs/history/<feature>/
+  // CONTEXT.md` markdown (via read_snapshot); a changed entry elsewhere in a
+  // project's tree cannot affect what `/` shows, so the home/no-match branch
+  // below reloads only when at least one changed entry is board-relevant.
+  function isBoardRelevant(changedEntry) {
+    var slash = changedEntry.indexOf("/");
+    if (slash === -1) return false;
+    return changedEntry.slice(slash + 1).indexOf("docs/history/") === 0;
+  }
   function shouldReload(changed) {
     if (document.querySelector(".term-screen")) return false;
     var m = location.pathname.match(/^\/p\/([^\/]+)\/(.*)$/);
-    if (!m) return true;
+    if (!m) return changed.some(isBoardRelevant);
     var pid, rest;
     try {
       pid = decodeURIComponent(m[1]);
