@@ -2170,6 +2170,16 @@
       pill.appendChild(document.createTextNode(agent.status));
       item.appendChild(pill);
 
+      // drawer-title-1: the agent's own terminal title — what it is doing
+      // right now (`AgentPaneRow.title`). Skipped when empty or when it
+      // merely repeats the name, so a titleless agent's row stays two lines.
+      if (agent.title && agent.title !== agent.name) {
+        var title = document.createElement("span");
+        title.className = "agent-drawer__suffix";
+        title.textContent = agent.title;
+        item.appendChild(title);
+      }
+
       var suffix = document.createElement("span");
       suffix.className = "agent-drawer__suffix";
       suffix.textContent = agent.project_name + " · " + agent.workspace + ":" + agent.tab;
