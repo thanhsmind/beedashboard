@@ -2971,7 +2971,6 @@ fn project_panes(
                 status: agent
                     .map(|a| a.status.as_str().to_string())
                     .unwrap_or_else(|| "shell".to_string()),
-                title: agent.map(|a| a.title.clone()).unwrap_or_default(),
                 cwd: resolved.to_string_lossy().into_owned(),
                 workspace: snapshot.workspace_label_for_id(&pane.workspace_id),
                 tab: snapshot.tab_label_for_id(&pane.tab_id),
@@ -3130,7 +3129,6 @@ fn unassigned_panes(
                 kind: agent.kind.clone(),
                 name: agent.name.clone(),
                 status: agent.status.as_str().to_string(),
-                title: agent.title.clone(),
                 cwd,
                 workspace: snapshot.workspace_label_for(agent),
                 tab: snapshot.tab_label_for(agent),
@@ -17896,19 +17894,15 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&scratch).ok();
     }
 
-    /// home-terminal-parity (plan Slice 1): the identity line above the
-    /// screen carries the selected pane's project label, its `status_pill`
-    /// and its program (`kind`) — the identity that before this feature
-    /// lived only inside the closed `<select>`'s own option text.
-    ///
-    /// home-terminal-header: that line is now a two-line header block. The
-    /// title line carries the status pill and the pane's own name — project
-    /// label plus the `workspace · tab` pair the project page's strip
-    /// already prints — and the sub line keeps the program and title in the
-    /// muted tone. Every fact the old single line carried is still asserted
-    /// here; only which of the two lines carries it has changed.
+    /// terminals-pane-head-dedupe: the selected pane's card renders no
+    /// identity header of its own — the `pane_bar` switcher directly above
+    /// it already names the pane (project, `workspace · tab`, status,
+    /// program), and repeating that identity inside the card only pushed
+    /// the screen further down a handset's viewport. The switcher itself
+    /// stays the single place that identity lives, project pane and
+    /// unassigned pane alike.
     #[tokio::test]
-    async fn terminals_tab_identity_line_names_project_status_and_program() {
+    async fn terminals_tab_pane_card_carries_no_identity_header() {
         use crate::herdr::fake::FakeHerdr;
         use crate::herdr::wire::AgentStatus;
 
@@ -17952,24 +17946,12 @@ mod bee_route_tests {
         )
         .await;
         assert!(
-            project_body.contains(r#"<div class="term-pane__head">"#),
-            "the selected pane must be named by a header block: {project_body}"
-        );
-        // `frontend-app · main` is the fake herdr's own seeded window/tab
-        // label pair — the same pair `terminal_page`'s strip is asserted
-        // against elsewhere in this module, which is the point: a pane reads
-        // identically on both surfaces.
-        assert!(
-            project_body.contains(r#"<span>proj-a · frontend-app · main</span>"#),
-            "the header's title line must name the selected pane's own project and its workspace/tab identity: {project_body}"
+            !project_body.contains(r#"<div class="term-pane__head">"#),
+            "the selected pane's card must carry no identity header of its own: {project_body}"
         );
         assert!(
-            project_body.contains(r#"<div class="term-pane__title"><span class="fg-status fg-status--warn"><span class="fg-status__dot"></span>working</span>"#),
-            "the header's title line must open with the selected pane's status pill: {project_body}"
-        );
-        assert!(
-            project_body.contains(r#"<div class="term-pane__sub">claude"#),
-            "the header's sub line must name the selected pane's program: {project_body}"
+            project_body.contains("pane-bar__current"),
+            "the switcher above the card must still name the selected pane: {project_body}"
         );
 
         let unassigned_body = body_string(
@@ -17981,8 +17963,8 @@ mod bee_route_tests {
         )
         .await;
         assert!(
-            unassigned_body.contains(r#"<span>Unassigned · docs-site · main</span>"#),
-            "an unassigned pane's header must read Unassigned rather than a project name: {unassigned_body}"
+            !unassigned_body.contains(r#"<div class="term-pane__head">"#),
+            "an unassigned pane's card must carry no identity header either: {unassigned_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -18230,7 +18212,7 @@ mod bee_route_tests {
             "no configured preset and no plain-shell button must render no create box at all: {body}"
         );
         assert!(
-            body.contains(r#"<div class="term-pane__head">"#),
+            body.contains(r#"class="fg-card term-pane""#),
             "the pane itself must still render: {body}"
         );
 
@@ -21702,11 +21684,6 @@ mod bee_route_tests {
             )),
             "no card for the shell pane: {body}"
         );
-        // home-terminal-header: matched as rendered markup, not as a bare
-        // token — `PROJECT_TAB_STYLE` now *styles* `.term-pane__head` for the
-        // homepage tab's own header block, and that rule ships on this page
-        // too. The truth being proved is unchanged: this page's pane card
-        // renders no heading element of its own.
         assert!(
             !body.contains(r#"<div class="term-pane__head">"#),
             "a pane card must carry no heading of its own: {body}"
