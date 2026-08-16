@@ -65,7 +65,7 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
 /// list was unreachable from every other page. This appends the drawer
 /// markup to `body` before delegating to `layout()`, so every production
 /// page (all ~18 [`layout`] callers below, migrated to this one) carries it
-/// and can open it from the topbar menu's own "Agents" entry
+/// and can open it from the topbar's own circular agent toggle
 /// ([`topbar_full`]). `homepage` is `true` only for [`home_page`] itself —
 /// across every one of its tabs (Kanban, Projects, Terminals), not just
 /// Terminals — since home-terminal-parity-2's locked drawer-row shape
@@ -1372,12 +1372,13 @@ fn terminal_create_controls(project_id: &str, presets: &[String], plain_shell: b
 /// agents-drawer-global: this used to render only on terminal pages and
 /// the homepage Terminals tab, each with its own floating right-edge
 /// `.agent-drawer__tab` pill as the sole affordance to open it. Now
-/// [`layout_with_drawer`] renders this on every page, and the topbar
-/// menu's own "Agents" entry ([`topbar_full`]) is the single affordance —
-/// the pill (and its CSS) is gone; only the checkbox and the `.fg-drawer`
-/// panel markup remain, and any `<label for="agent-drawer-toggle">`
-/// anywhere on the page (there is now exactly one, in the topbar menu)
-/// still opens it via the ordinary HTML `for` mechanism.
+/// [`layout_with_drawer`] renders this on every page, and the topbar's own
+/// circular agent toggle ([`topbar_full`], agents-toggle-circle) is the
+/// single affordance — the pill (and its CSS) is gone; only the checkbox
+/// and the `.fg-drawer` panel markup remain, and any `<label
+/// for="agent-drawer-toggle">` anywhere on the page (there is now exactly
+/// one, on the topbar) still opens it via the ordinary HTML `for`
+/// mechanism.
 ///
 /// home-terminal-parity-2: `homepage` marks the drawer body with
 /// `data-agent-drawer-homepage` for [`home_page`]'s own instance — the one
@@ -5747,6 +5748,14 @@ fn theme_toggle() -> &'static str {
     r#"<button id="theme-toggle" class="theme-toggle fg-btn fg-btn--ghost" title="Toggle theme">◐</button>"#
 }
 
+/// agents-toggle-circle: circular icon button that opens the global agent
+/// switch drawer ([`agent_switch_drawer`]) via `#agent-drawer-toggle`. Sits
+/// on the bar next to the theme toggle rather than inside the hamburger
+/// menu — see [`topbar_full`]'s doc comment for why.
+fn agent_toggle() -> &'static str {
+    r#"<label class="agent-toggle" for="agent-drawer-toggle" title="Agents" aria-label="Agents"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg></label>"#
+}
+
 /// Hamburger that opens the file-tree sidebar on mobile (hidden on wide
 /// screens via CSS). Only file pages carry a sidebar, so only they render it.
 fn sidebar_toggle() -> &'static str {
@@ -5779,21 +5788,25 @@ fn topbar(center: &str) -> String {
 /// on these pages is "Waggle Dance" by a locked decision (`bee-cockpit.md`),
 /// never the identifier the command line uses.
 ///
-/// The nav slot, the Agents entry and the Settings link share one menu. On
-/// a wide screen the stylesheet hides its control and lays the panel out
-/// inline, so the bar reads exactly as it did before this existed. On a
-/// narrow one the control becomes the only visible affordance and the panel
-/// drops full-width under the bar.
+/// The nav slot and the Settings link share one menu. On a wide screen the
+/// stylesheet hides its control and lays the panel out inline, so the bar
+/// reads exactly as it did before this existed. On a narrow one the control
+/// becomes the only visible affordance and the panel drops full-width under
+/// the bar.
 ///
-/// agents-drawer-global: the Agents entry is a plain `<label for=
-/// "agent-drawer-toggle">`, not a link — clicking it checks
-/// [`agent_switch_drawer`]'s own checkbox (that `id`, wherever the drawer's
-/// markup itself sits on the page) and opens the drawer, the same
-/// label-targets-a-foreign-checkbox trick the drawer's own now-removed
-/// floating pill used. `assets/app.js`'s generic `.js-menu` click handler
-/// resolves that cross-menu target so opening the drawer this way also
-/// closes this menu, rather than the drawer's own outside-click check
-/// immediately reclosing what the click just opened.
+/// agents-toggle-circle: the Agents affordance lives outside that menu —
+/// like the theme toggle, opening the agent drawer acts on this page rather
+/// than leaving it, so it stays on the bar at every width instead of
+/// collapsing into the menu at narrow ones. It is a plain `<label for=
+/// "agent-drawer-toggle">` styled as a circular icon button, not a link —
+/// clicking it checks [`agent_switch_drawer`]'s own checkbox (that `id`,
+/// wherever the drawer's markup itself sits on the page) and opens the
+/// drawer, the same label-targets-a-foreign-checkbox trick the drawer's own
+/// now-removed floating pill used. `assets/app.js`'s generic `.js-menu`
+/// click handler resolves that cross-menu target so opening the drawer this
+/// way also closes the hamburger menu if it happened to be open, rather than
+/// the drawer's own outside-click check immediately reclosing what the click
+/// just opened.
 ///
 /// The open state is a checkbox rather than a `<details>` — deliberately.
 /// `<details>` looked like the obvious fit, but a *closed* one has its
@@ -5820,10 +5833,10 @@ fn topbar_full(lead: &str, center: &str, actions: &str, nav: &str) -> String {
       <label class="topbar-menu__button" for="topbar-menu-toggle" title="Menu"><span class="menu-label">Menu</span><span aria-hidden="true">☰</span></label>
       <div class="topbar-menu__panel">
         {nav}
-        <label class="nav-link" for="agent-drawer-toggle">Agents</label>
         <a class="nav-link" href="/settings">Settings</a>
       </div>
     </div>
+    {agent_toggle}
     {toggle}
   </div>
 </header>"#,
@@ -5831,6 +5844,7 @@ fn topbar_full(lead: &str, center: &str, actions: &str, nav: &str) -> String {
         center = center,
         actions = actions,
         nav = nav,
+        agent_toggle = agent_toggle(),
         toggle = theme_toggle(),
     )
 }
@@ -6705,9 +6719,10 @@ mod tests {
     /// agents-drawer-global: `layout_with_drawer` renders the drawer on
     /// every page, not just the terminal ones — the Settings page has no
     /// terminal involvement at all, so it is the clean case that proves the
-    /// seam, not just the old terminal-only splice points. It must also
-    /// carry the topbar menu's "Agents" entry, the drawer's only remaining
-    /// affordance now that the floating right-edge pill is retired.
+    /// seam, not just the old terminal-only splice points. agents-toggle-
+    /// circle: it must also carry the on-bar circular agent toggle, the
+    /// drawer's only remaining affordance now that the floating right-edge
+    /// pill is retired and the toggle has moved out of the hamburger menu.
     #[test]
     fn every_page_renders_the_agent_switch_drawer_via_the_topbar_menu() {
         let html = settings_page(
@@ -6721,19 +6736,24 @@ mod tests {
             "a non-terminal page must still render the agent switch drawer: {html}"
         );
         assert!(
-            html.contains(r#"<label class="nav-link" for="agent-drawer-toggle">Agents</label>"#),
-            "the topbar menu must carry an Agents entry that opens the drawer: {html}"
+            html.contains(r#"<label class="agent-toggle" for="agent-drawer-toggle""#),
+            "the topbar must carry an on-bar Agents toggle that opens the drawer: {html}"
+        );
+        assert!(
+            !html.contains(r#"<label class="nav-link" for="agent-drawer-toggle">Agents</label>"#),
+            "the Agents entry must no longer sit inside the hamburger menu: {html}"
         );
         assert!(
             !html.contains("agent-drawer__tab"),
-            "the floating agent-drawer pill is retired; the topbar menu is the only affordance now: {html}"
+            "the floating agent-drawer pill is retired; the on-bar toggle is the only affordance now: {html}"
         );
     }
 
     /// Everything in the bar that navigates away from this page — the section
     /// tabs and the Settings link — lives inside one menu. The theme toggle
-    /// is not in it: it changes this page rather than leaving it, and stays
-    /// reachable in one press at every width.
+    /// and (agents-toggle-circle) the Agents toggle are not in it: both act
+    /// on this page rather than leaving it, and stay reachable in one press
+    /// at every width.
     #[test]
     fn the_bars_navigation_sits_in_one_no_script_menu() {
         let project = sample_project();
