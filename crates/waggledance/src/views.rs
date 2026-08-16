@@ -1366,72 +1366,6 @@ fn pane_controls(pane_id: &str, name: &str, attach: bool, base: Option<&str>) ->
     )
 }
 
-/// Inline wiring for [`terminal_create_controls`]'s "New shell"/preset
-/// buttons — POSTs to `create/pane` or `create/agent` and reloads the page
-/// on success so the freshly created pane joins `assets/app.js`'s own
-/// poller on the next render.
-///
-/// agent-terminal-13: not folded into `assets/app.js` — that file is not
-/// among this cell's declared files (`crates/waggledance/src/server.rs`,
-/// `crates/waggledance/src/views.rs`, `crates/waggledance-core/src/config.rs`), so the
-/// creation controls' own click wiring lives here instead, the same
-/// deliberate duplication `UNASSIGNED_TERMINAL_SCRIPT` already documents for
-/// the same reason ("a later cell to fold both into one shared script once
-/// `assets/app.js` is in scope").
-const TERMINAL_CREATE_SCRIPT: &str = r#"<script>
-(function () {
-  function postJson(url, body) {
-    return fetch(url, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  }
-  function afterCreate(promise, failMsg) {
-    promise
-      .then(function (res) {
-        if (res.ok) {
-          location.reload();
-          return;
-        }
-        return res.json().then(function (b) {
-          alert((b && b.error) || failMsg);
-        });
-      })
-      .catch(function () {
-        alert(failMsg);
-      });
-  }
-  Array.prototype.slice
-    .call(document.querySelectorAll(".term-create[data-project-id]"))
-    .forEach(function (box) {
-      var pid = box.getAttribute("data-project-id");
-      var paneBtn = box.querySelector(".term-create__pane");
-      if (paneBtn) {
-        paneBtn.addEventListener("click", function () {
-          afterCreate(
-            postJson("/p/" + encodeURIComponent(pid) + "/_terminal/create/pane", {}),
-            "could not start a shell"
-          );
-        });
-      }
-      Array.prototype.slice
-        .call(box.querySelectorAll(".term-create__agent[data-preset]"))
-        .forEach(function (btn) {
-          btn.addEventListener("click", function () {
-            afterCreate(
-              postJson("/p/" + encodeURIComponent(pid) + "/_terminal/create/agent", {
-                preset: btn.getAttribute("data-preset"),
-              }),
-              "could not start an agent"
-            );
-          });
-        });
-    });
-})();
-</script>"#;
-
 /// D8's creation controls (agent-terminal-13): a "New shell" button is
 /// always offered — plain-shell creation needs no preset — plus one button
 /// per operator-configured preset **label**, never argv (P4): the argv
@@ -1476,12 +1410,10 @@ fn terminal_create_controls(project_id: &str, presets: &[String], plain_shell: b
     format!(
         r#"<div class="term-create" data-project-id="{pid}">
   {pane_button}{preset_buttons}
-</div>
-{script}"#,
+</div>"#,
         pid = esc(project_id),
         pane_button = pane_button,
         preset_buttons = preset_buttons,
-        script = TERMINAL_CREATE_SCRIPT,
     )
 }
 
@@ -1663,156 +1595,23 @@ pub fn transcript_page(
     layout(&format!("{} · transcript", project.name), "", &body)
 }
 
-/// Inline poller/reply/keys wiring for [`unassigned_terminal_page`], scoped
-/// to `.unassigned-panes` so it never touches a project page's own panes.
-/// `assets/app.js`'s existing terminal script is not reused here — it
-/// resolves every URL from a `data-project-id` attribute
-/// (`/p/:id/_terminal/...`), and this group belongs to no project id; that
-/// file is also not among this cell's declared files. This duplicates its
-/// shape deliberately rather than inventing a different wiring convention —
-/// flagged here for a later cell to fold both into one shared script once
-/// `assets/app.js` is in scope.
-const UNASSIGNED_TERMINAL_SCRIPT: &str = r#"<script>
-(function () {
-  var POLL_MS = 1500;
-  var HERDR_DOWN_TEXT = "herdr is not running";
-  var lastRevision = {};
-
-  function screenUrl(paneId) {
-    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/screen";
-  }
-  function inputUrl(paneId) {
-    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/input";
-  }
-  function keysUrl(paneId) {
-    return "/_terminal/unassigned/" + encodeURIComponent(paneId) + "/keys";
-  }
-
-  function pollOne(el) {
-    var paneId = el.getAttribute("data-pane-id");
-    fetch(screenUrl(paneId), { credentials: "same-origin" })
-      .then(function (res) {
-        // A 502 is the one status `herdr_down_response()` (server.rs) ever
-        // sends, and only when herdr itself is unreachable — but the body
-        // still has to say so, because a tunnel or proxy in front of this
-        // page can hand back its own unrelated 502 HTML on a blip. Every
-        // other failure (a thrown fetch below, any other status, a 502
-        // whose body isn't that exact JSON) is treated as transient: the
-        // pane keeps its last good screen and just gets marked stale, never
-        // overwritten with wording that says the agent is gone.
-        if (res.status === 502) {
-          return res.json().then(function (body) {
-            if (body && body.error === HERDR_DOWN_TEXT) {
-              el.textContent = HERDR_DOWN_TEXT;
-              el.classList.remove("term-screen--stale");
-              // The next successful poll must always repaint, even if its
-              // revision happens to match whatever was last drawn before
-              // the outage — otherwise this banner never clears.
-              delete lastRevision[paneId];
-              return null;
-            }
-            el.classList.add("term-screen--stale");
-            return null;
-          });
-        }
-        if (!res.ok) { el.classList.add("term-screen--stale"); return null; }
-        return res.json();
-      })
-      .then(function (body) {
-        if (!body) return;
-        el.classList.remove("term-screen--stale");
-        if (lastRevision[paneId] === body.revision) return;
-        lastRevision[paneId] = body.revision;
-        // `body.text` is safe, pre-escaped HTML from waggledance-core's ansi
-        // translator (agent-terminal-12) — never the raw pane text — so
-        // `innerHTML` here renders ANSI colour/attribute markup rather than
-        // showing literal escape characters.
-        el.innerHTML = body.text;
-      })
-      .catch(function () {
-        // Thrown fetch (network blip, phone waking from sleep) or an
-        // unparseable 502 body — none of these confirm herdr is actually
-        // down, so the pane keeps whatever it last showed.
-        el.classList.add("term-screen--stale");
-      });
-  }
-
-  function pollAll() {
-    Array.prototype.slice
-      .call(document.querySelectorAll(".unassigned-panes .term-screen[data-pane-id]"))
-      .forEach(pollOne);
-  }
-  pollAll();
-  setInterval(pollAll, POLL_MS);
-
-  function postJson(url, body) {
-    return fetch(url, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  }
-
-  function sendReply(paneId, text, submit, input) {
-    if (!text) return;
-    postJson(inputUrl(paneId), { text: text, submit: submit })
-      .then(function (res) { if (res.ok && input) input.value = ""; })
-      .catch(function () {});
-  }
-
-  Array.prototype.slice
-    .call(document.querySelectorAll(".unassigned-panes .term-reply[data-pane-id]"))
-    .forEach(function (form) {
-      var paneId = form.getAttribute("data-pane-id");
-      var input = form.querySelector(".term-reply__text");
-      var stageBtn = form.querySelector(".term-reply__stage");
-      var approveBtn = form.querySelector(".term-reply__approve");
-      form.addEventListener("submit", function (ev) {
-        ev.preventDefault();
-        sendReply(paneId, input.value, true, input);
-      });
-      if (input) {
-        input.addEventListener("keydown", function (ev) {
-          if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
-            ev.preventDefault();
-            sendReply(paneId, input.value, true, input);
-          }
-        });
-      }
-      if (stageBtn) {
-        stageBtn.addEventListener("click", function () {
-          sendReply(paneId, input.value, false, input);
-        });
-      }
-      if (approveBtn) {
-        approveBtn.addEventListener("click", function () {
-          postJson(inputUrl(paneId), { text: "Approve", submit: true }).catch(function () {});
-        });
-      }
-    });
-
-  Array.prototype.slice
-    .call(document.querySelectorAll(".unassigned-panes .term-keys[data-pane-id]"))
-    .forEach(function (group) {
-      var paneId = group.getAttribute("data-pane-id");
-      Array.prototype.slice.call(group.querySelectorAll("button[data-key]")).forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          var key = btn.getAttribute("data-key");
-          if (!key) return;
-          postJson(keysUrl(paneId), { keys: [key] }).catch(function () {});
-        });
-      });
-    });
-})();
-</script>"#;
-
 /// `GET /_terminal/unassigned` up state (D5/D4/D6): every herdr pane whose
 /// cwd sits under no registered project root, gated identically to
 /// [`terminal_page`] (session, D7 switch, method) — this view renders only
 /// what the route already decided to hand it, so it carries no gate logic
 /// of its own. Zero panes renders a named empty state distinct from both
 /// [`terminal_page`]'s own empty wording and [`unassigned_terminal_down_page`].
+///
+/// backlog-groom-2-4: the poller/reply/keys wiring for this page used to be
+/// its own inline `<script>` const here (`UNASSIGNED_TERMINAL_SCRIPT`),
+/// duplicating `assets/app.js`'s shape by hand. It now lives in `app.js`
+/// itself, scoped to `.unassigned-panes` exactly as before, and reads its
+/// route prefix from this `<main>`'s own `data-unassigned-base` rather than
+/// a hardcoded string — the one data attribute this page needed to carry to
+/// fold cleanly. `assets/app.js`'s *other* terminal poller/posters (the
+/// `data-project-id`/`data-term-base` ones) still skip this page entirely
+/// (`unassigned-poller-guard` D1, `hasTarget`) — this is a second, separate
+/// wiring, not a merge into that one.
 pub fn unassigned_terminal_page(panes: &[TerminalPaneView]) -> String {
     let rows = pane_cards(
         panes,
@@ -1823,16 +1622,14 @@ pub fn unassigned_terminal_page(panes: &[TerminalPaneView]) -> String {
     let body = format!(
         r#"{topbar}
 {tab_style}
-<main class="fg-page">
+<main class="fg-page" data-unassigned-base="/_terminal/unassigned">
   <h2 class="fg-pagehead__title">Unassigned agents</h2>
   <p class="term-pane__meta">Agents running outside every registered project. Registering a project here never happens automatically (D5) — <a href="/">register it from the project list</a> if you want it to have its own Terminal tab.</p>
   <div class="term-panes unassigned-panes">{rows}</div>
-</main>
-{script}"#,
+</main>"#,
         topbar = topbar("<span class=\"crumb\">Unassigned agents</span>"),
         tab_style = PROJECT_TAB_STYLE,
         rows = rows,
-        script = UNASSIGNED_TERMINAL_SCRIPT,
     );
     layout("Unassigned agents", "", &body)
 }
@@ -7097,11 +6894,11 @@ mod tests {
     fn terminal_page_renders_no_preset_controls_when_none_configured() {
         let project = sample_project();
         let html = terminal_page(&project, &[], None, &[]);
-        // Checked as rendered HTML attribute shapes, not bare substrings:
-        // `TERMINAL_CREATE_SCRIPT` itself contains the literal selector
-        // `.term-create__agent[data-preset]` and `getAttribute("data-preset")`
-        // on every render regardless of preset count, so a plain
-        // `.contains("term-create__agent")` would false-negative here.
+        // Checked as rendered HTML attribute shapes, not bare substrings —
+        // `.term-create__agent`/`data-preset` never render at all with no
+        // presets configured, and views.rs ships no JS whose own literal
+        // text could false-positive a substring match (backlog-groom-2-4:
+        // the create control's click wiring now lives in `assets/app.js`).
         assert!(!html.contains("class=\"term-create__agent\""), "{html}");
         assert!(!html.contains("data-preset=\""), "{html}");
         assert!(html.contains("class=\"term-create__pane\""), "{html}");
@@ -7270,19 +7067,28 @@ mod tests {
     }
 
     /// D4: the Unassigned page has no `data-project-id` to key off, so it is
-    /// wired by its own inline `UNASSIGNED_TERMINAL_SCRIPT` rather than
-    /// `assets/app.js` — the Approve handler has to be duplicated here too,
-    /// or the button on that page would render inert.
+    /// wired by its own scoped IIFE in `assets/app.js` (backlog-groom-2-4,
+    /// keyed off `data-unassigned-base`) rather than the shared
+    /// `data-project-id`/`data-term-base` wiring above — the Approve handler
+    /// has to be duplicated in that IIFE too, or the button on that page
+    /// would render inert. Sliced from `main[data-unassigned-base]`'s own
+    /// offset in the file to pin it to that IIFE specifically, not the
+    /// shared one above (whose `postJson(inputUrl(paneId, base), ...)` call
+    /// takes a second `base` argument this one never does).
     #[test]
-    fn unassigned_terminal_script_wires_the_approve_button() {
+    fn unassigned_terminal_wiring_in_app_js_wires_the_approve_button() {
+        let script = include_str!("../assets/app.js");
+        let start = script.find("data-unassigned-base").unwrap_or_else(|| {
+            panic!("app.js must read the Unassigned page's own data-unassigned-base: {script}")
+        });
+        let section = &script[start..];
         assert!(
-            UNASSIGNED_TERMINAL_SCRIPT
-                .contains(r#"var approveBtn = form.querySelector(".term-reply__approve");"#),
-            "UNASSIGNED_TERMINAL_SCRIPT must read the Approve button: {UNASSIGNED_TERMINAL_SCRIPT}"
+            section.contains(r#"var approveBtn = form.querySelector(".term-reply__approve");"#),
+            "the Unassigned page's own wiring in app.js must read the Approve button: {section}"
         );
         assert!(
-            UNASSIGNED_TERMINAL_SCRIPT.contains(r#"postJson(inputUrl(paneId), { text: "Approve", submit: true })"#),
-            "UNASSIGNED_TERMINAL_SCRIPT's Approve handler must post the exact text Approve with submit true to that page's own input URL: {UNASSIGNED_TERMINAL_SCRIPT}"
+            section.contains(r#"postJson(inputUrl(paneId), { text: "Approve", submit: true })"#),
+            "the Unassigned page's own wiring must post the exact text Approve with submit true to that page's own input URL: {section}"
         );
     }
 
@@ -7309,10 +7115,14 @@ mod tests {
         // carries none), and its `.term-screen` panes (via `pane_cards`,
         // `attach: false`) carry no `data-term-base` either — the shared
         // poller/posters must find nothing to resolve a target from here.
+        // `data-unassigned-base` is a distinct attribute the shared
+        // `hasTarget` guard never reads (backlog-groom-2-4): it feeds only
+        // this page's own separate wiring in `assets/app.js`.
         let unassigned_html = unassigned_terminal_page(std::slice::from_ref(&pane));
         assert!(
-            unassigned_html.contains(r#"<main class="fg-page">"#),
-            "the Unassigned page's <main> must render with no data-project-id: {unassigned_html}"
+            unassigned_html
+                .contains(r#"<main class="fg-page" data-unassigned-base="/_terminal/unassigned">"#),
+            "the Unassigned page's <main> must render with no data-project-id, only its own scoped base: {unassigned_html}"
         );
         assert!(
             !unassigned_html.contains("data-project-id"),
