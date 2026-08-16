@@ -2963,7 +2963,15 @@ fn project_panes(
                 kind: agent
                     .map(|a| a.kind.clone())
                     .unwrap_or_else(|| "shell".to_string()),
-                name: agent.map(|a| a.name.clone()).unwrap_or_default(),
+                // A shell pane (no agent) has no name to borrow either, so it
+                // gets the same "shell" fallback `kind`/`status` already use
+                // (D2) — every aria-label that interpolates `name`
+                // (`Scroll {name}'s history`, `Reply to {name}`, …) stays a
+                // real accessible name instead of collapsing to "Scroll 's
+                // history".
+                name: agent
+                    .map(|a| a.name.clone())
+                    .unwrap_or_else(|| "shell".to_string()),
                 // A shell row (no agent) admits its own status rather than
                 // borrowing an `AgentStatus` it does not have (D2/D3) — the
                 // card's status pill names it "shell" instead of reading
@@ -21798,6 +21806,81 @@ mod bee_route_tests {
         assert!(
             !body.contains(r#"<div class="term-pane__head">"#),
             "a pane card must carry no heading of its own: {body}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// backlog-groom-2 D2: a shell row (no agent) gets a non-empty
+    /// accessible name -- `project_panes` falls back to `"shell"` the same
+    /// way it already does for `kind`/`status` -- so every aria-label that
+    /// interpolates the pane's name (`Scroll {name}'s history`,
+    /// `Reply to {name}`) reads a real name instead of collapsing to
+    /// `Scroll 's history` / `Reply to `. An agent pane's own name-derived
+    /// labels are unchanged.
+    #[tokio::test]
+    async fn terminal_pane_page_a_shell_rows_aria_labels_read_shell_not_empty() {
+        let dir = fresh_root("scope-shell-aria-data");
+        enable_terminal(&dir);
+        let root = fresh_root("scope-shell-aria-project");
+
+        let fake = std::sync::Arc::new(crate::herdr::fake::FakeHerdr::new());
+        let agent_pane = fake
+            .agent_start("w1", Some(&root.to_string_lossy()), &["claude".to_string()])
+            .await
+            .unwrap();
+        let shell_pane = fake
+            .tab_create("w1", Some(&root.to_string_lossy()))
+            .await
+            .unwrap();
+
+        let mut st = build_state_with_dir(&dir);
+        st.herdr = fake;
+        let project = register(&st, &root, "shell-aria");
+        let app = router(st);
+
+        let shell_resp = app
+            .clone()
+            .oneshot(terminal_pane_req(&project.id, &shell_pane.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(shell_resp.status(), StatusCode::OK);
+        let shell_body = body_string(shell_resp).await;
+        assert!(
+            shell_body.contains("aria-label=\"Scroll shell's history\""),
+            "a shell pane's scroll label must fall back to shell: {shell_body}"
+        );
+        assert!(
+            shell_body.contains("aria-label=\"Reply to shell\""),
+            "a shell pane's reply label must fall back to shell: {shell_body}"
+        );
+        assert!(
+            !shell_body.contains("Scroll 's history"),
+            "a shell pane's scroll label must never interpolate an empty name: {shell_body}"
+        );
+        assert!(
+            !shell_body.contains("Reply to \""),
+            "a shell pane's reply label must never interpolate an empty name: {shell_body}"
+        );
+
+        let agent_resp = app
+            .clone()
+            .oneshot(terminal_pane_req(&project.id, &agent_pane.pane_id, None))
+            .await
+            .unwrap();
+        assert_eq!(agent_resp.status(), StatusCode::OK);
+        let agent_body = body_string(agent_resp).await;
+        assert!(
+            agent_body.contains(&format!(
+                "aria-label=\"Scroll {}'s history\"",
+                agent_pane.name
+            )),
+            "an agent pane's own scroll label must stay unchanged: {agent_body}"
+        );
+        assert!(
+            agent_body.contains(&format!("aria-label=\"Reply to {}\"", agent_pane.name)),
+            "an agent pane's own reply label must stay unchanged: {agent_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
