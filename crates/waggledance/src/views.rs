@@ -14,6 +14,7 @@ use waggledance_core::domain::{IndexedFile, Project, RenderedPage, SearchResult}
 use waggledance_core::render::HighlightedSource;
 
 pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
+    let title = esc(title);
     format!(
         r#"<!doctype html>
 <html lang="en" data-theme="atelier" class="fg-root">
@@ -9696,6 +9697,75 @@ mod tests {
         let html = layout("My Doc", "", "<p>body</p>");
         assert!(
             html.contains("<title>My Doc · Waggle Dance</title>"),
+            "{html}"
+        );
+    }
+
+    /// review-p1-fixes D2: `layout()` interpolates the title raw into
+    /// `<title>{title} · Waggle Dance</title>`. A title carrying a
+    /// `</title><script>` payload must not be able to close the `<title>`
+    /// element and open a live `<script>` — the single sink (`esc()` inside
+    /// `layout()`) must catch every caller, including the ~12 that pass
+    /// unescaped strings (search query, doc H1, cell id, pbi title, feature,
+    /// project name, code-view paths).
+    #[test]
+    fn layout_escapes_a_title_that_tries_to_break_out_of_the_title_element() {
+        let payload = "</title><script>alert(1)</script>";
+        let html = layout(payload, "", "<p>body</p>");
+        assert!(
+            !html.contains("</title><script>"),
+            "the raw payload must not survive unescaped: {html}"
+        );
+        assert!(
+            !html.contains("<script>alert(1)</script>"),
+            "no live <script> tag must be reachable through the title: {html}"
+        );
+        assert!(
+            html.contains("&lt;/title&gt;&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "the payload's angle brackets must be escaped: {html}"
+        );
+        // The literal suffix layout() appends is never escaped.
+        assert!(html.contains("· Waggle Dance</title>"), "{html}");
+    }
+
+    /// D2: `&` and `"` in a title must also be escaped — `esc()` covers
+    /// `< > & "` and the title sits in an RCDATA context where a stray `&`
+    /// could start a malformed entity and a stray `"` could break an
+    /// attribute if the title were ever reused elsewhere.
+    #[test]
+    fn layout_escapes_ampersand_and_quote_in_title() {
+        let html = layout(r#"Fish & Chips "deluxe""#, "", "<p>body</p>");
+        assert!(
+            html.contains("<title>Fish &amp; Chips &quot;deluxe&quot; · Waggle Dance</title>"),
+            "{html}"
+        );
+    }
+
+    /// D2: a plain title with nothing to escape renders unchanged, so the
+    /// new `esc()` call is a no-op on the common case.
+    #[test]
+    fn layout_leaves_a_plain_title_unchanged() {
+        let html = layout("Projects", "", "<p>body</p>");
+        assert!(
+            html.contains("<title>Projects · Waggle Dance</title>"),
+            "{html}"
+        );
+    }
+
+    /// D2 reflected path: `search_page` builds its title from the raw query
+    /// (`format!("search: {query}")`) and never pre-escapes it — the sink
+    /// inside `layout()` must be the one thing standing between a search
+    /// query and a broken-out `<script>`.
+    #[test]
+    fn search_page_title_is_escaped_by_the_layout_sink() {
+        let project = sample_project();
+        let html = search_page(&project, "</title><script>", &[]);
+        assert!(
+            !html.contains("</title><script>"),
+            "the raw query must not survive unescaped into the title: {html}"
+        );
+        assert!(
+            html.contains("<title>search: &lt;/title&gt;&lt;script&gt; · Waggle Dance</title>"),
             "{html}"
         );
     }
