@@ -1928,7 +1928,18 @@ fn parse_cell(path: &Path, root: &Path) -> Result<BeeCell, String> {
 /// descends into `archive/` (`archived_cells_contribute_to_no_count`), and
 /// this function does not change that — the main board's snapshot-wide
 /// buckets and KPIs stay archive-free.
+///
+/// `feature` is gated through [`validate_feature_name`] (review-p1-fixes
+/// D4) before it is ever joined onto `dir`: `bee_feature_detail` passes
+/// this route's `:feature` URL segment straight through, and axum
+/// percent-decodes a path param after routing, so a segment can arrive
+/// containing a decoded `/`, `\`, or a `..`/`.` component. A name the gate
+/// rejects returns an empty `Vec` here — no [`PathBuf`] is built and no
+/// read is attempted, matching [`promote_proposals_path`]'s own guard.
 pub fn read_archived_cells(root: &Path, feature: &str) -> Vec<BeeCell> {
+    if !validate_feature_name(feature) {
+        return Vec::new();
+    }
     let dir = root.join(".bee").join("cells").join("archive").join(feature);
     if !dir.is_dir() {
         return Vec::new();
@@ -2814,12 +2825,15 @@ fn reduce_embedded_path(path: &str, root: &Path) -> String {
 }
 
 /// The only gate a `feature` name passes through before it is ever joined
-/// onto a filesystem path — see [`promote_proposals_path`], the sole call
-/// site. `feature` is unvalidated free text everywhere this module reads
-/// it — `.bee/state.json`'s active feature, a `.bee/lanes/*.json` record,
-/// a `.bee/cells/*.json` record — and none of those three sources is under
-/// this code's control, so this check runs the same way regardless of
-/// which one a name came from.
+/// onto a filesystem path — every call site ([`promote_proposals_path`],
+/// [`feature_docs_dir`], and [`read_archived_cells`], the last added for
+/// review-p1-fixes D4) runs this same check first. `feature` is
+/// unvalidated free text everywhere this module reads it — `.bee/state.json`'s
+/// active feature, a `.bee/lanes/*.json` record, a `.bee/cells/*.json`
+/// record, and (for `read_archived_cells`) a percent-decoded `:feature`
+/// URL segment `bee_feature_detail` passes straight through — and none of
+/// those sources is under this code's control, so this check runs the
+/// same way regardless of which one a name came from.
 ///
 /// Rejected: an empty string; a leading `.` (this alone covers a bare `.`
 /// or `..` component, since both start with `.`, as well as any
@@ -3789,6 +3803,37 @@ mod tests {
         assert_eq!(snap.buckets.waiting.len(), 0);
         assert!(!snap.active, "the archived open cell must not flip active");
         assert!(snap.buckets.done.iter().all(|c| c.id == "live"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_archived_cells_rejects_traversal_and_separators() {
+        let root = fresh_root("archive-traversal");
+
+        // A normal feature slug still reads its own archived cells.
+        write(&root, ".bee/cells/archive/demo/archived-1.json", &cell_json("archived-1", "capped"));
+        let normal = read_archived_cells(&root, "demo");
+        assert_eq!(normal.len(), 1, "a normal feature slug must still read its archived cells");
+        assert_eq!(normal[0].id, "archived-1");
+
+        // A trap cell sits at every location an unguarded join would land
+        // on for each rejected feature below — proof the guard runs before
+        // the join and the read, not merely that the fixture happens to
+        // miss the resolved path.
+        write(&root, ".bee/etc/trap.json", &cell_json("trap-etc", "capped")); // '../../etc'
+        write(&root, ".bee/trap.json", &cell_json("trap-bee", "capped")); // '../..'
+        write(&root, ".bee/cells/archive/a/b/trap.json", &cell_json("trap-ab", "capped")); // 'a/b'
+        write(&root, ".bee/cells/archive/trap-empty.json", &cell_json("trap-empty", "capped")); // ''
+
+        for feature in ["../../etc", "../..", "a/b", ""] {
+            let cells = read_archived_cells(&root, feature);
+            assert!(
+                cells.is_empty(),
+                "feature {feature:?} must return an empty Vec and read nothing, got {:?}",
+                cells.iter().map(|c| &c.id).collect::<Vec<_>>()
+            );
+        }
 
         std::fs::remove_dir_all(&root).ok();
     }
