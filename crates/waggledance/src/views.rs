@@ -2067,6 +2067,11 @@ html[data-scheme="dark"] .bee-hub-theme {
 .bee-hub__summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); cursor: pointer; list-style: none; }
 .bee-hub__summary::-webkit-details-marker { display: none; }
 .bee-hub__summary:focus-visible { outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }
+/* Card titles are list entries under a `.bee-panel__subhead` column header,
+   not headings of their own -- cap them at the same size as that header
+   (they'd otherwise inherit the larger `--type-heading-size` from
+   `.fg-card__title`, outweighing the column name above them). */
+.bee-hub__summary .fg-card__title { font-size: var(--type-heading-sm-size); }
 /* Same rotation `.chap-folders__chev` uses (app.css) for its own disclosure
    chevron, keyed off the native `[open]` attribute a `<details>` toggles
    itself rather than that pattern's own `.is-open` class. */
