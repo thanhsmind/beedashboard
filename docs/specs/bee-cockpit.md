@@ -94,8 +94,16 @@ three differences that follow from having more than one project in view:
 
 Reading every project's store is more work than reading one, so it is done off to
 the side and for all projects at once, never one after another while the page
-waits. The per-project board is untouched by any of this: it keeps its own address
-and renders exactly what it rendered before.
+waits. A project's rolled-up reading is also remembered between requests: a repeat
+render reuses the last reading unless that project's store or its feature history
+has actually changed since, so opening the front page again is cheap and only a
+project that moved is read afresh. The per-project board is untouched by any of
+this: it keeps its own address and renders exactly what it rendered before.
+
+The front page also refreshes itself only when the change concerns it: an edit
+somewhere in a project that has nothing to do with the board — a note, a readme —
+no longer reloads the board, which reloads on its own feature-history content, not
+on every file a project happens to hold.
 
 ## The reading order — and why it is the feature
 
