@@ -1184,6 +1184,12 @@
       // absent (so `screenUrl` falls back to `projectId`) on the project
       // and Unassigned pages, unchanged.
       var base = validTermBase(screenEl.getAttribute("data-term-base"));
+      // unassigned-poller-guard D1: same bail-out the reply form and key
+      // group blocks already carry — no resolvable target for this pane's
+      // history controls (the Unassigned page's own scoped script owns its
+      // panes instead), so Older/Newer/Live are never wired to post
+      // `/p/null/...`.
+      if (!hasTarget(base, projectId)) return;
       var olderBtn = group.querySelector('[data-scroll="older"]');
       var newerBtn = group.querySelector('[data-scroll="newer"]');
       var liveBtn = group.querySelector('[data-scroll="live"]');

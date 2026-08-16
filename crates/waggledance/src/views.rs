@@ -854,11 +854,18 @@ const PROJECT_TAB_STYLE: &str = r#"<style>
 /// (`pane_cards`/`transcript_cards`'s `empty_msg`) already says so, and an
 /// empty strip would say it twice. No JavaScript: these are links, and one
 /// pane per page means `assets/app.js` polls one screen instead of N.
+///
+/// `link` builds each pane's own href from its pane id — D7: the strip's
+/// three callers no longer share one `project_id` to compose a link from
+/// (a homepage tab spans projects and includes panes belonging to none), so
+/// each caller supplies the link it wants, and this function stays ignorant
+/// of what shape that link takes. [`terminal_page`] and [`transcript_page`]
+/// pass a closure reproducing today's `/p/{id}/_{kind}/pane/{pane_id}`
+/// exactly, so their rendered output is unchanged.
 fn pane_strip(
-    project_id: &str,
-    kind: &str,
     panes: &[TerminalPaneView],
     selected: Option<&str>,
+    link: &dyn Fn(&str) -> String,
 ) -> String {
     if panes.is_empty() {
         return String::new();
@@ -866,22 +873,21 @@ fn pane_strip(
     let mut out = String::from(r#"<nav class="pane-strip" aria-label="Panes">"#);
     for p in panes {
         let active = selected == Some(p.pane_id.as_str());
-        out.push_str(&pane_tab(project_id, kind, p, active, ""));
+        out.push_str(&pane_tab(&link(&p.pane_id), p, active, ""));
     }
     out.push_str("</nav>");
     out
 }
 
-/// One entry in the pane strip. `extra` adds classes to the anchor — the pane
-/// bar uses it to mark the standalone copy of the active tab it shows on a
-/// narrow screen, where the strip itself is inside the menu.
-fn pane_tab(
-    project_id: &str,
-    kind: &str,
-    p: &TerminalPaneView,
-    active: bool,
-    extra: &str,
-) -> String {
+/// One entry in the pane strip. `link` is the pane's own href, already built
+/// by the caller (D7) — this function only escapes and places it, the same
+/// way it already escaped the `project_id`/`pane_id` pair it used to compose
+/// that href from; `esc` is a plain character replace, so escaping the
+/// composed string here is byte-identical to escaping each part before
+/// concatenating it. `extra` adds classes to the anchor — the pane bar uses
+/// it to mark the standalone copy of the active tab it shows on a narrow
+/// screen, where the strip itself is inside the menu.
+fn pane_tab(link: &str, p: &TerminalPaneView, active: bool, extra: &str) -> String {
     let cls = match (active, extra.is_empty()) {
         (true, true) => "pane-strip__tab pane-strip__tab--active".to_string(),
         (true, false) => format!("pane-strip__tab pane-strip__tab--active {extra}"),
@@ -889,11 +895,9 @@ fn pane_tab(
         (false, false) => format!("pane-strip__tab {extra}"),
     };
     format!(
-        r#"<a class="{cls}" href="/p/{pid}/_{kind}/pane/{pane_id}"><span class="term-pane__id">{workspace} · {tab}</span> {status_pill}<span class="term-pane__meta">{program}</span></a>"#,
+        r#"<a class="{cls}" href="{href}"><span class="term-pane__id">{workspace} · {tab}</span> {status_pill}<span class="term-pane__meta">{program}</span></a>"#,
         cls = cls,
-        pid = esc(project_id),
-        kind = kind,
-        pane_id = esc(&p.pane_id),
+        href = esc(link),
         workspace = esc(&p.workspace),
         tab = esc(&p.tab),
         status_pill = status_pill(&p.status),
@@ -910,14 +914,16 @@ fn pane_tab(
 /// narrow row, once inside the strip where it keeps its place among its
 /// siblings. Only one of the two is ever displayed, so a reader — including
 /// one using a screen reader — meets a single copy.
+///
+/// `link` is [`pane_strip`]'s own per-pane link builder, threaded straight
+/// through (D7).
 fn pane_bar(
-    project_id: &str,
-    kind: &str,
     panes: &[TerminalPaneView],
     selected: Option<&str>,
     create: &str,
+    link: &dyn Fn(&str) -> String,
 ) -> String {
-    let strip = pane_strip(project_id, kind, panes, selected);
+    let strip = pane_strip(panes, selected, link);
     if strip.is_empty() {
         // No panes to switch between: there is nothing for a menu to hold,
         // and the creation controls (when the page has any) stand alone.
@@ -927,7 +933,7 @@ fn pane_bar(
         .iter()
         .find(|p| selected == Some(p.pane_id.as_str()))
         .or_else(|| panes.first())
-        .map(|p| pane_tab(project_id, kind, p, true, "pane-bar__current"))
+        .map(|p| pane_tab(&link(&p.pane_id), p, true, "pane-bar__current"))
         .unwrap_or_default();
     format!(
         r#"<div class="pane-bar js-menu">
@@ -1225,7 +1231,19 @@ fn status_pill(status: &str) -> String {
 /// shares this card markup but has no project-scoped
 /// `/p/:id/_terminal/:pane_id/attach` route to upload against (plan finding
 /// 7), so [`unassigned_terminal_page`] passes `false` and renders none of it.
-fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str, attach: bool) -> String {
+///
+/// `base`, when `Some`, is threaded straight into every rendered pane's
+/// [`pane_controls`] call (D5) — a homepage tab caller supplies its selected
+/// pane's own base since it has no single `data-project-id` to fall back on.
+/// [`terminal_page`] and [`unassigned_terminal_page`] both pass `None`:
+/// their controls keep resolving through the project-scoped fallback and
+/// render byte-identical markup to before this cell.
+fn pane_cards(
+    panes: &[TerminalPaneView],
+    empty_msg: &str,
+    attach: bool,
+    base: Option<&str>,
+) -> String {
     if panes.is_empty() {
         return format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_msg));
     }
@@ -1247,7 +1265,7 @@ fn pane_cards(panes: &[TerminalPaneView], empty_msg: &str, attach: bool) -> Stri
 </div>"#,
             pane_id = esc(&p.pane_id),
             name = esc(&p.name),
-            controls = pane_controls(&p.pane_id, &p.name, attach, None),
+            controls = pane_controls(&p.pane_id, &p.name, attach, base),
         ));
     }
     out
@@ -1497,15 +1515,16 @@ pub fn terminal_page(
 ) -> String {
     let empty_msg = "No agents are running under this project right now.";
     let rows = match selected.and_then(|pid| panes.iter().find(|p| p.pane_id == pid)) {
-        Some(pane) => pane_cards(std::slice::from_ref(pane), empty_msg, true),
-        None => pane_cards(&[], empty_msg, true),
+        Some(pane) => pane_cards(std::slice::from_ref(pane), empty_msg, true, None),
+        None => pane_cards(&[], empty_msg, true, None),
     };
+    // D7: reproduces today's `/p/{id}/_terminal/pane/{pane_id}` exactly, so
+    // this page's own links are unchanged.
     let bar = pane_bar(
-        &project.id,
-        "terminal",
         panes,
         selected,
         &terminal_create_controls(&project.id, presets, true),
+        &|pane_id: &str| format!("/p/{}/_terminal/pane/{}", project.id, pane_id),
     );
     // `data-project-id` lets `assets/app.js`'s screen poller build each
     // pane's `/p/:id/_terminal/:pane_id/screen` URL without threading the id
@@ -1581,7 +1600,11 @@ pub fn transcript_page(
         Some(pane) => transcript_cards(std::slice::from_ref(pane), empty_msg),
         None => transcript_cards(&[], empty_msg),
     };
-    let bar = pane_bar(&project.id, "transcript", panes, selected, "");
+    // D7: reproduces today's `/p/{id}/_transcript/pane/{pane_id}` exactly, so
+    // this page's own links are unchanged.
+    let bar = pane_bar(panes, selected, "", &|pane_id: &str| {
+        format!("/p/{}/_transcript/pane/{}", project.id, pane_id)
+    });
     // `data-project-id` lets `assets/app.js`'s transcript poller build each
     // pane's `/p/:id/_terminal/:pane_id/transcript` URL, mirroring the
     // screen poller's own `data-project-id` use on `terminal_page`.
@@ -1764,6 +1787,7 @@ pub fn unassigned_terminal_page(panes: &[TerminalPaneView]) -> String {
         panes,
         "No agents are running outside a registered project right now.",
         false,
+        None,
     );
     let body = format!(
         r#"{topbar}
@@ -6641,6 +6665,77 @@ mod tests {
         assert!(
             html[row_start..row_end].contains("class=\"term-create__pane\""),
             "New shell must share the pane strip's row: {html}"
+        );
+    }
+
+    /// homepage-terminal-full D7: `pane_tab`/`pane_strip`/`pane_bar` now
+    /// take a per-pane link the caller builds instead of composing one from
+    /// a single `project_id` — the standalone terminal page's own links
+    /// must still be exactly what they were before that change.
+    #[test]
+    fn terminal_page_pane_links_are_unchanged() {
+        let project = sample_project();
+        let panes = vec![TerminalPaneView {
+            pane_id: "w1:p1".into(),
+            kind: "claude".into(),
+            name: "one".into(),
+            status: "working".into(),
+            title: String::new(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+        }];
+        let html = terminal_page(&project, &panes, Some("w1:p1"), &[]);
+        assert!(
+            html.contains(r#"href="/p/proj-1/_terminal/pane/w1:p1""#),
+            "the pane's link must reproduce today's `/p/{{id}}/_terminal/pane/{{pane_id}}` shape: {html}"
+        );
+    }
+
+    /// homepage-terminal-full D7: the transcript page's own pane links keep
+    /// their `_transcript` shape, unchanged by the same signature change.
+    #[test]
+    fn transcript_page_pane_links_are_unchanged() {
+        let project = sample_project();
+        let panes = vec![TerminalPaneView {
+            pane_id: "w1:p1".into(),
+            kind: "claude".into(),
+            name: "one".into(),
+            status: "working".into(),
+            title: String::new(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+        }];
+        let html = transcript_page(&project, &panes, Some("w1:p1"));
+        assert!(
+            html.contains(r#"href="/p/proj-1/_transcript/pane/w1:p1""#),
+            "the pane's link must reproduce today's `/p/{{id}}/_transcript/pane/{{pane_id}}` shape: {html}"
+        );
+    }
+
+    /// homepage-terminal-full D5 (risk map): `pane_cards`' two current
+    /// callers both pass `None` for `base`, so the standalone page's
+    /// controls keep resolving through the page-root `data-project-id`
+    /// fallback and must never carry `data-term-base` themselves — only a
+    /// future project-less caller (a homepage tab) would supply one.
+    #[test]
+    fn terminal_page_controls_carry_no_data_term_base() {
+        let project = sample_project();
+        let panes = vec![TerminalPaneView {
+            pane_id: "w1:p1".into(),
+            kind: "claude".into(),
+            name: "one".into(),
+            status: "working".into(),
+            title: String::new(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+        }];
+        let html = terminal_page(&project, &panes, Some("w1:p1"), &[]);
+        assert!(
+            !html.contains("data-term-base"),
+            "the standalone page's controls must not carry data-term-base: {html}"
         );
     }
 
