@@ -15,7 +15,7 @@ bee:
 
 ## What shipped
 
-- **unassigned-poller-guard-1** — Added a shared hasTarget(base, projectId) helper in app.js and used it as a per-element bail-out in the screen poller (pollOne) and the two posters loops (forms/keyGroups, covering input/keys/attach) so no element without a valid data-term-base or a page projectId ever fetches/posts /p/null/.... Rust boundary test in views.rs pins the markup contract (Unassigned page's `<main>` has no data-project-id and its panes carry no data-term-base; the project page's `<main>` carries data-project-id; the homepage Terminals tab's pane carries data-term-base). cargo test --workspace: 1023 passed. JS guard itself has no repo harness — manual browser check recorded in the test doc comment: on /_terminal/unassigned no /p/null request fires across several poll ticks and Send posts once. (1 file(s) changed)
+- **unassigned-poller-guard-1** — Added a shared hasTarget(base, projectId) helper in app.js and used it as a per-element bail-out in the screen poller (pollOne) and all three poster loops (forms, keyGroups, and the scroll Older/Newer/Live group — covering input/keys/attach) so no element without a valid data-term-base or a page projectId ever fetches/posts /p/null/.... Rust boundary test in views.rs pins the markup contract (Unassigned page's `<main>` has no data-project-id and its panes carry no data-term-base; the project page's `<main>` carries data-project-id; the homepage Terminals tab's pane carries data-term-base). cargo test --workspace: 1023 passed. JS guard itself has no repo harness — manual browser check recorded in the test doc comment: on /_terminal/unassigned no /p/null request fires across several poll ticks and Send posts once. (2 files changed: app.js, views.rs)
 
 ## Verify
 

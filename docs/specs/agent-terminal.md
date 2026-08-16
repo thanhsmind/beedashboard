@@ -197,8 +197,10 @@ implementation. Code entry points are listed in `reading-map.md`.
   record for why), under a hard cap of 1.5 seconds from the text write. On
   the cap, or on any failure to read the screen, the Enter is sent anyway:
   the worst case is the old racy behaviour, never a silently dropped reply.
-  Staging waits for nothing, and a submit with no text (the Approve shape)
-  sends only its Enter, immediately.
+  Staging waits for nothing. A submit carrying no text at all sends only
+  its Enter, immediately — though no current page produces that shape: the
+  Approve control submits the literal word "Approve" as its text, so it
+  takes the settle wait like any other reply.
 - **Afterwards:** the agent's next screen poll reflects whatever it did with
   the input.
 

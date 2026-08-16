@@ -44,12 +44,16 @@ terminal to stop changing:
 - then it **watches the screen** every 100ms and treats it as settled the
   first time two consecutive looks are identical;
 - with a **hard cap of 1.5 seconds** measured from the text write. On the
-  cap, on a read failure, on any error at all, the Enter is sent anyway.
-  A person's submit is never dropped because the screen would not hold
-  still — the worst case is the old behaviour, never a silently lost reply.
+  cap, on a read failure, on any error from the settle poll, the Enter is
+  sent anyway. A person's submit is never dropped because the screen would
+  not hold still — the worst case is the old behaviour, never a silently
+  lost reply.
 
 Measured against a real agent terminal: the wait ended at 352ms with the
 image already resolved into a chip in the composer, and the Enter submitted.
+(352ms is the wait's own floor — the quiet window plus one poll — so that
+run proves the submit landed, while the text comparison itself is pinned by
+the mock-socket tests, not by this measurement.)
 
 ## What "the screen stopped changing" means
 
@@ -75,5 +79,6 @@ reader will find it before deciding to simplify it back.
   them would leave every reply unsent in the composer.
 - Staging is untouched: a Stage still writes the text and presses nothing,
   with no waiting at all.
-- A submit with no text — the Approve button's shape — still sends only the
-  Enter, immediately.
+- A submit with no text still sends only the Enter, immediately — an API
+  shape with no current web caller: the Approve button submits the literal
+  text `Approve` and takes the settle wait like any other reply.
