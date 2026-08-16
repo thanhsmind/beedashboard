@@ -349,6 +349,22 @@ anyone who can reach the daemon.
   read and drive every pane on the host. The terminal switch and the
   Unassigned switch are policy for an operator who already trusts everyone
   who can reach the port; neither is a substitute for that front door.
+- **The host boundary the daemon does enforce.** Every request is checked
+  against the machine it claims to be talking to: a request whose declared
+  host is not the local machine (or a hostname the operator configured) is
+  refused outright, before any route runs. This holds a page open in an
+  ordinary browser to the loopback address the daemon actually answers on, so
+  a page served from somewhere else — or one tricked into resolving an
+  outside name to this machine — cannot reach the terminal routes at all,
+  and cannot forge the settings submission described above from a foreign
+  origin. It narrows, but does not replace, the front-door condition: a
+  proxy that presents the daemon under an operator-configured hostname still
+  needs its own authentication.
+- **Untrusted text never executes.** Everything the daemon renders into a
+  page — a document's own words, a search term typed into the box, a
+  project's name, a pane's labels — is treated as text, never as markup, so
+  a document or a link crafted to smuggle a script cannot run one in the
+  daemon's own page and reach the terminal switches from the inside.
 - **Afterwards:** turning the switch off immediately closes every gated
   route; turning it back on immediately reopens them — there is no
   credential to regenerate or session to re-establish either way.
