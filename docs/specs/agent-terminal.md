@@ -185,6 +185,20 @@ implementation. Code entry points are listed in `reading-map.md`.
   actions — reading the screen, sending text, sending a key, reading the
   transcript — is refused unless the target agent already belongs to this
   project, exactly like viewing the terminal itself.
+- **When a reply is submitted (text sent with the explicit choice to press
+  Enter), the Enter waits for the pane to settle first.** Placing the text and
+  pressing Enter are two separate acts, and an agent that has to digest the
+  text — reading an attached image off disk into a chip, for instance — would
+  swallow an Enter that lands mid-digestion, leaving the whole reply sitting
+  staged. So between the two, the sender waits a quiet window of 250
+  milliseconds, then watches the pane's screen every 100 milliseconds and
+  treats it as settled the first time two consecutive looks show identical
+  **text** (the pane's own change counter is not trusted — see the delivery
+  record for why), under a hard cap of 1.5 seconds from the text write. On
+  the cap, or on any failure to read the screen, the Enter is sent anyway:
+  the worst case is the old racy behaviour, never a silently dropped reply.
+  Staging waits for nothing, and a submit with no text (the Approve shape)
+  sends only its Enter, immediately.
 - **Afterwards:** the agent's next screen poll reflects whatever it did with
   the input.
 

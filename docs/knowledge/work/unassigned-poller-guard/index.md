@@ -1,6 +1,3 @@
----
-okf_version: 0.1
----
 <!--
 GENERATED FILE — do not hand-edit.
 Rendered by `bee knowledge index` from concept frontmatter inside docs/knowledge/ (okf-foundation D21).
@@ -9,12 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# Knowledge Bundle
+# work/unassigned-poller-guard/
 
-## Sections
+## Concepts
 
-- [work/](work/index.md) — 31 concept(s)
-
-## Critical patterns
-
-None.
+- [unassigned-poller-guard — delivery](delivery.md) — Delivery record for work item unassigned-poller-guard: a page never polls or posts to a pane it cannot address — no more /p/null requests from the Unassigned page.
