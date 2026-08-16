@@ -1278,12 +1278,11 @@ mod tests {
             let started = tokio::time::Instant::now();
             client.send_input("w1:p1", "hello", true).await.unwrap();
             let elapsed = started.elapsed();
-            let outcome: Vec<Value> = server
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|(value, _)| value)
-                .collect();
+            // Keep the arrival Instant the mock already produces (rather
+            // than discarding it) -- it is what lets this test pin the
+            // poll loop's own pacing at socket.rs:313, not just that a
+            // read happened at all.
+            let outcome: Vec<(Value, tokio::time::Instant)> = server.await.unwrap();
             (elapsed, outcome)
         })
         .await
@@ -1299,7 +1298,7 @@ mod tests {
             TEST_SETTLE_MAX_WAIT
         );
 
-        let last = outcome.last().expect("at least the enter request");
+        let last = &outcome.last().expect("at least the enter request").0;
         assert_eq!(
             last["method"], "pane.send_input",
             "the cap must still let the Enter through: {outcome:?}"
@@ -1309,10 +1308,50 @@ mod tests {
             json!(["enter"]),
             "the submit must never be dropped for an unsettled screen: {outcome:?}"
         );
+
+        let read_arrivals: Vec<tokio::time::Instant> = outcome
+            .iter()
+            .filter(|(value, _)| value["method"] == "pane.read")
+            .map(|(_, at)| *at)
+            .collect();
         assert!(
-            outcome.iter().any(|r| r["method"] == "pane.read"),
-            "the settle-wait poll must have run at least once before the cap sent \
+            read_arrivals.len() >= 2,
+            "the settle-wait poll must have run more than once before the cap sent \
              the Enter anyway: {outcome:?}"
+        );
+
+        // (a) Pin the loop's own pacing: consecutive pane.read arrivals
+        // must be spaced by roughly TEST_SETTLE_POLL_INTERVAL. Deleting or
+        // zeroing the poll sleep at socket.rs:313 collapses the loop into
+        // a busy-spin, so consecutive arrivals land back-to-back instead.
+        // A jitter floor of 80% of the nominal interval absorbs ordinary
+        // scheduler noise on a loaded box without letting a collapsed
+        // sleep pass.
+        let min_expected_gap = TEST_SETTLE_POLL_INTERVAL.mul_f64(0.8);
+        let min_gap = read_arrivals
+            .windows(2)
+            .map(|pair| pair[1].saturating_duration_since(pair[0]))
+            .min()
+            .expect("read_arrivals.len() >= 2 guarantees at least one window");
+        assert!(
+            min_gap >= min_expected_gap,
+            "consecutive pane.read arrivals must be spaced by roughly the poll \
+             interval ({TEST_SETTLE_POLL_INTERVAL:?}, jitter floor {min_expected_gap:?}) -- \
+             got a gap as small as {min_gap:?}, suggesting the poll sleep at \
+             socket.rs:313 is missing or too short: {outcome:?}"
+        );
+
+        // (b) Pin the loop's own ceiling: a busy-spinning poll (the same
+        // missing/zeroed sleep as above) would also blow past the number
+        // of reads a correctly-paced loop can fit inside max_wait, so cap
+        // the read count independently of the timing assertion above.
+        let max_reads = TEST_SETTLE_MAX_WAIT.as_nanos() / TEST_SETTLE_POLL_INTERVAL.as_nanos() + 2;
+        assert!(
+            (read_arrivals.len() as u128) <= max_reads,
+            "the settle-wait poll must not exceed roughly max_wait/poll_interval \
+             reads ({max_reads}) -- got {} pane.read calls, suggesting the poll \
+             sleep at socket.rs:313 is missing or too short: {outcome:?}",
+            read_arrivals.len()
         );
     }
 
