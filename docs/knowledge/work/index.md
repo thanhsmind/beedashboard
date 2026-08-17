@@ -35,6 +35,7 @@ never a generation timestamp or any other wall-clock value.
 - [kanban-live-signals/](kanban-live-signals/index.md) — 1 concept(s)
 - [mcp-query-surface/](mcp-query-surface/index.md) — 1 concept(s)
 - [no-input-zoom/](no-input-zoom/index.md) — 1 concept(s)
+- [orchestrator-dispatch/](orchestrator-dispatch/index.md) — 1 concept(s)
 - [pbi-detail/](pbi-detail/index.md) — 1 concept(s)
 - [poller-inflight-guard/](poller-inflight-guard/index.md) — 1 concept(s)
 - [project-color-identity/](project-color-identity/index.md) — 1 concept(s)

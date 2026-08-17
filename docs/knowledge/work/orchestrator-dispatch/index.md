@@ -1,6 +1,3 @@
----
-okf_version: 0.1
----
 <!--
 GENERATED FILE — do not hand-edit.
 Rendered by `bee knowledge index` from concept frontmatter inside docs/knowledge/ (okf-foundation D21).
@@ -9,12 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# Knowledge Bundle
+# work/orchestrator-dispatch/
 
-## Sections
+## Concepts
 
-- [work/](work/index.md) — 42 concept(s)
-
-## Critical patterns
-
-None.
+- [orchestrator-dispatch — delivery](delivery.md) — Delivery record for work item orchestrator-dispatch: 4 capped cells shipping the MCP orchestration surface (dispatch/await/runs), the fail-closed send/wait protocol, durable run state, and the read-only Runs view.

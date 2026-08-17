@@ -10,4 +10,4 @@ never a generation timestamp or any other wall-clock value.
 
 ## Concepts
 
-- [mcp-query-surface — delivery](delivery.md) — Delivery record for work item mcp-query-surface: 3 capped cells shipping the four-tool agent-facing MCP query surface.
+- [mcp-query-surface — delivery](delivery.md) — Delivery record for work item mcp-query-surface: 5 capped cells shipping the four-tool agent-facing MCP query surface plus its review P1 fixes.
