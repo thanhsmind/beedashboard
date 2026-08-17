@@ -262,6 +262,7 @@ mod tests {
             root_path: dir.clone(),
             created_at: now_rfc3339(),
             last_seen_at: now_rfc3339(),
+            orchestration_enabled: false,
         };
         let n = IndexService::index_project(&store, &project, &["node_modules".into()], 10_000_000)
             .unwrap();

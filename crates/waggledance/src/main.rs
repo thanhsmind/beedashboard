@@ -5,6 +5,7 @@ mod doctor;
 mod herdr;
 mod mcp;
 mod notify;
+mod orchestrate;
 mod runtime;
 mod server;
 mod supervisor;

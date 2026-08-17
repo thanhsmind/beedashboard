@@ -461,6 +461,13 @@ fn router(state: AppState) -> Router {
         .route("/p/:id/_bee/cell/:cell_id", get(bee_cell_detail))
         .route("/p/:id/_bee/feature/:feature", get(bee_feature_detail))
         .route("/p/:id/_bee/pbi/:pbi_id", get(bee_pbi_detail))
+        // D8: the read-only Runs view — no mutating route in this family.
+        .route("/p/:id/_runs", get(runs_page_handler))
+        // D6: the settings-page Orchestration section's per-project toggle.
+        .route(
+            "/api/projects/:id/orchestration",
+            post(update_project_orchestration),
+        )
         // Gated (D4/D7/D12): `terminal_family_enabled` is the only check
         // left in front of this route.
         .route("/p/:id/_terminal", get(terminal_page))
@@ -1156,13 +1163,44 @@ async fn settings_page_handler(
         st.config_data_dir.as_deref(),
     ));
     let notify_credential_view = current_notify_credential_view(&st);
+    // D6: the Orchestration section's own per-project rows — every
+    // registered project, same source `api_projects`/the homepage read.
+    let projects = st.engine.list_projects().unwrap_or_default();
     Html(views::settings_page(
         &cfg,
         flag.saved.is_some(),
         flag.notify_error.is_some(),
         notify_credential_view,
+        &projects,
     ))
     .into_response()
+}
+
+#[derive(serde::Deserialize, Default)]
+struct OrchestrationForm {
+    /// Presence/absence, matching every other checkbox-backed form on this
+    /// page (`SettingsForm::open_browser`'s own doc comment) — a submission
+    /// that omits the key means the box was left unchecked.
+    #[serde(default)]
+    enabled: Option<String>,
+}
+
+/// `POST /api/projects/:id/orchestration` — the settings page's per-project
+/// D6 toggle. Flips `Project::orchestration_enabled` through the cell-1
+/// engine accessor and redirects back to `/settings`, reusing the same
+/// `saved=1` banner `update_config`/`update_terminal_config` already use. An
+/// unknown project id is a no-op write (`set_orchestration_enabled` updates
+/// zero rows) followed by the same redirect — the settings page's own
+/// re-render is the truth a reader checks, not this response.
+async fn update_project_orchestration(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Form(form): Form<OrchestrationForm>,
+) -> Response {
+    let _ = st
+        .engine
+        .set_orchestration_enabled(&id, form.enabled.is_some());
+    Redirect::to("/settings?saved=1").into_response()
 }
 
 /// The Telegram credential state `settings_page` renders — masked to the
@@ -1892,6 +1930,24 @@ async fn transcript_page_for_pane(
     Path((id, pane_id)): Path<(String, String)>,
 ) -> Response {
     transcript_page_inner(st, id, Some(pane_id)).await
+}
+
+/// `GET /p/:id/_runs` (D8) — the read-only Runs view: every persisted run
+/// for this project, newest first, projected straight from the cell-1
+/// `list_runs` engine accessor. No mutation lives on this route or its
+/// rendered page (`views::runs_page`'s own doc comment). An unknown project
+/// id answers the same not-found every other project-scoped route uses.
+const RUNS_PAGE_LIMIT: usize = 200;
+
+async fn runs_page_handler(State(st): State<AppState>, Path(id): Path<String>) -> Response {
+    let Ok(Some(project)) = st.engine.get_project(&id) else {
+        return not_found("project not found");
+    };
+    let runs = st
+        .engine
+        .list_runs(&id, RUNS_PAGE_LIMIT)
+        .unwrap_or_default();
+    Html(views::runs_page(&project, &runs)).into_response()
 }
 
 /// The configured D8 preset **labels** only — read the same injectable
@@ -10170,6 +10226,125 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// D8: `GET /p/:id/_runs` renders every persisted run for that project —
+    /// task, worker pane, status, marker, both timestamps — and 404s for an
+    /// unknown project the same clean way every other project-scoped route
+    /// does. Route-level, not just `views::runs_page`'s own unit test,
+    /// because the not-found branch is the router's decision, not the
+    /// view's.
+    #[tokio::test]
+    async fn runs_route_renders_persisted_runs_and_404s_for_unknown_project() {
+        let dir = fresh_root("runs-route");
+        let st = build_state();
+        let project = register(&st, &dir, "runs-proj");
+
+        st.engine
+            .insert_run(&waggledance_core::domain::Run {
+                id: "run-1".into(),
+                project_id: project.id.clone(),
+                pane_id: "w1:p1".into(),
+                preset_label: Some("claude".into()),
+                task: "fix the flaky test".into(),
+                baseline: String::new(),
+                marker: "HERDR_DONE_abc123".into(),
+                status: "done".into(),
+                created_at: "2026-08-16T00:00:00Z".into(),
+                updated_at: "2026-08-16T00:05:00Z".into(),
+            })
+            .unwrap();
+
+        let app = router(st);
+        let resp = get(app.clone(), &format!("/p/{}/_runs", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        for needle in ["fix the flaky test", "w1:p1", "HERDR_DONE_abc123"] {
+            assert!(
+                body.contains(needle),
+                "the runs page must render {needle:?}: {body}"
+            );
+        }
+        assert!(
+            !body.contains("<form"),
+            "the runs page must never carry a mutating form (D8): {body}"
+        );
+
+        let missing = get(app, "/p/does-not-exist/_runs").await;
+        assert_eq!(
+            missing.status(),
+            StatusCode::NOT_FOUND,
+            "an unknown project id must 404, not render an empty runs page"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D6: `POST /api/projects/:id/orchestration` flips
+    /// `Project::orchestration_enabled`, and the change is visible on the
+    /// settings page's own re-render — the must-have this cell names in
+    /// full: "the settings toggle flips orchestration_enabled and the
+    /// change is visible on reload".
+    #[tokio::test]
+    async fn orchestration_toggle_route_flips_the_flag_and_is_visible_on_reload() {
+        let dir = fresh_root("orchestration-toggle");
+        let settings_dir = fresh_root("orchestration-toggle-settings");
+        let st = build_state_with_dir(&settings_dir);
+        let project = register(&st, &dir, "orch-proj");
+        assert!(
+            !project.orchestration_enabled,
+            "a freshly registered project must default to opted-out (D6)"
+        );
+
+        let app = router(st.clone());
+        let on_req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
+            .method("POST")
+            .uri(format!("/api/projects/{}/orchestration", project.id))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("enabled=on"))
+            .unwrap();
+        let resp = app.clone().oneshot(on_req).await.unwrap();
+        assert!(resp.status().is_redirection());
+
+        let reloaded = st.engine.get_project(&project.id).unwrap().unwrap();
+        assert!(
+            reloaded.orchestration_enabled,
+            "the toggle route must flip the flag on"
+        );
+
+        let settings_html = body_string(get(app.clone(), "/settings").await).await;
+        let row_start = settings_html
+            .find(&format!(
+                "action=\"/api/projects/{}/orchestration\"",
+                project.id
+            ))
+            .expect("the settings page must render this project's own toggle row");
+        let row = &settings_html[row_start..row_start + 200];
+        assert!(
+            row.contains(r#"name="enabled" checked"#),
+            "the reloaded settings page must show the flag as checked: {row}"
+        );
+
+        // Submitting the row with the box unchecked (no `enabled` key) must
+        // flip it back off — matching every other checkbox-backed form on
+        // this page.
+        let off_req = Request::builder()
+            .header(header::HOST, "127.0.0.1")
+            .method("POST")
+            .uri(format!("/api/projects/{}/orchestration", project.id))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::empty())
+            .unwrap();
+        app.oneshot(off_req).await.unwrap();
+        let reloaded_off = st.engine.get_project(&project.id).unwrap().unwrap();
+        assert!(
+            !reloaded_off.orchestration_enabled,
+            "an unchecked submission must flip the flag back off"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&settings_dir).ok();
+    }
+
     /// P3: `POST /api/config` is unauthenticated (D4 leaves it that way), so
     /// it must never be able to move a D7 switch — a supervisor field there
     /// would let any LAN visitor make waggledance spawn a process.
@@ -13672,6 +13847,7 @@ mod bee_route_tests {
             false,
             false,
             views::NotifyCredentialView::NotConfigured,
+            &[],
         );
         let form_start = html
             .find(r#"id="terminal-config-form""#)

@@ -1,10 +1,14 @@
 //! Minimal MCP server over stdio (newline-delimited JSON-RPC 2.0).
 //! Exposes the agent-facing query surface (PRD §5.5): the original write-side
-//! `waggledance_view_file`, plus three read-only query tools —
+//! `waggledance_view_file`, three read-only query tools —
 //! `waggledance_search`, `waggledance_projects`, `waggledance_ask_state`
-//! (mcp-query-surface D3). Hand-rolled to avoid a heavy SDK dependency; the
-//! protocol surface here is intentionally small.
+//! (mcp-query-surface D3) — and the orchestrator-dispatch write surface
+//! (`docs/history/orchestrator-dispatch/plan.md` D2): `waggledance_dispatch`,
+//! `waggledance_await`, `waggledance_runs`. Hand-rolled to avoid a heavy SDK
+//! dependency; the protocol surface here is intentionally small.
 
+use crate::herdr::{socket::SocketHerdr, Herdr};
+use crate::orchestrate;
 use crate::runtime;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -12,17 +16,62 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 use waggledance_core::bee;
 use waggledance_core::config::registry_db_path;
+use waggledance_core::domain::{Project, Run};
 use waggledance_core::{Config, Engine, Error, SqliteStore};
 
 /// Default `waggledance_search` hit cap when the caller does not pass `limit`.
 const DEFAULT_SEARCH_LIMIT: usize = 10;
 
+/// Default `waggledance_runs` row cap per project when the caller does not
+/// pass `limit` (no `limit` field is exposed on the tool at all — every
+/// listed project is capped the same way).
+const RUNS_LIST_LIMIT: usize = 100;
+
 const PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// The owned tokio runtime + herdr socket client the dispatch-family tools
+/// need — `mcp.rs`'s stdio loop is otherwise sync with no herdr client at
+/// all (module doc). Built lazily on the first `waggledance_dispatch`/
+/// `waggledance_await` call (`orchestration_handle`) so a session that never
+/// touches orchestration never pays for either; `waggledance_runs` needs
+/// neither and never triggers this.
+struct Orchestration {
+    runtime: tokio::runtime::Runtime,
+    herdr: SocketHerdr,
+}
+
+impl Orchestration {
+    fn init() -> std::result::Result<Self, String> {
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| format!("failed to start the orchestration runtime: {e}"))?;
+        // Mirrors `server.rs`'s own best-effort fallback: an unresolvable
+        // default socket path never blocks startup, it just means every
+        // herdr call below fails with a named "unavailable" error instead
+        // of a crash.
+        let socket_path = crate::herdr::socket::default_socket_path()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/nonexistent/herdr.sock"));
+        Ok(Orchestration {
+            runtime,
+            herdr: SocketHerdr::new(socket_path),
+        })
+    }
+}
+
+/// Lazily build (or reuse) the shared [`Orchestration`] handle.
+fn orchestration_handle(
+    slot: &mut Option<Orchestration>,
+) -> std::result::Result<&Orchestration, String> {
+    if slot.is_none() {
+        *slot = Some(Orchestration::init()?);
+    }
+    Ok(slot.as_ref().expect("just initialized above"))
+}
 
 pub fn run() -> Result<()> {
     let engine = Engine::new(SqliteStore::open(&registry_db_path())?, Config::load());
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
+    let mut orchestration: Option<Orchestration> = None;
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -53,11 +102,14 @@ pub fn run() -> Result<()> {
                         view_file_schema(),
                         search_schema(),
                         projects_schema(),
-                        ask_state_schema()
+                        ask_state_schema(),
+                        dispatch_schema(),
+                        await_schema(),
+                        runs_schema()
                     ]
                 }),
             )),
-            "tools/call" => Some(handle_tool_call(id, &engine, &req)),
+            "tools/call" => Some(handle_tool_call(id, &engine, &mut orchestration, &req)),
             "ping" => Some(ok(id, json!({}))),
             _ if id.is_some() => Some(err(id, -32601, "method not found")),
             _ => None, // notification
@@ -138,7 +190,67 @@ fn ask_state_schema() -> Value {
     })
 }
 
-fn handle_tool_call(id: Option<Value>, engine: &Engine, req: &Value) -> Value {
+fn dispatch_schema() -> Value {
+    json!({
+        "name": "waggledance_dispatch",
+        "description": "Dispatch a task to an agent pane in a project that has opted into \
+    orchestrator dispatch (D6 — refused, naming the remedy, when the project or the terminal \
+    surface has not been switched on). Either spawn a fresh agent via an operator-configured \
+    preset label, or target an already-running pane by id — exactly one of `preset`/`pane_id`, \
+    never both, and never a raw command. Returns a `run_id` immediately; poll completion with \
+    `waggledance_await`.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": { "type": "string", "description": "Registered project id" },
+                "preset": { "type": "string", "description": "Operator-configured agent preset label to spawn a fresh pane — mutually exclusive with pane_id" },
+                "pane_id": { "type": "string", "description": "An already-running pane id to target — mutually exclusive with preset" },
+                "task": { "type": "string", "description": "The task text sent to the agent" }
+            },
+            "required": ["project", "task"]
+        }
+    })
+}
+
+fn await_schema() -> Value {
+    json!({
+        "name": "waggledance_await",
+        "description": "Block until a dispatched run completes, blocks on a human, or the \
+    timeout elapses — whichever comes first, at most 60 seconds regardless of the \
+    `timeout_seconds` requested (a longer request is silently clamped, never honored, never an \
+    error). Returns `status` (working/done/blocked/timeout) and the transcript `delta` since \
+    dispatch.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": { "type": "string", "description": "The run_id returned by waggledance_dispatch" },
+                "timeout_seconds": { "type": "integer", "description": "Max seconds to wait, clamped to 60 server-side (default 60)" }
+            },
+            "required": ["run_id"]
+        }
+    })
+}
+
+fn runs_schema() -> Value {
+    json!({
+        "name": "waggledance_runs",
+        "description": "List dispatched runs and their current status (read-only, D8), \
+    optionally filtered to one project.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": { "type": "string", "description": "Optional project id to narrow to a single project's runs" }
+            }
+        }
+    })
+}
+
+fn handle_tool_call(
+    id: Option<Value>,
+    engine: &Engine,
+    orchestration: &mut Option<Orchestration>,
+    req: &Value,
+) -> Value {
     let args = req
         .get("params")
         .and_then(|p| p.get("arguments"))
@@ -154,6 +266,9 @@ fn handle_tool_call(id: Option<Value>, engine: &Engine, req: &Value) -> Value {
         "waggledance_search" => handle_search(id, engine, &args),
         "waggledance_projects" => handle_projects(id, engine),
         "waggledance_ask_state" => handle_ask_state(id, engine, &args),
+        "waggledance_dispatch" => handle_dispatch(id, engine, orchestration, &args),
+        "waggledance_await" => handle_await(id, engine, orchestration, &args),
+        "waggledance_runs" => handle_runs(id, engine, &args),
         _ => err(id, -32602, "unknown tool"),
     }
 }
@@ -488,6 +603,282 @@ fn ask_state_digest(project_id: &str, snapshot: &bee::BeeSnapshot) -> Value {
 /// The file's path rides along as ordinary text next to the short link, because
 /// the link itself is opaque — without it, a transcript full of `/s/…` codes
 /// tells a reader nothing about which document each one was.
+/// `waggledance_dispatch`: D3/D6 gated dispatch. Refuses before touching
+/// herdr at all when the project or the terminal family is off, or when the
+/// preset label is unknown — only a resolved preset/pane_id ever reaches
+/// [`run_dispatch`]'s herdr calls.
+fn handle_dispatch(
+    id: Option<Value>,
+    engine: &Engine,
+    orchestration: &mut Option<Orchestration>,
+    args: &Value,
+) -> Value {
+    let Some(project_id) = args
+        .get("project")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return tool_error(id, "\"project\" is required");
+    };
+    let Some(task) = args
+        .get("task")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return tool_error(id, "\"task\" is required");
+    };
+    let preset_label = args
+        .get("preset")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let pane_id_arg = args
+        .get("pane_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    match (preset_label, pane_id_arg) {
+        (Some(_), Some(_)) => {
+            return tool_error(
+                id,
+                "specify exactly one of \"preset\" or \"pane_id\", not both",
+            )
+        }
+        (None, None) => return tool_error(id, "specify one of \"preset\" or \"pane_id\""),
+        _ => {}
+    }
+
+    let project = match engine.get_project(project_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return tool_error(id, &format!("project not found: {project_id}")),
+        Err(e) => return tool_error(id, &format!("project lookup failed: {e}")),
+    };
+    if !engine.config.terminal.enabled {
+        return tool_error(
+            id,
+            "the terminal surface is disabled — turn on terminal.enabled from the settings \
+             page before dispatching",
+        );
+    }
+    if !engine.orchestration_allowed(&project) {
+        return tool_error(
+            id,
+            &format!(
+                "project {project_id} has not opted into orchestrator dispatch — enable it \
+                 from the project's settings page"
+            ),
+        );
+    }
+
+    // Resolved before any herdr call so an unknown label never touches the
+    // socket at all.
+    let preset = match preset_label {
+        Some(label) => match engine
+            .config
+            .terminal
+            .agent_presets
+            .iter()
+            .find(|p| p.label == label)
+        {
+            Some(p) => Some(p.clone()),
+            None => return tool_error(id, &format!("unknown agent preset: {label}")),
+        },
+        None => None,
+    };
+
+    let orch = match orchestration_handle(orchestration) {
+        Ok(o) => o,
+        Err(e) => return tool_error(id, &e),
+    };
+    let outcome = orch.runtime.block_on(run_dispatch(
+        &orch.herdr,
+        engine,
+        &project,
+        preset,
+        pane_id_arg.map(str::to_string),
+        task,
+    ));
+    match outcome {
+        Ok(run_id) => ok(
+            id,
+            json!({
+                "content": [{ "type": "text", "text": format!("dispatched run {run_id}") }],
+                "structuredContent": { "run_id": run_id }
+            }),
+        ),
+        Err(msg) => tool_error(id, &msg),
+    }
+}
+
+/// The dispatch protocol sequence itself (D1/D3/D5): resolve the target pane
+/// (spawn via `preset`'s argv, or preflight an existing `pane_id`), capture
+/// the baseline, mint a marker, send the task, and persist the run row (D7).
+/// String-errored — every failure here is already a named, human-readable
+/// refusal by the time it reaches [`handle_dispatch`].
+async fn run_dispatch(
+    herdr: &dyn Herdr,
+    engine: &Engine,
+    project: &Project,
+    preset: Option<waggledance_core::config::AgentPreset>,
+    pane_id_arg: Option<String>,
+    task: &str,
+) -> std::result::Result<String, String> {
+    let (pane_id, preset_label) = match (preset, pane_id_arg) {
+        (Some(preset), None) => {
+            let snapshot = herdr
+                .snapshot()
+                .await
+                .map_err(|e| format!("herdr snapshot failed: {e}"))?;
+            let boundary =
+                waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+                    .map_err(|e| format!("project {} destination unresolved: {e}", project.id))?;
+            let (workspace_id, cwd) = orchestrate::resolve_spawn_destination(&snapshot, &boundary)
+                .ok_or_else(|| {
+                    format!(
+                        "project {} has no herdr workspace with a resolved working directory \
+                         under its own root; refusing to start an agent in an arbitrary \
+                         directory",
+                        project.id
+                    )
+                })?;
+            let started = herdr
+                .agent_start(&workspace_id, Some(&cwd), &preset.argv)
+                .await
+                .map_err(|e| format!("agent start failed: {e}"))?;
+            (started.pane_id, Some(preset.label))
+        }
+        (None, Some(pane_id)) => {
+            orchestrate::preflight(herdr, &pane_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            (pane_id, None)
+        }
+        (Some(_), Some(_)) | (None, None) => {
+            unreachable!("handle_dispatch already validated exactly one of preset/pane_id")
+        }
+    };
+
+    let baseline = orchestrate::capture_baseline(herdr, &pane_id)
+        .await
+        .map_err(|e| format!("herdr read failed: {e}"))?;
+    let marker = orchestrate::mint_marker();
+    orchestrate::send_task(herdr, &pane_id, task, &marker)
+        .await
+        .map_err(|e| format!("herdr send failed: {e}"))?;
+
+    let now = waggledance_core::indexer::now_rfc3339();
+    let run = Run {
+        id: format!("run-{:016x}", rand::random::<u64>()),
+        project_id: project.id.clone(),
+        pane_id,
+        preset_label,
+        task: task.to_string(),
+        baseline,
+        marker: marker.joined(),
+        status: "working".to_string(),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    let run_id = run.id.clone();
+    engine
+        .insert_run(&run)
+        .map_err(|e| format!("run persistence failed: {e}"))?;
+    Ok(run_id)
+}
+
+/// `waggledance_await`: bounded poll for a run's completion (D4/D5).
+/// `run_id` is resolved before the orchestration runtime is ever built, so
+/// an unknown id never touches herdr.
+fn handle_await(
+    id: Option<Value>,
+    engine: &Engine,
+    orchestration: &mut Option<Orchestration>,
+    args: &Value,
+) -> Value {
+    let Some(run_id) = args
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
+        return tool_error(id, "\"run_id\" is required");
+    };
+    let run = match engine.get_run(run_id) {
+        Ok(Some(r)) => r,
+        Ok(None) => return tool_error(id, &format!("unknown run_id: {run_id}")),
+        Err(e) => return tool_error(id, &format!("run lookup failed: {e}")),
+    };
+    let timeout = args
+        .get("timeout_seconds")
+        .and_then(|v| v.as_u64())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(orchestrate::MAX_AWAIT_TIMEOUT);
+
+    let orch = match orchestration_handle(orchestration) {
+        Ok(o) => o,
+        Err(e) => return tool_error(id, &e),
+    };
+    match orch
+        .runtime
+        .block_on(orchestrate::await_run(&orch.herdr, engine, &run, timeout))
+    {
+        Ok(outcome) => ok(
+            id,
+            json!({
+                "content": [{ "type": "text", "text": format!("run {run_id}: {}", outcome.status.as_str()) }],
+                "structuredContent": {
+                    "run_id": run_id,
+                    "status": outcome.status.as_str(),
+                    "delta": outcome.delta
+                }
+            }),
+        ),
+        Err(e) => tool_error(id, &format!("await failed: {e}")),
+    }
+}
+
+/// `waggledance_runs`: the run store, read-only (D8), optionally narrowed to
+/// one project.
+fn handle_runs(id: Option<Value>, engine: &Engine, args: &Value) -> Value {
+    let project_filter = args
+        .get("project")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let project_ids: Vec<String> = match project_filter {
+        Some(p) => vec![p.to_string()],
+        None => match engine.list_projects() {
+            Ok(ps) => ps.into_iter().map(|p| p.id).collect(),
+            Err(e) => return tool_error(id, &format!("could not list registered projects: {e}")),
+        },
+    };
+    let mut runs: Vec<Run> = Vec::new();
+    for pid in &project_ids {
+        match engine.list_runs(pid, RUNS_LIST_LIMIT) {
+            Ok(rs) => runs.extend(rs),
+            Err(e) => return tool_error(id, &format!("run listing failed: {e}")),
+        }
+    }
+    let rows: Vec<Value> = runs
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "project_id": r.project_id,
+                "pane_id": r.pane_id,
+                "preset_label": r.preset_label,
+                "task": r.task,
+                "status": r.status,
+                "created_at": r.created_at,
+                "updated_at": r.updated_at
+            })
+        })
+        .collect();
+    ok(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": format!("{} run(s)", rows.len()) }],
+            "structuredContent": { "runs": rows }
+        }),
+    )
+}
+
 fn viewable_text(urls: &[String], rel_path: &str, project_id: &str) -> String {
     let viewable = if urls.len() > 1 {
         let lines = urls
@@ -573,13 +964,22 @@ mod tests {
     }
 
     fn call_tool(engine: &Engine, name: &str, args: Value) -> Value {
+        call_tool_with_orchestration(engine, &mut None, name, args)
+    }
+
+    fn call_tool_with_orchestration(
+        engine: &Engine,
+        orchestration: &mut Option<Orchestration>,
+        name: &str,
+        args: Value,
+    ) -> Value {
         let req = json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
             "params": { "name": name, "arguments": args }
         });
-        handle_tool_call(Some(json!(1)), engine, &req)
+        handle_tool_call(Some(json!(1)), engine, orchestration, &req)
     }
 
     /// Two registered projects, each with one markdown file sharing a word
@@ -616,12 +1016,15 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_has_four_schemas() {
+    fn tools_list_has_seven_schemas() {
         let tools = [
             view_file_schema(),
             search_schema(),
             projects_schema(),
             ask_state_schema(),
+            dispatch_schema(),
+            await_schema(),
+            runs_schema(),
         ];
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
@@ -630,7 +1033,10 @@ mod tests {
                 "waggledance_view_file",
                 "waggledance_search",
                 "waggledance_projects",
-                "waggledance_ask_state"
+                "waggledance_ask_state",
+                "waggledance_dispatch",
+                "waggledance_await",
+                "waggledance_runs"
             ]
         );
     }
@@ -899,12 +1305,251 @@ mod tests {
             "method": "tools/call",
             "params": { "name": "not_a_real_tool", "arguments": {} }
         });
-        let resp = handle_tool_call(Some(json!(1)), &engine, &req);
+        let resp = handle_tool_call(Some(json!(1)), &engine, &mut None, &req);
         assert_eq!(resp["error"]["code"], -32602, "{resp}");
         assert!(
             resp["result"].is_null(),
             "unknown tool must not be a tool_error: {resp}"
         );
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    /// A single-project engine with the terminal family already on
+    /// (`Config::default()` leaves it off) — the dispatch-family refusal
+    /// tests below build on this and flip the per-project D6 switch
+    /// themselves where a test needs it on too.
+    fn dispatch_engine(tag: &str) -> (Engine, waggledance_core::domain::Project) {
+        let dir =
+            std::env::temp_dir().join(format!("waggledance-mcp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "docs/a.md", "# Project\nnothing interesting.");
+        let mut config = Config::default();
+        config.terminal.enabled = true;
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), config);
+        let project = engine.register(&dir, None).unwrap();
+        (engine, project)
+    }
+
+    #[test]
+    fn dispatch_requires_project_and_task() {
+        let (engine, pa) = dispatch_engine("dispatch-required-fields");
+        let missing_project = call_tool(
+            &engine,
+            "waggledance_dispatch",
+            json!({ "task": "do the thing", "pane_id": "w1:p1" }),
+        );
+        assert_eq!(
+            missing_project["result"]["isError"], true,
+            "{missing_project}"
+        );
+        let missing_task = call_tool(
+            &engine,
+            "waggledance_dispatch",
+            json!({ "project": pa.id, "pane_id": "w1:p1" }),
+        );
+        assert_eq!(missing_task["result"]["isError"], true, "{missing_task}");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+    }
+
+    #[test]
+    fn dispatch_requires_exactly_one_of_preset_or_pane_id() {
+        let (engine, pa) = dispatch_engine("dispatch-preset-xor-pane");
+        let neither = call_tool(
+            &engine,
+            "waggledance_dispatch",
+            json!({ "project": pa.id, "task": "go" }),
+        );
+        let neither_text = neither["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(neither_text.contains("specify one of"), "{neither_text}");
+
+        let both = call_tool(
+            &engine,
+            "waggledance_dispatch",
+            json!({ "project": pa.id, "task": "go", "preset": "p", "pane_id": "w1:p1" }),
+        );
+        let both_text = both["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(both_text.contains("not both"), "{both_text}");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+    }
+
+    #[test]
+    fn dispatch_refuses_an_unknown_project() {
+        let (engine, pa) = dispatch_engine("dispatch-unknown-project");
+        let resp = call_tool(
+            &engine,
+            "waggledance_dispatch",
+            json!({ "project": "does-not-exist", "task": "go", "pane_id": "w1:p1" }),
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("does-not-exist"), "{text}");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+    }
+
+    /// D6: the terminal family is off by default even on an
+    /// orchestration-enabled project — the refusal must name the remedy.
+    #[test]
+    fn dispatch_refuses_when_terminal_family_is_off() {
+        let dir = std::env::temp_dir().join(format!(
+            "waggledance-mcp-dispatch-terminal-off-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "docs/a.md", "# Project\n");
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let project = engine.register(&dir, None).unwrap();
+        engine.set_orchestration_enabled(&project.id, true).unwrap();
+
+        let resp = call_tool(
+            &engine,
+            "waggledance_dispatch",
+            json!({ "project": project.id, "task": "go", "pane_id": "w1:p1" }),
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("terminal.enabled"), "{text}");
+
+        std::fs::remove_dir_all(&project.root_path).ok();
+    }
+
+    /// D6: terminal family on, but this project never opted in — the
+    /// refusal must name the remedy (the project's own settings page).
+    #[test]
+    fn dispatch_refuses_a_project_that_has_not_opted_in() {
+        let (engine, pa) = dispatch_engine("dispatch-not-opted-in");
+        let resp = call_tool(
+            &engine,
+            "waggledance_dispatch",
+            json!({ "project": pa.id, "task": "go", "pane_id": "w1:p1" }),
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("has not opted into orchestrator dispatch"),
+            "{text}"
+        );
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+    }
+
+    #[test]
+    fn dispatch_refuses_an_unknown_preset_label_before_touching_herdr() {
+        let (engine, pa) = dispatch_engine("dispatch-unknown-preset");
+        engine.set_orchestration_enabled(&pa.id, true).unwrap();
+
+        let resp = call_tool(
+            &engine,
+            "waggledance_dispatch",
+            json!({ "project": pa.id, "task": "go", "preset": "nope" }),
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown agent preset: nope"), "{text}");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+    }
+
+    /// Targeting a pane_id goes through `orchestrate::preflight` before any
+    /// send — this proves that wiring end to end against whatever herdr
+    /// state the test sandbox actually has: no socket at all reports
+    /// unverifiable/unavailable, a live socket with no such pane reports
+    /// `no such pane` — either way a named error, never a silent hang and
+    /// never a fabricated completion (D5 fail-closed).
+    #[test]
+    fn dispatch_to_an_unreachable_pane_refuses_fail_closed_never_a_completion() {
+        let (engine, pa) = dispatch_engine("dispatch-herdr-unavailable");
+        engine.set_orchestration_enabled(&pa.id, true).unwrap();
+
+        let mut orchestration: Option<Orchestration> = None;
+        let resp = call_tool_with_orchestration(
+            &engine,
+            &mut orchestration,
+            "waggledance_dispatch",
+            json!({ "project": pa.id, "task": "go", "pane_id": "w1:p1" }),
+        );
+        assert_eq!(resp["result"]["isError"], true, "{resp}");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let lower = text.to_lowercase();
+        assert!(
+            lower.contains("unverifiable")
+                || lower.contains("herdr")
+                || lower.contains("no such pane"),
+            "expected a named fail-closed refusal, got: {text}"
+        );
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+    }
+
+    #[test]
+    fn await_requires_run_id() {
+        let (engine, pa) = dispatch_engine("await-required-field");
+        let resp = call_tool(&engine, "waggledance_await", json!({}));
+        assert_eq!(resp["result"]["isError"], true, "{resp}");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+    }
+
+    /// An unknown run_id never touches herdr — resolved before the
+    /// orchestration runtime is built.
+    #[test]
+    fn await_refuses_an_unknown_run_id_without_touching_herdr() {
+        let (engine, pa) = dispatch_engine("await-unknown-run");
+        let resp = call_tool(
+            &engine,
+            "waggledance_await",
+            json!({ "run_id": "does-not-exist" }),
+        );
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown run_id: does-not-exist"), "{text}");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+    }
+
+    fn seeded_run(project_id: &str, id: &str) -> Run {
+        let now = waggledance_core::indexer::now_rfc3339();
+        Run {
+            id: id.to_string(),
+            project_id: project_id.to_string(),
+            pane_id: "w1:p1".to_string(),
+            preset_label: None,
+            task: "do the thing".to_string(),
+            baseline: String::new(),
+            marker: "HERDR_DONE_deadbeef".to_string(),
+            status: "working".to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn runs_filtered_lists_only_that_projects_rows() {
+        let (engine, pa, pb) = two_project_engine("runs-filtered");
+        engine.insert_run(&seeded_run(&pa.id, "run-a")).unwrap();
+        engine.insert_run(&seeded_run(&pb.id, "run-b")).unwrap();
+
+        let resp = call_tool(&engine, "waggledance_runs", json!({ "project": pa.id }));
+        let rows = resp["result"]["structuredContent"]["runs"]
+            .as_array()
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{resp}");
+        assert_eq!(rows[0]["id"], "run-a");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    #[test]
+    fn runs_unfiltered_spans_every_project() {
+        let (engine, pa, pb) = two_project_engine("runs-unfiltered");
+        engine.insert_run(&seeded_run(&pa.id, "run-a")).unwrap();
+        engine.insert_run(&seeded_run(&pb.id, "run-b")).unwrap();
+
+        let resp = call_tool(&engine, "waggledance_runs", json!({}));
+        let rows = resp["result"]["structuredContent"]["runs"]
+            .as_array()
+            .unwrap();
+        assert_eq!(rows.len(), 2, "{resp}");
 
         std::fs::remove_dir_all(&pa.root_path).ok();
         std::fs::remove_dir_all(&pb.root_path).ok();

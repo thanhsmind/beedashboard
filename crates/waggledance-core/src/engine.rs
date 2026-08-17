@@ -4,7 +4,7 @@
 
 use crate::code_source::{self, DirListing, SourceContent};
 use crate::config::Config;
-use crate::domain::{IndexedFile, Project, RenderedPage, SearchResult};
+use crate::domain::{IndexedFile, Project, RenderedPage, Run, SearchResult};
 use crate::error::{Error, Result};
 use crate::fuzzy::{self, FuzzyHit};
 use crate::indexer::{self, IndexService};
@@ -73,6 +73,7 @@ impl Engine {
             root_path: root,
             created_at: now.clone(),
             last_seen_at: now,
+            orchestration_enabled: false,
         };
         self.store.upsert_project(&project)?;
         IndexService::index_project(
@@ -365,6 +366,46 @@ impl Engine {
 
     pub fn get_project(&self, id: &str) -> Result<Option<Project>> {
         self.store.get_project(id)
+    }
+
+    /// D6: flip a project's orchestrator-dispatch opt-in flag.
+    pub fn set_orchestration_enabled(&self, project_id: &str, enabled: bool) -> Result<()> {
+        self.store.set_orchestration_enabled(project_id, enabled)
+    }
+
+    /// D6 gating predicate: true only when this project has opted into
+    /// orchestrator dispatch. This is the per-project half of the check —
+    /// the caller combines it with the global `terminal.enabled` switch
+    /// (`self.config.terminal.enabled`) before allowing a dispatch, since a
+    /// project can be opted in while the terminal family itself is off.
+    pub fn orchestration_allowed(&self, project: &Project) -> bool {
+        project.orchestration_enabled
+    }
+
+    // ---- runs (D7) ----
+
+    pub fn insert_run(&self, run: &Run) -> Result<()> {
+        self.store.insert_run(run)
+    }
+
+    pub fn update_run_status(
+        &self,
+        id: &str,
+        status: &str,
+        updated_at: &str,
+        baseline: Option<&str>,
+        marker: Option<&str>,
+    ) -> Result<()> {
+        self.store
+            .update_run_status(id, status, updated_at, baseline, marker)
+    }
+
+    pub fn get_run(&self, id: &str) -> Result<Option<Run>> {
+        self.store.get_run(id)
+    }
+
+    pub fn list_runs(&self, project_id: &str, limit: usize) -> Result<Vec<Run>> {
+        self.store.list_runs(project_id, limit)
     }
 
     pub fn list_files(&self, project_id: &str) -> Result<Vec<IndexedFile>> {
@@ -895,5 +936,62 @@ mod tests {
             2,
             "a vanished root must never empty the index"
         );
+    }
+
+    fn sample_run(project_id: &str) -> Run {
+        Run {
+            id: "r1".into(),
+            project_id: project_id.into(),
+            pane_id: "pane-1".into(),
+            preset_label: Some("claude".into()),
+            task: "do the thing".into(),
+            baseline: "baseline text".into(),
+            marker: "HERDR_DONE_abc123".into(),
+            status: "pending".into(),
+            created_at: "2026-08-16T00:00:00Z".into(),
+            updated_at: "2026-08-16T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn run_crud_accessors_pass_through_to_the_store() {
+        let dir = std::env::temp_dir().join(format!("waggledance-runs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let project = engine.register(&dir, None).unwrap();
+
+        engine.insert_run(&sample_run(&project.id)).unwrap();
+        let got = engine.get_run("r1").unwrap().unwrap();
+        assert_eq!(got.status, "pending");
+
+        engine
+            .update_run_status("r1", "done", "2026-08-16T00:05:00Z", None, None)
+            .unwrap();
+        assert_eq!(engine.get_run("r1").unwrap().unwrap().status, "done");
+
+        let listed = engine.list_runs(&project.id, 10).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "r1");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn orchestration_allowed_is_gated_by_the_per_project_flag() {
+        let dir = std::env::temp_dir().join(format!("waggledance-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let engine = Engine::new(SqliteStore::open_in_memory().unwrap(), Config::default());
+        let project = engine.register(&dir, None).unwrap();
+        assert!(!engine.orchestration_allowed(&project));
+
+        engine.set_orchestration_enabled(&project.id, true).unwrap();
+        let reloaded = engine.get_project(&project.id).unwrap().unwrap();
+        assert!(engine.orchestration_allowed(&reloaded));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -12,6 +12,10 @@ pub struct Project {
     /// RFC3339 timestamps.
     pub created_at: String,
     pub last_seen_at: String,
+    /// D6 opt-in: true only when this project has been switched into
+    /// orchestrator-dispatch mode. Effective only when `terminal.enabled` is
+    /// also on (the caller combines the two — see `Engine::orchestration_allowed`).
+    pub orchestration_enabled: bool,
 }
 
 /// One indexed markdown file.
@@ -55,6 +59,30 @@ pub struct SearchResult {
     pub excerpt: String,
     pub url: String,
     pub score: f64,
+}
+
+/// One orchestrator dispatch: a task sent to one pane, from baseline capture
+/// to a terminal status. Durable per D7 so a restarted orchestrator recovers
+/// the fleet by reading run state instead of carrying a prompt-side roster.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Run {
+    pub id: String,
+    pub project_id: String,
+    pub pane_id: String,
+    /// The preset used to spawn the pane, or `None` when `dispatch` targeted
+    /// an already-running pane instead of spawning one (D3).
+    pub preset_label: Option<String>,
+    pub task: String,
+    /// Pre-send transcript capture the run's delta and marker-freshness are
+    /// measured against (D5).
+    pub baseline: String,
+    /// The split completion token minted for this run (D5).
+    pub marker: String,
+    /// Protocol status enum string: pending/working/done/blocked/failed/timeout.
+    pub status: String,
+    /// RFC3339 timestamps.
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Rendered markdown page plus metadata for the viewer.
