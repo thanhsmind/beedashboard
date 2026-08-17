@@ -1760,7 +1760,8 @@ pre.mermaid.zoomable:focus-within .mermaid-controls {
   font-size: var(--type-body-sm-size);
   white-space: pre-wrap;
   word-break: break-word;
-=======
+}
+
 /* ── Code viewer section ─────────────────────────────────────────
    A second section next to Docs: browse the project's real directory
    tree and read source files. No index behind it (D1), so the sidebar

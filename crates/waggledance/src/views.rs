@@ -11628,6 +11628,30 @@ mod tests {
         );
     }
 
+    /// A leftover merge-conflict marker (or the unbalanced braces it leaves
+    /// behind) once shipped inside `assets/app.css`: the CSS parser swallowed
+    /// every rule after the unclosed block, silently disabling the kanban
+    /// clamp-break and everything else below it. Braces in comments or
+    /// strings don't appear in these sheets, so a straight count is an honest
+    /// structural check.
+    #[test]
+    fn app_css_has_no_conflict_markers_and_balanced_braces() {
+        for line in APP_CSS.lines() {
+            assert!(
+                !line.starts_with("<<<<<<<")
+                    && !line.starts_with("=======")
+                    && !line.starts_with(">>>>>>>"),
+                "APP_CSS carries a merge-conflict marker line: {line}"
+            );
+        }
+        let open = APP_CSS.matches('{').count();
+        let close = APP_CSS.matches('}').count();
+        assert_eq!(
+            open, close,
+            "APP_CSS braces are unbalanced ({open} open vs {close} close) — an unclosed block disables every rule after it"
+        );
+    }
+
     /// waggledance-rename W5: `mdview:mermaid-done` was renamed on both the
     /// dispatch side (`file_page`'s embedded script) and the listener side
     /// (`assets/app.js`). Comparing the two sides to each other — instead of
