@@ -746,6 +746,23 @@ async fn run_dispatch(
             (started.pane_id, Some(preset.label))
         }
         (None, Some(pane_id)) => {
+            // D6 containment: a caller-supplied pane_id must belong to THIS
+            // project's own root before any send. Without this, an opted-in
+            // project could dispatch into any pane on the host (pane ids are
+            // enumerable off GET /api/agents) -- the same boundary every
+            // sibling pane-scoped write route enforces via
+            // `project_and_verify_pane_in_boundary`. The spawn branch above
+            // needs no equivalent: it creates the pane under a
+            // boundary-validated workspace anchor.
+            let snapshot = herdr
+                .snapshot()
+                .await
+                .map_err(|e| format!("herdr snapshot failed: {e}"))?;
+            let boundary =
+                waggledance_core::paths_boundary::Boundary::new(vec![project.root_path.clone()])
+                    .map_err(|e| format!("project {} destination unresolved: {e}", project.id))?;
+            orchestrate::verify_pane_in_boundary(&snapshot, &boundary, &pane_id, &project.id)
+                .map_err(|e| e.to_string())?;
             orchestrate::preflight(herdr, &pane_id)
                 .await
                 .map_err(|e| e.to_string())?;

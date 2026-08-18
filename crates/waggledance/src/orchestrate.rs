@@ -77,6 +77,56 @@ pub enum DispatchRefusal {
     Unverifiable { pane_id: String, reason: String },
     #[error("no such pane: {0}")]
     NoSuchPane(String),
+    #[error("pane {pane_id} is not inside project {project_id}'s own root -- refusing to dispatch across project boundaries")]
+    OutsideBoundary { pane_id: String, project_id: String },
+}
+
+/// Confirm `pane_id` names a pane whose own folder resolves **inside**
+/// `boundary` (D6 per-project containment): the dispatch destination is only
+/// ever a pane the calling project already owns, never one enumerated off
+/// another project on the same host. Mirrors `server.rs`'s `project_panes`
+/// containment rule exactly — a pane is in-project when its `cwd`, or failing
+/// that its `foreground_cwd`, `validate_existing`s under the boundary — which
+/// is the same check every sibling pane-scoped write route runs through
+/// `project_and_verify_pane_in_boundary`. The pane-spawn branch of
+/// [`run_dispatch`] never needs this: it *creates* the pane under a
+/// boundary-validated workspace anchor, so containment is structural there;
+/// the caller-supplied-`pane_id` branch is the one that must prove it.
+///
+/// `project_id` is carried only for the refusal message. A `pane_id` absent
+/// from the snapshot's `panes[]`, or present but with no folder resolving
+/// inside the boundary, both refuse — the second is the cross-project attack
+/// this closes, the first is a stale/unknown pane, and neither is ever
+/// treated as "probably fine".
+pub fn verify_pane_in_boundary(
+    snapshot: &herdr::Snapshot,
+    boundary: &Boundary,
+    pane_id: &str,
+    project_id: &str,
+) -> Result<(), DispatchRefusal> {
+    let contained = snapshot
+        .panes
+        .iter()
+        .filter(|pane| pane.pane_id == pane_id)
+        .any(|pane| {
+            pane.cwd
+                .as_deref()
+                .and_then(|raw| boundary.validate_existing(std::path::Path::new(raw)).ok())
+                .or_else(|| {
+                    pane.foreground_cwd
+                        .as_deref()
+                        .and_then(|raw| boundary.validate_existing(std::path::Path::new(raw)).ok())
+                })
+                .is_some()
+        });
+    if contained {
+        Ok(())
+    } else {
+        Err(DispatchRefusal::OutsideBoundary {
+            pane_id: pane_id.to_string(),
+            project_id: project_id.to_string(),
+        })
+    }
 }
 
 /// Resolve `pane_id`'s current [`AgentStatus`] from a fresh snapshot and
@@ -689,6 +739,114 @@ mod tests {
         };
 
         assert!(resolve_spawn_destination(&snapshot, &boundary).is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    #[test]
+    fn verify_pane_in_boundary_accepts_a_pane_whose_cwd_is_inside_the_project() {
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("waggledance-orchestrate-verify-in-{pid}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let boundary = Boundary::new(vec![root.clone()]).unwrap();
+
+        let (_w, _l, pane) = workspace_with_anchor("w-inside", &root);
+        let pane_id = pane.pane_id.clone();
+        let snapshot = herdr::Snapshot {
+            panes: vec![pane],
+            ..Default::default()
+        };
+
+        assert!(verify_pane_in_boundary(&snapshot, &boundary, &pane_id, "proj-1").is_ok());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn verify_pane_in_boundary_refuses_a_pane_in_another_project() {
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("waggledance-orchestrate-verify-out-{pid}"));
+        let elsewhere =
+            std::env::temp_dir().join(format!("waggledance-orchestrate-verify-out-other-{pid}"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        // The project's boundary is `root`, but the target pane lives in a
+        // sibling project's directory -- the exact cross-project dispatch this
+        // check closes.
+        let boundary = Boundary::new(vec![root.clone()]).unwrap();
+
+        let (_w, _l, foreign) = workspace_with_anchor("w-other-project", &elsewhere);
+        let foreign_id = foreign.pane_id.clone();
+        let snapshot = herdr::Snapshot {
+            panes: vec![foreign],
+            ..Default::default()
+        };
+
+        let err = verify_pane_in_boundary(&snapshot, &boundary, &foreign_id, "proj-1").unwrap_err();
+        assert_eq!(
+            err,
+            DispatchRefusal::OutsideBoundary {
+                pane_id: foreign_id,
+                project_id: "proj-1".to_string(),
+            }
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&elsewhere).ok();
+    }
+
+    #[test]
+    fn verify_pane_in_boundary_refuses_a_pane_absent_from_the_snapshot() {
+        let pid = std::process::id();
+        let root =
+            std::env::temp_dir().join(format!("waggledance-orchestrate-verify-absent-{pid}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let boundary = Boundary::new(vec![root.clone()]).unwrap();
+
+        // A pane id that appears nowhere in panes[] (stale, or never existed)
+        // refuses the same way a cross-project one does -- never "probably
+        // fine".
+        let snapshot = herdr::Snapshot::default();
+        let err =
+            verify_pane_in_boundary(&snapshot, &boundary, "ghost:pane", "proj-1").unwrap_err();
+        assert_eq!(
+            err,
+            DispatchRefusal::OutsideBoundary {
+                pane_id: "ghost:pane".to_string(),
+                project_id: "proj-1".to_string(),
+            }
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn verify_pane_in_boundary_falls_back_to_foreground_cwd() {
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("waggledance-orchestrate-verify-fg-{pid}"));
+        let elsewhere =
+            std::env::temp_dir().join(format!("waggledance-orchestrate-verify-fg-out-{pid}"));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let boundary = Boundary::new(vec![root.clone()]).unwrap();
+
+        // process cwd is outside the project, but the foreground child moved
+        // into it -- `project_panes`' own second-chance rule, so containment
+        // must honor it too.
+        let pane = herdr::wire::Pane {
+            pane_id: "w-fg-pane".to_string(),
+            workspace_id: "w-fg".to_string(),
+            tab_id: "w-fg-tab".to_string(),
+            cwd: Some(elsewhere.to_string_lossy().into_owned()),
+            foreground_cwd: Some(root.to_string_lossy().into_owned()),
+        };
+        let snapshot = herdr::Snapshot {
+            panes: vec![pane],
+            ..Default::default()
+        };
+
+        assert!(verify_pane_in_boundary(&snapshot, &boundary, "w-fg-pane", "proj-1").is_ok());
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&elsewhere).ok();
