@@ -571,6 +571,21 @@ html[data-scheme="dark"] .topbar .home {
   color: var(--color-text-muted);
   font-size: var(--type-caption-size);
 }
+/* badge-title (D 6b39db89, touches D1a 7810e5ee): the pane's own terminal
+   title, rendered only when it says something the program text above did
+   not already say. A title can run arbitrarily long (it is free text from
+   the agent's own session), so it gets the same clip-and-ellipsis
+   treatment `.term-attach__chip-label` already uses, capped well short of
+   a Projects row or feature card's own width rather than left to blow
+   either one up. */
+.proj-row__badge-title {
+  color: var(--color-text-muted);
+  font-size: var(--type-caption-size);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 16em;
+}
 /* project-suggestions S1/S2/S3: the suggestion block sits under the
    project list, one `.proj-row` per unregistered folder a herdr session is
    running in. It reuses `.proj-list`/`.proj-row`'s own row layout rather

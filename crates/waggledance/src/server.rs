@@ -3196,6 +3196,11 @@ fn project_panes(
                 cwd: resolved.to_string_lossy().into_owned(),
                 workspace: snapshot.workspace_label_for_id(&pane.workspace_id),
                 tab: snapshot.tab_label_for_id(&pane.tab_id),
+                // badge-title (D 6b39db89): a shell pane (no agent) has no
+                // title to borrow either, so it gets the empty string —
+                // `terminal_badges_nav` already renders no title span for
+                // an empty `title`, the same way it treats `kind == name`.
+                title: agent.map(|a| a.title.clone()).unwrap_or_default(),
             })
         })
         .collect()
@@ -3354,6 +3359,11 @@ fn unassigned_panes(
                 cwd,
                 workspace: snapshot.workspace_label_for(agent),
                 tab: snapshot.tab_label_for(agent),
+                // badge-title (D 6b39db89): every row here is agent-backed
+                // by construction (sourced from `snapshot.agents`, never
+                // `snapshot.panes` — this function's own doc comment), so
+                // `title` reads straight off the agent, no fallback needed.
+                title: agent.title.clone(),
             }
         })
         .collect()
