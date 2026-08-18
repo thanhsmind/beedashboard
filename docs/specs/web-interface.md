@@ -315,13 +315,17 @@ consumes it.
   supported mode (settings.md R3), so the operator's local path is treated
   the same way as any other local-only detail: never exposed to whoever can
   reach the page.
-- **R6 (per D d356af5d, D bc3bf3bb, D 7810e5ee).** The session markers on a
-  project row obey the terminal switch and nothing else: switch off, the page
-  behaves as though the feature did not exist, and it does not ask the session
-  host anything. Switch on, a marker names the session's state and the program
-  it runs — never the agent's own generated identifier, and never a folder
-  path, so R5 still holds. The markers are read once per page load; the page
-  never polls, so there is nothing to keep open. The reading is bounded: a
+- **R6 (per D d356af5d, D bc3bf3bb, D 7810e5ee, extended by D 6b39db89).** The
+  session markers on a project row obey the terminal switch and nothing else:
+  switch off, the page behaves as though the feature did not exist, and it
+  does not ask the session host anything. Switch on, a marker names the
+  session's state, the program it runs, and the session's own terminal
+  title — what the agent is doing right now — but never the agent's own
+  generated identifier, and never a folder path, so R5 still holds. The title
+  is omitted when it is empty or says nothing the program name does not
+  already say, and it renders on both surfaces that draw these markers:
+  project rows and feature cards. The markers are read once per page load;
+  the page never polls, so there is nothing to keep open. The reading is bounded: a
   session host that is down, or that accepts and then does not answer, leaves
   the rows plain rather than delaying the page.
 - **R7 (per D 6c41879e, D 4fcbe3fb).** Registering a folder from the page is
