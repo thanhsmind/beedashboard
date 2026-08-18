@@ -204,13 +204,16 @@
   // Code section's folder disclosure: code_tree() (views.rs) server-renders
   // the same `.chap-folders` markup the block above builds client-side for
   // Docs, so this only needs to wire the click-to-toggle + remembered-open
-  // behavior, not build any DOM. Runs once at load — safe to always attach:
-  // on a Docs page `.chap-folders__bar` does not exist yet at this point
-  // (the block above only creates it later, inside `render()`, and wires
-  // its own handler when it does), so this only ever finds real elements on
-  // a Code page.
+  // behavior, not build any DOM. Runs once at load — and the Docs block
+  // above already ran its `render()` synchronously, so its bar IS in the DOM
+  // by now and already carries its own handler. Attaching a second handler
+  // to it would toggle the disclosure twice per click (open then straight
+  // back closed), so skip anything inside the Docs sidebar (`#chapter`) —
+  // the Code sidebar's `nav.chapter` has no id.
   (function () {
-    var bars = document.querySelectorAll(".chap-folders__bar");
+    var docsNav = document.getElementById("chapter");
+    var bars = [].slice.call(document.querySelectorAll(".chap-folders__bar"))
+      .filter(function (bar) { return !(docsNav && docsNav.contains(bar)); });
     if (!bars.length) return;
     var remembered = false;
     try {
