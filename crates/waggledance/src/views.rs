@@ -499,13 +499,17 @@ fn register_error_message(code: &str) -> Option<&'static str> {
     })
 }
 
-/// D1, as clarified by D1a — D2, D3, D5: one badge per terminal pane in
-/// `panes`, which the caller has already matched against this project's own
-/// D2 containment boundary (`server.rs::project_panes`, the same query
-/// `pane_strip` above draws from at pane-page scope). Each badge is a link
-/// to that pane's own terminal view carrying the same [`status_pill`] and
-/// program (`kind` — the herdr agent kind) `pane_strip` prints; the pane's
-/// `name` field — the agent's own name — never reaches this markup (D1a).
+/// D1, as clarified by D1a — D2, D3, D5, and badge-title (D 6b39db89,
+/// touches D1a 7810e5ee): one badge per terminal pane in `panes`, which the
+/// caller has already matched against this project's own D2 containment
+/// boundary (`server.rs::project_panes`, the same query `pane_strip` above
+/// draws from at pane-page scope). Each badge is a link to that pane's own
+/// terminal view carrying the same [`status_pill`], program (`kind` — the
+/// herdr agent kind), and — when it says something the program text does
+/// not already say — the pane's own terminal title (`title`, herdr
+/// `Agent.title`) `pane_strip` prints; the pane's `name` field — the
+/// agent's own name — still never reaches this markup (D1a holds); `title`
+/// is a different field, what the agent is doing right now.
 /// board-badges-agents-only supersedes D2's every-pane-badges rule: an
 /// agent-less shell pane (`kind == "shell"`) is skipped here — the board is
 /// a fleet overview of running agents, and a plain shell stays reachable
@@ -524,15 +528,21 @@ fn project_badges(project_id: &str, panes: &[TerminalPaneView]) -> String {
 /// (card-terminals-1) so [`bee_hub_card`] can reuse the exact same nav/pill
 /// markup for a feature card's own checkout panes -- same classes, same
 /// per-pane anchor to `/p/{project_id}/_terminal/pane/{pane_id}`, same
-/// [`status_pill`] and program text -- while carrying its own accessible
-/// label instead of `project_badges`'s "Terminal panes": a feature card's
-/// panes are the terminals running in that feature's own *checkout*, not
-/// panes that belong to the feature itself (a Main feature's checkout is
-/// shared with every other Main feature of that project, so a label
-/// claiming otherwise would be false for every one of them). Plain shell
-/// panes (`kind == "shell"`) are filtered out first (board-badges-agents-only)
-/// before the emptiness check, so an all-shell `panes` renders no container
-/// at all, exactly like an empty list, for either caller.
+/// [`status_pill`], program text, and title span -- while carrying its own
+/// accessible label instead of `project_badges`'s "Terminal panes": a
+/// feature card's panes are the terminals running in that feature's own
+/// *checkout*, not panes that belong to the feature itself (a Main
+/// feature's checkout is shared with every other Main feature of that
+/// project, so a label claiming otherwise would be false for every one of
+/// them). Plain shell panes (`kind == "shell"`) are filtered out first
+/// (board-badges-agents-only) before the emptiness check, so an all-shell
+/// `panes` renders no container at all, exactly like an empty list, for
+/// either caller. badge-title (D 6b39db89): the title span renders only
+/// when `p.title` is non-empty AND differs from `p.kind` -- the same
+/// non-redundancy rule the agent switch drawer already applies to its own
+/// title suffix (`assets/app.js`'s `agent.title !== agent.name` branch) --
+/// so a titleless pane, or one whose title merely repeats its program,
+/// keeps the badge to its original two-piece shape.
 fn terminal_badges_nav(
     project_id: &str,
     panes: &[TerminalPaneView],
@@ -551,8 +561,16 @@ fn terminal_badges_nav(
     };
     let mut out = format!(r#"<nav class="{class}" aria-label="{}">"#, esc(aria_label));
     for p in panes {
+        let title_span = if !p.title.is_empty() && p.title != p.kind {
+            format!(
+                r#"<span class="proj-row__badge-title">{title}</span>"#,
+                title = esc(&p.title),
+            )
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            r#"<a class="proj-row__badge" href="/p/{pid}/_terminal/pane/{pane_id}">{status_pill}<span class="proj-row__badge-program">{program}</span></a>"#,
+            r#"<a class="proj-row__badge" href="/p/{pid}/_terminal/pane/{pane_id}">{status_pill}<span class="proj-row__badge-program">{program}</span>{title_span}</a>"#,
             pid = pid,
             pane_id = esc(&p.pane_id),
             status_pill = status_pill(&p.status),
@@ -975,6 +993,14 @@ pub struct TerminalPaneView {
     pub cwd: String,
     pub workspace: String,
     pub tab: String,
+    /// badge-title (D 6b39db89, touches D1a 7810e5ee): the pane's own
+    /// terminal title (herdr `Agent.title` — what the agent is doing right
+    /// now), the same field the agent switch drawer already shows
+    /// (`assets/app.js`'s `agent.title` branch). D1a still holds: `name` —
+    /// the agent's own name — never reaches the badge markup; `title` is a
+    /// different field carried here for that reason. A shell pane (no
+    /// agent) carries the empty string.
+    pub title: String,
 }
 
 /// homepage-terminals: one agent-backed pane the homepage's Terminals tab
@@ -6525,6 +6551,7 @@ mod tests {
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
+            title: String::new(),
         }
     }
 
@@ -6547,6 +6574,7 @@ mod tests {
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
+            title: String::new(),
         };
         let projects = vec![
             (idle, 3, vec![shell_pane]),
@@ -6736,6 +6764,7 @@ mod tests {
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
+            title: String::new(),
         }];
         let project_html = terminal_page(&project, &panes, Some("w1:p1"), &[]);
         assert!(
@@ -6806,6 +6835,7 @@ mod tests {
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
+            title: String::new(),
         }];
         let html = terminal_page(&project, &panes, Some("w1:p1"), &[]);
         assert!(
@@ -6827,6 +6857,7 @@ mod tests {
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
+            title: String::new(),
         }];
         let html = transcript_page(&project, &panes, Some("w1:p1"));
         assert!(
@@ -6851,6 +6882,7 @@ mod tests {
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
+            title: String::new(),
         }];
         let html = terminal_page(&project, &panes, Some("w1:p1"), &[]);
         assert!(
@@ -6886,6 +6918,7 @@ mod tests {
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
+            title: String::new(),
         }];
         let pane_html = terminal_page(&project, &panes, Some("w1:p1"), &[]);
         assert!(
@@ -6982,6 +7015,7 @@ mod tests {
                 cwd: String::new(),
                 workspace: "w1".into(),
                 tab: "t1".into(),
+                title: String::new(),
             },
             TerminalPaneView {
                 pane_id: "w1:p2".into(),
@@ -6991,6 +7025,7 @@ mod tests {
                 cwd: String::new(),
                 workspace: "w1".into(),
                 tab: "t2".into(),
+                title: String::new(),
             },
         ];
         let html = terminal_page(&project, &panes, Some("w1:p2"), &["Claude".to_string()]);
@@ -7427,6 +7462,7 @@ mod tests {
                 cwd: String::new(),
                 workspace: "w1".into(),
                 tab: pane_id.into(),
+                title: String::new(),
             },
             base: format!(
                 "/p/{}/_terminal/{}",
@@ -9792,6 +9828,7 @@ mod tests {
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
+            title: String::new(),
         };
         let mut proj_b_panes: std::collections::HashMap<String, Vec<TerminalPaneView>> =
             std::collections::HashMap::new();
@@ -10233,6 +10270,7 @@ mod tests {
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
+            title: String::new(),
         }];
         let card_html = bee_hub_card(&BeeHubCardArgs {
             project_id: "proj-a",
@@ -10322,6 +10360,7 @@ mod tests {
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t1".into(),
+            title: String::new(),
         };
         let agent = TerminalPaneView {
             pane_id: "w1:p2".into(),
@@ -10331,6 +10370,7 @@ mod tests {
             cwd: String::new(),
             workspace: "w1".into(),
             tab: "t2".into(),
+            title: String::new(),
         };
         let mixed = project_badges("proj-a", &[shell("w1:p1"), agent.clone()]);
         assert!(
@@ -10345,6 +10385,77 @@ mod tests {
         assert!(
             only_shells.is_empty(),
             "a list of nothing but shell panes must render no container at all, exactly like an empty list: {only_shells}"
+        );
+    }
+
+    /// badge-title (D 6b39db89, touches D1a 7810e5ee), extending
+    /// `board_badges_skip_plain_shell_panes`'s own panes: a pane whose
+    /// title differs from its program renders a `.proj-row__badge-title`
+    /// span right after `.proj-row__badge-program`, HTML-escaped exactly
+    /// like every other user-supplied text this module renders -- and the
+    /// pane's own `name` (D1a) still never reaches the markup.
+    #[test]
+    fn badge_title_renders_after_the_program_span_when_it_says_something_new() {
+        let pane = TerminalPaneView {
+            pane_id: "w1:p1".into(),
+            kind: "claude".into(),
+            name: "agent-name-must-not-appear".into(),
+            status: "working".into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+            title: "<script>fixing bug</script>".into(),
+        };
+        let html = project_badges("proj-a", &[pane]);
+        let program_at = html
+            .find(r#"<span class="proj-row__badge-program">claude</span>"#)
+            .unwrap_or_else(|| panic!("program span must render: {html}"));
+        let title_at = html
+            .find(
+                r#"<span class="proj-row__badge-title">&lt;script&gt;fixing bug&lt;/script&gt;</span>"#,
+            )
+            .unwrap_or_else(|| panic!("title span must render, HTML-escaped: {html}"));
+        assert!(
+            title_at > program_at,
+            "the title span must render after the program span: {html}"
+        );
+        assert!(
+            !html.contains("agent-name-must-not-appear"),
+            "the pane's own agent name must never reach this markup (D1a's rule): {html}"
+        );
+    }
+
+    /// badge-title (D 6b39db89): a titleless pane, or one whose title
+    /// merely repeats its program, renders no `.proj-row__badge-title`
+    /// span at all -- the same non-redundancy rule the agent switch drawer
+    /// applies to its own title suffix (`assets/app.js`'s
+    /// `agent.title !== agent.name` branch).
+    #[test]
+    fn badge_title_skipped_when_empty_or_redundant_with_the_program() {
+        let empty_title = TerminalPaneView {
+            pane_id: "w1:p1".into(),
+            kind: "claude".into(),
+            name: "n".into(),
+            status: "working".into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+            title: String::new(),
+        };
+        let redundant_title = TerminalPaneView {
+            pane_id: "w1:p2".into(),
+            kind: "codex".into(),
+            name: "n".into(),
+            status: "working".into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+            title: "codex".into(),
+        };
+        let html = project_badges("proj-a", &[empty_title, redundant_title]);
+        assert!(
+            !html.contains("proj-row__badge-title"),
+            "an empty title and a title equal to the program must both render no title span: {html}"
         );
     }
 
