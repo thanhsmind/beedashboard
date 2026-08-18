@@ -613,6 +613,17 @@ pub struct BeeWorktree {
     pub live: bool,
     /// The freshest live session's heartbeat age, in minutes, when `live`.
     pub heartbeat_age_minutes: Option<f64>,
+    /// True when this project's own `.bee/deferred-queue.jsonl` carries a
+    /// still-open `worktree-cleanup` entry for this worktree — bee's
+    /// `worktree-keep-on-merge` D1 (2026-08-17) deliberately KEEPS a
+    /// worktree after `bee worktree merge` instead of removing it, and
+    /// queues that cleanup instead of forgetting it. Such a worktree is
+    /// finished work awaiting cleanup, not live work, so callers should not
+    /// count it toward "in progress". Derived by
+    /// [`read_merged_pending_worktrees`], the same signal bee's own `bee
+    /// worktree list` reports as `merged_pending`. Never read from the
+    /// worktree's own `.bee/` — the queue lives only in this project's.
+    pub merged_pending: bool,
 }
 
 impl BeeWorktree {
@@ -633,6 +644,7 @@ impl BeeWorktree {
             created_at,
             live: false,
             heartbeat_age_minutes: None,
+            merged_pending: false,
         }
     }
 }
@@ -2519,12 +2531,103 @@ fn read_worktrees(
         .map(|(id, _)| resolve_worktree(id, root, workspaces, now))
         .collect();
 
+    let (pending_ids, pending_features) = read_merged_pending_worktrees(root);
+    for wt in &mut out {
+        wt.merged_pending = pending_ids.contains(&wt.id)
+            || wt
+                .feature
+                .as_deref()
+                .is_some_and(|f| pending_features.contains(f));
+    }
+
     // Live first (must-have), resolved before unresolved next, id as a
     // stable tiebreak so the order is deterministic across reads.
     out.sort_by(|a, b| {
         (!a.live, !a.resolved, a.id.as_str()).cmp(&(!b.live, !b.resolved, b.id.as_str()))
     });
     out
+}
+
+/// Read this project's own `.bee/deferred-queue.jsonl` (append-only JSONL,
+/// one JSON object per line) for still-open `worktree-cleanup` entries —
+/// bee's `worktree-keep-on-merge` D1 (2026-08-17), which keeps a merged
+/// worktree on purpose and queues its cleanup instead of forgetting it.
+/// Mirrors bee's own `bee worktree list`, which derives its `merged_pending`
+/// map the same way.
+///
+/// An `"add"` event of `kind == "worktree-cleanup"` opens an entry, keyed by
+/// its own queue `id` (a UUID distinct from the worktree grant id); a later
+/// `"complete"` event carrying that same queue `id` closes it. An entry
+/// still open at end-of-file is pending, and is reported two ways so a
+/// caller can match on whichever field it has to hand: by the basename of
+/// the entry's `files[0]` (the worktree grant id, since bee's queued
+/// `files` for this `kind` names the worktree's sibling directory) and by
+/// the entry's own `feature`.
+///
+/// A missing or unreadable queue file (or a line that fails to parse)
+/// yields two empty sets — never a hard failure, matching how the rest of
+/// this module treats missing bee files.
+fn read_merged_pending_worktrees(
+    root: &Path,
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashSet<String>,
+) {
+    let path = root.join(".bee").join("deferred-queue.jsonl");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return (
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+        );
+    };
+
+    let mut open: std::collections::HashMap<String, (Option<String>, Option<String>)> =
+        std::collections::HashMap::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(event) = v.get("event").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(queue_id) = v.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        match event {
+            "add" if v.get("kind").and_then(Value::as_str) == Some("worktree-cleanup") => {
+                let worktree_id = v
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .and_then(|files| files.first())
+                    .and_then(Value::as_str)
+                    .and_then(|p| Path::new(p).file_name())
+                    .and_then(|n| n.to_str())
+                    .map(String::from);
+                let feature = v.get("feature").and_then(Value::as_str).map(String::from);
+                open.insert(queue_id.to_string(), (worktree_id, feature));
+            }
+            "complete" => {
+                open.remove(queue_id);
+            }
+            _ => {}
+        }
+    }
+
+    let mut ids = std::collections::HashSet::new();
+    let mut features = std::collections::HashSet::new();
+    for (worktree_id, feature) in open.into_values() {
+        if let Some(id) = worktree_id {
+            ids.insert(id);
+        }
+        if let Some(feature) = feature {
+            features.insert(feature);
+        }
+    }
+    (ids, features)
 }
 
 /// Resolve one granted worktree id against its own sibling directory, which
@@ -2597,6 +2700,10 @@ fn resolve_worktree(
         created_at,
         live,
         heartbeat_age_minutes,
+        // Set by `read_worktrees` once every worktree in the batch is
+        // resolved — `merged_pending` is derived from this project's own
+        // queue, not from anything read here.
+        merged_pending: false,
     }
 }
 
@@ -5799,6 +5906,121 @@ mod tests {
                 w.id
             );
         }
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// (merged-worktree-not-live) A still-open `worktree-cleanup` entry in
+    /// this project's own `.bee/deferred-queue.jsonl` — bee's
+    /// `worktree-keep-on-merge` D1, which keeps a merged worktree on
+    /// purpose instead of removing it — marks the matching worktree
+    /// `merged_pending`.
+    #[test]
+    fn worktree_cleanup_entry_marks_merged_pending_true() {
+        let root = fresh_root("worktree-merged-pending");
+        let sibling = make_worktree_sibling("bee-board-ux-4-wt-merged");
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"feat-merged","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-wt-merged"]),
+        );
+        write(
+            &root,
+            ".bee/deferred-queue.jsonl",
+            &format!(
+                r#"{{"ts":"2026-08-18T06:23:28.188Z","event":"add","id":"828a482f-fc11-4364-b234-e732128888a2","kind":"worktree-cleanup","feature":"feat-merged","cells":[],"areas":[],"files":["{sibling}"],"reason":"merged into main and kept per default (D1)"}}"#,
+                sibling = sibling.to_string_lossy().replace('\\', "\\\\"),
+            ),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.worktrees.len(), 1, "{:?}", snap.worktrees);
+        assert!(
+            snap.worktrees[0].merged_pending,
+            "a still-open worktree-cleanup entry must mark the worktree merged_pending: {:?}",
+            snap.worktrees[0]
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// A `worktree-cleanup` entry followed by a later `complete` event
+    /// carrying the same queue id is resolved — the worktree it named must
+    /// NOT read as `merged_pending` (bee's own cleanup already ran, or is
+    /// about to).
+    #[test]
+    fn worktree_cleanup_entry_followed_by_complete_marks_merged_pending_false() {
+        let root = fresh_root("worktree-merged-pending-resolved");
+        let sibling = make_worktree_sibling("bee-board-ux-4-wt-merged-resolved");
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"feat-merged-resolved","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-wt-merged-resolved"]),
+        );
+        let add_line = format!(
+            r#"{{"ts":"2026-08-18T06:23:28.188Z","event":"add","id":"828a482f-fc11-4364-b234-e732128888a2","kind":"worktree-cleanup","feature":"feat-merged-resolved","cells":[],"areas":[],"files":["{sibling}"],"reason":"merged into main and kept per default (D1)"}}"#,
+            sibling = sibling.to_string_lossy().replace('\\', "\\\\"),
+        );
+        let complete_line = r#"{"ts":"2026-08-18T07:00:00.000Z","event":"complete","id":"828a482f-fc11-4364-b234-e732128888a2"}"#;
+        write(
+            &root,
+            ".bee/deferred-queue.jsonl",
+            &format!("{add_line}\n{complete_line}\n"),
+        );
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.worktrees.len(), 1, "{:?}", snap.worktrees);
+        assert!(
+            !snap.worktrees[0].merged_pending,
+            "a completed worktree-cleanup entry must not mark the worktree merged_pending: {:?}",
+            snap.worktrees[0]
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// A missing `.bee/deferred-queue.jsonl` yields `merged_pending = false`
+    /// for every worktree — never a hard failure, matching every other
+    /// optional-file precedent in this module.
+    #[test]
+    fn missing_deferred_queue_file_yields_merged_pending_false() {
+        let root = fresh_root("worktree-no-deferred-queue");
+        let sibling = make_worktree_sibling("bee-board-ux-4-wt-no-queue");
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"feat-no-queue","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["bee-board-ux-4-wt-no-queue"]),
+        );
+        assert!(!root.join(".bee/deferred-queue.jsonl").exists());
+
+        let snap = read_snapshot(&root);
+        assert_eq!(snap.worktrees.len(), 1, "{:?}", snap.worktrees);
+        assert!(!snap.worktrees[0].merged_pending);
+        assert!(
+            snap.read_errors
+                .iter()
+                .all(|e| !e.contains("deferred-queue")),
+            "a missing deferred queue must not be a read error: {:?}",
+            snap.read_errors
+        );
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&sibling).ok();

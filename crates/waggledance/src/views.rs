@@ -2624,10 +2624,18 @@ fn bee_classify_features(
             .sessions
             .iter()
             .any(|s| s.live && s.lane.as_deref() == Some(f.feature.as_str()));
+        // (merged-worktree-not-live) A worktree bee already merged and kept
+        // on purpose (`worktree-keep-on-merge` D1, 2026-08-17 -- kept
+        // instead of removed, with a `worktree-cleanup` entry queued in
+        // `.bee/deferred-queue.jsonl` so the cleanup is not forgotten) is
+        // finished work awaiting cleanup, not live work: `merged_pending`
+        // worktrees are excluded here so such a feature can leave In
+        // Progress once its cells are done, instead of being pinned by a
+        // grant bee itself is done with.
         let worktree_bound = snapshot
             .worktrees
             .iter()
-            .any(|w| w.feature.as_deref() == Some(f.feature.as_str()));
+            .any(|w| w.feature.as_deref() == Some(f.feature.as_str()) && !w.merged_pending);
         // (kanban-columns D10) An `open` cell alone is no longer live work
         // for placement -- only `doing` (claimed) or `stuck` cells count,
         // plus the three existing pulls. Counting `waiting` here (as the
@@ -9274,6 +9282,7 @@ mod tests {
             created_at: None,
             live: false,
             heartbeat_age_minutes: None,
+            merged_pending: false,
         };
         let (label, tone) =
             bee_hub_worktree_chip("wt-feat", std::slice::from_ref(&grant), &[], true);
@@ -11519,6 +11528,7 @@ mod tests {
             created_at: None,
             live: false,
             heartbeat_age_minutes: None,
+            merged_pending: false,
         };
         let label = bee_hub_worktree_label("wt-feat", std::slice::from_ref(&grant), &[], false);
         assert_eq!(label, "wt/hold-holder-attribution");
@@ -11538,6 +11548,7 @@ mod tests {
             created_at: None,
             live: false,
             heartbeat_age_minutes: None,
+            merged_pending: false,
         };
         let label = bee_hub_worktree_label("wt-feat", std::slice::from_ref(&grant), &[], false);
         assert_eq!(label, "worktree");

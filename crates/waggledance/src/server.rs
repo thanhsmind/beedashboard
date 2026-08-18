@@ -5696,6 +5696,98 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&sibling).ok();
     }
 
+    /// (merged-worktree-not-live) The mirror of the case just proved above:
+    /// a feature whose only pull toward In Progress is a granted worktree
+    /// bee has already merged into main and kept on purpose
+    /// (`worktree-keep-on-merge` D1, 2026-08-17 — kept instead of removed,
+    /// with a `worktree-cleanup` entry queued in
+    /// `.bee/deferred-queue.jsonl`) must NOT land in In Progress: that
+    /// worktree is finished work awaiting cleanup, not live work.
+    #[tokio::test]
+    async fn feature_hub_merged_pending_worktree_does_not_pin_feature_to_in_progress() {
+        let root = fresh_root("hub-merged-pending");
+        write(
+            &root,
+            ".bee/lanes/session-live-feat.json",
+            &lane_json(
+                "session-live-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": true, "execution": true, "review": true"#),
+                None,
+            ),
+        );
+        write(
+            &root,
+            ".bee/sessions/live.json",
+            &format!(
+                r#"{{"id": "live", "started_at": "2026-08-12T05:00:00Z", "last_heartbeat": "{now}", "workspace_id": "main", "source": "startup", "lane": "session-live-feat"}}"#,
+                now = rfc3339_minutes_ago(1)
+            ),
+        );
+
+        write(
+            &root,
+            ".bee/lanes/wt-merged-feat.json",
+            &lane_json(
+                "wt-merged-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": true, "execution": true, "review": true"#),
+                None,
+            ),
+        );
+        let sibling = make_worktree_sibling("hub-merged-pending-wt");
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"wt-merged-feat","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["hub-merged-pending-wt"]),
+        );
+        write(
+            &root,
+            ".bee/deferred-queue.jsonl",
+            &format!(
+                r#"{{"ts":"2026-08-18T06:23:28.188Z","event":"add","id":"828a482f-fc11-4364-b234-e732128888a2","kind":"worktree-cleanup","feature":"wt-merged-feat","cells":[],"areas":[],"files":["{sibling}"],"reason":"merged into main and kept per default (D1)"}}"#,
+                sibling = sibling.to_string_lossy().replace('\\', "\\\\"),
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-merged-pending");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""),
+            "only the session-bound feature counts -- the merged-pending worktree must not pin its feature to In Progress: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/session-live-feat\"",
+                project.id
+            )),
+            "the session-bound zero-cell feature must still render under In Progress: {body}"
+        );
+        assert!(
+            !body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/wt-merged-feat\"",
+                project.id
+            )),
+            "a feature pulled in only by a merged-pending worktree must not render at all: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
     /// (edge, feature-hub fh-1, grown to five columns by kanban-columns D1)
     /// An entirely empty store — no cells, no lanes, no archive — still
     /// renders all five groups, each stating its own honest, distinct empty
