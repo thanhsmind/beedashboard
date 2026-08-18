@@ -2594,6 +2594,26 @@ struct BeeHubFinishedData {
 /// then every archived feature not already placed, sorted by name. Tested
 /// in D11's fixed order: In Progress, then Finished, then Review, then
 /// Compound, then Todo.
+/// (merged-worktree-not-live) bee's own terminal phase SET, not the single
+/// value `"compounding-complete"` this hub used to test alone: bee's write
+/// guard (`is_terminal_phase`) treats `{"idle", "compounding-complete"}` as
+/// terminal, and bee's own captured learning
+/// (`docs/knowledge/patterns/20260713-a-guard-that-tests-one-state-is-a.md`)
+/// names testing only one member of a guard's state set a bug. Since the
+/// 2026-08-18 merge-closes-the-lane change, `bee close` writes lane phase
+/// `"idle"` and never writes `"compounding-complete"` again, so a hub that
+/// only recognized the old value stopped placing newly closed features
+/// under Finished at all. Widening this test alone is safe: `"idle"` at
+/// `state.json`'s default (never-started) record cannot flip a *live*
+/// feature into Finished, because [`bee_classify_features`]'s own
+/// `finished_and_idle = is_finished && live == 0` still requires zero live
+/// cells — a feature with a doing/stuck cell, a bound session, or a bound
+/// worktree keeps winning the earlier `has_live_work` branch regardless of
+/// what this function returns for its phase.
+fn bee_phase_is_terminal(phase: Option<&str>) -> bool {
+    matches!(phase, Some("idle") | Some("compounding-complete"))
+}
+
 fn bee_classify_features(
     snapshot: &BeeSnapshot,
     archived_features: &std::collections::HashSet<String>,
@@ -2624,10 +2644,18 @@ fn bee_classify_features(
             .sessions
             .iter()
             .any(|s| s.live && s.lane.as_deref() == Some(f.feature.as_str()));
+        // (merged-worktree-not-live) A worktree bee already merged and kept
+        // on purpose (`worktree-keep-on-merge` D1, 2026-08-17 -- kept
+        // instead of removed, with a `worktree-cleanup` entry queued in
+        // `.bee/deferred-queue.jsonl` so the cleanup is not forgotten) is
+        // finished work awaiting cleanup, not live work: `merged_pending`
+        // worktrees are excluded here so such a feature can leave In
+        // Progress once its cells are done, instead of being pinned by a
+        // grant bee itself is done with.
         let worktree_bound = snapshot
             .worktrees
             .iter()
-            .any(|w| w.feature.as_deref() == Some(f.feature.as_str()));
+            .any(|w| w.feature.as_deref() == Some(f.feature.as_str()) && !w.merged_pending);
         // (kanban-columns D10) An `open` cell alone is no longer live work
         // for placement -- only `doing` (claimed) or `stuck` cells count,
         // plus the three existing pulls. Counting `waiting` here (as the
@@ -2665,7 +2693,7 @@ fn bee_classify_features(
         // which keeps naming a feature long after it closed — records
         // where a session stopped, not a decision still owed. Only a live
         // cell pulls a finished feature back out of Finished.
-        let is_finished = f.phase.as_deref() == Some("compounding-complete")
+        let is_finished = bee_phase_is_terminal(f.phase.as_deref())
             || archived_features.contains(f.feature.as_str());
         let finished_and_idle = is_finished && live == 0;
 
@@ -9060,6 +9088,205 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// (merged-worktree-not-live) bee's OTHER terminal phase: since the
+    /// 2026-08-18 merge-closes-the-lane change, `bee close` writes lane
+    /// phase `"idle"`, never `"compounding-complete"` again. A zero-live-
+    /// cell feature at `"idle"` must land under Finished exactly like a
+    /// `"compounding-complete"` one always has — this is the case the
+    /// pre-widening hub silently broke.
+    #[test]
+    fn hub_sends_an_idle_phase_feature_to_finished_when_no_live_cell_remains() {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-idle-finished-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/idle-closed-feat.json",
+            r#"{
+                "feature": "idle-closed-feat",
+                "phase": "idle",
+                "mode": "standard",
+                "next_action": "none"
+            }"#,
+        );
+        write(
+            ".bee/cells/archive/idle-closed-feat/a.json",
+            r#"{
+                "id": "ic-1",
+                "feature": "idle-closed-feat",
+                "lane": "tiny",
+                "title": "Cell ic-1",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "capped",
+                "tier": "generation",
+                "trace": {"worker": "w1", "claimed_at": "2026-08-10T08:00:00Z", "capped_at": "2026-08-10T08:30:00Z"}
+            }"#,
+        );
+
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
+
+        assert!(
+            html.contains(
+                r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/idle-closed-feat""#
+            ),
+            "a phase-idle feature with no live cells must land under Finished: {html}"
+        );
+        assert!(
+            !html.contains(
+                r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/idle-closed-feat""#
+            ),
+            "the idle-phase closed feature must render no In Progress card: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (merged-worktree-not-live) `finished_and_idle` still requires zero
+    /// live cells, so widening `is_finished` to `"idle"` must never flip a
+    /// feature with a `doing` cell into Finished: `has_live_work` keeps
+    /// winning the In Progress branch, exactly as it already does for a
+    /// live `"compounding-complete"` feature (that case is untouched by
+    /// this widening and stays covered by the tests above).
+    #[test]
+    fn hub_keeps_an_idle_phase_feature_with_a_doing_cell_in_progress() {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-idle-live-cell-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/idle-live-cell-feat.json",
+            r#"{
+                "feature": "idle-live-cell-feat",
+                "phase": "idle",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
+            }"#,
+        );
+        write(
+            ".bee/cells/a.json",
+            r#"{
+                "id": "ilc-1",
+                "feature": "idle-live-cell-feat",
+                "lane": "tiny",
+                "title": "Cell ilc-1",
+                "action": "do the thing",
+                "verify": "cargo test",
+                "files": [],
+                "read_first": [],
+                "deps": [],
+                "decisions": [],
+                "must_haves": {},
+                "behavior_change": false,
+                "change_class": "behavior",
+                "pbi": null,
+                "status": "claimed",
+                "tier": "generation",
+                "trace": {"worker": "w1", "claimed_at": "2026-08-10T08:00:00Z", "capped_at": null}
+            }"#,
+        );
+
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
+
+        assert!(
+            html.contains(
+                r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/idle-live-cell-feat""#
+            ),
+            "a phase-idle feature with a doing cell must stay under In Progress: {html}"
+        );
+        assert!(
+            !html.contains(r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/idle-live-cell-feat""#),
+            "the phase-idle feature must never also render under Finished while a cell is live: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (merged-worktree-not-live) `finished_and_idle` reads ONLY the cell
+    /// counts (`live == 0`), never `has_live_work`'s broader session/
+    /// worktree/`is_active` signals — this is the same, already-locked rule
+    /// [`hub_keeps_a_closed_feature_in_finished_even_with_a_bound_session_and_a_pause_handoff`]
+    /// pins for `"compounding-complete"`: "Only a live cell pulls a
+    /// finished feature back out of Finished." Widening `is_finished` to
+    /// `"idle"` must keep that exact precedent — a session bound to an
+    /// idle-phase lane with zero cells still renders Finished, not In
+    /// Progress.
+    #[test]
+    fn hub_keeps_an_idle_phase_feature_with_a_bound_session_and_no_cells_in_finished() {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-idle-live-session-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            ".bee/lanes/idle-live-session-feat.json",
+            r#"{
+                "feature": "idle-live-session-feat",
+                "phase": "idle",
+                "mode": "standard",
+                "next_action": "keep going",
+                "approved_gates": {"context": true, "shape": true, "execution": true, "review": true}
+            }"#,
+        );
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            ".bee/sessions/live.json",
+            &format!(
+                r#"{{"id": "live", "last_heartbeat": "{now}", "lane": "idle-live-session-feat"}}"#
+            ),
+        );
+
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
+
+        assert!(
+            html.contains(r#"data-hub-group="finished" href="/p/proj-1/_bee/feature/idle-live-session-feat""#),
+            "a phase-idle, zero-cell feature must stay under Finished even with a bound live session -- only a live cell pulls it back out: {html}"
+        );
+        assert!(
+            !html.contains(r#"bee-hub__detail-link" href="/p/proj-1/_bee/feature/idle-live-session-feat""#),
+            "a bound live session must never drag a phase-idle, zero-cell feature back into In Progress: {html}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// (kanban-columns D5) In Progress wins every tie: a feature with live
     /// work stays in In Progress even when it also carries an unresolved
     /// review candidate; it only reaches Review once it has no live cells
@@ -9274,6 +9501,7 @@ mod tests {
             created_at: None,
             live: false,
             heartbeat_age_minutes: None,
+            merged_pending: false,
         };
         let (label, tone) =
             bee_hub_worktree_chip("wt-feat", std::slice::from_ref(&grant), &[], true);
@@ -11519,6 +11747,7 @@ mod tests {
             created_at: None,
             live: false,
             heartbeat_age_minutes: None,
+            merged_pending: false,
         };
         let label = bee_hub_worktree_label("wt-feat", std::slice::from_ref(&grant), &[], false);
         assert_eq!(label, "wt/hold-holder-attribution");
@@ -11538,6 +11767,7 @@ mod tests {
             created_at: None,
             live: false,
             heartbeat_age_minutes: None,
+            merged_pending: false,
         };
         let label = bee_hub_worktree_label("wt-feat", std::slice::from_ref(&grant), &[], false);
         assert_eq!(label, "worktree");

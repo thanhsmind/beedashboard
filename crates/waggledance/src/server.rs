@@ -5546,6 +5546,113 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (merged-worktree-not-live) bee's OTHER terminal phase, proven at the
+    /// HTTP layer: since the 2026-08-18 merge-closes-the-lane change,
+    /// `bee close` writes lane phase `"idle"`, never `"compounding-complete"`
+    /// again. A zero-live-cell feature at `"idle"` must render under
+    /// Finished exactly like a `"compounding-complete"` one always has.
+    #[tokio::test]
+    async fn feature_hub_idle_phase_lane_with_no_live_cells_renders_under_finished() {
+        let root = fresh_root("hub-idle-finished");
+        write(
+            &root,
+            ".bee/lanes/idle-closed-feat.json",
+            &lane_json("idle-closed-feat", "idle", "standard", "none", None, None),
+        );
+        write(
+            &root,
+            ".bee/cells/archive/idle-closed-feat/a.json",
+            &feature_cell_json(
+                "ic-1",
+                "idle-closed-feat",
+                "capped",
+                Some(&rfc3339_minutes_ago(90)),
+                Some(&rfc3339_minutes_ago(30)),
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-idle-finished");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/idle-closed-feat\"",
+                project.id
+            )),
+            "an idle-phase feature with no live cells must render under Finished: {body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""),
+            "{body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (merged-worktree-not-live) `finished_and_idle` still requires zero
+    /// live cells, so widening `is_finished` to `"idle"` must never flip a
+    /// feature carrying a `doing` cell into Finished at the HTTP layer —
+    /// `has_live_work` keeps winning the In Progress branch regardless of
+    /// the lane's own phase string.
+    #[tokio::test]
+    async fn feature_hub_idle_phase_lane_with_a_doing_cell_stays_in_progress() {
+        let root = fresh_root("hub-idle-live-cell");
+        write(
+            &root,
+            ".bee/lanes/idle-live-cell-feat.json",
+            &lane_json(
+                "idle-live-cell-feat",
+                "idle",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": true, "execution": true, "review": true"#),
+                None,
+            ),
+        );
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json(
+                "ilc-1",
+                "idle-live-cell-feat",
+                "claimed",
+                Some(&rfc3339_minutes_ago(5)),
+                None,
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-idle-live-cell");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/idle-live-cell-feat\"",
+                project.id
+            )),
+            "an idle-phase feature with a doing cell must stay under In Progress: {body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"finished\" data-hub-count=\"0\""),
+            "{body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (edge, feature-hub fh-1, D1) A currently granted worktree naming a
     /// Finished feature still places it under Finished. The chip that used
     /// to read "Open · wt/wt-feat" here (winning over the group's own
@@ -5690,6 +5797,98 @@ mod bee_route_tests {
         assert!(
             !body.contains("Waiting on you"),
             "with every gate approved, neither card carries a Waiting on you line: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&sibling).ok();
+    }
+
+    /// (merged-worktree-not-live) The mirror of the case just proved above:
+    /// a feature whose only pull toward In Progress is a granted worktree
+    /// bee has already merged into main and kept on purpose
+    /// (`worktree-keep-on-merge` D1, 2026-08-17 — kept instead of removed,
+    /// with a `worktree-cleanup` entry queued in
+    /// `.bee/deferred-queue.jsonl`) must NOT land in In Progress: that
+    /// worktree is finished work awaiting cleanup, not live work.
+    #[tokio::test]
+    async fn feature_hub_merged_pending_worktree_does_not_pin_feature_to_in_progress() {
+        let root = fresh_root("hub-merged-pending");
+        write(
+            &root,
+            ".bee/lanes/session-live-feat.json",
+            &lane_json(
+                "session-live-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": true, "execution": true, "review": true"#),
+                None,
+            ),
+        );
+        write(
+            &root,
+            ".bee/sessions/live.json",
+            &format!(
+                r#"{{"id": "live", "started_at": "2026-08-12T05:00:00Z", "last_heartbeat": "{now}", "workspace_id": "main", "source": "startup", "lane": "session-live-feat"}}"#,
+                now = rfc3339_minutes_ago(1)
+            ),
+        );
+
+        write(
+            &root,
+            ".bee/lanes/wt-merged-feat.json",
+            &lane_json(
+                "wt-merged-feat",
+                "swarming",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": true, "execution": true, "review": true"#),
+                None,
+            ),
+        );
+        let sibling = make_worktree_sibling("hub-merged-pending-wt");
+        write(
+            &sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"wt-merged-feat","mode":"standard"}"#,
+        );
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["hub-merged-pending-wt"]),
+        );
+        write(
+            &root,
+            ".bee/deferred-queue.jsonl",
+            &format!(
+                r#"{{"ts":"2026-08-18T06:23:28.188Z","event":"add","id":"828a482f-fc11-4364-b234-e732128888a2","kind":"worktree-cleanup","feature":"wt-merged-feat","cells":[],"areas":[],"files":["{sibling}"],"reason":"merged into main and kept per default (D1)"}}"#,
+                sibling = sibling.to_string_lossy().replace('\\', "\\\\"),
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-merged-pending");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""),
+            "only the session-bound feature counts -- the merged-pending worktree must not pin its feature to In Progress: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/session-live-feat\"",
+                project.id
+            )),
+            "the session-bound zero-cell feature must still render under In Progress: {body}"
+        );
+        assert!(
+            !body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/wt-merged-feat\"",
+                project.id
+            )),
+            "a feature pulled in only by a merged-pending worktree must not render at all: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
