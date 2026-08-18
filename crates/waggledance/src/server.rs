@@ -5546,6 +5546,113 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// (merged-worktree-not-live) bee's OTHER terminal phase, proven at the
+    /// HTTP layer: since the 2026-08-18 merge-closes-the-lane change,
+    /// `bee close` writes lane phase `"idle"`, never `"compounding-complete"`
+    /// again. A zero-live-cell feature at `"idle"` must render under
+    /// Finished exactly like a `"compounding-complete"` one always has.
+    #[tokio::test]
+    async fn feature_hub_idle_phase_lane_with_no_live_cells_renders_under_finished() {
+        let root = fresh_root("hub-idle-finished");
+        write(
+            &root,
+            ".bee/lanes/idle-closed-feat.json",
+            &lane_json("idle-closed-feat", "idle", "standard", "none", None, None),
+        );
+        write(
+            &root,
+            ".bee/cells/archive/idle-closed-feat/a.json",
+            &feature_cell_json(
+                "ic-1",
+                "idle-closed-feat",
+                "capped",
+                Some(&rfc3339_minutes_ago(90)),
+                Some(&rfc3339_minutes_ago(30)),
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-idle-finished");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("data-hub-group=\"finished\" data-hub-count=\"1\""),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/idle-closed-feat\"",
+                project.id
+            )),
+            "an idle-phase feature with no live cells must render under Finished: {body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""),
+            "{body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// (merged-worktree-not-live) `finished_and_idle` still requires zero
+    /// live cells, so widening `is_finished` to `"idle"` must never flip a
+    /// feature carrying a `doing` cell into Finished at the HTTP layer —
+    /// `has_live_work` keeps winning the In Progress branch regardless of
+    /// the lane's own phase string.
+    #[tokio::test]
+    async fn feature_hub_idle_phase_lane_with_a_doing_cell_stays_in_progress() {
+        let root = fresh_root("hub-idle-live-cell");
+        write(
+            &root,
+            ".bee/lanes/idle-live-cell-feat.json",
+            &lane_json(
+                "idle-live-cell-feat",
+                "idle",
+                "standard",
+                "keep going",
+                Some(r#""context": true, "shape": true, "execution": true, "review": true"#),
+                None,
+            ),
+        );
+        write(
+            &root,
+            ".bee/cells/a.json",
+            &feature_cell_json(
+                "ilc-1",
+                "idle-live-cell-feat",
+                "claimed",
+                Some(&rfc3339_minutes_ago(5)),
+                None,
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-idle-live-cell");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"1\""),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "href=\"/p/{}/_bee/feature/idle-live-cell-feat\"",
+                project.id
+            )),
+            "an idle-phase feature with a doing cell must stay under In Progress: {body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"finished\" data-hub-count=\"0\""),
+            "{body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// (edge, feature-hub fh-1, D1) A currently granted worktree naming a
     /// Finished feature still places it under Finished. The chip that used
     /// to read "Open · wt/wt-feat" here (winning over the group's own
