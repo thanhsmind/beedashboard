@@ -1628,8 +1628,10 @@ mod tests {
         let mut config_on = Config::default();
         config_on.terminal.enabled = true;
         config_on.terminal.notify_enabled = true;
-        let dir_on = std::env::temp_dir()
-            .join(format!("waggledance-mcp-await-notify-on-{}", std::process::id()));
+        let dir_on = std::env::temp_dir().join(format!(
+            "waggledance-mcp-await-notify-on-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir_on);
         write(&dir_on, "docs/a.md", "# Project\n");
         let engine_on = Engine::new(SqliteStore::open_in_memory().unwrap(), config_on);
@@ -1649,8 +1651,10 @@ mod tests {
     /// and leaves no database file when it is false.
     #[test]
     fn notify_store_in_mcp_opens_only_when_notify_switch_is_on() {
-        let dir = std::env::temp_dir()
-            .join(format!("waggledance-mcp-notify-store-lazy-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "waggledance-mcp-notify-store-lazy-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let path = waggledance_core::config::notify_store_path_override(Some(&dir));
 
@@ -1682,7 +1686,9 @@ mod tests {
     #[test]
     fn await_tool_call_arms_notify_store_under_opt_in_switch() {
         let (engine_off, pa) = dispatch_engine("await-tool-off");
-        engine_off.insert_run(&seeded_run(&pa.id, "run-tool-off")).unwrap();
+        engine_off
+            .insert_run(&seeded_run(&pa.id, "run-tool-off"))
+            .unwrap();
         let mut orch_off: Option<Orchestration> = None;
         let _ = call_tool_with_orchestration(
             &engine_off,
@@ -1690,11 +1696,18 @@ mod tests {
             "waggledance_await",
             json!({ "run_id": "run-tool-off", "timeout_seconds": 0 }),
         );
-        let orch = orch_off.as_ref().expect("orchestration initialized by await");
-        assert!(orch.notify_store.is_none(), "disabled notify switch -> no store");
+        let orch = orch_off
+            .as_ref()
+            .expect("orchestration initialized by await");
+        assert!(
+            orch.notify_store.is_none(),
+            "disabled notify switch -> no store"
+        );
 
-        let dir = std::env::temp_dir()
-            .join(format!("waggledance-mcp-await-tool-on-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "waggledance-mcp-await-tool-on-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         write(&dir, "docs/a.md", "# Project\n");
         let mut config_on = Config::default();
@@ -1702,7 +1715,9 @@ mod tests {
         config_on.terminal.notify_enabled = true;
         let engine_on = Engine::new(SqliteStore::open_in_memory().unwrap(), config_on);
         let pb = engine_on.register(&dir, None).unwrap();
-        engine_on.insert_run(&seeded_run(&pb.id, "run-tool-on")).unwrap();
+        engine_on
+            .insert_run(&seeded_run(&pb.id, "run-tool-on"))
+            .unwrap();
 
         let mut orch_on: Option<Orchestration> = None;
         let _ = call_tool_with_orchestration(
@@ -1711,8 +1726,13 @@ mod tests {
             "waggledance_await",
             json!({ "run_id": "run-tool-on", "timeout_seconds": 0 }),
         );
-        let orch = orch_on.as_ref().expect("orchestration initialized by await");
-        assert!(orch.notify_store.is_some(), "enabled notify switch -> Some(store)");
+        let orch = orch_on
+            .as_ref()
+            .expect("orchestration initialized by await");
+        assert!(
+            orch.notify_store.is_some(),
+            "enabled notify switch -> Some(store)"
+        );
 
         std::fs::remove_dir_all(&pa.root_path).ok();
         std::fs::remove_dir_all(&pb.root_path).ok();
