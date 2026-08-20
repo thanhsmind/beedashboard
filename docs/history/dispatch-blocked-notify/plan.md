@@ -50,7 +50,8 @@ sends nothing when the switch is off.
 
 Rejected alternatives:
 - Raise the alert from `reconcile` by polling run rows — a second poller for
-  state the await path already sees; more moving parts, later alerts.
+  state the await path already sees; more moving parts, and alerts that arrive
+  behind the transition instead of with it.
 - Dedupe in memory in the orchestrator — dies with the process, and D5's
   guarantee has to survive a restart.
 - Have the run path call the notifier directly — bypasses the at-least-once
@@ -88,6 +89,6 @@ Triad, smallest demonstrating size:
 
 ## Out of scope
 
-- A `failed` run status and any alert for it (D2) — deferred idea in CONTEXT.md.
+- A `failed` run status and any alert for it (D2) — kept in CONTEXT.md under trigger `code-starts-writing-a-failed-run-status-a__cb4bc9f7`.
 - Any resume, retry, or unblock action driven from the notification.
-- The broadcast tool (`p-bf161077`) and any change to the Telegram channel itself.
+- The broadcast tool (`p-bf161077`, trigger `a-second-dispatched-run-alert-class-is-a__5a2fbc19`) and any change to the Telegram channel itself.
