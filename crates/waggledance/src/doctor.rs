@@ -1036,7 +1036,7 @@ mod mcp_register_tests {
         let (s, _) = register_json_mcp(&p, false, true);
         assert_eq!(s, Status::Ok); // no write needed
         let after: Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
-        assert_eq!(before, after); // parsed content unchanged (BTreeMap may reorder bytes on a write, but there was none)
+        assert_eq!(before, after); // parsed content unchanged (no write happened at all)
         assert!(!backup_path(&p).exists()); // no write happened, so no backup either
         std::fs::remove_file(&p).ok();
     }
@@ -1060,6 +1060,39 @@ mod mcp_register_tests {
         let (s, _) = register_json_mcp(&p, true, true);
         assert_eq!(s, Status::Manual);
         assert!(!p.exists());
+    }
+
+    #[test]
+    fn json_fix_preserves_unrelated_key_order() {
+        let p = tmp("json-order");
+        // Deliberately non-alphabetical: without serde_json's preserve_order
+        // feature the Map is a BTreeMap and this round trip would sort them.
+        std::fs::write(
+            &p,
+            r#"{"zulu":1,"alpha":2,"mcpServers":{"other":{"command":"x"}},"middle":3}"#,
+        )
+        .unwrap();
+        let (s, _) = register_json_mcp(&p, false, true);
+        assert_eq!(s, Status::Fixed);
+        let text = std::fs::read_to_string(&p).unwrap();
+        let positions: Vec<usize> = ["zulu", "alpha", "mcpServers", "middle"]
+            .iter()
+            .map(|key| {
+                text.find(&format!("\"{key}\""))
+                    .unwrap_or_else(|| panic!("{key} missing from rewritten config:\n{text}"))
+            })
+            .collect();
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "unrelated keys must keep their original order, got:\n{text}"
+        );
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            v["mcpServers"]["waggledance"]["args"][0].as_str(),
+            Some("mcp")
+        );
+        std::fs::remove_file(&p).ok();
+        std::fs::remove_file(backup_path(&p)).ok();
     }
 
     // ── TOML (Codex's ~/.codex/config.toml) ──
