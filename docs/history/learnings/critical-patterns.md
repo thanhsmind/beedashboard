@@ -299,3 +299,17 @@ bee-compounding appends hard-won patterns here; keep it short and current.
   opt-out: an opt-out is one missed call site away from renaming a developer's
   real home directory. (2026-08-13, `waggledance-rename` D2/D7,
   `docs/history/learnings/20260813-a-string-in-two-places-is-a-contract.md`)
+- **A close-gate citation must sit on one line, and the sweeps flag by open
+  window rather than by change.** The routing door matches `<feature-slug>
+  <D-id>` adjacently: prose-wrapped so the slug ends a line and `D1` starts
+  the next, it reports the ids unrouted with the exact message it gives for
+  citing nothing. Suspect the wrap before the content. The impact and
+  doc-deferral doors are noisier still — they name every decision logged
+  while the feature sat active, so a long-open feature is flagged against
+  documents it never touched; the answer there is a decision tagged
+  `impact-deferral` / `doc-deferral` naming the feature and the reason, never
+  an edit that would make a correct citation wrong. Log that reason with
+  `--relation none`: `touches:<ids>` mints one fresh capture stub per citing
+  line, for the finding it just resolved. (2026-08-20,
+  `terminal-approve-button`,
+  `docs/history/terminal-approve-button/reports/learnings.md`)
