@@ -69,12 +69,14 @@ From the quick scout only. Downstream agents read these before planning.
 
 ## Outstanding Questions
 
-### Deferred To Planning
+Both planning questions are answered; nothing is outstanding.
 
-- [ ] Which single place raises the alert so a run cannot notify twice through two paths — the await return, the status-persistence point, or reconcile.
-- [ ] Whether D3's suppression reads live run state or a marker the run leaves on the pane record.
+- [x] Which single place raises the alert — the status-persistence point inside `await_run`'s `finish`, which already persists every terminal-for-this-call transition (dbn-2). The MCP process opens its own outbox against the server's own database (dbn-4).
+- [x] Whether D3's suppression reads live run state — it reads live run state through a `RunOwnership` port answered from the engine, not a marker on the pane record (dbn-5).
 
 ## Deferred Ideas
 
-- A `failed` run status for infrastructure breakage (pane gone, send refused mid-run) — out of scope per D2; it would touch orchestrate, persistence, and the MCP schema.
-- Broadcast tool (port of `broadcast.sh`) — separate backlog row `p-bf161077`.
+Out-of-scope ideas captured during shaping. Each carries the registered trigger that brings it back.
+
+- A `failed` run status for infrastructure breakage (pane gone, send refused mid-run) — out of scope per D2; it would touch orchestrate, persistence, and the MCP schema. Trigger: `code-starts-writing-a-failed-run-status-a__cb4bc9f7`.
+- Broadcast tool (port of `broadcast.sh`) — backlog row `p-bf161077`. Trigger: `a-second-dispatched-run-alert-class-is-a__5a2fbc19`.
