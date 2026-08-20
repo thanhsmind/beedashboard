@@ -69,7 +69,8 @@ None.
 ## Deferred Ideas
 
 - More canned replies (Reject, Retry) beside Approve — one button is what
-  was asked for; a row of them is a different feature.
+  was asked for; a row of them is a different feature. Revisits on
+  `a-user-asks-for-a-canned-reply-beside-ap__3be024da`.
 
 ## Handoff Note
 

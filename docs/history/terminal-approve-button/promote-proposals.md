@@ -12,8 +12,9 @@ timestamp: 2026-08-15
 bee:
   id: terminal-approve-button-delivery
   lifecycle: active
+  areas: [web-interface, agent-terminal]
   required_context: [docs/history/terminal-approve-button/CONTEXT.md]
-  sources: [docs/history/terminal-approve-button/CONTEXT.md, .bee/cells/terminal-approve-button-1.json]
+  sources: [docs/history/terminal-approve-button/CONTEXT.md, .bee/cells/archive/terminal-approve-button/terminal-approve-button-1.json]
 ---
 
 # terminal-approve-button — Delivery
@@ -38,7 +39,13 @@ Proposed by `bee knowledge promote --work terminal-approve-button` from 1 capped
 
 (b) AREA UPDATES — candidate spec-sync bullets, each citing its cell
 
-None: the work item declares no bee.areas, so there is no area to sync (D19).
+areas: from the scribing stamp for "terminal-approve-button" — .bee/logs/scribing-runs.jsonl's most recent entry (2026-08-15T14:25:30.802Z), the work item declares no bee.areas.
+
+area web-interface:
+  (no capped behavior_change cell exists for this feature)
+
+area agent-terminal:
+  (no capped behavior_change cell exists for this feature)
 
 (c) PATTERN CANDIDATES — candidate bee.pattern concepts, bee.polarity pitfall
 

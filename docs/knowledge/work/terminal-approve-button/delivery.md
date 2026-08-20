@@ -20,17 +20,17 @@ pressing send — on a phone, the most common reply in the system was also one
 of the slowest.
 
 Every terminal reply box now leads its button row with `Approve`, ahead of
-Stage and Send. One tap sends the word `Approve` to that terminal and
+Stage and Send (D1). One tap sends the word `Approve` to that terminal and
 presses Enter, exactly as typing it and hitting Send would.
 
-- **It sends for real.** There is no confirmation step. That was the
+- **It sends for real.** There is no confirmation step (D2). That was the
   explicit choice: one tap or it is not worth having.
-- **It ignores what you were writing.** The button never reads the reply box
-  and never attaches whatever files were staged; it sends only the one word.
+- **It ignores what you were writing** (D3). The button never reads the reply
+  box and never attaches whatever files were staged; it sends only the one word.
   A half-written draft survives the tap untouched, because clearing work the
   user never asked to send would be losing it.
-- **Everywhere the Stage button appears.** The project's terminal page, the
-  home page's Terminals tab, and the page for terminals belonging to no
+- **Everywhere the Stage button appears** (D4). The project's terminal page,
+  the home page's Terminals tab, and the page for terminals belonging to no
   project. One renderer draws the button on all three; the click behaviour
   had to be wired twice, because the unassigned page carries its own copy of
   the page script rather than sharing the main one.
@@ -57,6 +57,8 @@ None recorded.
 ## Provenance
 
 Written from the capped trace of `terminal-approve-button-1` and the locked
-decisions in `docs/history/terminal-approve-button/CONTEXT.md`. Sits in the
+decisions in `docs/history/terminal-approve-button/CONTEXT.md`. The `(D…)`
+markers above carry those decisions into this record:
+terminal-approve-button D1/D2/D3/D4. Sits in the
 terminal reply box, beside the fixed-key buttons
 [ctrl-c-key](../ctrl-c-key/index.md) added.
