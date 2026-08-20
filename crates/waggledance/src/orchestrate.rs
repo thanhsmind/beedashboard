@@ -26,10 +26,12 @@ use std::time::Duration;
 use waggledance_core::ansi;
 use waggledance_core::domain::Run;
 use waggledance_core::indexer::now_rfc3339;
+use waggledance_core::notify_store::NotifyStore;
 use waggledance_core::paths_boundary::Boundary;
 use waggledance_core::Engine;
 
 use crate::herdr::{self, AgentStatus, Herdr, HerdrError, ReadSource};
+use crate::notify;
 
 /// Herdr's own hard cap on a `recent` read (mirrors `pane_scroller.rs`'s own
 /// local copy of the same constant, `pane_scroller.rs:52`) — baseline/delta
@@ -330,13 +332,25 @@ pub struct AwaitOutcome {
 /// methods) before returning, so a restarted orchestrator recovers the
 /// fleet by reading run state (D7) instead of needing this call to have
 /// been the one that saw it.
+/// `notify_store: None` runs the same poll/persist loop with no alert path
+/// configured -- a caller with no notification store simply raises nothing
+/// (dbn-2's own contract).
 pub async fn await_run(
     herdr: &dyn Herdr,
     engine: &Engine,
     run: &Run,
     timeout: Duration,
+    notify_store: Option<&NotifyStore>,
 ) -> Result<AwaitOutcome, OrchestrateError> {
-    await_run_with_poll_interval(herdr, engine, run, timeout, AWAIT_POLL_INTERVAL).await
+    await_run_with_poll_interval(
+        herdr,
+        engine,
+        run,
+        timeout,
+        AWAIT_POLL_INTERVAL,
+        notify_store,
+    )
+    .await
 }
 
 /// `await_run`'s real loop, parameterized on poll cadence — production
@@ -351,6 +365,7 @@ async fn await_run_with_poll_interval(
     run: &Run,
     timeout: Duration,
     poll_interval: Duration,
+    notify_store: Option<&NotifyStore>,
 ) -> Result<AwaitOutcome, OrchestrateError> {
     let deadline = tokio::time::Instant::now() + clamp_timeout(timeout);
     // A marker string minted for THIS run but already sitting in ITS OWN
@@ -376,11 +391,11 @@ async fn await_run_with_poll_interval(
         let delta = delta_from_baseline(&run.baseline, &read.text);
 
         if status == Some(AgentStatus::Blocked) {
-            return finish(engine, run, RunStatus::Blocked, delta).await;
+            return finish(engine, run, RunStatus::Blocked, delta, notify_store).await;
         }
 
         if !marker_is_stale_from_start && read.text.contains(run.marker.as_str()) {
-            return finish(engine, run, RunStatus::Done, delta).await;
+            return finish(engine, run, RunStatus::Done, delta, notify_store).await;
         }
 
         if status == Some(AgentStatus::Unknown) || status.is_none() {
@@ -392,7 +407,7 @@ async fn await_run_with_poll_interval(
                 stable_reads = 1;
             }
             if stable_reads >= STABILITY_READS {
-                return finish(engine, run, RunStatus::Done, delta).await;
+                return finish(engine, run, RunStatus::Done, delta, notify_store).await;
             }
         } else {
             stable_reads = 0;
@@ -406,22 +421,45 @@ async fn await_run_with_poll_interval(
             } else {
                 RunStatus::Working
             };
-            return finish(engine, run, timed_out_status, delta).await;
+            return finish(engine, run, timed_out_status, delta, notify_store).await;
         }
         let remaining = deadline.saturating_duration_since(now);
         tokio::time::sleep(poll_interval.min(remaining)).await;
     }
 }
 
-/// Persist `run`'s terminal-for-this-call status transition (D7) and hand
-/// back `await_run`'s outcome.
+/// Persist `run`'s terminal-for-this-call status transition (D7) and, when
+/// the status is one a human must clear (D1) and a notification store is
+/// configured, enqueue exactly one run-aware alert through dbn-1's
+/// `enqueue_run_notification` -- the body names only project, pane and run
+/// id (D4), and the store's own `(run_id, kind)` uniqueness constraint
+/// makes a repeat enqueue for an already-notified status a no-op (D5).
+/// Nothing is sent from here: the alert lands in the outbox and the
+/// existing drain delivers it, so the opt-in switch (D6) keeps governing
+/// delivery untouched. `notify_store: None` still persists the status --
+/// it just raises nothing.
 async fn finish(
     engine: &Engine,
     run: &Run,
     status: RunStatus,
     delta: String,
+    notify_store: Option<&NotifyStore>,
 ) -> Result<AwaitOutcome, OrchestrateError> {
     engine.update_run_status(&run.id, status.as_str(), &now_rfc3339(), None, None)?;
+    if let Some(store) = notify_store {
+        if notify::is_run_notifiable(status) {
+            let body = format!("{} {} {}", run.project_id, run.pane_id, run.id);
+            if let Err(e) = store.enqueue_run_notification(
+                &run.id,
+                &run.project_id,
+                &run.pane_id,
+                status.as_str(),
+                &body,
+            ) {
+                tracing::warn!("failed to enqueue run notification for {}: {e}", run.id);
+            }
+        }
+    }
     Ok(AwaitOutcome { status, delta })
 }
 
@@ -497,7 +535,8 @@ mod tests {
             .await
             .unwrap();
 
-        let outcome = await_run(&herdr, &engine, &run, Duration::from_secs(5))
+        let store = NotifyStore::open_in_memory().unwrap();
+        let outcome = await_run(&herdr, &engine, &run, Duration::from_secs(5), Some(&store))
             .await
             .unwrap();
         assert_eq!(outcome.status, RunStatus::Done);
@@ -511,6 +550,10 @@ mod tests {
         assert_eq!(
             stored.status, "done",
             "the transition must persist through the cell-1 repository methods"
+        );
+        assert!(
+            store.undelivered().unwrap().is_empty(),
+            "Done never notifies (D1)"
         );
     }
 
@@ -536,6 +579,7 @@ mod tests {
             &run,
             Duration::from_millis(20),
             Duration::from_millis(5),
+            None,
         )
         .await
         .unwrap();
@@ -557,12 +601,14 @@ mod tests {
         let run = build_run("run-timeout", pane, &baseline, &marker.joined());
         engine.insert_run(&run).unwrap();
 
+        let store = NotifyStore::open_in_memory().unwrap();
         let outcome = await_run_with_poll_interval(
             &herdr,
             &engine,
             &run,
             Duration::from_millis(15),
             Duration::from_millis(5),
+            Some(&store),
         )
         .await
         .unwrap();
@@ -574,12 +620,17 @@ mod tests {
 
         let stored = engine.get_run(&run.id).unwrap().unwrap();
         assert_eq!(stored.status, "working");
+        assert!(
+            store.undelivered().unwrap().is_empty(),
+            "Working never notifies (D1)"
+        );
     }
 
     #[tokio::test]
     async fn await_run_returns_blocked_when_the_pane_blocks_mid_run() {
         let herdr = FakeHerdr::new();
         let engine = test_engine();
+        let store = NotifyStore::open_in_memory().unwrap();
         let pane = "w2:p4"; // seeded Idle -- flips to Blocked mid-poll below.
         let baseline = capture_baseline(&herdr, pane).await.unwrap();
         let marker = mint_marker();
@@ -602,6 +653,7 @@ mod tests {
             &run,
             Duration::from_secs(2),
             Duration::from_millis(5),
+            Some(&store),
         )
         .await
         .unwrap();
@@ -609,6 +661,93 @@ mod tests {
 
         let stored = engine.get_run(&run.id).unwrap().unwrap();
         assert_eq!(stored.status, "blocked");
+
+        let pending = store.undelivered().unwrap();
+        assert_eq!(pending.len(), 1, "exactly one pending alert (D5)");
+        assert_eq!(pending[0].kind, "blocked");
+        assert_eq!(pending[0].run_id.as_deref(), Some(run.id.as_str()));
+        assert!(pending[0].body.contains(&run.project_id));
+        assert!(pending[0].body.contains(&run.pane_id));
+        assert!(pending[0].body.contains(&run.id));
+        assert!(
+            !pending[0].body.contains(&run.task),
+            "alert body must never carry the run's task text (D4): {:?}",
+            pending[0].body
+        );
+    }
+
+    #[tokio::test]
+    async fn await_run_repeated_blocked_await_leaves_one_pending_alert() {
+        let herdr = FakeHerdr::new();
+        let engine = test_engine();
+        let store = NotifyStore::open_in_memory().unwrap();
+        let pane = "w1:p2"; // seeded Blocked from the start (see FakeHerdr::new's doc).
+        let baseline = capture_baseline(&herdr, pane).await.unwrap();
+        let marker = mint_marker();
+        let run = build_run("run-blocked-twice", pane, &baseline, &marker.joined());
+        engine.insert_run(&run).unwrap();
+
+        for _ in 0..2 {
+            let outcome = await_run_with_poll_interval(
+                &herdr,
+                &engine,
+                &run,
+                Duration::from_millis(20),
+                Duration::from_millis(5),
+                Some(&store),
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome.status, RunStatus::Blocked);
+        }
+
+        let pending = store.undelivered().unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "D5: a run returning Blocked on two consecutive awaits must still \
+             leave exactly one pending alert"
+        );
+    }
+
+    #[tokio::test]
+    async fn await_run_timeout_status_enqueues_exactly_one_alert() {
+        let herdr = FakeHerdr::new();
+        let engine = test_engine();
+        let store = NotifyStore::open_in_memory().unwrap();
+        let pane = "w2:p4";
+        // Unknown is never a trustworthy signal to fall back on, so a
+        // deadline reached before content stabilizes reports Timeout, not
+        // Working.
+        herdr.set_status(pane, AgentStatus::Unknown).await.unwrap();
+        let baseline = capture_baseline(&herdr, pane).await.unwrap();
+        let marker = mint_marker(); // never printed -- content stays put.
+        let run = build_run("run-timeout-alert", pane, &baseline, &marker.joined());
+        engine.insert_run(&run).unwrap();
+
+        // poll_interval > timeout so the loop's own `remaining` cap makes
+        // the very first sleep land exactly on the deadline -- the second
+        // iteration's deadline check fires with stable_reads still under
+        // STABILITY_READS, before content could ever settle into a Done.
+        let outcome = await_run_with_poll_interval(
+            &herdr,
+            &engine,
+            &run,
+            Duration::from_millis(10),
+            Duration::from_millis(50),
+            Some(&store),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.status, RunStatus::Timeout);
+
+        let stored = engine.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(stored.status, "timeout");
+
+        let pending = store.undelivered().unwrap();
+        assert_eq!(pending.len(), 1, "exactly one pending timeout alert");
+        assert_eq!(pending[0].kind, "timeout");
+        assert_eq!(pending[0].run_id.as_deref(), Some(run.id.as_str()));
     }
 
     #[tokio::test]
@@ -630,6 +769,7 @@ mod tests {
             &run,
             Duration::from_millis(200),
             Duration::from_millis(2),
+            None,
         )
         .await
         .unwrap();

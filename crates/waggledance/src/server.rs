@@ -284,6 +284,7 @@ pub async fn serve() -> Result<()> {
         state.herdr.clone(),
         state.notify_store.clone(),
         telegram,
+        Some(engine.clone()),
     );
 
     // Filesystem watcher (kept alive for the process lifetime).
@@ -1330,6 +1331,7 @@ async fn update_terminal_config(
         st.herdr.clone(),
         st.notify_store.clone(),
         telegram,
+        Some(st.engine.clone()),
     );
 
     // agent-terminal-24: a failed credential write redirects to the

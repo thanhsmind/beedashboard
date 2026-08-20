@@ -1,7 +1,9 @@
 //! Notification service — outbound alerts when an agent needs a human
 //! (`blocked`) or finishes (`done`) (D1: ported from herdr-go's `notify`
 //! module). [`Notifier`] is a hexagonal port: Telegram is one implementation,
-//! never the only path, so a future channel drops in unchanged.
+//! never the only path, so a future channel drops in unchanged. [`RunOwnership`]
+//! is a second port (D3) that lets this service suppress watcher alerts while
+//! a dispatched run owns a pane, without taking a dependency on the engine.
 //!
 //! Delivery is **at-least-once**: the obligation is enqueued in the
 //! [`NotifyStore`](waggledance_core::notify_store::NotifyStore) first and marked
@@ -21,6 +23,7 @@ use async_trait::async_trait;
 use waggledance_core::notify_store::NotifyStore;
 
 use crate::herdr::AgentStatus;
+use crate::orchestrate::RunStatus;
 use crate::watcher::StatusChange;
 
 pub use telegram::TelegramNotifier;
@@ -52,9 +55,34 @@ impl Notifier for NullNotifier {
     }
 }
 
+/// A port for asking whether a pane currently has an owning run (D3).
+/// Expressed as a hexagonal port so [`NotifyService`] does not take a hard
+/// dependency on the engine.
+pub trait RunOwnership: Send + Sync {
+    fn is_pane_owned(&self, pane_id: &str) -> bool;
+}
+
+impl<F> RunOwnership for F
+where
+    F: Fn(&str) -> bool + Send + Sync,
+{
+    fn is_pane_owned(&self, pane_id: &str) -> bool {
+        self(pane_id)
+    }
+}
+
 /// Which status transitions are worth a human's attention.
 pub fn is_notifiable(status: AgentStatus) -> bool {
     matches!(status, AgentStatus::Blocked | AgentStatus::Done)
+}
+
+/// Which run statuses are worth a human's attention (D1): `Blocked` waits on
+/// a person, `Timeout` never got a trustworthy signal at all -- `Done` and
+/// `Working` never notify. A separate answer from [`is_notifiable`] because
+/// that one speaks [`AgentStatus`], this one [`RunStatus`] -- distinct
+/// vocabularies, never overloaded onto one function.
+pub fn is_run_notifiable(status: RunStatus) -> bool {
+    matches!(status, RunStatus::Blocked | RunStatus::Timeout)
 }
 
 /// Bridges the watcher to a channel with durable, at-least-once delivery.
@@ -65,18 +93,41 @@ pub fn is_notifiable(status: AgentStatus) -> bool {
 pub struct NotifyService {
     store: Arc<NotifyStore>,
     notifier: Arc<dyn Notifier>,
+    ownership: Option<Arc<dyn RunOwnership>>,
 }
 
 impl NotifyService {
     pub fn new(store: Arc<NotifyStore>, notifier: Arc<dyn Notifier>) -> Self {
-        NotifyService { store, notifier }
+        NotifyService {
+            store,
+            notifier,
+            ownership: None,
+        }
     }
 
-    /// Record a status change as a pending obligation *if* it is notifiable.
+    pub fn with_ownership(
+        store: Arc<NotifyStore>,
+        notifier: Arc<dyn Notifier>,
+        ownership: Arc<dyn RunOwnership>,
+    ) -> Self {
+        NotifyService {
+            store,
+            notifier,
+            ownership: Some(ownership),
+        }
+    }
+
+    /// Record a status change as a pending obligation *if* it is notifiable
+    /// and the pane is not currently owned by a dispatched run (D3).
     /// Returns true if it was enqueued.
     pub async fn record(&self, change: &StatusChange) -> bool {
         if !is_notifiable(change.status) {
             return false;
+        }
+        if let Some(ownership) = &self.ownership {
+            if ownership.is_pane_owned(&change.pane_id) {
+                return false;
+            }
         }
         let body = format!(
             "{} agent {} is {}",
@@ -160,6 +211,42 @@ mod tests {
         assert!(svc.record(&change("p", AgentStatus::Done)).await);
         assert!(!svc.record(&change("p", AgentStatus::Working)).await);
         assert!(!svc.record(&change("p", AgentStatus::Idle)).await);
+        assert_eq!(store.undelivered().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn blocked_pane_with_owning_run_enqueues_nothing() {
+        let store = store();
+        let ownership = Arc::new(|pane: &str| pane == "p1");
+        let svc = NotifyService::with_ownership(store.clone(), Arc::new(NullNotifier), ownership);
+        assert!(!svc.record(&change("p1", AgentStatus::Blocked)).await);
+        assert!(store.undelivered().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn blocked_pane_without_owning_run_enqueues() {
+        let store = store();
+        let ownership = Arc::new(|pane: &str| pane == "other");
+        let svc = NotifyService::with_ownership(store.clone(), Arc::new(NullNotifier), ownership);
+        assert!(svc.record(&change("p1", AgentStatus::Blocked)).await);
+        assert_eq!(store.undelivered().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn done_pane_with_owning_run_stays_suppressed() {
+        let store = store();
+        let ownership = Arc::new(|pane: &str| pane == "p1");
+        let svc = NotifyService::with_ownership(store.clone(), Arc::new(NullNotifier), ownership);
+        assert!(!svc.record(&change("p1", AgentStatus::Done)).await);
+        assert!(store.undelivered().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_without_ownership_port_behaves_as_before() {
+        let store = store();
+        let svc = NotifyService::new(store.clone(), Arc::new(NullNotifier));
+        assert!(svc.record(&change("p1", AgentStatus::Blocked)).await);
+        assert!(svc.record(&change("p1", AgentStatus::Done)).await);
         assert_eq!(store.undelivered().unwrap().len(), 2);
     }
 
