@@ -145,9 +145,10 @@ impl TerminalBackground {
         herdr: Arc<dyn herdr::Herdr>,
         notify_store: Arc<waggledance_core::notify_store::NotifyStore>,
         telegram: Option<(String, String)>,
+        engine: Option<Arc<waggledance_core::Engine>>,
     ) {
         self.reconcile_supervisor(cfg.supervisor_enabled, herdr.clone());
-        self.reconcile_notify(cfg.notify_enabled, herdr, notify_store, telegram);
+        self.reconcile_notify(cfg.notify_enabled, herdr, notify_store, telegram, engine);
     }
 
     fn reconcile_supervisor(&self, enabled: bool, control: Arc<dyn herdr::Herdr>) {
@@ -240,12 +241,14 @@ impl TerminalBackground {
         control: Arc<dyn herdr::Herdr>,
         store: Arc<waggledance_core::notify_store::NotifyStore>,
         telegram: Option<(String, String)>,
+        engine: Option<Arc<waggledance_core::Engine>>,
     ) {
         self.reconcile_notify_with_interval(
             enabled,
             control,
             store,
             telegram,
+            engine,
             Duration::from_millis(2000),
         );
     }
@@ -258,6 +261,7 @@ impl TerminalBackground {
         control: Arc<dyn herdr::Herdr>,
         store: Arc<waggledance_core::notify_store::NotifyStore>,
         telegram: Option<(String, String)>,
+        engine: Option<Arc<waggledance_core::Engine>>,
         interval: Duration,
     ) {
         let mut slot = self.notify.lock().unwrap();
@@ -278,7 +282,18 @@ impl TerminalBackground {
                     }
                     None => Arc::new(notify::NullNotifier),
                 };
-                let service = Arc::new(notify::NotifyService::new(store, notifier));
+                let service = match engine {
+                    Some(eng) => {
+                        let ownership: Arc<dyn notify::RunOwnership> =
+                            Arc::new(move |pane_id: &str| -> bool {
+                                is_pane_owned_by_run(&eng, pane_id)
+                            });
+                        Arc::new(notify::NotifyService::with_ownership(
+                            store, notifier, ownership,
+                        ))
+                    }
+                    None => Arc::new(notify::NotifyService::new(store, notifier)),
+                };
                 let poll_watcher = watcher::PollWatcher::new(control, interval);
                 let ticks = self.notify_ticks.clone();
                 *slot = Some(tokio::spawn(async move {
@@ -311,6 +326,36 @@ impl TerminalBackground {
                 *self.notify_store.lock().unwrap() = None;
             }
         }
+    }
+}
+
+/// Query the engine for whether a pane is currently owned by an active run (D3).
+/// A pane owns a run when the latest run for that pane has not reached a terminal
+/// state that the human already saw (i.e. status is "working", "pending", "blocked",
+/// or "timeout", rather than terminal "done" or "failed").
+fn is_pane_owned_by_run(engine: &waggledance_core::Engine, pane_id: &str) -> bool {
+    let Ok(projects) = engine.list_projects() else {
+        return false;
+    };
+    let mut latest_run: Option<waggledance_core::domain::Run> = None;
+    for project in projects {
+        if let Ok(runs) = engine.list_runs(&project.id, 50) {
+            for run in runs {
+                if run.pane_id == pane_id {
+                    match &latest_run {
+                        Some(current) if current.created_at >= run.created_at => {}
+                        _ => latest_run = Some(run),
+                    }
+                }
+            }
+        }
+    }
+    match latest_run {
+        Some(run) => matches!(
+            run.status.as_str(),
+            "working" | "pending" | "blocked" | "timeout"
+        ),
+        None => false,
     }
 }
 
@@ -373,6 +418,7 @@ mod terminal_background_tests {
             Arc::new(FakeHerdr::new()),
             store(),
             None,
+            None,
         );
         assert!(!bg.supervisor_running());
         assert!(!bg.notify_running());
@@ -401,7 +447,7 @@ mod terminal_background_tests {
             ..Default::default()
         };
 
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None, None);
         assert!(
             bg.supervisor_running(),
             "switching on must start the watchdog"
@@ -409,7 +455,7 @@ mod terminal_background_tests {
         assert!(!bg.notify_running(), "the notify switch is still off");
 
         cfg.supervisor_enabled = false;
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None, None);
         assert!(
             !bg.supervisor_running(),
             "switching off must stop the watchdog"
@@ -429,7 +475,7 @@ mod terminal_background_tests {
         };
 
         let st = store();
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st.clone(), None);
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st.clone(), None, None);
         assert!(bg.notify_running(), "switching on must start the watcher");
         assert!(
             !bg.supervisor_running(),
@@ -441,7 +487,7 @@ mod terminal_background_tests {
         );
 
         cfg.notify_enabled = false;
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st, None);
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st, None, None);
         assert!(!bg.notify_running(), "switching off must stop the watcher");
         assert!(
             bg.notify_store().is_none(),
@@ -459,12 +505,12 @@ mod terminal_background_tests {
             notify_enabled: true,
             ..Default::default()
         };
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None, None);
         assert!(bg.supervisor_running());
         assert!(bg.notify_running());
 
         cfg.notify_enabled = false;
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None, None);
         assert!(
             bg.supervisor_running(),
             "turning off notify must not touch the supervisor"
@@ -484,11 +530,11 @@ mod terminal_background_tests {
             ..Default::default()
         };
         let st = store();
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st.clone(), None);
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st.clone(), None, None);
         assert!(bg.supervisor_running());
         assert!(bg.notify_running());
         assert!(bg.notify_store().is_some());
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st, None);
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st, None, None);
         assert!(bg.supervisor_running());
         assert!(bg.notify_running());
         assert!(bg.notify_store().is_some());
@@ -509,7 +555,7 @@ mod terminal_background_tests {
             notify_enabled: true,
             ..Default::default()
         };
-        bg.reconcile(&on_cfg, fake.clone(), st.clone(), None);
+        bg.reconcile(&on_cfg, fake.clone(), st.clone(), None, None);
         let handed_store = bg
             .notify_store()
             .expect("store must be present when notify switch is on");
@@ -523,7 +569,7 @@ mod terminal_background_tests {
             notify_enabled: false,
             ..Default::default()
         };
-        bg.reconcile(&off_cfg, fake.clone(), st.clone(), None);
+        bg.reconcile(&off_cfg, fake.clone(), st.clone(), None, None);
         assert!(
             bg.notify_store().is_none(),
             "D6: turning notify switch off must disarm the dispatch store"
@@ -546,12 +592,12 @@ mod terminal_background_tests {
             notify_enabled: false,
             ..Default::default()
         };
-        bg.reconcile(&off_cfg, fake.clone(), st.clone(), None);
+        bg.reconcile(&off_cfg, fake.clone(), st.clone(), None, None);
         assert!(!bg.notify_running());
         assert!(bg.notify_store().is_none());
 
         // 2. Notifications enabled: store is handed down to dispatch path
-        bg.reconcile_notify_with_interval(true, fake.clone(), st.clone(), None, fast);
+        bg.reconcile_notify_with_interval(true, fake.clone(), st.clone(), None, None, fast);
         assert!(bg.notify_running());
         let dispatch_store = bg.notify_store().expect("switch on hands store down");
 
@@ -574,9 +620,58 @@ mod terminal_background_tests {
         assert_eq!(st.undelivered().unwrap().len(), 0);
 
         // 3. Notifications turned off: store is disarmed and nothing further is driven
-        bg.reconcile_notify_with_interval(false, fake.clone(), st.clone(), None, fast);
+        bg.reconcile_notify_with_interval(false, fake.clone(), st.clone(), None, None, fast);
         assert!(!bg.notify_running());
         assert!(bg.notify_store().is_none());
+    }
+
+    /// D3 / dbn-5: when a pane has an active dispatched run, the watcher's pane
+    /// alert is suppressed because the run-aware alert owns that event.
+    #[tokio::test]
+    async fn reconcile_with_engine_suppresses_watcher_alert_for_owned_pane() {
+        let engine = waggledance_core::Engine::new(
+            waggledance_core::SqliteStore::open_in_memory().unwrap(),
+            waggledance_core::Config::default(),
+        );
+        let project = waggledance_core::domain::Project {
+            id: "proj-1".into(),
+            name: "test-proj".into(),
+            root_path: std::path::PathBuf::from("/tmp/test"),
+            created_at: waggledance_core::indexer::now_rfc3339(),
+            last_seen_at: waggledance_core::indexer::now_rfc3339(),
+            orchestration_enabled: true,
+        };
+        engine.store.upsert_project(&project).unwrap();
+        let now = waggledance_core::indexer::now_rfc3339();
+
+        // 1. Working run owns the pane -> is_pane_owned_by_run is true
+        let run = waggledance_core::domain::Run {
+            id: "run-own-1".into(),
+            project_id: project.id.clone(),
+            pane_id: "w2:p4".into(),
+            preset_label: None,
+            task: "test task".into(),
+            baseline: "".into(),
+            marker: "".into(),
+            status: "working".into(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        engine.insert_run(&run).unwrap();
+        assert!(is_pane_owned_by_run(&engine, "w2:p4"));
+        assert!(!is_pane_owned_by_run(&engine, "w1:p1"));
+
+        // 2. Blocked run still owns the pane (suppressed in favour of run-aware alert)
+        engine
+            .update_run_status("run-own-1", "blocked", &now, None, None)
+            .unwrap();
+        assert!(is_pane_owned_by_run(&engine, "w2:p4"));
+
+        // 3. Done run has reached terminal state -> no longer owns the pane
+        engine
+            .update_run_status("run-own-1", "done", &now, None, None)
+            .unwrap();
+        assert!(!is_pane_owned_by_run(&engine, "w2:p4"));
     }
 
     /// `main.rs` must still declare the modules this manager depends on —
@@ -631,7 +726,7 @@ mod terminal_background_tests {
         let fake: Arc<dyn crate::herdr::Herdr> = Arc::new(FakeHerdr::new());
         let fast = Duration::from_millis(15);
 
-        bg.reconcile_notify_with_interval(true, fake.clone(), store(), None, fast);
+        bg.reconcile_notify_with_interval(true, fake.clone(), store(), None, None, fast);
         tokio::time::sleep(Duration::from_millis(90)).await;
         let ticks_while_on = bg.notify_ticks();
         assert!(
@@ -639,7 +734,7 @@ mod terminal_background_tests {
             "the watcher must actually poll while switched on (ticks={ticks_while_on})"
         );
 
-        bg.reconcile_notify_with_interval(false, fake.clone(), store(), None, fast);
+        bg.reconcile_notify_with_interval(false, fake.clone(), store(), None, None, fast);
         let ticks_at_off = bg.notify_ticks();
         tokio::time::sleep(Duration::from_millis(150)).await;
         let ticks_after_wait = bg.notify_ticks();
