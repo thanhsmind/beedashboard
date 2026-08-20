@@ -1,6 +1,3 @@
----
-okf_version: 0.1
----
 <!--
 GENERATED FILE — do not hand-edit.
 Rendered by `bee knowledge index` from concept frontmatter inside docs/knowledge/ (okf-foundation D21).
@@ -9,13 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# Knowledge Bundle
+# patterns/
 
-## Sections
+## Concepts
 
-- [patterns/](patterns/index.md) — 1 concept(s)
-- [work/](work/index.md) — 46 concept(s)
-
-## Critical patterns
-
-None.
+- [A cell that promises a user-visible outcome owes one proof of the whole path](prove-the-whole-path.md) — Pitfall: slicing a user-visible outcome into per-unit cells lets every slice go green while the feature stays inert, because no proof ever crosses the seams between them.

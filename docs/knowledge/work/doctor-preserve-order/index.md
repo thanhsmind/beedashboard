@@ -1,6 +1,3 @@
----
-okf_version: 0.1
----
 <!--
 GENERATED FILE — do not hand-edit.
 Rendered by `bee knowledge index` from concept frontmatter inside docs/knowledge/ (okf-foundation D21).
@@ -9,13 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# Knowledge Bundle
+# work/doctor-preserve-order/
 
-## Sections
+## Concepts
 
-- [patterns/](patterns/index.md) — 1 concept(s)
-- [work/](work/index.md) — 46 concept(s)
-
-## Critical patterns
-
-None.
+- [doctor-preserve-order — delivery](delivery.md) — Delivery record for work item doctor-preserve-order: one capped cell stopping the health-check fixer from reordering a user's configuration file.

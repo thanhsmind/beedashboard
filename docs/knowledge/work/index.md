@@ -23,6 +23,7 @@ never a generation timestamp or any other wall-clock value.
 - [cross-board/](cross-board/index.md) — 1 concept(s)
 - [ctrl-c-key/](ctrl-c-key/index.md) — 1 concept(s)
 - [dispatch-blocked-notify/](dispatch-blocked-notify/index.md) — 1 concept(s)
+- [doctor-preserve-order/](doctor-preserve-order/index.md) — 1 concept(s)
 - [gate-stop-superseded/](gate-stop-superseded/index.md) — 1 concept(s)
 - [home-board-perf/](home-board-perf/index.md) — 1 concept(s)
 - [home-terminal-header/](home-terminal-header/index.md) — 1 concept(s)
