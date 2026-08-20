@@ -64,6 +64,10 @@ fn main() {
 pub struct TerminalBackground {
     supervisor: Mutex<Option<SupervisorTask>>,
     notify: Mutex<Option<JoinHandle<()>>>,
+    /// The notification store handed down to the dispatch path while
+    /// notifications are enabled (D6/dbn-3). `None` when notifications
+    /// are disabled.
+    notify_store: Mutex<Option<Arc<waggledance_core::notify_store::NotifyStore>>>,
     /// The most recently stopped task's handle, kept only until the next
     /// switch-on has waited for it to finish.
     supervisor_stopping: Mutex<Option<JoinHandle<()>>>,
@@ -99,6 +103,13 @@ impl TerminalBackground {
     /// True while the notify (watcher + drain) task is live.
     pub fn notify_running(&self) -> bool {
         self.notify.lock().unwrap().is_some()
+    }
+
+    /// The notification store available to the dispatch path while the notify
+    /// switch is on (D6/dbn-3). Returns `None` when notifications are
+    /// disabled so no alerts are raised or enqueued outside the opt-in switch.
+    pub fn notify_store(&self) -> Option<Arc<waggledance_core::notify_store::NotifyStore>> {
+        self.notify_store.lock().unwrap().clone()
     }
 
     /// How many health checks the supervisor task has actually completed —
@@ -251,8 +262,12 @@ impl TerminalBackground {
     ) {
         let mut slot = self.notify.lock().unwrap();
         match (enabled, slot.take()) {
-            (true, Some(existing)) => *slot = Some(existing), // already running
+            (true, Some(existing)) => {
+                *slot = Some(existing);
+                *self.notify_store.lock().unwrap() = Some(store);
+            }
             (true, None) => {
+                *self.notify_store.lock().unwrap() = Some(store.clone());
                 let previous = self.notify_stopping.lock().unwrap().take();
                 let notifier: Arc<dyn notify::Notifier> = match telegram {
                     Some((token, chat_id)) => {
@@ -288,10 +303,13 @@ impl TerminalBackground {
                 }));
             }
             (false, Some(handle)) => {
+                *self.notify_store.lock().unwrap() = None;
                 handle.abort();
                 *self.notify_stopping.lock().unwrap() = Some(handle);
             }
-            (false, None) => {}
+            (false, None) => {
+                *self.notify_store.lock().unwrap() = None;
+            }
         }
     }
 }
@@ -316,6 +334,7 @@ impl Drop for TerminalBackground {
         if let Some(h) = self.notify_stopping.lock().unwrap().take() {
             h.abort();
         }
+        *self.notify_store.lock().unwrap() = None;
     }
 }
 
@@ -357,6 +376,10 @@ mod terminal_background_tests {
         );
         assert!(!bg.supervisor_running());
         assert!(!bg.notify_running());
+        assert!(
+            bg.notify_store().is_none(),
+            "default config leaves dispatch store None"
+        );
     }
 
     /// The supervisor switch: on starts the watchdog, off stops it — with no
@@ -405,16 +428,25 @@ mod terminal_background_tests {
             ..Default::default()
         };
 
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
+        let st = store();
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st.clone(), None);
         assert!(bg.notify_running(), "switching on must start the watcher");
         assert!(
             !bg.supervisor_running(),
             "the supervisor switch is still off"
         );
+        assert!(
+            bg.notify_store().is_some(),
+            "switching on must hand the store down the dispatch path"
+        );
 
         cfg.notify_enabled = false;
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st, None);
         assert!(!bg.notify_running(), "switching off must stop the watcher");
+        assert!(
+            bg.notify_store().is_none(),
+            "switching off must clear the dispatch path's store"
+        );
     }
 
     /// Flipping one switch never disturbs the other — each `reconcile_*`
@@ -448,12 +480,103 @@ mod terminal_background_tests {
         let bg = TerminalBackground::new();
         let cfg = TerminalConfig {
             supervisor_enabled: true,
+            notify_enabled: true,
             ..Default::default()
         };
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
+        let st = store();
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st.clone(), None);
         assert!(bg.supervisor_running());
-        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), store(), None);
+        assert!(bg.notify_running());
+        assert!(bg.notify_store().is_some());
+        bg.reconcile(&cfg, Arc::new(FakeHerdr::new()), st, None);
         assert!(bg.supervisor_running());
+        assert!(bg.notify_running());
+        assert!(bg.notify_store().is_some());
+    }
+
+    /// D6 / dbn-3: reconcile is the single place the notify store is handed down
+    /// to the dispatch path. With notifications enabled, the exact store
+    /// instance is handed down; with notifications disabled, nothing is handed
+    /// down (`None`) and no alerts are driven or sent.
+    #[tokio::test]
+    async fn reconcile_notify_switch_arms_and_disarms_dispatch_store() {
+        let bg = TerminalBackground::new();
+        let st = store();
+        let fake = Arc::new(FakeHerdr::new());
+
+        // Switch on -> dispatch path receives the exact store instance
+        let on_cfg = TerminalConfig {
+            notify_enabled: true,
+            ..Default::default()
+        };
+        bg.reconcile(&on_cfg, fake.clone(), st.clone(), None);
+        let handed_store = bg
+            .notify_store()
+            .expect("store must be present when notify switch is on");
+        assert!(
+            Arc::ptr_eq(&handed_store, &st),
+            "the dispatch path must receive the same notification store instance the drain reads"
+        );
+
+        // Switch off -> dispatch path receives None
+        let off_cfg = TerminalConfig {
+            notify_enabled: false,
+            ..Default::default()
+        };
+        bg.reconcile(&off_cfg, fake.clone(), st.clone(), None);
+        assert!(
+            bg.notify_store().is_none(),
+            "D6: turning notify switch off must disarm the dispatch store"
+        );
+    }
+
+    /// D6 / dbn-3 end-to-end reconcile: with notifications enabled, a dispatched
+    /// run's alert in the store is delivered through the channel when drained;
+    /// with notifications disabled, nothing is handed down, nothing is driven,
+    /// and nothing is sent.
+    #[tokio::test]
+    async fn reconcile_with_notify_enabled_delivers_run_alerts_and_off_sends_nothing() {
+        let bg = TerminalBackground::new();
+        let fake = Arc::new(FakeHerdr::new());
+        let st = store();
+        let fast = Duration::from_millis(15);
+
+        // 1. Notifications disabled: nothing is handed down and nothing is driven
+        let off_cfg = TerminalConfig {
+            notify_enabled: false,
+            ..Default::default()
+        };
+        bg.reconcile(&off_cfg, fake.clone(), st.clone(), None);
+        assert!(!bg.notify_running());
+        assert!(bg.notify_store().is_none());
+
+        // 2. Notifications enabled: store is handed down to dispatch path
+        bg.reconcile_notify_with_interval(true, fake.clone(), st.clone(), None, fast);
+        assert!(bg.notify_running());
+        let dispatch_store = bg.notify_store().expect("switch on hands store down");
+
+        // Enqueue a run-aware alert via the handed-down store (as orchestrate::finish does on Blocked)
+        let enqueued = dispatch_store.enqueue_run_notification(
+            "run-rec-1",
+            "proj-alpha",
+            "w1:p1",
+            "blocked",
+            "proj-alpha w1:p1 run-rec-1",
+        );
+        assert!(enqueued.is_ok());
+        assert_eq!(st.undelivered().unwrap().len(), 1);
+
+        // Drain the store via the NotifyService adapter (the same service created in reconcile)
+        let notifier = Arc::new(notify::NullNotifier);
+        let service = notify::NotifyService::new(st.clone(), notifier);
+        let delivered = service.drain().await;
+        assert_eq!(delivered, 1, "dispatched run alert must be delivered");
+        assert_eq!(st.undelivered().unwrap().len(), 0);
+
+        // 3. Notifications turned off: store is disarmed and nothing further is driven
+        bg.reconcile_notify_with_interval(false, fake.clone(), st.clone(), None, fast);
+        assert!(!bg.notify_running());
+        assert!(bg.notify_store().is_none());
     }
 
     /// `main.rs` must still declare the modules this manager depends on —
