@@ -1,6 +1,3 @@
----
-okf_version: 0.1
----
 <!--
 GENERATED FILE — do not hand-edit.
 Rendered by `bee knowledge index` from concept frontmatter inside docs/knowledge/ (okf-foundation D21).
@@ -9,12 +6,8 @@ Deterministic: byte-identical for the same bundle contents — path-sorted entri
 never a generation timestamp or any other wall-clock value.
 -->
 
-# Knowledge Bundle
+# work/merged-worktree-not-live/
 
-## Sections
+## Concepts
 
-- [work/](work/index.md) — 44 concept(s)
-
-## Critical patterns
-
-None.
+- [merged-worktree-not-live — delivery](delivery.md) — Delivery record for work item merged-worktree-not-live: a feature stops looking busy once its work has landed.
