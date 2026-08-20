@@ -832,10 +832,16 @@ fn handle_await(
         Ok(o) => o,
         Err(e) => return tool_error(id, &e),
     };
-    match orch
-        .runtime
-        .block_on(orchestrate::await_run(&orch.herdr, engine, &run, timeout))
-    {
+    match orch.runtime.block_on(orchestrate::await_run(
+        &orch.herdr,
+        engine,
+        &run,
+        timeout,
+        // `Orchestration` carries no notification store today -- the
+        // run-aware alert path (dbn-2) is optional by design, so this
+        // caller simply raises nothing.
+        None,
+    )) {
         Ok(outcome) => ok(
             id,
             json!({

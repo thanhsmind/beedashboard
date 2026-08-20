@@ -80,10 +80,7 @@ impl NotifyStore {
             conn.execute("ALTER TABLE notifications ADD COLUMN run_id TEXT", [])?;
         }
         if !has_column(conn, "notifications", "project_id")? {
-            conn.execute(
-                "ALTER TABLE notifications ADD COLUMN project_id TEXT",
-                [],
-            )?;
+            conn.execute("ALTER TABLE notifications ADD COLUMN project_id TEXT", [])?;
         }
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_notifications_run_kind

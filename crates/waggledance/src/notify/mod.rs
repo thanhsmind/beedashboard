@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use waggledance_core::notify_store::NotifyStore;
 
 use crate::herdr::AgentStatus;
+use crate::orchestrate::RunStatus;
 use crate::watcher::StatusChange;
 
 pub use telegram::TelegramNotifier;
@@ -55,6 +56,15 @@ impl Notifier for NullNotifier {
 /// Which status transitions are worth a human's attention.
 pub fn is_notifiable(status: AgentStatus) -> bool {
     matches!(status, AgentStatus::Blocked | AgentStatus::Done)
+}
+
+/// Which run statuses are worth a human's attention (D1): `Blocked` waits on
+/// a person, `Timeout` never got a trustworthy signal at all -- `Done` and
+/// `Working` never notify. A separate answer from [`is_notifiable`] because
+/// that one speaks [`AgentStatus`], this one [`RunStatus`] -- distinct
+/// vocabularies, never overloaded onto one function.
+pub fn is_run_notifiable(status: RunStatus) -> bool {
+    matches!(status, RunStatus::Blocked | RunStatus::Timeout)
 }
 
 /// Bridges the watcher to a channel with durable, at-least-once delivery.
