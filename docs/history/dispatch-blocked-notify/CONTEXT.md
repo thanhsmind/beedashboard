@@ -74,7 +74,7 @@ Both planning questions are answered; nothing is outstanding.
 - [x] Which single place raises the alert — the status-persistence point inside `await_run`'s `finish`, which already persists every terminal-for-this-call transition (dbn-2). The MCP process opens its own outbox against the server's own database (dbn-4).
 - [x] Whether D3's suppression reads live run state — it reads live run state through a `RunOwnership` port answered from the engine, not a marker on the pane record (dbn-5).
 
-## Deferred Ideas
+## Deferred Ideas — triggers `code-starts-writing-a-failed-run-status-a__cb4bc9f7`, `a-second-dispatched-run-alert-class-is-a__5a2fbc19`
 
 Out-of-scope ideas captured during shaping. Each carries the registered trigger that brings it back.
 
