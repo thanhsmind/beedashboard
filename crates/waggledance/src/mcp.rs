@@ -17,6 +17,7 @@ use std::path::Path;
 use waggledance_core::bee;
 use waggledance_core::config::registry_db_path;
 use waggledance_core::domain::{Project, Run};
+use waggledance_core::notify_store::NotifyStore;
 use waggledance_core::{Config, Engine, Error, SqliteStore};
 
 /// Default `waggledance_search` hit cap when the caller does not pass `limit`.
@@ -38,10 +39,18 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 struct Orchestration {
     runtime: tokio::runtime::Runtime,
     herdr: SocketHerdr,
+    notify_store: Option<NotifyStore>,
 }
 
 impl Orchestration {
-    fn init() -> std::result::Result<Self, String> {
+    fn init(cfg: &waggledance_core::config::TerminalConfig) -> std::result::Result<Self, String> {
+        Self::init_with_override(cfg, None)
+    }
+
+    fn init_with_override(
+        cfg: &waggledance_core::config::TerminalConfig,
+        override_dir: Option<&Path>,
+    ) -> std::result::Result<Self, String> {
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| format!("failed to start the orchestration runtime: {e}"))?;
         // Mirrors `server.rs`'s own best-effort fallback: an unresolvable
@@ -50,19 +59,44 @@ impl Orchestration {
         // of a crash.
         let socket_path = crate::herdr::socket::default_socket_path()
             .unwrap_or_else(|_| std::path::PathBuf::from("/nonexistent/herdr.sock"));
+        let notify_store = open_notify_store(cfg, override_dir);
         Ok(Orchestration {
             runtime,
             herdr: SocketHerdr::new(socket_path),
+            notify_store,
         })
     }
 }
 
+/// D7/D9 outbox for the MCP stdio process (dbn-4): Orchestration opens its own
+/// NotifyStore against the SAME database file the server uses.
+/// Per D6 the opt-in switch still governs: open the store and pass Some only
+/// when the notify switch is enabled in the configuration, and None when it is off.
+/// A store that fails to open falls back to None and logs one warning, matching
+/// the degrade-rather-than-fail shape server.rs uses.
+fn open_notify_store(
+    cfg: &waggledance_core::config::TerminalConfig,
+    override_dir: Option<&Path>,
+) -> Option<NotifyStore> {
+    if !cfg.notify_enabled {
+        return None;
+    }
+    let notify_store_path = waggledance_core::config::notify_store_path_override(override_dir);
+    NotifyStore::open(&notify_store_path)
+        .map_err(|e| {
+            tracing::warn!("notify outbox open failed ({e}); notifications disabled");
+            e
+        })
+        .ok()
+}
+
 /// Lazily build (or reuse) the shared [`Orchestration`] handle.
-fn orchestration_handle(
-    slot: &mut Option<Orchestration>,
-) -> std::result::Result<&Orchestration, String> {
+fn orchestration_handle<'a>(
+    slot: &'a mut Option<Orchestration>,
+    cfg: &waggledance_core::config::TerminalConfig,
+) -> std::result::Result<&'a Orchestration, String> {
     if slot.is_none() {
-        *slot = Some(Orchestration::init()?);
+        *slot = Some(Orchestration::init(cfg)?);
     }
     Ok(slot.as_ref().expect("just initialized above"))
 }
@@ -684,7 +718,7 @@ fn handle_dispatch(
         None => None,
     };
 
-    let orch = match orchestration_handle(orchestration) {
+    let orch = match orchestration_handle(orchestration, &engine.config.terminal) {
         Ok(o) => o,
         Err(e) => return tool_error(id, &e),
     };
@@ -828,7 +862,7 @@ fn handle_await(
         .map(std::time::Duration::from_secs)
         .unwrap_or(orchestrate::MAX_AWAIT_TIMEOUT);
 
-    let orch = match orchestration_handle(orchestration) {
+    let orch = match orchestration_handle(orchestration, &engine.config.terminal) {
         Ok(o) => o,
         Err(e) => return tool_error(id, &e),
     };
@@ -837,10 +871,7 @@ fn handle_await(
         engine,
         &run,
         timeout,
-        // `Orchestration` carries no notification store today -- the
-        // run-aware alert path (dbn-2) is optional by design, so this
-        // caller simply raises nothing.
-        None,
+        orch.notify_store.as_ref(),
     )) {
         Ok(outcome) => ok(
             id,
@@ -1573,6 +1604,115 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(rows.len(), 2, "{resp}");
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    /// D6 / dbn-4: in MCP stdio process, Orchestration opens its own NotifyStore
+    /// against the server's database when notifications are enabled, and None
+    /// when disabled so the await path raises no alerts.
+    #[test]
+    fn await_path_receives_store_when_notify_enabled_and_none_when_disabled() {
+        // 1. Switch off: orchestration initialized on await path has no notify store
+        let (engine_off, pa) = dispatch_engine("await-notify-off");
+        assert!(!engine_off.config.terminal.notify_enabled);
+        let mut orch_off: Option<Orchestration> = None;
+        let orch = orchestration_handle(&mut orch_off, &engine_off.config.terminal).unwrap();
+        assert!(
+            orch.notify_store.is_none(),
+            "D6: notify switch off must not open a notify store on the await path"
+        );
+
+        // 2. Switch on: orchestration initialized on await path receives a live notify store
+        let mut config_on = Config::default();
+        config_on.terminal.enabled = true;
+        config_on.terminal.notify_enabled = true;
+        let dir_on = std::env::temp_dir()
+            .join(format!("waggledance-mcp-await-notify-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir_on);
+        write(&dir_on, "docs/a.md", "# Project\n");
+        let engine_on = Engine::new(SqliteStore::open_in_memory().unwrap(), config_on);
+        let pb = engine_on.register(&dir_on, None).unwrap();
+        let mut orch_on: Option<Orchestration> = None;
+        let orch = orchestration_handle(&mut orch_on, &engine_on.config.terminal).unwrap();
+        assert!(
+            orch.notify_store.is_some(),
+            "notify switch on must open a notify store for the await path"
+        );
+
+        std::fs::remove_dir_all(&pa.root_path).ok();
+        std::fs::remove_dir_all(&pb.root_path).ok();
+    }
+
+    /// D6 / dbn-4: `open_notify_store` opens lazily only when `notify_enabled` is true,
+    /// and leaves no database file when it is false.
+    #[test]
+    fn notify_store_in_mcp_opens_only_when_notify_switch_is_on() {
+        let dir = std::env::temp_dir()
+            .join(format!("waggledance-mcp-notify-store-lazy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = waggledance_core::config::notify_store_path_override(Some(&dir));
+
+        let off = waggledance_core::config::TerminalConfig::default();
+        assert!(!off.notify_enabled);
+        let store_off = open_notify_store(&off, Some(&dir));
+        assert!(store_off.is_none(), "switch off must return None");
+        assert!(
+            !path.exists(),
+            "opening store with notify switch off must not create database file"
+        );
+
+        let on = waggledance_core::config::TerminalConfig {
+            notify_enabled: true,
+            ..Default::default()
+        };
+        let store_on = open_notify_store(&on, Some(&dir));
+        assert!(store_on.is_some(), "switch on must return Some(store)");
+        assert!(
+            path.exists(),
+            "opening store with notify switch on must create database file"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// D6 / dbn-4: calling `waggledance_await` with notify switch on arms Orchestration
+    /// with a notify store, and with it off leaves notify_store None.
+    #[test]
+    fn await_tool_call_arms_notify_store_under_opt_in_switch() {
+        let (engine_off, pa) = dispatch_engine("await-tool-off");
+        engine_off.insert_run(&seeded_run(&pa.id, "run-tool-off")).unwrap();
+        let mut orch_off: Option<Orchestration> = None;
+        let _ = call_tool_with_orchestration(
+            &engine_off,
+            &mut orch_off,
+            "waggledance_await",
+            json!({ "run_id": "run-tool-off", "timeout_seconds": 0 }),
+        );
+        let orch = orch_off.as_ref().expect("orchestration initialized by await");
+        assert!(orch.notify_store.is_none(), "disabled notify switch -> no store");
+
+        let dir = std::env::temp_dir()
+            .join(format!("waggledance-mcp-await-tool-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        write(&dir, "docs/a.md", "# Project\n");
+        let mut config_on = Config::default();
+        config_on.terminal.enabled = true;
+        config_on.terminal.notify_enabled = true;
+        let engine_on = Engine::new(SqliteStore::open_in_memory().unwrap(), config_on);
+        let pb = engine_on.register(&dir, None).unwrap();
+        engine_on.insert_run(&seeded_run(&pb.id, "run-tool-on")).unwrap();
+
+        let mut orch_on: Option<Orchestration> = None;
+        let _ = call_tool_with_orchestration(
+            &engine_on,
+            &mut orch_on,
+            "waggledance_await",
+            json!({ "run_id": "run-tool-on", "timeout_seconds": 0 }),
+        );
+        let orch = orch_on.as_ref().expect("orchestration initialized by await");
+        assert!(orch.notify_store.is_some(), "enabled notify switch -> Some(store)");
 
         std::fs::remove_dir_all(&pa.root_path).ok();
         std::fs::remove_dir_all(&pb.root_path).ok();

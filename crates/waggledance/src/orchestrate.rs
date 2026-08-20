@@ -449,13 +449,15 @@ async fn finish(
     if let Some(store) = notify_store {
         if notify::is_run_notifiable(status) {
             let body = format!("{} {} {}", run.project_id, run.pane_id, run.id);
-            let _ = store.enqueue_run_notification(
+            if let Err(e) = store.enqueue_run_notification(
                 &run.id,
                 &run.project_id,
                 &run.pane_id,
                 status.as_str(),
                 &body,
-            );
+            ) {
+                tracing::warn!("failed to enqueue run notification for {}: {e}", run.id);
+            }
         }
     }
     Ok(AwaitOutcome { status, delta })
