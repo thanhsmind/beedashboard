@@ -3557,7 +3557,17 @@ fn bee_hub_feature_cells<'a, 'b>(
 /// was rejected: it would also hide a feature whose interview really did
 /// stop for an answer and never went further, which is the case the Waiting
 /// group exists to catch.
+///
+/// (ctk-7) `BeeApprovedGates` also carries `uat`, and this walk deliberately
+/// does not scan it. `uat` is the acceptance door at merge time; whether an
+/// unapproved one should ALSO read as a `Waiting on you` stop is an open
+/// product question, and answering it by omission would silently flip every
+/// feature that has not been accepted yet into "waiting on the human". So
+/// `uat` is excluded here for the same reason `review` is excluded at the
+/// call site — a gate on its own schedule is not a blocking stop — and the
+/// exclusion stays deliberate until that question is actually decided.
 fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static str, &'static str)> {
+    // Four entries, not five: `uat` is intentionally absent — see above.
     const GATES: [(&str, &str); 4] = [
         ("context", "Explore"),
         ("shape", "Shape"),
@@ -3571,6 +3581,8 @@ fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static s
                 "shape" => g.shape,
                 "execution" => g.execution,
                 "review" => g.review,
+                // `uat` included: a gate outside GATES never reads as approved
+                // here, so it can neither be skipped past nor become a stop.
                 _ => None,
             })
             .unwrap_or(false)
@@ -8451,12 +8463,16 @@ mod tests {
     /// awaiting your decision" and sat under Waiting on you.
     #[test]
     fn gate_stop_skips_a_gate_a_later_approval_already_passed() {
+        // (ctk-7) `uat` is not a parameter: this probe is about the
+        // four-gate walk, and `uat` must not participate in it. Both of its
+        // values are covered by `gate_stop_ignores_the_uat_gate_entirely`.
         let gates =
             |c: Option<bool>, s: Option<bool>, e: Option<bool>, r: Option<bool>| BeeApprovedGates {
                 context: c,
                 shape: s,
                 execution: e,
                 review: r,
+                uat: None,
             };
 
         // The reported shape: explore unstamped, but shape and execution
@@ -8491,6 +8507,39 @@ mod tests {
 
         // No record at all reads as nothing approved yet.
         assert_eq!(bee_gate_current_stop(None), Some(("context", "Explore")));
+    }
+
+    /// (ctk-7) The `uat` gate is readable off the store now, and this walk
+    /// must keep ignoring it. Whether an unapproved acceptance gate should
+    /// read as `Waiting on you` is an open product question; until it is
+    /// answered, adding the field changes no card's stop.
+    #[test]
+    fn gate_stop_ignores_the_uat_gate_entirely() {
+        let gates = |uat: Option<bool>| BeeApprovedGates {
+            context: Some(true),
+            shape: Some(true),
+            execution: Some(true),
+            review: Some(true),
+            uat,
+        };
+
+        // Everything through review approved: nothing is owed, whatever the
+        // acceptance gate says. An unapproved `uat` must NOT become a stop.
+        assert_eq!(bee_gate_current_stop(Some(&gates(Some(false)))), None);
+        assert_eq!(bee_gate_current_stop(Some(&gates(None))), None);
+        assert_eq!(bee_gate_current_stop(Some(&gates(Some(true)))), None);
+
+        // Nor may an approved `uat` supersede an earlier unapproved gate:
+        // the walk starts after the last approved gate in ITS order, and
+        // `uat` is not in that order.
+        let mid = BeeApprovedGates {
+            context: Some(true),
+            shape: Some(false),
+            execution: Some(false),
+            review: Some(false),
+            uat: Some(true),
+        };
+        assert_eq!(bee_gate_current_stop(Some(&mid)), Some(("shape", "Shape")));
     }
 
     /// (waiting-means-stopped-1) The bug this cell fixes: an unapproved
