@@ -1813,106 +1813,55 @@ pub fn bee_board_page(
     layout_with_drawer(&format!("{} · bee", project.name), "", &body, false)
 }
 
-/// D3's anthropic.com-inspired palette plus every `.bee-*` layout rule the
-/// bee page family (board and, from feature-hub-2, the feature detail page)
-/// shares — factored out of `bee_board_page` so the detail page can pick up
-/// the exact same `--color-*` token names and card idiom rather than
-/// re-declaring them and risking the two pages drifting apart. Returned as
-/// one `<style>` block; every page that embeds it wraps its own content in
-/// `<main class="fg-page bee-hub-theme">` to opt in (see the palette
-/// comment below for why that scoping class exists at all).
+/// Every `.bee-*` layout rule the bee page family (board and, from
+/// feature-hub-2, the feature detail page) shares, plus the ten
+/// per-project identity hues — factored out of `bee_board_page` so the
+/// detail page can pick up the exact same card idiom rather than
+/// re-declaring it and risking the two pages drifting apart. D1
+/// (console theme, b27a73c6) deleted this block's page-local `--color-*`
+/// override, so every rule here now reads the one shipped theme's tokens;
+/// `.bee-hub-theme` survives only as the scope for the identity hues (see
+/// that rule's own comment). Returned as one `<style>` block; every page
+/// that embeds it wraps its own content in
+/// `<main class="fg-page bee-hub-theme">` to opt in.
 fn bee_hub_style() -> String {
     r#"<style>
 .bee-finished { margin-bottom: var(--space-4); }
-/* D3: anthropic.com-inspired palette (cream page, warm panel, near-black
-   ink, book-cloth coral accent), scoped to the bee page only via the
-   `.bee-hub-theme` class on this page's own `<main>` — every other page
-   keeps its default "atelier" theme untouched. This overrides only the
-   Tier-2 semantic tokens (`--color-*`) the existing `fg-*` components
-   already read, so no markup here or elsewhere had to change to pick it
-   up. Dark reuses the exact same toggle this page already had: the
-   no-flash head script (`layout`) sets `data-scheme` on `<html>` before
-   first paint; this only adds a scoped override keyed off that same
-   attribute, never a second toggle mechanism. */
+/* D1 (console theme, b27a73c6): this page used to carry its own
+   anthropic.com-inspired palette here, overriding the Tier-2 semantic
+   `--color-*` tokens for `.bee-hub-theme`. That override is deleted --
+   the board now inherits colour from the one shipped theme
+   (`assets/atelier/console.css`) exactly like every other page, so no
+   `fg-*` component here reads a page-local colour. `.bee-hub-theme`
+   survives on this page's own `<main>` only as the scope for the
+   per-project identity hues below -- never again for palette. */
 .bee-hub-theme {
-  --color-bg: #FAF9F5;
-  --color-surface: #FFFFFF;
-  --color-surface-raised: #FFFFFF;
-  --color-surface-sunken: #F0EEE6;
-  --color-text: #1A1815;
-  --color-text-muted: #5A5650;
-  --color-text-subtle: #8A8478;
-  --color-border: #E4DFD3;
-  --color-border-strong: #D8D1C0;
-  --color-action: #CC785C;
-  --color-action-hover: #B3654B;
-  --color-action-press: #9C5540;
-  --color-brand: #CC785C;
-  --color-brand-tint: #F3E3DC;
-  --color-link: #CC785C;
-  --color-link-hover: #B3654B;
-  --color-on-action: #FFFFFF;
-  --color-success: #3D7A4E;
-  --color-success-tint: #E1EFE3;
-  --color-warning: #B8791A;
-  --color-warning-tint: #F5E7D0;
-  --color-danger: #C1443B;
-  --color-danger-tint: #F5DEDC;
-  --color-info: #4A7A78;
-  --color-info-tint: #DFEBEA;
-  --color-surface-hover: #F6EFE9;
   /* project-color-identity: ten fixed hues for the cross-project board's
-     own per-project accent -- defined here, not alongside
-     `--color-accent-alt-*` in contract.css: those five tokens are
+     own per-project accent -- defined here, not alongside the five
+     accent-alt lane tokens in contract.css: those five are
      sitewide semantic slots (brand/info/success/warning/danger) every
      theme repoints and every page may read, while a project's board
      colour is a page-local identity nothing outside this page needs, so
      it never grows that sitewide token surface. Picked at one fixed
-     lightness/saturation, evenly spread around the wheel, so each stays
-     legible both as a thin left border and as small text against this
-     page's card surfaces -- deliberately not restated in the
-     `data-scheme="dark"` block below: a per-project colour's whole job
-     is to read as the same identity everywhere it appears, light or
-     dark, unlike the semantic chip tones nearby that do shift with
-     scheme. */
-  --bee-hub-project-1: #9E2E2E;
-  --bee-hub-project-2: #9E712E;
-  --bee-hub-project-3: #889E2E;
-  --bee-hub-project-4: #449E2E;
-  --bee-hub-project-5: #2E9E5B;
-  --bee-hub-project-6: #2E9E9E;
-  --bee-hub-project-7: #2E5B9E;
-  --bee-hub-project-8: #442E9E;
-  --bee-hub-project-9: #882E9E;
-  --bee-hub-project-10: #9E2E71;
-}
-html[data-scheme="dark"] .bee-hub-theme {
-  --color-bg: #241E18;
-  --color-surface: #2D261F;
-  --color-surface-raised: #342C24;
-  --color-surface-sunken: #1C1712;
-  --color-text: #F5F0E6;
-  --color-text-muted: #C9BFAF;
-  --color-text-subtle: #998F7E;
-  --color-border: #40372C;
-  --color-border-strong: #4E4335;
-  --color-action: #D98868;
-  --color-action-hover: #E29A7D;
-  --color-action-press: #C77552;
-  --color-brand: #D98868;
-  --color-brand-tint: #3A2B22;
-  --color-link: #D98868;
-  --color-link-hover: #E29A7D;
-  --color-on-action: #241E18;
-  --color-success: #6FB584;
-  --color-success-tint: #223226;
-  --color-warning: #D9A24E;
-  --color-warning-tint: #362912;
-  --color-danger: #E0796F;
-  --color-danger-tint: #3A211E;
-  --color-info: #7FADAB;
-  --color-info-tint: #22302F;
-  --color-surface-hover: #342C24;
+     lightness/saturation, evenly spread around the wheel, re-expressed
+     here for the console theme's dark-native surfaces (the previous set
+     was tuned against a cream page and reads too dark on the shipped
+     theme's near-black canvas now) so each stays legible both as a
+     thin left border and as small text. One value per hue, no
+     `data-scheme="dark"` counterpart: a per-project colour's whole job is
+     to read as the same identity everywhere it appears, and the console
+     theme's dark canvas is what both schemes are judged against here
+     (see console.css's own status/supporting hues for the same register). */
+  --bee-hub-project-1: #E88273;
+  --bee-hub-project-2: #E8C973;
+  --bee-hub-project-3: #C1E873;
+  --bee-hub-project-4: #7AE873;
+  --bee-hub-project-5: #73E8B1;
+  --bee-hub-project-6: #73D8E8;
+  --bee-hub-project-7: #7392E8;
+  --bee-hub-project-8: #9A73E8;
+  --bee-hub-project-9: #E073E8;
+  --bee-hub-project-10: #E873A9;
 }
 .bee-hub { margin-bottom: var(--space-4); }
 /* board-liveness-3: the live strip's own dense-row idiom, one row per live

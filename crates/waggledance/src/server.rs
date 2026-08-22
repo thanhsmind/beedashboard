@@ -6389,14 +6389,20 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (theme, feature-hub fh-1, D3) Both scheme variants of the new
-    /// anthropic.com-inspired palette render in the board's own stylesheet
-    /// — light (scoped to `.bee-hub-theme`) and dark (scoped to
-    /// `html[data-scheme="dark"] .bee-hub-theme`, reusing the existing
-    /// no-flash `data-scheme` toggle, never a second mechanism) — and both
-    /// carry the same book-cloth coral family for their action color.
+    /// (theme, feature-hub fh-1, D1 b27a73c6) The board used to carry a
+    /// page-local `--color-*` override for `.bee-hub-theme` (and its own
+    /// `html[data-scheme="dark"] .bee-hub-theme` counterpart); D1 deletes
+    /// it so the board's colours come from the one shipped theme like
+    /// every other page. This test used to pin that override's literal
+    /// hex values (a cream `--color-bg: #FAF9F5;`, a coral
+    /// `--color-action: #CC785C;`, a warm-brown dark `--color-bg:
+    /// #241E18;`); it is re-shaped, not weakened, to guard the new truth:
+    /// the rendered board carries no `--color-*` declaration of its own at
+    /// all, while the ten per-project identity hues — never part of the
+    /// deleted palette — still render under the same `.bee-hub-theme`
+    /// scope and the board's `<main>` still carries that scope class.
     #[tokio::test]
-    async fn feature_hub_theme_tokens_render_for_both_light_and_dark() {
+    async fn feature_hub_page_carries_no_palette_override_and_still_declares_project_hues() {
         let root = fresh_root("hub-theme");
         write(
             &root,
@@ -6411,24 +6417,30 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains(".bee-hub-theme {") && body.contains("--color-bg: #FAF9F5;"),
-            "the light palette must define the cream page background: {body}"
+            !body.contains("html[data-scheme=\"dark\"] .bee-hub-theme {"),
+            "the deleted page-local dark palette block must not reappear: {body}"
         );
+        let open = body
+            .find(".bee-hub-theme {")
+            .expect("the scope class must still be declared, now for identity hues only");
+        let close = body[open..]
+            .find('}')
+            .map(|i| open + i)
+            .expect(".bee-hub-theme rule must be closed");
+        let rule_body = &body[open..close];
         assert!(
-            body.contains("--color-action: #CC785C;"),
-            "the light palette must use the book-cloth coral accent: {body}"
+            !rule_body.contains("--color-"),
+            "the .bee-hub-theme rule must define no page-local --color-* token of its own — colour comes from the shipped theme alone: {rule_body}"
         );
-        assert!(
-            body.contains("html[data-scheme=\"dark\"] .bee-hub-theme {"),
-            "the dark palette must be scoped through the existing data-scheme toggle: {body}"
-        );
-        assert!(
-            body.contains("--color-bg: #241E18;"),
-            "the dark palette must define its own deep warm-brown background: {body}"
-        );
+        for n in 1..=10 {
+            assert!(
+                body.contains(&format!("--bee-hub-project-{n}:")),
+                "the per-project identity hue {n} must still be declared: {body}"
+            );
+        }
         assert!(
             body.contains("<main class=\"fg-page bee-hub-theme\">"),
-            "the board's own <main> must carry the palette scope class: {body}"
+            "the board's own <main> must still carry the identity-hue scope class: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
