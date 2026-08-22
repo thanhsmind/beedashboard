@@ -6702,9 +6702,20 @@ mod bee_route_tests {
             )),
             "the card must badge the pane running in its own checkout: {body}"
         );
+        // ctk-11: `agent_start` seeds an IDLE pane, and an idle session no
+        // longer spends a slot on the collapsed card -- it badges in the
+        // quiet group inside the card's expandable body instead. The
+        // guarantee this test was written for (the pane in this checkout
+        // badges THIS card, under a label naming the checkout rather than
+        // the feature) is unchanged; only which of the two groups' labels
+        // carries it moved.
         assert!(
-            body.contains("Terminals in this checkout"),
+            body.contains("Quiet terminals in this checkout"),
             "the badge group's accessible label must name the checkout: {body}"
+        );
+        assert!(
+            body.contains("No active session in this checkout — expand for 1 quiet session"),
+            "a card whose only session is quiet must say so rather than render a bare card: {body}"
         );
 
         std::fs::remove_dir_all(&config_dir).ok();
@@ -19441,8 +19452,12 @@ mod bee_route_tests {
             feat_wt_card_at < wt_badge_at,
             "the worktree's own pane must badge feat-wt's card, its own checkout: {section}"
         );
+        // ctk-11: these fixtures' panes are `agent_start`'s idle default,
+        // so they badge in the quiet group inside each card's expandable
+        // body. The containment join every assertion above checks is
+        // untouched -- only the label of the group carrying the badge moved.
         assert!(
-            section.contains("Terminals in this checkout"),
+            section.contains("Quiet terminals in this checkout"),
             "the badge group's accessible label must name the checkout, never the feature: {section}"
         );
 

@@ -550,6 +550,25 @@ fn terminal_badges_nav(
     extra_class: &str,
 ) -> String {
     let panes: Vec<&TerminalPaneView> = panes.iter().filter(|p| p.kind != "shell").collect();
+    terminal_badges_nav_from_refs(project_id, &panes, aria_label, extra_class)
+}
+
+/// (ctk-11) The same nav, over an already-chosen set of panes. Every caller
+/// that wants EVERY agent pane badged -- the project-list row through
+/// [`project_badges`] -- goes through [`terminal_badges_nav`] above, which
+/// drops shell panes and hands the whole remainder here; that path is
+/// unchanged and renders byte-identical markup to before this cell. The
+/// board card is the one caller that splits its panes into two groups first
+/// (see [`bee_hub_terminal_badge_groups`]) and so calls this directly, once
+/// per group, rather than re-filtering a slice it has already partitioned.
+/// The emptiness rule is stated once, here, so neither entry point can
+/// render an empty `<nav>`.
+fn terminal_badges_nav_from_refs(
+    project_id: &str,
+    panes: &[&TerminalPaneView],
+    aria_label: &str,
+    extra_class: &str,
+) -> String {
     if panes.is_empty() {
         return String::new();
     }
@@ -579,6 +598,84 @@ fn terminal_badges_nav(
     }
     out.push_str("</nav>");
     out
+}
+
+/// (ctk-11) The board card's own badge split, and the ONLY caller that
+/// splits: a card in a checkout running five sessions used to spend all
+/// five badges on its collapsed summary, four of which said nothing a
+/// reader scanning the board needed. Only the sessions that are actually
+/// doing something stay on the collapsed card; the rest move inside the
+/// card's expandable body, where a reader who cares can still reach every
+/// one of them.
+///
+/// ACTIVE is `working` and `blocked` -- two of the four states
+/// [`status_pill`] styles. `blocked` is deliberately active even though it
+/// is not literally running: a blocked terminal is the one waiting on the
+/// human, and folding it away would hide the very thing the board exists to
+/// surface. `idle`, `done` and any unknown status are QUIET.
+///
+/// Shell panes (`kind == "shell"`) are dropped BEFORE the split, not by the
+/// nav renderer downstream: they are not sessions this board counts
+/// (board-badges-agents-only), so counting them as folded-away would
+/// overstate what the checkout holds in the honesty line below.
+///
+/// Returns `(active_nav, quiet_nav, quiet_note)`. Each nav is empty when its
+/// own group is -- neither group ever renders an empty frame -- and the note
+/// is empty when nothing was folded away. The note is what keeps the
+/// collapsed card honest (`docs/specs/bee-cockpit.md`, "A capped or
+/// truncated list always states its true total beside the visible subset"):
+/// a card that shows one badge out of five says so, and says how many are
+/// waiting inside, rather than letting the reader take one badge for the
+/// whole checkout.
+fn bee_hub_terminal_badge_groups(
+    project_id: &str,
+    panes: &[TerminalPaneView],
+) -> (String, String, String) {
+    let agents: Vec<&TerminalPaneView> = panes.iter().filter(|p| p.kind != "shell").collect();
+    let (active, quiet): (Vec<&TerminalPaneView>, Vec<&TerminalPaneView>) = agents
+        .iter()
+        .copied()
+        .partition(|p| matches!(p.status.as_str(), "working" | "blocked"));
+    let active_nav = terminal_badges_nav_from_refs(
+        project_id,
+        &active,
+        "Terminals in this checkout",
+        "bee-hub__badges",
+    );
+    let quiet_nav = terminal_badges_nav_from_refs(
+        project_id,
+        &quiet,
+        "Quiet terminals in this checkout",
+        "bee-hub__quiet-badges",
+    );
+    let quiet_note = if quiet.is_empty() {
+        String::new()
+    } else {
+        let noun = if quiet.len() == 1 {
+            "quiet session"
+        } else {
+            "quiet sessions"
+        };
+        // "Nothing to measure renders as a stated absence, never as a zero"
+        // (the same spec's own rule): a checkout whose every session is
+        // quiet says so in words instead of opening on "Showing 0 of 3".
+        let lead = if active.is_empty() {
+            "No active session in this checkout".to_string()
+        } else {
+            format!(
+                "Showing {shown} of {total} sessions in this checkout",
+                shown = active.len(),
+                total = agents.len(),
+            )
+        };
+        format!(
+            r#"<p class="bee-cell__meta bee-hub__quiet-note">{lead} — expand for {count} {noun}</p>"#,
+            lead = lead,
+            count = quiet.len(),
+            noun = noun,
+        )
+    };
+    (active_nav, quiet_nav, quiet_note)
 }
 
 /// A registered project's landing page: a card linking into the bee board
@@ -2057,6 +2154,24 @@ fn bee_hub_style() -> String {
    14px the header and meta block above use, so the badges line up with
    the card's own content rather than sitting flush to its border. */
 .bee-hub__badges { border-top: var(--border-width-hairline) solid var(--color-border); padding: var(--space-2) 14px; flex: 0 0 auto; }
+/* ctk-11: the quiet group's own nav, inside the card's expandable body
+   rather than at the shell's foot -- so it wants the body's own flow, not
+   `.bee-hub__badges`' hairline-and-side-padding foot treatment (the body
+   already pads itself). It keeps the shared badge-nav markup, and therefore
+   that shared class's flex layout, and only cancels its full-width basis
+   and outer padding so it sits in the body like every other line there.
+   (The shared class is deliberately not named in this comment: several
+   guards assert the board's own inline CSS mentions no badge-container
+   class, so a page with no badges says nothing about badges anywhere.) */
+.bee-hub__quiet-badges { padding: 0; flex: 0 0 auto; }
+/* ctk-11: the honesty line that rides beside the collapsed card's active
+   badges -- muted and small, because it is a caveat on the badges above it,
+   never a signal of its own. It carries the foot's hairline and side
+   padding when it stands alone (every session quiet, so there is no badge
+   nav to draw that rule), and drops both when it follows the nav, which has
+   already drawn them. */
+.bee-hub__quiet-note { border-top: var(--border-width-hairline) solid var(--color-border); margin: 0; padding: var(--space-2) 14px; color: var(--color-text-muted); }
+.bee-hub__badges + .bee-hub__quiet-note { border-top: 0; padding-top: 0; }
 /* ctk-6: the cell-count line is the digest's counts slot -- mono, at the
    digest's 10-10.5px meta size. `bee_hub_card` renders no markup here at
    all for a feature with no cells, so this line never states a zeroed
@@ -4164,12 +4279,15 @@ fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
     // `<nav>` at all. card-badge-inside: the extra `bee-hub__badges` class
     // draws the hairline rule that separates the badges from the card's
     // own content while both sit inside the shared `bee-hub__shell` box.
-    let terminal_badges_html = terminal_badges_nav(
-        project_id,
-        panes,
-        "Terminals in this checkout",
-        "bee-hub__badges",
-    );
+    // ctk-11 splits that nav in two (see `bee_hub_terminal_badge_groups`):
+    // only the working and blocked panes keep this sibling position, so a
+    // checkout running one agent beside four idle terminals spends its
+    // collapsed summary on the one that is doing something. The quiet
+    // group's own nav goes inside the `<details>` body below, and the note
+    // rides here beside the active badges so the collapsed card never
+    // understates how many sessions its checkout carries.
+    let (terminal_badges_html, quiet_badges_html, quiet_note_html) =
+        bee_hub_terminal_badge_groups(project_id, panes);
     // card-collapse-inprogress D1/D3/D6: a native `<details>` with no
     // `open` attribute renders every card collapsed on every page load,
     // with no persisted state and no JavaScript -- clicking the
@@ -4178,7 +4296,7 @@ fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
     // the top of the expandable body, since a `<details>`/`<summary>`
     // pair, unlike the old whole-card `<a>`, cannot itself be a link.
     format!(
-        r#"<div class="{shell_class}"><details class="bee-hub__card" data-hub-group="{group_key}"><summary class="bee-hub__summary">{title_html}{run_state_html}<span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/{pid}/_bee/feature/{feature_href}">Feature detail<span aria-hidden="true"> →</span></a>{subtitle_html}{desc_html}{branch_html}{progress_html}{reason_html}{blocked_reason_html}{deferred_html}{footer_html}</div></details>{terminal_badges_html}</div>"#,
+        r#"<div class="{shell_class}"><details class="bee-hub__card" data-hub-group="{group_key}"><summary class="bee-hub__summary">{title_html}{run_state_html}<span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/{pid}/_bee/feature/{feature_href}">Feature detail<span aria-hidden="true"> →</span></a>{subtitle_html}{desc_html}{branch_html}{progress_html}{reason_html}{blocked_reason_html}{deferred_html}{quiet_badges_html}{footer_html}</div></details>{terminal_badges_html}{quiet_note_html}</div>"#,
         shell_class = shell_class,
         group_key = group_key,
         title_html = title_html,
@@ -4192,8 +4310,10 @@ fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
         reason_html = reason_html,
         blocked_reason_html = blocked_reason_html,
         deferred_html = deferred_html,
+        quiet_badges_html = quiet_badges_html,
         footer_html = footer_html,
         terminal_badges_html = terminal_badges_html,
+        quiet_note_html = quiet_note_html,
     )
 }
 
@@ -11230,6 +11350,194 @@ mod tests {
         assert!(
             card_html.ends_with("</details></div>"),
             "with no badges, the shell must close right after the card's own </details>: {card_html}"
+        );
+    }
+
+    /// (ctk-11, must-have) The badge split: a checkout running one working
+    /// agent beside idle/done/unknown ones spends its COLLAPSED card on the
+    /// working one alone, and the quiet ones move inside the `<details>`
+    /// body where expanding the card still reaches every one of them. A
+    /// `blocked` pane counts as active for this purpose (it is the one
+    /// waiting on a person), and the collapsed card states how many
+    /// sessions it folded away rather than letting one badge stand for five.
+    #[test]
+    fn bee_hub_card_folds_quiet_panes_into_the_body_and_keeps_active_ones_collapsed() {
+        let pane = |id: &str, status: &str| TerminalPaneView {
+            pane_id: id.into(),
+            kind: "claude".into(),
+            name: "n".into(),
+            status: status.into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+            title: String::new(),
+        };
+        let panes = vec![
+            pane("w1:working", "working"),
+            pane("w1:idle", "idle"),
+            pane("w1:done", "done"),
+            pane("w1:unknown", "unknown"),
+            pane("w1:blocked", "blocked"),
+        ];
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &panes,
+            run_state: None,
+            waiting_on_live: false,
+            last_tool_call: None,
+            deferred: &[],
+        });
+        let details_end = card_html
+            .find("</details>")
+            .expect("the card's own details must close");
+        let at = |pane_id: &str| {
+            card_html
+                .find(&format!(r#"href="/p/proj-a/_terminal/pane/{pane_id}""#))
+                .unwrap_or_else(|| {
+                    panic!("{pane_id} must badge somewhere on the card: {card_html}")
+                })
+        };
+        for active in ["w1:working", "w1:blocked"] {
+            assert!(
+                at(active) > details_end,
+                "{active} must keep the collapsed card's own sibling nav: {card_html}"
+            );
+        }
+        for quiet in ["w1:idle", "w1:done", "w1:unknown"] {
+            assert!(
+                at(quiet) < details_end,
+                "{quiet} must move inside the details body, reachable only by expanding: {card_html}"
+            );
+        }
+        assert!(
+            card_html.contains(r#"aria-label="Terminals in this checkout""#)
+                && card_html.contains(r#"aria-label="Quiet terminals in this checkout""#),
+            "each group needs its own accessible label so a screen reader can tell them apart: {card_html}"
+        );
+        assert!(
+            card_html
+                .contains("Showing 2 of 5 sessions in this checkout — expand for 3 quiet sessions"),
+            "the collapsed card must state its true total and how many it folded away: {card_html}"
+        );
+        assert!(
+            card_html.contains("bee-hub__badges") && card_html.contains("bee-hub__quiet-badges"),
+            "the active group keeps the shell-foot nav class and the quiet group carries its own: {card_html}"
+        );
+    }
+
+    /// (ctk-11, must-have) Neither group ever renders an empty frame, and a
+    /// shell pane joins neither group nor the folded count — the board
+    /// counts agent sessions only (board-badges-agents-only), so a checkout
+    /// whose only extra terminal is a plain shell has nothing folded away
+    /// and says nothing.
+    #[test]
+    fn bee_hub_card_badge_groups_never_render_an_empty_frame_or_count_a_shell() {
+        let pane = |id: &str, kind: &str, status: &str| TerminalPaneView {
+            pane_id: id.into(),
+            kind: kind.into(),
+            name: "n".into(),
+            status: status.into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+            title: String::new(),
+        };
+        let card = |panes: &[TerminalPaneView]| {
+            bee_hub_card(&BeeHubCardArgs {
+                project_id: "proj-a",
+                feature: "feat-a",
+                group_key: "in-progress",
+                done: 1,
+                total: 2,
+                last_activity: None,
+                worktree_label: "Main",
+                reason: None,
+                docs: None,
+                project_label: None,
+                project_color: None,
+                panes,
+                run_state: None,
+                waiting_on_live: false,
+                last_tool_call: None,
+                deferred: &[],
+            })
+        };
+
+        let all_active = card(&[pane("w1:p1", "claude", "working")]);
+        assert!(
+            !all_active.contains("bee-hub__quiet-badges") && !all_active.contains("quiet session"),
+            "no quiet pane means no inner nav and no folded-away note at all: {all_active}"
+        );
+
+        let all_quiet = card(&[pane("w1:p1", "claude", "idle")]);
+        assert!(
+            !all_quiet.contains("bee-hub__badges"),
+            "no active pane means no sibling nav at all, exactly like a card with no panes: {all_quiet}"
+        );
+        assert!(
+            all_quiet.contains("No active session in this checkout — expand for 1 quiet session"),
+            "an all-quiet checkout states its absence in words, never as 'Showing 0': {all_quiet}"
+        );
+
+        let shell_beside_agent = card(&[
+            pane("w1:p1", "claude", "working"),
+            pane("w1:p2", "shell", "shell"),
+        ]);
+        assert!(
+            !shell_beside_agent.contains("bee-hub__quiet-badges")
+                && !shell_beside_agent.contains("quiet session")
+                && !shell_beside_agent.contains("pane/w1:p2"),
+            "a plain shell joins neither group and is never counted as folded away: {shell_beside_agent}"
+        );
+    }
+
+    /// (ctk-11) The project-list row is the other caller of the shared badge
+    /// nav and it does NOT split: every agent pane in the project keeps its
+    /// badge there, whatever its status, exactly as before this cell.
+    #[test]
+    fn project_badges_still_show_every_agent_pane_whatever_its_status() {
+        let pane = |id: &str, status: &str| TerminalPaneView {
+            pane_id: id.into(),
+            kind: "claude".into(),
+            name: "n".into(),
+            status: status.into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+            title: String::new(),
+        };
+        let html = project_badges(
+            "proj-a",
+            &[
+                pane("w1:working", "working"),
+                pane("w1:idle", "idle"),
+                pane("w1:done", "done"),
+            ],
+        );
+        for id in ["w1:working", "w1:idle", "w1:done"] {
+            assert!(
+                html.contains(&format!("pane/{id}")),
+                "the project row must keep badging every agent pane, including {id}: {html}"
+            );
+        }
+        assert_eq!(
+            html.matches("<nav").count(),
+            1,
+            "the project row renders one nav over all its panes, never a split: {html}"
+        );
+        assert!(
+            !html.contains("quiet"),
+            "the project row states no folded-away count, because it folds nothing: {html}"
         );
     }
 
