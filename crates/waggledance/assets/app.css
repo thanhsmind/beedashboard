@@ -538,11 +538,18 @@ html[data-scheme="dark"] .topbar .home {
   font-weight: var(--weight-regular);
   color: var(--color-text-muted);
 }
+/* console-theme-kanban (ctk-13): anchored to the project NAME LINE, never
+   centred on the row box. A row stopped being just its name when it grew a
+   terminal-badge block that can stack four or five deep, so `top: 50%` put
+   this control in the vertical middle of that stack — measured overlapping
+   a badge on the three-badge row — where it read as a square adrift rather
+   than as the project's own control. `top` is `.proj-row__link`'s own
+   `padding-top`, so the control's top edge and the name's line box start on
+   the same line however many badges hang below. */
 .proj-row__delete {
   position: absolute;
-  top: 50%;
+  top: var(--space-2);
   right: 0;
-  transform: translateY(-50%);
   margin: 0;
 }
 /* Terminal-pane badges (D1/D1a/D2/D3/D5): sit under the row's meta line, a
@@ -644,16 +651,30 @@ html[data-scheme="dark"] .topbar .home {
   right: var(--space-3);
   margin: 0;
 }
+/* console-theme-kanban (ctk-13): icon weight, not button weight. Down the
+   project rail this control repeats once per row, so the hairline border on
+   a surface fill it used to carry stacked into a column of grey squares
+   competing with the project names for the eye. At rest it is the bare
+   glyph; the border and the destructive tone arrive on hover or focus. The
+   border stays declared at `transparent` so gaining it shifts no layout.
+
+   Receding is about WEIGHT, never about vanishing — this unregisters a
+   project. It is a real `<button>` in normal flow order, it keeps the
+   `aria-label`/`title` the row markup in `views.rs` gives it, its 24px box
+   is the WCAG 2.5.8 minimum target, and `:focus-visible` below paints the
+   same destructive state as hover PLUS the system's own focus ring (the
+   `:where(.fg-btn, …)` list in `atelier/components.css` does not reach a
+   bare button, so the ring is declared here from the same tokens). */
 .proj-card__del {
-  width: 28px; /* structural: fixed icon-button footprint */
-  height: 28px;
+  width: 24px; /* structural: fixed icon-button footprint */
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  border: var(--border-width-hairline) solid var(--color-border);
+  border: var(--border-width-hairline) solid transparent;
   border-radius: var(--radius-sm);
-  background: var(--color-surface);
+  background: none;
   color: var(--color-text-subtle);
   font-size: var(--type-body-sm-size);
   line-height: 1;
@@ -662,10 +683,15 @@ html[data-scheme="dark"] .topbar .home {
     border-color var(--motion-fast) var(--ease-standard),
     background var(--motion-fast) var(--ease-standard);
 }
-.proj-card__del:hover {
+.proj-card__del:hover,
+.proj-card__del:focus-visible {
   color: var(--color-danger);
   border-color: var(--color-danger);
   background: var(--color-danger-tint);
+}
+.proj-card__del:focus-visible {
+  outline: var(--focus-width) solid var(--focus-color);
+  outline-offset: var(--focus-offset);
 }
 
 /* ── Home: the project rail ─────────────────────────────────
@@ -693,8 +719,19 @@ html[data-scheme="dark"] .topbar .home {
   display: flex;
   flex-direction: column;
   flex: none;
-  /* Structural geometry, not a value on the space scale. */
-  width: 260px;
+  /* Structural geometry, not a value on the space scale.
+
+     console-theme-kanban (ctk-13): judged against the widest line the rail
+     actually renders, measured in the browser at this theme's caption size —
+     the meta line AFTER `app.js` reformats its `<time>` into a locale
+     string, e.g. `212 markdown files · Aug 14, 2026, 09:55 AM` at 236px,
+     and the longest project name, `Yu-Gi-OhForbiddenMemoriesGuide` at
+     217px. The old 260px left a 199px text column, so nine of ten meta
+     lines and the longest name wrapped. 297px is the measured threshold
+     where the last one stops wrapping — a 236px column, i.e. none to
+     spare; 320px leaves 259px, 23px of headroom, enough for a five-digit
+     file count or a longer locale date before anything wraps again. */
+  width: 320px;
   /* Sticks below the topbar; 53px matches the topbar's rendered height —
      the same structural offset `.sidebar` above already uses. */
   height: calc(100vh - 53px);
@@ -782,6 +819,29 @@ html[data-scheme="dark"] .topbar .home {
 .home-sidebar .proj-row__name,
 .home-sidebar .proj-suggestion__path {
   overflow-wrap: anywhere;
+}
+/* console-theme-kanban (ctk-13): no badge may push the rail sideways. The
+   rail was growing its own horizontal scrollbar — 334px of content in a
+   259px column, measured — and widening it did not help, because the
+   overflow scaled with the content rather than with the column: a long
+   terminal title held `.proj-row__badge-title` at its 16em cap, and the
+   badges `<nav>`'s default `min-width: auto` let the nav itself size to
+   that inflexible item instead of to its `flex-basis: 100%`. So the badge's
+   own `max-width: 100%` resolved against an already-blown-out parent and
+   clamped nothing.
+
+   Releasing the nav's min-width is what makes the chain hold: the nav is
+   pinned to the row, the badge to the nav, and the title can then shrink
+   below its content width so the ellipsis `.proj-row__badge-title` already
+   declares does the truncating. The 16em cap itself is untouched and still
+   governs wherever a row is wider than this rail. */
+.home-sidebar .proj-row__badges,
+.home-sidebar .proj-row__badge-title {
+  min-width: 0;
+}
+.home-sidebar .proj-row__badge {
+  max-width: 100%;
+  min-width: 0;
 }
 /* The digest's status dot, on a row that has an agent running in it. The
    element is the design system's own `.fg-status__dot` (size, pill radius,
