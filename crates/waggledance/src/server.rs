@@ -21464,6 +21464,31 @@ mod bee_route_tests {
         max
     }
 
+    /// Distinct tone modifier classes extracted from every `fg-chip fg-chip--<tone>` span.
+    fn chip_tones(body: &str) -> std::collections::BTreeSet<String> {
+        const MARK: &str = "class=\"fg-chip fg-chip--";
+        let mut out = std::collections::BTreeSet::new();
+        let mut rest = body;
+        while let Some(idx) = rest.find(MARK) {
+            let after = &rest[idx + MARK.len()..];
+            let Some(gt) = after.find('>') else { break };
+            let class_str = &after[..gt];
+            let tone = class_str
+                .split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                .next()
+                .unwrap_or_default();
+            if !tone.is_empty() {
+                out.insert(tone.to_string());
+            }
+            let after_tag = &after[gt + 1..];
+            let Some(close) = after_tag.find("</span>") else {
+                break;
+            };
+            rest = &after_tag[close + "</span>".len()..];
+        }
+        out
+    }
+
     /// Every `fg-chip fg-chip--<tone>` span's visible text content, in
     /// document order — the colour probe's raw material. A tone chip with
     /// nothing but whitespace between its tags would be exactly the
@@ -21777,14 +21802,18 @@ mod bee_route_tests {
     /// (colour) Every severity/state chip the board renders carries a word
     /// alongside its tone class — never a bare colour with no text a
     /// colour-blind reader could fall back on. The fixture trips several
-    /// different tones at once (a stuck cell's Critical attention item, a
-    /// recorded gate-bypass Warning, plus the neutral "Needs attention"
-    /// count chip) so this is not just proving the one tone the happiest
-    /// fixture would hit.
+    /// distinct tones at once (a blocked feature's Warning run-state badge
+    /// alongside the review queue's neutral count chips — note that column
+    /// counts are plain text rather than chips now) so this is not just
+    /// proving the one tone the happiest fixture would hit.
     #[tokio::test]
     async fn board_severity_and_state_chips_always_carry_a_word_not_color_alone() {
         let root = fresh_root("colour-chips");
-        write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature": "demo", "run_state": "blocked"}"#,
+        );
         write(
             &root,
             ".bee/cells/a.json",
@@ -21796,6 +21825,16 @@ mod bee_route_tests {
         let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
+
+        let tones = chip_tones(&body);
+        assert!(
+            tones.len() >= 2,
+            "fixture must trip several distinct tone classes to be a real probe, found {tones:?}: {body}"
+        );
+        assert!(
+            tones.contains("warning") && tones.contains("neutral"),
+            "fixture must trip both warning and neutral tones, found {tones:?}: {body}"
+        );
 
         let chips = chip_texts(&body);
         assert!(
