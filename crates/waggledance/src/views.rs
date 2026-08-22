@@ -2107,30 +2107,31 @@ fn bee_hub_style() -> String {
    flow and let a long title run underneath it. `--density-row-pad-y` is
    the theme's own row rhythm, the token this row's hand-picked
    `--space-1` predates.
-   ctk-9: the row reads as ONE line, never two columns. Before this, the
-   project span was `flex: none` while the title was a bare text node, so
-   the title became a second flex item with its own narrow box and
-   `overflow-wrap: anywhere` wrapped it inside that box — a long title
+   ctk-9/ctk-10: the row reads as ONE continuous text run — neither two
+   columns nor a cut line. Before ctk-9 the project span was `flex: none`
+   while the title was a bare text node, so the title became a second flex
+   item with its own narrow box and wrapped inside it — a long title
    stacked into three or four ragged lines beside a lonely project chip.
-   The fix is the card's own branch-line idiom (`.bee-hub__branch-name`):
-   the title gets an element of its own that takes the remaining width and
-   truncates with an ellipsis rather than wrapping, so the row can never
-   grow a second line. The `overflow-wrap: anywhere` that drove the
-   wrapping goes with it; the `min-width: 0` chain up through
-   `.bee-hub__cards`/`.bee-hub__group` into the grid's own `minmax(200px,
-   1fr)` tracks is what keeps a `nowrap` line shrinking the text instead of
-   growing the column (the trap `.bee-hub__slug` above records). Alignment
-   moves from `baseline` to `center` because a flex item with `overflow`
-   other than `visible` synthesizes its baseline from its bottom edge — on
-   `baseline` the truncating title would drop the project chip and the ship
-   time out of line with it. */
-.bee-hub__row { display: flex; align-items: center; gap: var(--space-2); min-width: 0; color: var(--color-text); font-size: var(--type-body-sm-size); text-decoration: none; padding: var(--density-row-pad-y) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); }
+   ctk-9 answered that with the card's branch-line idiom
+   (`.bee-hub__branch-name`): an element of its own that takes the leftover
+   width and truncates with an ellipsis — which cut titles the user wants
+   to read in full. ctk-10 keeps the column fix and drops the cut: the row
+   stops being a flex container at all and becomes ordinary block-level
+   text flow, so the project chip (still `inline-flex`, for its 6px
+   identity dot), the title and the ship time are inline content in one run
+   that uses the column's full width and wraps onto further lines. Nothing
+   here may truncate — no `text-overflow`, no `white-space: nowrap`.
+   `overflow-wrap: anywhere` comes back with the wrapping: it breaks the
+   one unbroken slug that would otherwise overflow, and (unlike
+   `break-word`) it also shrinks the row's min-content width, which is what
+   the `min-width: 0` chain up through `.bee-hub__cards`/`.bee-hub__group`
+   into the grid's own `minmax(200px, 1fr)` tracks needs to keep a long
+   title shrinking the text instead of growing the column (the trap
+   `.bee-hub__slug` above records). The ship time trails the text in flow
+   rather than riding `margin-left: auto`: a wrapped run has no single
+   right edge for a floated corner to anchor to. */
+.bee-hub__row { display: block; min-width: 0; overflow-wrap: anywhere; color: var(--color-text); font-size: var(--type-body-sm-size); text-decoration: none; padding: var(--density-row-pad-y) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); }
 .bee-hub__row:hover { color: var(--color-action); }
-/* ctk-9: the dense row's title — the one flexible part of the line. It
-   takes whatever width the project chip and ship time leave and cuts off
-   with an ellipsis; the full text stays reachable on the row's own `title`
-   attribute and on the feature detail page the row links to. */
-.bee-hub__row-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* cross-board D5/D10: the cross-project board's own project label and ship
    time on a Finished row — absent on every per-project board row, which
    passes neither and renders unchanged.
@@ -2141,9 +2142,9 @@ fn bee_hub_style() -> String {
    project span and its time) and the swatch can never be read out as
    content — it is the same fact the label beside it already says in
    words. `--radius-xs` is 2px, the digest's own square-swatch radius. */
-.bee-hub__row-project { display: inline-flex; align-items: center; gap: var(--space-1); flex: none; color: var(--color-text-subtle); font-size: var(--type-caption-size); }
+.bee-hub__row-project { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--color-text-subtle); font-size: var(--type-caption-size); }
 .bee-hub__row-project::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: var(--radius-xs); background: currentColor; }
-.bee-hub__row-time { margin-left: auto; flex: none; color: var(--color-text-subtle); font-family: var(--font-mono); font-size: var(--type-micro-size); letter-spacing: var(--type-micro-tracking); }
+.bee-hub__row-time { color: var(--color-text-subtle); font-family: var(--font-mono); font-size: var(--type-micro-size); letter-spacing: var(--type-micro-tracking); }
 .bee-hub__more { margin-top: var(--space-1); }
 .bee-hub__more-summary { cursor: pointer; list-style: none; color: var(--color-text-subtle); font-size: var(--type-caption-size); padding: var(--space-1) var(--space-2); }
 .bee-hub__more-summary::-webkit-details-marker { display: none; }
@@ -4255,15 +4256,15 @@ fn bee_hub_project_bee_href(project_id: &str) -> String {
 /// [`bee_cross_project_board_project_colors`], built once by the caller and
 /// threaded down exactly as [`bee_hub_card`] receives it, never hashed
 /// separately here), so a project reads in one fixed colour everywhere it
-/// appears. ctk-9: the name rides in its own `bee-hub__row-name` span
-/// rather than as a bare text node, because a bare text node has no
-/// element to hang truncation rules on and so wrapped into a second column
-/// beside the project chip; the row also carries the full, unabbreviated
-/// name as its `title` attribute, so what the ellipsis cuts is still
-/// reachable on hover (and, as ever, one click away on the detail page the
-/// row links to). Both spellings run through [`esc`] — a feature title is
-/// free text from the store, and `esc` escapes `"` as well, which is what
-/// makes it safe in an attribute.
+/// appears. ctk-9/ctk-10: the name rides in its own `bee-hub__row-name`
+/// span rather than as a bare text node — ctk-9 needed an element to hang
+/// layout rules on, and ctk-10 keeps it because it is the address the
+/// wrapping guard pins. The name is never abbreviated here: the row is one
+/// continuous text run that wraps in full (see `.bee-hub__row` in
+/// [`bee_hub_style`]), and the row still carries the same full name as its
+/// `title` attribute for the hover reading. Both spellings run through
+/// [`esc`] — a feature title is free text from the store, and `esc`
+/// escapes `"` as well, which is what makes it safe in an attribute.
 #[allow(clippy::too_many_arguments)]
 fn bee_hub_finished_row(
     group_key: &str,
@@ -9928,12 +9929,12 @@ mod tests {
 
     /// (hub-finished-compact) A Finished row is exactly a name and a link —
     /// none of `bee_hub_card`'s chip, progress bar or activity markup.
-    /// ctk-9 moved the name into its own `bee-hub__row-name` span (so it can
-    /// truncate instead of wrapping) and put the full name on the row's
-    /// `title` attribute; the guarantee this test protects — a dense row
-    /// carries the name, the link, and nothing of the full card — is
-    /// unchanged, so the expected literal is repaired at the name's new
-    /// address rather than loosened.
+    /// ctk-9 moved the name into its own `bee-hub__row-name` span and put
+    /// the full name on the row's `title` attribute (ctk-10 keeps both, and
+    /// drops the truncation that first motivated the span); the guarantee
+    /// this test protects — a dense row carries the name, the link, and
+    /// nothing of the full card — is unchanged, so the expected literal is
+    /// repaired at the name's new address rather than loosened.
     #[test]
     fn bee_hub_finished_row_renders_only_a_name_and_link() {
         let row = bee_hub_finished_row(
@@ -9999,7 +10000,8 @@ mod tests {
             None,
         );
         // ctk-9: the title's address moved from a bare text node before
-        // `</a>` into its own `bee-hub__row-name` span. Naming the span in
+        // `</a>` into its own `bee-hub__row-name` span (ctk-10 leaves that
+        // address alone, it only stops the span from cutting). Naming it in
         // the expected literal keeps this as tight as `>Human Title</a>`
         // was — a bare `>Human Title</span>` would also be satisfied by the
         // project span beside it.
@@ -10013,13 +10015,16 @@ mod tests {
         );
     }
 
-    /// (ctk-9) The dense row reads as ONE line, not two columns: the title
-    /// sits in its own element that truncates with an ellipsis instead of
-    /// wrapping, and because the ellipsis can cut it, the full text stays
-    /// reachable on the row's own `title` attribute. Free text from the
-    /// store, so the attribute is escaped like the visible text is.
+    /// (ctk-9, corrected by ctk-10) The dense row reads as ONE continuous
+    /// text run: the project chip and the title flow together across the
+    /// column's full width and wrap onto further lines when long — neither
+    /// the two-column layout ctk-9 removed nor the ellipsis ctk-9 put in
+    /// its place. The name still sits in its own element (that is the
+    /// address this guard pins) and the full text still rides the row's
+    /// `title` attribute for the hover reading. Free text from the store,
+    /// so the attribute is escaped like the visible text is.
     #[test]
-    fn bee_hub_finished_row_truncates_its_title_but_keeps_the_full_text_reachable() {
+    fn bee_hub_finished_row_wraps_its_full_title_instead_of_truncating_it() {
         let docs = waggledance_core::bee::BeeFeatureDocs {
             title: Some(r#"A "very" long <title> & then some"#.to_string()),
             description: None,
@@ -10039,15 +10044,14 @@ mod tests {
             row.contains(&format!(
                 r#"<span class="bee-hub__row-name">{escaped}</span>"#
             )),
-            "the title needs an element of its own to hang truncation on: {row}"
+            "the title keeps an element of its own, rendered in full: {row}"
         );
         assert!(
             row.contains(&format!(r#" title="{escaped}">"#)),
-            "the full title must survive the ellipsis on the row's title attribute, escaped: {row}"
+            "the full title must also ride the row's title attribute, escaped: {row}"
         );
-        // Truncation is visual only: the row still links to the detail page
-        // where the full text lives, and still carries its group key and
-        // project chip.
+        // The row still links to the detail page where the rest of the
+        // feature lives, and still carries its group key and project chip.
         assert!(
             row.contains(r#"href="/p/proj-1/_bee/feature/long-feat""#)
                 && row.contains(r#"data-hub-group="todo""#)
@@ -10055,23 +10059,48 @@ mod tests {
             "the row keeps its link, group key and project chip: {row}"
         );
 
-        // The rule that makes it one line: the title takes the leftover
-        // width and cuts off, and the row no longer breaks words mid-token.
         let css = bee_hub_style();
-        assert!(
-            css.contains(
-                ".bee-hub__row-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }"
-            ),
-            "the row title must truncate rather than wrap"
-        );
+        // Nothing in the dense row may cut its text: no rule on the row or
+        // any of its parts truncates, ellipsises or forbids the wrap.
+        for rule in css.split('}') {
+            let Some((selector, body)) = rule.split_once('{') else {
+                continue;
+            };
+            if !selector.contains(".bee-hub__row") {
+                continue;
+            }
+            assert!(
+                !body.contains("text-overflow")
+                    && !body.contains("ellipsis")
+                    && !body.contains("white-space: nowrap"),
+                "no dense-row rule may cut the title: {selector}{{{body}}}"
+            );
+        }
+        // The rules that make it one wrapping run: the row is ordinary
+        // block-level text flow (not a flex container handing each part its
+        // own box), and a single unbroken slug still breaks rather than
+        // overflowing the column.
         let row_rule = css
             .split(".bee-hub__row {")
             .nth(1)
             .and_then(|s| s.split('}').next())
             .expect("the .bee-hub__row rule must exist");
         assert!(
-            !row_rule.contains("overflow-wrap"),
-            "the row must not re-introduce the wrapping that made it two columns: {row_rule}"
+            row_rule.contains("display: block") && !row_rule.contains("display: flex"),
+            "the row must lay its parts out as inline text flow, not as flex columns: {row_rule}"
+        );
+        assert!(
+            row_rule.contains("overflow-wrap: anywhere"),
+            "a long unbroken token must break instead of overflowing the column: {row_rule}"
+        );
+        let time_rule = css
+            .split(".bee-hub__row-time {")
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .expect("the .bee-hub__row-time rule must exist");
+        assert!(
+            !time_rule.contains("margin-left: auto"),
+            "the ship time trails the text in flow: a wrapped run has no right edge to pin it to: {time_rule}"
         );
     }
 
