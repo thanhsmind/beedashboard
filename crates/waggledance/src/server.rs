@@ -4774,15 +4774,15 @@ mod asset_response_tests {
     }
 
     #[test]
-    fn served_stylesheet_bundles_jetbrains_mono_and_leads_font_mono_token() {
+    fn served_stylesheet_bundles_geist_mono_and_leads_font_mono_token() {
         // A device monospace font often lacks box-drawing glyphs, so a
         // browser substitutes a fallback of a different advance width and
         // the terminal grid misaligns even when nothing wraps. The face must
-        // be bundled offline — no external font URL — exactly like Manrope.
+        // be bundled offline — no external font URL — exactly like Geist.
         let css = views::APP_CSS;
         assert!(
-            css.contains("font-family: 'JetBrains Mono';"),
-            "served stylesheet must declare a JetBrains Mono @font-face"
+            css.contains("font-family: 'Geist Mono';"),
+            "served stylesheet must declare a Geist Mono @font-face"
         );
         assert!(
             css.contains("src: url(data:font/woff2;base64,"),
@@ -4807,7 +4807,7 @@ mod asset_response_tests {
         );
         for decl in &font_mono_decls {
             assert!(
-                decl.contains("'JetBrains Mono', ui-monospace"),
+                decl.contains("'Geist Mono', ui-monospace"),
                 "--font-mono must lead with the bundled face before the system stack: {decl}"
             );
         }

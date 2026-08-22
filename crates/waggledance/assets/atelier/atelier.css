@@ -104,11 +104,11 @@ html[data-theme="atelier"] {
   --scrollbar-thumb: var(--_slate-200);
   --scrollbar-track: transparent;
 
-  /* ── Typography — Manrope everywhere (1–2 physical faces) ── */
-  --font-display: 'Manrope', system-ui, -apple-system, sans-serif;
-  --font-body:    'Manrope', system-ui, -apple-system, sans-serif;
-  --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-  --font-accent:  'Manrope', system-ui, sans-serif;   /* no distinct voice face → = display */
+  /* ── Typography — Geist everywhere (1–2 physical faces) ── */
+  --font-display: 'Geist', system-ui, -apple-system, sans-serif;
+  --font-body:    'Geist', system-ui, -apple-system, sans-serif;
+  --font-mono:    'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-accent:  'Geist', system-ui, sans-serif;   /* no distinct voice face → = display */
 
   /* Role character — Manrope's punchy, tight display personality */
   --type-display-weight: 800; --type-display-tracking: -0.03em;
@@ -217,8 +217,8 @@ html[data-theme="atelier"][data-accent="honey"] {
    + numbers so density is unchanged. "system" is inherited from contract.css. */
 html[data-theme="atelier"][data-typeface-set="grotesk"] {
   --font-display: 'Space Grotesk', system-ui, sans-serif;
-  --font-body:    'Manrope', system-ui, sans-serif;
-  --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
-  --font-accent:  'Manrope', system-ui, sans-serif;
+  --font-body:    'Geist', system-ui, sans-serif;
+  --font-mono:    'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-accent:  'Geist', system-ui, sans-serif;
   --type-display-tracking: -0.02em; --type-title-tracking: -0.015em;
 }
