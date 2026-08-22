@@ -21624,8 +21624,8 @@ mod bee_route_tests {
 
     /// (theme) `.bee/`'s dark-scheme rules are present in the shared
     /// stylesheet under BOTH the theme-agnostic axis (`html[data-scheme=
-    /// "dark"]`, `contract.css`) and the atelier-specific one
-    /// (`html[data-theme="atelier"][data-scheme="dark"]`, `atelier.css`) —
+    /// "dark"]`, `contract.css`) and the console-specific one
+    /// (`html[data-theme="console"][data-scheme="dark"]`, `console.css`) —
     /// and neither is gated behind a `prefers-color-scheme` media query
     /// anywhere in the bundle. That absence is the "beats the OS in both
     /// directions" guarantee made structural rather than incidental: the
@@ -21648,8 +21648,14 @@ mod bee_route_tests {
             "the theme-agnostic dark-scheme axis must be present in the bundle"
         );
         assert!(
-            css.contains("html[data-theme=\"atelier\"][data-scheme=\"dark\"]"),
-            "the atelier theme's own dark-scheme override must be present in the bundle"
+            css.contains("html[data-theme=\"console\"][data-scheme=\"dark\"]"),
+            "the console theme's own dark-scheme override must be present in the bundle"
+        );
+        assert!(
+            css.contains("html[data-theme=\"console\"][data-scheme=\"light\"]"),
+            "the console theme is dark-native, so its LIGHT layer is the counterpart that has \
+             to beat contract.css's neutral dark fallback — without it, choosing light under \
+             an OS-dark preference would leak the fallback's colours back in"
         );
         assert!(
             !css.contains("prefers-color-scheme"),
@@ -21661,7 +21667,7 @@ mod bee_route_tests {
     }
 
     /// (theme) The board's own rendered page carries the explicit
-    /// `data-theme="atelier"` attribute and the no-flash script that always
+    /// `data-theme="console"` attribute and the no-flash script that always
     /// resolves to one definite `data-scheme` value (never leaving it
     /// unset for a CSS media query to fill in) — the per-page half of the
     /// same guarantee the stylesheet test above proves for the CSS itself.
@@ -21681,8 +21687,8 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains(r#"data-theme="atelier""#),
-            "the board page must carry the explicit atelier theme attribute: {body}"
+            body.contains(r#"data-theme="console""#),
+            "the board page must carry the explicit console theme attribute: {body}"
         );
         assert!(
             body.contains("setAttribute('data-scheme'"),

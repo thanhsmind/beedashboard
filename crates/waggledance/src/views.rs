@@ -17,7 +17,7 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
     let title = esc(title);
     format!(
         r#"<!doctype html>
-<html lang="en" data-theme="atelier" class="fg-root">
+<html lang="en" data-theme="console" class="fg-root">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -6331,7 +6331,7 @@ pub const APP_CSS: &str = concat!(
     "\n",
     include_str!("../assets/atelier/editorial.css"),
     "\n",
-    include_str!("../assets/atelier/atelier.css"),
+    include_str!("../assets/atelier/console.css"),
     "\n",
     include_str!("../assets/app.css"),
 );
