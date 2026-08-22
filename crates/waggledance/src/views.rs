@@ -1875,14 +1875,40 @@ fn bee_hub_style() -> String {
 .bee-strip__label { font-weight: var(--weight-strong); color: var(--color-text); }
 .bee-strip__meta { color: var(--color-text-muted); }
 .bee-strip__row--unresolved .bee-strip__meta { color: var(--color-danger); }
-/* kanban-columns D1/D12: five explicit tracks in the board's own left-to-
-   right column order (Todo, In Progress, Review, Compound, Finished) rather
-   than `repeat(auto-fit, minmax(260px, 1fr))` — that auto-fit sizing was
-   tuned for three equal columns and wraps badly once four of the five are
-   dense row lists needing far less width than the one that still renders
-   cards. In Progress keeps the wider, card-shaped track; the four row
-   columns share a narrower one. */
-.bee-hub__groups { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.6fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr); gap: var(--space-4); }
+/* kanban-columns D1/D12, kanban-columns-archive: four explicit tracks in
+   the board's own left-to-right column order (Todo, In Progress, Review,
+   Compound) rather than `repeat(auto-fit, minmax(260px, 1fr))` — that
+   auto-fit sizing was tuned for three equal columns and wraps badly once
+   three of the four are dense row lists needing far less width than the
+   one that still renders cards. In Progress keeps the wider, card-shaped
+   track; the three row columns share a narrower one. Finished is no
+   longer a fifth track here: kanban-columns-archive folds it into
+   `.bee-hub__archive`, a collapsed bar rendered after this grid closes
+   rather than inside it (see [`bee_hub_archive_bar`]). */
+.bee-hub__groups { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.6fr) minmax(200px, 1fr) minmax(200px, 1fr); gap: var(--space-4); }
+/* kanban-columns-archive: the folded Finished bar — a native `<details>`
+   (no JS) spanning the full board width beneath `.bee-hub__groups` rather
+   than sitting in it as a fifth track. `data-hub-group`/`data-hub-count`
+   stay on this element exactly as they sat on the old `.bee-hub__group`
+   div, so every existing assertion pinning that substring still resolves;
+   its open body reuses `.bee-hub__cards` (via `bee_hub_group_body`) so the
+   rows read exactly like the retired Finished column did. The summary
+   states the group's true total even while closed, per
+   `docs/specs/bee-cockpit.md`'s "collapsing a list is never allowed to
+   understate what it holds". */
+.bee-hub__archive { margin-top: var(--space-4); border-top: var(--border-width-hairline) solid var(--color-border); }
+.bee-hub__archive-summary { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--space-2); cursor: pointer; list-style: none; }
+.bee-hub__archive-summary::-webkit-details-marker { display: none; }
+.bee-hub__archive-summary:focus-visible { outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }
+.bee-hub__archive-label { font-family: var(--font-mono); font-size: var(--type-label-size); font-weight: var(--type-label-weight); letter-spacing: var(--type-label-tracking); text-transform: uppercase; color: var(--color-text-muted); }
+.bee-hub__archive-summary .fg-chip { margin-left: auto; }
+/* The digest's archive-expand curve (140ms on `cubic-bezier(0.25, 0.46,
+   0.45, 0.94)`) has no exact duration token in console.css (only 120/150/
+   220/250ms are tokenised) — `--motion-settle` is the nearest, paired with
+   `--ease-standard`, the token that already carries that exact curve. */
+.bee-hub__archive-summary .bee-hub__chev { transition: transform var(--motion-settle) var(--ease-standard); }
+.bee-hub__archive[open] .bee-hub__archive-summary .bee-hub__chev { transform: rotate(90deg); }
+.bee-hub__archive-body { padding: 0 var(--space-2) var(--space-3); }
 /* hub-fallbacks: a grid/flex item's own default `min-width: auto` sizes it
    to its content's min-content width — normally harmless, but a clamped
    `.bee-hub__desc` below is `white-space: nowrap` at its own min-content
@@ -3012,8 +3038,8 @@ fn bee_render_hub_section(
     {in_progress_group}
     {review_group}
     {compound_group}
-    {finished_group}
   </div>
+  {archive_bar}
 </section>"#,
         todo_group = bee_hub_group("Todo", "todo", todo_count, &todo_cards, "Nothing in Todo."),
         in_progress_group = bee_hub_group(
@@ -3037,22 +3063,17 @@ fn bee_render_hub_section(
             &compound_cards,
             "Nothing in Compound."
         ),
-        finished_group = bee_hub_group(
-            "Finished",
-            "finished",
-            finished_count,
-            &finished_cards,
-            "Nothing finished yet."
-        ),
+        archive_bar = bee_hub_archive_bar(finished_count, &finished_cards),
     )
 }
 
 /// The cross-project board's Features section
-/// (`docs/history/cross-board/CONTEXT.md` D1/D3/D4/D5/D7/D10, grown to five
-/// columns by kanban-columns D1/D9): runs [`bee_classify_features`] once
-/// per `(project, rollup)` pair -- the exact column rules the per-project
+/// (`docs/history/cross-board/CONTEXT.md` D1/D3/D4/D5/D7/D10, grown to four
+/// columns plus the folded Finished bar by kanban-columns D1/D9 and
+/// kanban-columns-archive): runs [`bee_classify_features`] once per
+/// `(project, rollup)` pair -- the exact column rules the per-project
 /// board applies to itself, D9's single shared classification rule -- then
-/// merges the results into five flat, multi-project columns instead of one
+/// merges the results into four flat, multi-project columns instead of one
 /// block per project (D4), labels every card and every dense row with its
 /// own project's name (D5), and orders and caps the merged Finished
 /// sequence per D10/D7: every feature with a ship time first, most recently
@@ -3066,9 +3087,10 @@ fn bee_render_hub_section(
 /// are the sum across projects. Archived-feature names and D10 ship times
 /// come from `rollup.archived_features` (cross-board-1's `read_rollup`) --
 /// this function performs no filesystem read of its own. An empty
-/// `rollups` still renders the same five empty columns [`bee_hub_group`]
-/// always shows for a column with nothing in it; whether to call this at
-/// all when nothing qualifies (D9) is the caller's decision.
+/// `rollups` still renders the same four empty columns [`bee_hub_group`]
+/// always shows for a column with nothing in it, plus
+/// [`bee_hub_archive_bar`]'s own honest empty line for Finished; whether to
+/// call this at all when nothing qualifies (D9) is the caller's decision.
 ///
 /// `feature_panes` (card-terminals-1) is the already-resolved join
 /// (`server.rs::project_feature_panes`): for each project id, a map from
@@ -3332,8 +3354,8 @@ pub fn bee_cross_project_features_section(
     {in_progress_group}
     {review_group}
     {compound_group}
-    {finished_group}
   </div>
+  {archive_bar}
 </section>"#,
         read_errors_strip = read_errors_strip,
         todo_group = bee_hub_group("Todo", "todo", todo_count, &todo_cards, "Nothing in Todo."),
@@ -3358,13 +3380,7 @@ pub fn bee_cross_project_features_section(
             &compound_cards,
             "Nothing in Compound."
         ),
-        finished_group = bee_hub_group(
-            "Finished",
-            "finished",
-            finished_count,
-            &finished_cards,
-            "Nothing finished yet."
-        ),
+        archive_bar = bee_hub_archive_bar(finished_count, &finished_cards),
     )
 }
 
@@ -3440,20 +3456,53 @@ fn bee_hub_group(
     cards_html: &str,
     empty_line: &str,
 ) -> String {
-    let body = if cards_html.is_empty() {
-        format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_line))
-    } else {
-        format!(
-            r#"<div class="bee-hub__cards">{cards_html}</div>"#,
-            cards_html = cards_html
-        )
-    };
+    let body = bee_hub_group_body(cards_html, empty_line);
     format!(
         r#"<div class="bee-hub__group" data-hub-group="{key}" data-hub-count="{count}"><h4 class="bee-panel__subhead">{label} <span class="fg-chip fg-chip--neutral">{count}</span></h4>{body}</div>"#,
         key = key,
         count = count,
         label = esc(label),
         body = body,
+    )
+}
+
+/// A hub group's body — its cards, or its own honest empty line
+/// (bee-board-pm D5) when it holds nothing — factored out of
+/// [`bee_hub_group`] so [`bee_hub_archive_bar`] renders the folded
+/// Finished bar's open content through the exact same path rather than
+/// duplicating it.
+fn bee_hub_group_body(cards_html: &str, empty_line: &str) -> String {
+    if cards_html.is_empty() {
+        format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_line))
+    } else {
+        format!(
+            r#"<div class="bee-hub__cards">{cards_html}</div>"#,
+            cards_html = cards_html
+        )
+    }
+}
+
+/// The Finished group's own collapsed bar (kanban-columns-archive, plan
+/// phase 3 + CONTEXT.md's carried Finished question): folds what used to
+/// be the board's fifth grid column into a `<details>` spanning the full
+/// board width, rendered right after `.bee-hub__groups` closes in both
+/// [`bee_render_hub_section`] and [`bee_cross_project_features_section`]
+/// rather than as a track inside it. The summary states the group's true
+/// total even while collapsed — `docs/specs/bee-cockpit.md`'s "collapsing
+/// a list is never allowed to understate what it holds" — and
+/// `data-hub-group`/`data-hub-count` stay on this element exactly as they
+/// sat on the old `.bee-hub__group` div, so every existing assertion
+/// pinning that substring still resolves. Opening it reveals precisely
+/// what the retired Finished column rendered: the same `cards_html` this
+/// is handed, already paged ten-at-a-time by its caller via
+/// [`bee_hub_finished_rows`]/[`bee_hub_finished_more`] — this function
+/// never touches ordering or paging, only where the result lands on the
+/// page.
+fn bee_hub_archive_bar(count: usize, cards_html: &str) -> String {
+    format!(
+        r#"<details class="bee-hub__archive" data-hub-group="finished" data-hub-count="{count}"><summary class="bee-hub__archive-summary"><span class="bee-hub__archive-label">ARCHIVE</span><span class="fg-chip fg-chip--neutral">{count}</span><span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__archive-body">{body}</div></details>"#,
+        count = count,
+        body = bee_hub_group_body(cards_html, "Nothing finished yet."),
     )
 }
 
@@ -11741,11 +11790,15 @@ mod tests {
         assert_eq!(bee_hub_worktree_label("solo-feat", &[], &[], false), "Main");
     }
 
-    /// (hub-finished-compact, integration) The paging arithmetic itself is
-    /// proven at the unit level above; this proves `bee_feature_hub_section`
-    /// really wires the Finished group's rows through
-    /// `bee_hub_finished_rows` end to end, rather than dumping every
-    /// archived feature into the open flow.
+    /// (hub-finished-compact, integration; shape updated by
+    /// kanban-columns-archive) The paging arithmetic itself is proven at
+    /// the unit level above; this proves `bee_feature_hub_section` really
+    /// wires the Finished group's rows through `bee_hub_finished_rows` end
+    /// to end, rather than dumping every archived feature into the open
+    /// flow. The folded Finished bar ([`bee_hub_archive_bar`]) is itself a
+    /// `<details>` now, so 12 rows produce two: the outer archive bar plus
+    /// one nested inside it holding the two overflow rows -- not one, as
+    /// before the bar existed.
     #[test]
     fn hub_finished_group_pages_more_than_ten_archived_features_behind_a_details() {
         let root = std::env::temp_dir().join(format!(
@@ -11795,8 +11848,8 @@ mod tests {
         );
         assert_eq!(
             html.matches("<details").count(),
-            1,
-            "12 finished features must page into exactly one <details>: {html}"
+            2,
+            "12 finished features must page into exactly one nested <details>, plus the archive bar's own outer <details>: {html}"
         );
         assert!(html.contains("Show 2 more · 2 left"), "{html}");
         for n in 0..12 {
@@ -11805,6 +11858,101 @@ mod tests {
                 "every finished feature must still render somewhere on the page: {html}"
             );
         }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// kanban-columns-archive: the Finished group folds into a collapsed
+    /// bar spanning the board rather than sitting in `.bee-hub__groups` as
+    /// a fifth track, and that bar must never understate what it holds
+    /// while closed (`docs/specs/bee-cockpit.md`: "collapsing a list is
+    /// never allowed to understate what it holds"). Existing coverage
+    /// already proves the row-level `data-hub-group="finished"` content and
+    /// the paging arithmetic (`bee_hub_finished_rows_pages_twenty_five_...`,
+    /// `hub_finished_group_pages_more_than_ten_...`); this is the gap those
+    /// leave: the bar's own container shape.
+    #[test]
+    fn bee_hub_archive_bar_renders_collapsed_and_states_its_true_count_while_closed() {
+        let bar = bee_hub_archive_bar(7, "<a>a-finished-row</a>");
+
+        // Collapsed by default: a native `<details>` with no `open`
+        // attribute on its own opening tag.
+        let open_tag_end = bar.find('>').expect("opening tag must close");
+        let open_tag = &bar[..open_tag_end];
+        assert!(
+            open_tag.starts_with("<details class=\"bee-hub__archive\""),
+            "the bar must be a <details> carrying its own archive class: {bar}"
+        );
+        assert!(
+            !open_tag.contains("open"),
+            "the bar must render collapsed by default, no `open` attribute: {bar}"
+        );
+
+        // States its true count on the summary even while closed --
+        // data-hub-group/data-hub-count sit on the same collapsed tag, not
+        // gated behind expansion.
+        assert!(
+            open_tag.contains(r#"data-hub-group="finished" data-hub-count="7""#),
+            "the true count must be reachable on the closed element itself: {bar}"
+        );
+        assert!(
+            bar.contains(">ARCHIVE<") || bar.contains("ARCHIVE</span>"),
+            "the summary must name itself ARCHIVE: {bar}"
+        );
+        assert!(
+            bar.contains(">7</span>"),
+            "the summary must show the count 7 beside the ARCHIVE label, not hidden inside the collapsed body: {bar}"
+        );
+
+        // Expanding it reveals exactly the rows it was handed, untouched.
+        assert!(
+            bar.contains("<a>a-finished-row</a>"),
+            "the bar's body must carry the same rows the caller handed it: {bar}"
+        );
+    }
+
+    /// The archive bar must sit AFTER `.bee-hub__groups` closes, never as a
+    /// track inside it -- the grid keeps exactly four column divs
+    /// (`data-hub-group`: todo, in-progress, review, compound), and the
+    /// finished bar's own `<details data-hub-group="finished" ...>` is
+    /// reachable only past that grid's closing `</div>`.
+    #[test]
+    fn bee_feature_hub_section_places_the_archive_bar_after_the_grid_not_inside_it() {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-archive-shape-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
+
+        let groups_open = html
+            .find(r#"<div class="bee-hub__groups">"#)
+            .expect("the four-column grid must render");
+        let archive_at = html
+            .find(r#"<details class="bee-hub__archive""#)
+            .expect("the archive bar must render");
+        assert!(
+            archive_at > groups_open,
+            "the archive bar must sit after the grid opens, not before it: {html}"
+        );
+        // Everything between the grid's own opening tag and the archive
+        // bar's opening tag is the grid's content (the archive bar renders
+        // immediately after `.bee-hub__groups` closes, so this span never
+        // reaches past its own closing `</div>`).
+        let grid_region = &html[groups_open..archive_at];
+        assert_eq!(
+            grid_region.matches(r#"data-hub-group=""#).count(),
+            4,
+            "the grid must carry exactly the four dense-row/card columns, never Finished: {html}"
+        );
+        assert!(
+            !grid_region.contains(r#"data-hub-group="finished""#),
+            "Finished must never render inside the grid: {grid_region}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
