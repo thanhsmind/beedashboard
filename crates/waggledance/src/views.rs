@@ -146,11 +146,19 @@ pub struct ProjectSuggestion {
 /// `Default` is `Kanban` so that an absent, empty, unknown, or otherwise
 /// unparseable `tab` query value (`server.rs`'s `RegisterFlag` visitor)
 /// always resolves here rather than needing its own fallback branch.
+///
+/// console-theme-kanban (ctk-12): the `Projects` variant is retired. Its
+/// whole body -- the project rows, their nested worktree children, the
+/// folder suggestions, the registration form and its error, and the
+/// Unassigned group -- now renders as [`project_sidebar`], a left rail on
+/// the Kanban tab, so there is no second section left for a third variant
+/// to name. `server.rs`'s query parser still recognises the literal
+/// `tab=projects` and maps it here, onto `Kanban`, so an old bookmark
+/// lands on the page that now carries what it was pointing at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HomeTab {
     #[default]
     Kanban,
-    Projects,
     /// homepage-terminals D1/D8: the third tab, opening one live agent
     /// terminal. Always offered on the strip regardless of herdr's own
     /// state — [`home_tab_strip`] never gates this variant's anchor on
@@ -176,10 +184,13 @@ fn home_tab_strip(selected: HomeTab) -> String {
             label = label,
         )
     };
+    // console-theme-kanban (ctk-12): two anchors, not three. The Projects
+    // tab is retired — its body is now the Kanban tab's own left rail
+    // ([`project_sidebar`]) — so the strip offers the two sections that
+    // still exist. Terminals is untouched and stays reachable.
     format!(
-        r#"<nav class="fg-tabs" aria-label="Home sections">{kanban}{projects}{terminals}</nav>"#,
+        r#"<nav class="fg-tabs" aria-label="Home sections">{kanban}{terminals}</nav>"#,
         kanban = tab_link(HomeTab::Kanban, "/?tab=kanban", "Kanban"),
-        projects = tab_link(HomeTab::Projects, "/?tab=projects", "Projects"),
         // homepage-terminals D8: no gate here — the anchor renders
         // whatever herdr's own state is; only the tab's own body reads it.
         terminals = tab_link(HomeTab::Terminals, "/?tab=terminals", "Terminals"),
@@ -196,17 +207,21 @@ fn home_tab_strip(selected: HomeTab) -> String {
 /// as "nothing qualified" and the Kanban tab renders its own `fg-empty`
 /// state instead of `cross_features_html` (backlog-groom-2 D1) -- the tab
 /// strip, and the Terminals tab riding on it, always render regardless of
-/// whether any project carries a bee board. A registration error forces the
-/// Projects tab regardless of `tab`: the banner [`project_list_main`]
-/// renders lives only there, and a user who just submitted the add-project
-/// form must see why it failed rather than land back on Kanban.
+/// whether any project carries a bee board.
 ///
-/// `bee_hub_style()` / `.bee-hub-theme` are scoped to Kanban only: every
+/// console-theme-kanban (ctk-12): there are two tabs now, not three. The
+/// project list, the folder suggestions, the registration form and its
+/// error banner, and the Unassigned group all moved into
+/// [`project_sidebar`], a left rail that renders on the Kanban tab beside
+/// the board. A registration error still forces a tab regardless of `tab`
+/// — Kanban now, since that is where the rail and its banner live — so a
+/// user who just submitted the add-project form still sees why it failed.
+///
+/// `bee_hub_style()` / `.bee-hub-theme` stay scoped to Kanban only: every
 /// rule the style block declares is itself scoped under the
-/// `.bee-hub-theme` selector (`bee_hub_style`'s own doc), so emitting it on
-/// the Projects tab's render would add a dead `<style>` block with no
-/// selector able to match anything on that page -- there is no reason to
-/// ship it there.
+/// `.bee-hub-theme` selector (`bee_hub_style`'s own doc), and the rail is a
+/// sibling of that scope, not a descendant — the rail's own rules live in
+/// `assets/app.css` beside the `.proj-*` rules it reuses.
 #[allow(clippy::too_many_arguments)] // each param is an independent render input server.rs::index_page already assembles; bundling them loses the doc comments pinned to each one above
 pub fn home_page(
     projects: &[(Project, usize, Vec<TerminalPaneView>)],
@@ -233,8 +248,16 @@ pub fn home_page(
     // same "New shell"/preset buttons the project terminal page offers.
     terminals_presets: &[String],
 ) -> String {
+    // console-theme-kanban (ctk-12), retargeting homepage-tabs edge (b):
+    // this line used to force the Projects tab, because that was the only
+    // tab the register banner rendered on. The banner now lives in the
+    // Kanban tab's own left rail ([`project_sidebar`]'s non-scrolling
+    // head), so the force is retargeted rather than deleted — a reader
+    // who just submitted the add-project form still always lands on the
+    // section that is showing why it failed, even from an explicit
+    // `?tab=terminals`.
     let tab = if register_error.is_some() {
-        HomeTab::Projects
+        HomeTab::Kanban
     } else {
         tab
     };
@@ -243,10 +266,22 @@ pub fn home_page(
             "Kanban",
             format!(
                 r#"{style}
+<div class="home-shell">
+{sidebar}
 <main class="fg-page bee-hub-theme">
   {features}
-</main>"#,
+</main>
+</div>"#,
                 style = bee_hub_style(),
+                // console-theme-kanban (ctk-12): the retired Projects tab,
+                // now a left rail sitting as a sibling of the board rather
+                // than inside it, so `<main>` keeps its own scrolling and
+                // its own `.bee-hub-theme` scope. The rail renders on this
+                // tab alone — Terminals is a live screen, and a project
+                // list beside it would only steal width from the thing the
+                // reader opened that tab for.
+                sidebar =
+                    project_sidebar(projects, unassigned_visible, suggestions, register_error),
                 // D1 (backlog-groom-2): an empty `cross_features_html`
                 // (D9 — no registered project carries a `.bee` board) used
                 // to make the whole page early-return the tabless plain
@@ -261,10 +296,6 @@ pub fn home_page(
                     cross_features_html.to_string()
                 },
             ),
-        ),
-        HomeTab::Projects => (
-            "Projects",
-            project_list_main(projects, unassigned_visible, suggestions, register_error),
         ),
         HomeTab::Terminals => (
             "Terminals",
@@ -287,12 +318,49 @@ pub fn home_page(
     layout_with_drawer(title, "", &body, true)
 }
 
-/// The project list itself — everything the home page's own Projects tab
-/// needs, factored out so [`home_page`] can render it unchanged beneath the
-/// cross-project sections (cross-board D1) without duplicating a single line
-/// of this logic. Returns just the `<main>` element; topbar and `layout`
-/// wrapping stay each caller's own job.
-fn project_list_main(
+/// console-theme-kanban (ctk-12) — was `project_list_main`, the body of
+/// the retired Projects tab. Every element that tab rendered is still here,
+/// moved rather than rebuilt: the project rows with their nested worktree
+/// children, terminal badges and unregister forms; the folder-suggestions
+/// block; the registration form and its error banner; and the Unassigned
+/// group's presence card. Nothing the tab could reach became unreachable.
+///
+/// What changed is the wrapper. The digest's sidebar (`style-digest.md`,
+/// "Sidebar") is reproduced as a shape, not ornament for ornament — and
+/// waggledance's rail carries strictly more than the source design's did,
+/// which is why the group heading, the suggestions block and the presence
+/// card have no counterpart there. Three ornaments are deliberately absent:
+/// there are no window controls (this is a web page, not a desktop shell);
+/// settings already live as a gear in the topbar; and the brand mark and
+/// name the digest pins to the top are the topbar's own `Waggle Dance`
+/// home link, sitting directly above this rail — a second copy twelve
+/// pixels lower would be the same word twice. What the digest pins to the
+/// bottom is Settings; what this rail pins there instead is the
+/// registration form, the one control it actually owns.
+///
+/// The register banner rides in the rail's own non-scrolling head rather
+/// than in its scrolling body: a failed registration has to land in front
+/// of the reader, and the head is on screen at load whatever the body has
+/// been scrolled to. `role="alert"` gives an assistive reader the same
+/// arrival, and [`home_page`] forces the Kanban tab whenever
+/// `register_error` is set, so this rail is always the section rendered.
+///
+/// Accessibility: the rail is a `<nav>` landmark with its own accessible
+/// name; the projects stay a real `<ul>` under a real heading; the one row
+/// that is actually current — the board being rendered right now, since
+/// every project row navigates away from this page — carries
+/// `aria-current="page"` as well as the accent fill; and every control in
+/// here is an anchor, an input or a button, so keyboard order is the
+/// document order with nothing to trap it.
+///
+/// OWED, the phone phase: this rail has no narrow-screen answer yet.
+/// Supplying one means a second `@media` block, and how a two-column shell
+/// collapses on a handset is that phase's decision to make, not this
+/// cell's.
+///
+/// Returns the `<nav>` element alone; the shell around it, the topbar and
+/// `layout` wrapping stay the caller's own job.
+fn project_sidebar(
     projects: &[(Project, usize, Vec<TerminalPaneView>)],
     unassigned_visible: bool,
     suggestions: &[ProjectSuggestion],
@@ -361,7 +429,7 @@ fn project_list_main(
             rows.push_str(&format!(
                 r#"<li class="{row_class}">
   <a class="proj-row__link" href="/p/{id}/">
-    <span class="proj-row__name">{label}</span>
+    {dot}<span class="proj-row__name">{label}</span>
     <span class="proj-row__meta">{count} markdown files · <time class="proj-row__time" datetime="{seen}">{seen_short}</time></span>
   </a>
   {badges}
@@ -377,6 +445,7 @@ fn project_list_main(
                 seen = esc(&p.last_seen_at),
                 seen_short = esc(&short_instant(&p.last_seen_at)),
                 badges = badges,
+                dot = project_row_dot(panes),
             ));
         }
         format!(r#"<ul class="proj-list">{rows}</ul>"#, rows = rows)
@@ -442,20 +511,87 @@ fn project_list_main(
     // error code — the submitted path never reaches this page (see
     // `register_error_message`'s own doc). An unrecognized or absent code
     // renders no banner at all.
+    // console-theme-kanban (ctk-12): `role="alert"` so the refusal reaches a
+    // reader who is not looking at the rail, the way landing on a dedicated
+    // tab used to. The banner renders in the rail's own non-scrolling head
+    // (see this function's doc), and `home_page` forces the Kanban tab
+    // whenever `register_error` is set, so it is always on screen at load.
     let register_banner = match register_error.and_then(register_error_message) {
         Some(msg) => format!(
-            r#"<div class="fg-banner fg-banner--danger"><span class="fg-banner__dot"></span><span class="fg-banner__body">{msg}</span></div>"#,
+            r#"<div class="fg-banner fg-banner--danger" role="alert" id="register-error"><span class="fg-banner__dot"></span><span class="fg-banner__body">{msg}</span></div>"#,
             msg = esc(msg),
         ),
         None => String::new(),
     };
     format!(
-        r#"<main class="fg-page">{register_banner}{add_form}{listing}{suggestions_block}{unassigned_card}</main>"#,
+        r#"<nav class="home-sidebar" aria-label="Projects">
+  <div class="home-sidebar__head">{register_banner}{filter}</div>
+  <div class="home-sidebar__body">
+    <ul class="home-sidebar__nav">
+      <li><a class="home-sidebar__row home-sidebar__row--on" href="/?tab=kanban" aria-current="page">Board</a></li>
+    </ul>
+    <h2 class="home-sidebar__group">Projects</h2>
+    {listing}
+    {suggestions_block}
+    {unassigned_card}
+  </div>
+  <div class="home-sidebar__foot">{add_form}</div>
+</nav>"#,
         register_banner = register_banner,
+        filter = project_filter_field(),
         add_form = project_add_form(),
         listing = listing,
         suggestions_block = suggestions_block,
         unassigned_card = unassigned_card,
+    )
+}
+
+/// console-theme-kanban (ctk-12): the digest's sidebar search field, and
+/// the one control on this rail that cannot work without JavaScript --
+/// filtering a list is a client-side act and this page has no server route
+/// for it. So the field ships `hidden` and `assets/app.js` unhides it once
+/// it has wired the filter up: with scripting off there is no dead input
+/// promising a search that would never happen, and with scripting on the
+/// reader gets a real one. The label is an `aria-label` rather than a
+/// visible `<label>` because the rail has no width to spend on a caption
+/// the placeholder already carries; the input is a real `type="search"`, so
+/// it is in the keyboard order and clears with Escape like any other.
+fn project_filter_field() -> &'static str {
+    r#"<div class="home-sidebar__search" hidden data-proj-filter>
+  <input class="fg-input home-sidebar__filter" type="search" id="proj-filter" name="q" placeholder="Filter projects" aria-label="Filter projects" autocomplete="off">
+</div>"#
+}
+
+/// console-theme-kanban (ctk-12): the digest's status dot on a rail row.
+/// It is the design system's own `.fg-status__dot` rather than a second dot
+/// vocabulary declared beside it — that component already ships the size,
+/// the pill radius, the status glow and the three tone colours this needs,
+/// so the rail contributes only the tone class and the alignment.
+///
+/// Colour never carries the meaning on its own: the dot is `aria-hidden`,
+/// and the words it summarises are the [`project_badges`] pills the same
+/// row renders on its next line, each one a [`status_pill`] printing its
+/// status as text. A row with no agent pane renders neither the dot nor the
+/// pills, so the two can never disagree.
+fn project_row_dot(panes: &[TerminalPaneView]) -> String {
+    // The same `kind != "shell"` filter the badges themselves apply: a
+    // plain shell is not an agent, and a dot for one would claim work that
+    // is not happening.
+    let agents: Vec<&TerminalPaneView> = panes.iter().filter(|p| p.kind != "shell").collect();
+    if agents.is_empty() {
+        return String::new();
+    }
+    // Worst news first, the same precedence the board's own In Progress
+    // ordering uses: blocked outranks working, which outranks quiet.
+    let tone = if agents.iter().any(|p| p.status == "blocked") {
+        "blocked"
+    } else if agents.iter().any(|p| p.status == "working") {
+        "working"
+    } else {
+        "idle"
+    };
+    format!(
+        r#"<span class="fg-status__dot proj-row__dot proj-row__dot--{tone}" aria-hidden="true"></span>"#
     )
 }
 
@@ -6944,6 +7080,14 @@ mod tests {
     /// backlog-groom-2 D1: a populated board renders exactly as before — the
     /// tab strip plus the cross-project section verbatim, never the empty
     /// state.
+    ///
+    /// console-theme-kanban (ctk-12): repaired, not weakened. The probe was
+    /// the bare class `fg-empty`, which stopped identifying the board's own
+    /// empty state the moment the project rail joined this page — the rail
+    /// renders its own `fg-empty` when no project is registered, which is
+    /// exactly the fixture here. The guarantee is unchanged; the assertion
+    /// now names the board's empty-state sentence, which is what it always
+    /// meant.
     #[test]
     fn home_page_with_populated_board_renders_kanban_section_unchanged() {
         let marker = r#"<div data-feature-hub="cross-project">MARKER-CONTENT</div>"#;
@@ -6965,7 +7109,7 @@ mod tests {
             "a populated cross-project section must render verbatim: {body}"
         );
         assert!(
-            !body.contains("fg-empty"),
+            !body.contains("No project here has a bee board yet."),
             "a populated board must not show the Kanban empty state: {body}"
         );
     }
@@ -7063,11 +7207,197 @@ mod tests {
         }
     }
 
-    /// projects-list-tidy: the Projects tab spends no line on a page
-    /// heading (the tab strip already says where you are), and a project
-    /// with agents running renders above one without — using the same
-    /// kind != "shell" filter as the row badges, so a shell-only project
-    /// stays in the idle partition.
+    /// console-theme-kanban (ctk-12), the cell's load-bearing claim:
+    /// retiring the Projects tab must make NOTHING it could reach
+    /// unreachable. Every element that tab rendered — the project rows with
+    /// their nested worktree children, terminal badges and unregister
+    /// forms; the folder-suggestions block; the registration form; and the
+    /// Unassigned group's presence card — has to come back on the Kanban
+    /// tab, beside the board rather than instead of it. One fixture carries
+    /// all five at once, because the failure this guards against is exactly
+    /// the one where four of them move and the fifth is forgotten.
+    #[test]
+    fn kanban_tab_rail_carries_everything_the_retired_projects_tab_could_reach() {
+        let parent = sample_project();
+        let mut branch = sample_project();
+        branch.id = "proj-1--wt--feature-x".into();
+        branch.name = "Proj One feature-x".into();
+        let projects = vec![
+            (parent, 3, vec![pane_with_status("working")]),
+            (branch, 1, Vec::new()),
+        ];
+        let suggestions = vec![ProjectSuggestion {
+            path: "/tmp/unregistered-folder".into(),
+            pane_count: 2,
+        }];
+        let body = home_page(
+            &projects,
+            true,
+            &suggestions,
+            None,
+            r#"<div data-feature-hub="cross-project">BOARD</div>"#,
+            HomeTab::Kanban,
+            &[],
+            None,
+            true,
+            &[],
+        );
+
+        // The board itself is still here — the rail joined the Kanban tab,
+        // it did not replace it.
+        assert!(
+            body.contains("BOARD"),
+            "the board must still render: {body}"
+        );
+        assert!(
+            body.contains(r#"<nav class="home-sidebar" aria-label="Projects">"#),
+            "the Kanban tab must render the project rail: {body}"
+        );
+
+        for (needle, what) in [
+            (r#"<ul class="proj-list">"#, "the project list"),
+            ("Proj One", "the project's own name"),
+            (
+                r#"class="proj-row proj-row--branch""#,
+                "the nested worktree child",
+            ),
+            ("feature-x", "the worktree child's branch name"),
+            (r#"href="/p/proj-1/""#, "the row's link to its project"),
+            (r#"class="proj-row__badges"#, "the row's terminal badges"),
+            (
+                r#"action="/api/projects/proj-1/unregister""#,
+                "the unregister form",
+            ),
+            ("Suggested projects", "the folder-suggestions block"),
+            ("/tmp/unregistered-folder", "the suggested folder's path"),
+            (
+                r#"<form class="proj-suggestion__register" method="post" action="/api/projects/register">"#,
+                "the one-press register form on a suggestion",
+            ),
+            (
+                r#"<form class="proj-add" method="post""#,
+                "the registration form",
+            ),
+            ("Unassigned agents", "the Unassigned group's presence card"),
+            (
+                r#"href="/_terminal/unassigned""#,
+                "the Unassigned group's link",
+            ),
+        ] {
+            assert!(
+                body.contains(needle),
+                "{what} must still be reachable from the Kanban tab's rail ({needle}): {body}"
+            );
+        }
+
+        // The registration form is the control the rail pins to its bottom,
+        // where the digest pins Settings — waggledance's settings already
+        // live as a gear in the topbar.
+        let foot_at = body
+            .find(r#"<div class="home-sidebar__foot">"#)
+            .expect("the rail must have a foot");
+        let form_at = body
+            .find(r#"<form class="proj-add""#)
+            .expect("the add form");
+        assert!(
+            foot_at < form_at,
+            "the registration form must be pinned in the rail's foot: {body}"
+        );
+    }
+
+    /// console-theme-kanban (ctk-12): the rail is navigation, and has to
+    /// behave like it. A named landmark, a real list under a real heading,
+    /// one row that says it is the current page, and no piece of meaning
+    /// carried by colour alone — the status dot is decorative by
+    /// construction and the words it summarises are the badge pills on the
+    /// row's own next line. Every control is an anchor, an input or a
+    /// button, so keyboard order is document order with nothing to trap it.
+    #[test]
+    fn project_rail_is_a_named_landmark_whose_current_row_and_dots_never_speak_by_colour_alone() {
+        let mut working = sample_project();
+        working.id = "proj-working".into();
+        let mut blocked = sample_project();
+        blocked.id = "proj-blocked".into();
+        let mut quiet = sample_project();
+        quiet.id = "proj-quiet".into();
+        let projects = vec![
+            (working, 1, vec![pane_with_status("working")]),
+            (blocked, 1, vec![pane_with_status("blocked")]),
+            (quiet, 1, Vec::new()),
+        ];
+        let rail = project_sidebar(&projects, false, &[], None);
+
+        assert!(
+            rail.starts_with(r#"<nav class="home-sidebar" aria-label="Projects">"#),
+            "the rail must be a navigation landmark with its own name: {rail}"
+        );
+        assert!(
+            rail.contains(r#"<h2 class="home-sidebar__group">Projects</h2>"#)
+                && rail.contains(r#"<ul class="proj-list">"#),
+            "the projects must stay a real list under a real heading: {rail}"
+        );
+        assert_eq!(
+            rail.matches(r#"aria-current="page""#).count(),
+            1,
+            "exactly one row in the rail may claim to be the current page: {rail}"
+        );
+        assert!(
+            rail.contains(
+                r#"<a class="home-sidebar__row home-sidebar__row--on" href="/?tab=kanban" aria-current="page">Board</a>"#
+            ),
+            "the current row must announce itself, not merely be filled with the accent: {rail}"
+        );
+
+        // Colour-only meaning: every dot is aria-hidden, and a dot only
+        // ever appears on a row that also prints its status as words.
+        assert_eq!(
+            rail.matches(r#"class="fg-status__dot proj-row__dot"#)
+                .count(),
+            2,
+            "a dot must render for the two rows with an agent pane, and only those: {rail}"
+        );
+        assert_eq!(
+            rail.matches("proj-row__dot--").count(),
+            2,
+            "every dot must carry a tone modifier: {rail}"
+        );
+        for tone in ["working", "blocked"] {
+            let dot = format!(
+                r#"<span class="fg-status__dot proj-row__dot proj-row__dot--{tone}" aria-hidden="true"></span>"#
+            );
+            assert!(
+                rail.contains(&dot),
+                "the {tone} dot must render, and must be aria-hidden: {rail}"
+            );
+            assert!(
+                rail.contains(&format!(">{tone}</span>")),
+                "the {tone} dot's meaning must also be present as words: {rail}"
+            );
+        }
+        assert!(
+            !rail.contains("proj-row__dot--idle"),
+            "the quiet project has no agent pane, so it must carry no dot at all: {rail}"
+        );
+
+        // Nothing in the rail is a div pretending to be a control: the only
+        // interactive elements are anchors, inputs and buttons.
+        assert!(
+            !rail.contains("onclick=") && !rail.contains(r##"href="#""##),
+            "the rail must carry no script-only or dead controls: {rail}"
+        );
+    }
+
+    /// projects-list-tidy: the project list spends no line on a page
+    /// heading (the rail's own group label already says what it is), and a
+    /// project with agents running renders above one without — using the
+    /// same kind != "shell" filter as the row badges, so a shell-only
+    /// project stays in the idle partition.
+    ///
+    /// console-theme-kanban (ctk-12): repaired at the list's new address.
+    /// `project_list_main` became [`project_sidebar`] when the Projects tab
+    /// was retired into the Kanban board's left rail; both guarantees this
+    /// pins survived that move intact, so the test moved with the subject
+    /// rather than being retired with the tab.
     #[test]
     fn project_list_drops_heading_and_floats_agent_active_projects_first() {
         let idle = sample_project();
@@ -7088,10 +7418,10 @@ mod tests {
             (idle, 3, vec![shell_pane]),
             (active, 5, vec![pane_with_status("working")]),
         ];
-        let html = project_list_main(&projects, false, &[], None);
+        let html = project_sidebar(&projects, false, &[], None);
         assert!(
             !html.contains("fg-pagehead__title"),
-            "the Projects tab must render no page heading: {html}"
+            "the project rail must render no page heading: {html}"
         );
         let two = html
             .find("Proj Two")

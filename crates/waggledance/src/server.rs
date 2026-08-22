@@ -645,13 +645,16 @@ struct RegisterFlag {
     /// D10's fixed error code from a refused `register_project` redirect —
     /// never the submitted path (see `views::register_error_message`).
     register_error: Option<String>,
-    /// homepage-tabs (homepage-terminals: now three): which home page
-    /// section `/` renders. Parsed the same defensive way as
-    /// `register_error` below — a repeated key never 400s the whole
+    /// homepage-tabs (homepage-terminals: now three; console-theme-kanban
+    /// ctk-12: back to two, with the third value kept as a redirect):
+    /// which home page section `/` renders. Parsed the same defensive way
+    /// as `register_error` below — a repeated key never 400s the whole
     /// request, it just keeps walking — and any value that is not exactly
     /// `"kanban"`, `"projects"` or `"terminals"` when the walk finishes
     /// resolves to `HomeTab::Kanban` (its `Default`), same as an absent or
-    /// empty query string does.
+    /// empty query string does. `"projects"` itself now resolves there too:
+    /// the tab it named is retired and its whole body is the Kanban tab's
+    /// left rail.
     tab: views::HomeTab,
     /// homepage-terminals D5: the pane selected on the Terminals tab —
     /// `/?tab=terminals&pane=<pane_id>`. Parsed defensively like `tab`
@@ -702,12 +705,22 @@ impl<'de> serde::Deserialize<'de> for RegisterFlag {
                         "register_error" => register_error = Some(value),
                         // homepage-tabs: last value for a repeated key wins,
                         // exactly like `register_error` above; any value
-                        // besides these three exact strings resolves to the
+                        // besides these exact strings resolves to the
                         // `Default` (Kanban) rather than erroring.
+                        //
+                        // console-theme-kanban (ctk-12): `"projects"` is
+                        // kept as a recognised value, not dropped into the
+                        // catch-all, and maps onto Kanban. The Projects tab
+                        // is retired and everything it rendered is now the
+                        // Kanban tab's own left rail, so a bookmarked
+                        // `/?tab=projects` lands on the page that carries
+                        // what the bookmark was pointing at. Spelling it as
+                        // its own arm rather than letting `_` swallow it
+                        // keeps the redirect visible to the next reader
+                        // instead of looking like an unrecognised value.
                         "tab" => {
                             tab = match value.as_str() {
-                                "kanban" => views::HomeTab::Kanban,
-                                "projects" => views::HomeTab::Projects,
+                                "kanban" | "projects" => views::HomeTab::Kanban,
                                 "terminals" => views::HomeTab::Terminals,
                                 _ => views::HomeTab::default(),
                             }
@@ -17774,9 +17787,10 @@ mod bee_route_tests {
         std::fs::create_dir_all(&root).unwrap();
         register(&st, &root, "demo");
 
-        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
-        // shows its own empty state now — the row markup this test cares
-        // about lives on the Projects tab.
+        // backlog-groom-2 D1: no `.bee/` here, so the Kanban tab shows its
+        // own empty state. console-theme-kanban (ctk-12): the row markup
+        // this test cares about lives in the Kanban tab's left rail now,
+        // and `?tab=projects` — the retired tab's own URL — resolves there.
         let body = body_string(get(router(st), "/?tab=projects").await).await;
         let script = include_str!("../assets/app.js");
 
@@ -17790,6 +17804,25 @@ mod bee_route_tests {
                 ".proj-row__delete",
                 "<form class=\"proj-row__delete\"",
                 "the delete confirmation",
+            ),
+            // console-theme-kanban (ctk-12): the rail's filter field ships
+            // `hidden` and is unhidden only by the script that wires it, so
+            // a drift between the two selectors is exactly the failure that
+            // would leave a dead search box on the page.
+            (
+                "[data-proj-filter]",
+                "<div class=\"home-sidebar__search\" hidden data-proj-filter>",
+                "the project-rail filter's unhide",
+            ),
+            (
+                ".home-sidebar__filter",
+                "class=\"fg-input home-sidebar__filter\"",
+                "the project-rail filter's input",
+            ),
+            (
+                ".home-sidebar .proj-row",
+                "<nav class=\"home-sidebar\" aria-label=\"Projects\">",
+                "the project-rail filter's row set",
             ),
         ] {
             assert!(
@@ -17841,16 +17874,21 @@ mod bee_route_tests {
     /// merge rather than one block per project — and emits no Live section
     /// at all, cross-project or otherwise.
     ///
-    /// homepage-tabs: Features and the project list now live on separate
-    /// tabs, so `/` (default Kanban) carries only Features and `/?tab=projects`
-    /// carries only the project list — this proves both sections still
-    /// render, on their own tab, rather than in one combined response.
+    /// homepage-tabs: Features and the project list used to live on
+    /// separate tabs, and this test proved they never rendered in one
+    /// combined response.
     ///
-    /// homepage-terminals: the strip now carries a third tab — proven here
-    /// too, so a reader of this test sees the Kanban/Projects mutual
-    /// exclusion is unaffected by Terminals joining the strip.
+    /// console-theme-kanban (ctk-12): that mutual-exclusion guarantee is
+    /// RETIRED — deliberately, not by accident. The Projects tab no longer
+    /// exists; its whole body is now the Kanban tab's own left rail, so one
+    /// combined response is exactly what the page is supposed to be. The
+    /// test is renamed and inverted rather than deleted, because the half
+    /// that still matters is the same half it always was: both sections
+    /// must actually render, from real `.bee/` data, and the Terminals tab
+    /// must carry neither of them. The old `/?tab=projects` URL is proven
+    /// here too, landing on that same combined page rather than erroring.
     #[tokio::test]
-    async fn home_page_renders_cross_project_features_on_kanban_and_projects_on_its_own_tab() {
+    async fn home_page_renders_cross_project_features_beside_the_project_rail_on_kanban() {
         let dir = fresh_root("home-cross-several");
         let st = build_state_with_dir(&dir);
         let root_a = dir.join("proj-a");
@@ -17874,8 +17912,8 @@ mod bee_route_tests {
             )
             });
         assert!(
-            !body.contains("<ul class=\"proj-list\">"),
-            "the Kanban tab must not also render the project list: {body}"
+            body.contains("<ul class=\"proj-list\">"),
+            "the Kanban tab must render the project rail's list beside the board: {body}"
         );
         assert!(
             body.contains("feat-a") && body.contains("feat-b"),
@@ -17891,14 +17929,19 @@ mod bee_route_tests {
             "the home page must emit no Live section at all: {body}"
         );
 
-        let projects_body = body_string(get(app.clone(), "/?tab=projects").await).await;
-        assert!(
-            projects_body.contains("<ul class=\"proj-list\">"),
-            "the Projects tab must render the project list: {projects_body}"
+        // The retired tab's own URL: a bookmark on `/?tab=projects` must
+        // still resolve, and must land on the page that now carries what it
+        // was pointing at — byte-identical to the default Kanban response.
+        let legacy_resp = get(app.clone(), "/?tab=projects").await;
+        assert_eq!(
+            legacy_resp.status(),
+            StatusCode::OK,
+            "an old /?tab=projects bookmark must still resolve"
         );
-        assert!(
-            !projects_body.contains(r#"data-feature-hub="cross-project""#),
-            "the Projects tab must not also render the Features section: {projects_body}"
+        let legacy_body = body_string(legacy_resp).await;
+        assert_eq!(
+            legacy_body, body,
+            "/?tab=projects must resolve to the Kanban page that now carries the project rail"
         );
 
         // homepage-terminals: the third tab renders neither of the other
@@ -18066,9 +18109,22 @@ mod bee_route_tests {
 
     /// homepage-tabs: the tab strip itself — exactly one `fg-tab--on` and
     /// one `aria-current="page"`, both on the tab actually selected, and
-    /// real anchors to `/?tab=kanban` / `/?tab=projects` / `/?tab=terminals`
-    /// (homepage-terminals) so the page works with JavaScript off and
-    /// survives the homepage's own `location.reload()`.
+    /// real anchors so the page works with JavaScript off and survives the
+    /// homepage's own `location.reload()`.
+    ///
+    /// console-theme-kanban (ctk-12): repaired for a two-tab strip. The
+    /// Projects anchor is retired with its tab — its body is now the Kanban
+    /// tab's left rail — so what this pins is Kanban and Terminals, that
+    /// the strip carries no third anchor at all, and that the retired tab's
+    /// own URL still selects Kanban rather than leaving the strip with
+    /// nothing marked current.
+    ///
+    /// The `aria-current` count is now scoped to the strip's own `<nav>`
+    /// rather than counted across the whole document. That is what the
+    /// assertion always meant — its own message says "exactly one TAB" —
+    /// and the page legitimately carries a second one now: the rail is a
+    /// separate navigation landmark, and the row marking where the reader
+    /// is inside it is correct, not a duplicate of the strip's.
     #[tokio::test]
     async fn home_page_tab_strip_marks_exactly_one_tab_selected() {
         let dir = fresh_root("home-tab-strip");
@@ -18078,6 +18134,20 @@ mod bee_route_tests {
         write_bee_project_fixture(&root, "feat-a");
         register(&st, &root, "Project A");
         let app = router(st);
+
+        // The strip's own markup, cut out of the page: `aria-current` is a
+        // per-landmark claim, so counting it document-wide would fold the
+        // rail's own current-row into the strip's count.
+        fn strip_of(body: &str) -> &str {
+            let open = body
+                .find(r#"<nav class="fg-tabs" aria-label="Home sections">"#)
+                .expect("the tab strip must render");
+            let close = body[open..]
+                .find("</nav>")
+                .map(|i| open + i)
+                .expect("the tab strip must be closed");
+            &body[open..close]
+        }
 
         let kanban_body = body_string(get(app.clone(), "/").await).await;
         assert!(
@@ -18090,7 +18160,9 @@ mod bee_route_tests {
             "exactly one tab must be marked selected: {kanban_body}"
         );
         assert_eq!(
-            kanban_body.matches(r#"aria-current="page""#).count(),
+            strip_of(&kanban_body)
+                .matches(r#"aria-current="page""#)
+                .count(),
             1,
             "exactly one tab must carry aria-current: {kanban_body}"
         );
@@ -18101,8 +18173,15 @@ mod bee_route_tests {
             "Kanban must be the selected tab by default: {kanban_body}"
         );
         assert!(
-            kanban_body.contains(r#"<a class="fg-tab" href="/?tab=projects">Projects</a>"#),
-            "Projects must be the plain, unselected tab: {kanban_body}"
+            !kanban_body.contains("/?tab=projects"),
+            "the retired Projects tab must not appear on the strip: {kanban_body}"
+        );
+        assert_eq!(
+            strip_of(&kanban_body)
+                .matches(r#"<a class="fg-tab"#)
+                .count(),
+            2,
+            "the strip must offer exactly two tabs: {kanban_body}"
         );
         // homepage-terminals D1/D8: the third tab is always on the strip,
         // plain and unselected here, whatever herdr's own state is.
@@ -18111,23 +18190,29 @@ mod bee_route_tests {
             "Terminals must always be offered, plain and unselected on Kanban: {kanban_body}"
         );
 
-        let projects_body = body_string(get(app.clone(), "/?tab=projects").await).await;
+        // The retired tab's own URL still resolves, and selects Kanban —
+        // the section that now carries what that URL was pointing at.
+        let legacy_resp = get(app.clone(), "/?tab=projects").await;
         assert_eq!(
-            projects_body.matches("fg-tab--on").count(),
+            legacy_resp.status(),
+            StatusCode::OK,
+            "an old /?tab=projects bookmark must still resolve"
+        );
+        let legacy_body = body_string(legacy_resp).await;
+        assert_eq!(
+            legacy_body.matches("fg-tab--on").count(),
             1,
-            "exactly one tab must be marked selected on the Projects tab too: {projects_body}"
+            "exactly one tab must be marked selected for the retired tab's URL too: {legacy_body}"
         );
         assert!(
-            projects_body.contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=projects" aria-current="page">Projects</a>"#),
-            "Projects must be the selected tab when asked for: {projects_body}"
+            legacy_body.contains(
+                r#"<a class="fg-tab fg-tab--on" href="/?tab=kanban" aria-current="page">Kanban</a>"#
+            ),
+            "/?tab=projects must select Kanban, where the project rail lives: {legacy_body}"
         );
         assert!(
-            projects_body.contains(r#"<a class="fg-tab" href="/?tab=kanban">Kanban</a>"#),
-            "Kanban must be the plain, unselected tab: {projects_body}"
-        );
-        assert!(
-            projects_body.contains(r#"<a class="fg-tab" href="/?tab=terminals">Terminals</a>"#),
-            "Terminals must always be offered, plain and unselected on Projects: {projects_body}"
+            legacy_body.contains(r#"<nav class="home-sidebar" aria-label="Projects">"#),
+            "/?tab=projects must land on the page carrying the project rail: {legacy_body}"
         );
 
         // homepage-terminals: Terminals itself, selected — the strip still
@@ -18184,17 +18269,27 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// homepage-tabs edge (b): a registration error forces the Projects tab
-    /// — where the banner lives — even when `tab=kanban` is explicitly
-    /// asked for, so a user who just submitted the add-project form always
-    /// sees why it failed.
+    /// homepage-tabs edge (b): a registration error forces the tab where
+    /// the banner lives, even when another tab is explicitly asked for, so
+    /// a user who just submitted the add-project form always sees why it
+    /// failed.
+    ///
+    /// console-theme-kanban (ctk-12): repaired, and the guarantee is
+    /// unchanged — only the destination moved. The banner used to live on
+    /// the Projects tab; it now lives in the Kanban tab's left rail, in the
+    /// rail's own non-scrolling head, so the force retargets to Kanban.
+    /// This pins the whole chain the reader depends on: the forced tab, the
+    /// banner rendering, the banner sitting inside the rail rather than
+    /// somewhere the rail's scroll could hide it, and `role="alert"` so a
+    /// screen reader is told about it on arrival too.
     ///
     /// homepage-terminals: proven a second time with `tab=terminals`, since
     /// D8 means the Terminals tab is otherwise always reachable — this
     /// shows `register_error` still overrides it, and that Terminals stays
     /// on the strip (plain, unselected) even while forced off.
     #[tokio::test]
-    async fn home_page_register_error_forces_the_projects_tab_over_an_explicit_kanban_request() {
+    async fn home_page_register_error_forces_the_tab_carrying_the_banner_over_an_explicit_request()
+    {
         let dir = fresh_root("home-tab-register-error");
         let st = build_state_with_dir(&dir);
         let root = dir.join("proj-a");
@@ -18207,28 +18302,49 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
-            body.contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=projects" aria-current="page">Projects</a>"#),
-            "a register_error must force the Projects tab even when tab=kanban was asked for: {body}"
+            body.contains(
+                r#"<a class="fg-tab fg-tab--on" href="/?tab=kanban" aria-current="page">Kanban</a>"#
+            ),
+            "a register_error must land on the tab whose rail carries the banner: {body}"
         );
         assert!(
-            !body.contains(r#"data-feature-hub="cross-project""#),
-            "the forced Projects tab must not also render the Features section: {body}"
+            body.contains(
+                r#"<div class="fg-banner fg-banner--danger" role="alert" id="register-error">"#
+            ),
+            "the register_error banner must render, and announce itself: {body}"
         );
+        // The banner has to be inside the rail's own non-scrolling head —
+        // that is what puts it on screen at load rather than somewhere the
+        // rail's scrolling body could have hidden it.
+        let head_at = body
+            .find(r#"<div class="home-sidebar__head">"#)
+            .expect("the rail's head must render");
+        let body_at = body
+            .find(r#"<div class="home-sidebar__body">"#)
+            .expect("the rail's body must render");
+        let banner_at = body
+            .find("fg-banner--danger")
+            .expect("the banner must render");
         assert!(
-            body.contains("fg-banner--danger"),
-            "the register_error banner must be visible on the forced Projects tab: {body}"
+            head_at < banner_at && banner_at < body_at,
+            "the register_error banner must sit in the rail's non-scrolling head: {body}"
         );
         assert!(
             body.contains(r#"<a class="fg-tab" href="/?tab=terminals">Terminals</a>"#),
-            "Terminals must stay on the strip, plain, even while register_error forces Projects: {body}"
+            "Terminals must stay on the strip, plain, even while register_error forces Kanban: {body}"
         );
 
         let terminals_forced_body =
             body_string(get(app, "/?tab=terminals&register_error=denied").await).await;
         assert!(
-            terminals_forced_body
-                .contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=projects" aria-current="page">Projects</a>"#),
-            "a register_error must force the Projects tab even when tab=terminals was asked for: {terminals_forced_body}"
+            terminals_forced_body.contains(
+                r#"<a class="fg-tab fg-tab--on" href="/?tab=kanban" aria-current="page">Kanban</a>"#
+            ),
+            "a register_error must force the banner's tab even when tab=terminals was asked for: {terminals_forced_body}"
+        );
+        assert!(
+            terminals_forced_body.contains("fg-banner--danger"),
+            "the forced page must actually carry the banner: {terminals_forced_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -19835,9 +19951,14 @@ mod bee_route_tests {
         // feature at all — not even the word "Unassigned". Byte-identical
         // to baseline: off means no herdr call, so nothing here changed.
         // backlog-groom-2 D1: no project is registered here, so the default
-        // Kanban tab now shows its own empty state — the Unassigned marker
-        // and the suggestion block this test cares about both live in
-        // `project_list_main`, which only renders on the Projects tab.
+        // Kanban tab shows its own empty state beside the rail.
+        // console-theme-kanban (ctk-12): the Unassigned marker and the
+        // suggestion block this test cares about live in
+        // `views::project_sidebar`, the left rail that the retired Projects
+        // tab became. The `?tab=projects` URL below is deliberately left as
+        // it was — it now resolves to Kanban, which is where that rail
+        // renders, so this test still points at its own subject and proves
+        // the old URL keeps working while it does so.
         let mut st_off = build_state_with_dir(&dir);
         st_off.herdr = fake.clone();
         let resp_off = get(router(st_off), "/?tab=projects").await;

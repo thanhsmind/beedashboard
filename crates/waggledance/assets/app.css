@@ -494,6 +494,12 @@ html[data-scheme="dark"] .topbar .home {
   padding: 0;
   border-top: var(--border-width-hairline) solid var(--color-border);
 }
+/* `.proj-row`'s own `display: flex` outranks the UA sheet's `[hidden] {
+   display: none }`, so the rail filter's `row.hidden = true` needs this
+   rule to actually hide anything. */
+.proj-row[hidden] {
+  display: none;
+}
 .proj-row {
   position: relative;
   display: flex;
@@ -660,6 +666,143 @@ html[data-scheme="dark"] .topbar .home {
   color: var(--color-danger);
   border-color: var(--color-danger);
   background: var(--color-danger-tint);
+}
+
+/* ── Home: the project rail ─────────────────────────────────
+   console-theme-kanban (ctk-12). The homepage's Projects tab is retired and
+   everything it rendered is now this rail, sitting to the left of the
+   Kanban board as its sibling rather than inside it, so the board keeps its
+   own scrolling and its own `.bee-hub-theme` scope.
+
+   Every colour here is a shipped contract token, never a literal:
+   `--color-surface-sunken` is the console theme's rail surface — the
+   digest's "cooler and darker than the page" step in dark, the muted step
+   in light — and `--color-surface-raised` is the fill the digest gives the
+   active row, a step up from the rail in both schemes.
+
+   OWED, the phone phase: this shell declares no narrow-screen behaviour.
+   Supplying one means a second `@media` block, and how a two-column shell
+   collapses on a handset is that phase's decision to make, not this
+   cell's. ───────────────────────────────────────────────── */
+.home-shell {
+  display: flex;
+  align-items: stretch;
+}
+.home-sidebar {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  /* Structural geometry, not a value on the space scale. */
+  width: 260px;
+  /* Sticks below the topbar; 53px matches the topbar's rendered height —
+     the same structural offset `.sidebar` above already uses. */
+  height: calc(100vh - 53px);
+  position: sticky;
+  top: 53px;
+  border-right: var(--border-width-hairline) solid var(--color-border);
+  background: var(--color-surface-sunken);
+}
+/* The head never scrolls. A refused registration puts its banner here, and
+   it has to be on screen the moment the page loads, whatever the body
+   below it has been scrolled to. */
+.home-sidebar__head {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+}
+/* With no banner to carry and scripting off, the head's only child is the
+   still-hidden filter field — it must not then reserve a strip of padding
+   above a rail that has nothing to show there. (`:empty` would never fire:
+   the hidden field is still a child.) */
+.home-sidebar__head:not(:has(> *:not([hidden]))) {
+  padding: 0;
+}
+.home-sidebar__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+/* The digest pins Settings to the bottom; waggledance's settings are
+   already a gear in the topbar, so what is pinned here instead is the one
+   control this rail actually owns — the registration form. */
+.home-sidebar__foot {
+  flex: none;
+  padding: var(--space-3);
+  border-top: var(--border-width-hairline) solid var(--color-border);
+}
+.home-sidebar__nav {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.home-sidebar__row {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  text-decoration: none;
+  color: var(--color-text-muted);
+}
+.home-sidebar__row:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
+}
+.home-sidebar__row--on {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  font-weight: var(--weight-semibold);
+}
+.home-sidebar__group {
+  margin: 0;
+  font-family: var(--type-tag-font);
+  font-size: var(--type-tag-size);
+  line-height: var(--type-tag-leading);
+  letter-spacing: var(--type-tag-tracking);
+  font-weight: var(--type-tag-weight);
+  text-transform: uppercase;
+  color: var(--color-text-subtle);
+}
+.home-sidebar__filter {
+  width: 100%;
+}
+/* The rail is far narrower than the full-width page these rows were laid
+   out for: reclaim the 56px gutter the delete button no longer needs at
+   this width, and let a long name or path wrap instead of pushing the row
+   wider than the rail that holds it. */
+.home-sidebar .proj-row__link,
+.home-sidebar .proj-row__badges {
+  padding-right: var(--space-6);
+}
+.home-sidebar .proj-row__name,
+.home-sidebar .proj-suggestion__path {
+  overflow-wrap: anywhere;
+}
+/* The digest's status dot, on a row that has an agent running in it. The
+   element is the design system's own `.fg-status__dot` (size, pill radius,
+   status glow, `background: currentColor`), so all this adds is the tone
+   and the alignment against a baseline-aligned row — no second dot
+   vocabulary, and no literal where the component already carries one.
+   Decorative by construction: `views::project_row_dot` marks it
+   `aria-hidden`, and the row's own badge pills on the line below print the
+   same status as words. */
+.proj-row__dot {
+  align-self: center;
+  color: var(--color-text-disabled);
+}
+.proj-row__dot--working {
+  color: var(--color-warning);
+}
+.proj-row__dot--blocked {
+  color: var(--color-danger);
+}
+.proj-row__dot--idle {
+  color: var(--color-text-disabled);
 }
 
 .sidebar,
@@ -1951,6 +2094,22 @@ pre.mermaid.zoomable:focus-within .mermaid-controls {
     box-sizing: border-box;
     padding-inline: var(--space-6);
   }
+}
+/* console-theme-kanban (ctk-12): the home board is no longer the whole
+   viewport — the project rail sits to its left — so the viewport-measured
+   1240px threshold above stopped describing the board's own box, and
+   `.fg-page`'s auto margins would centre the board inside whatever room is
+   left rather than filling it. Inside the home shell the clamp is dropped
+   at every width and the gutter is declared here instead, measured against
+   the space the board actually has. Deliberately the same rule retargeted
+   rather than a second breakpoint: the narrow-screen answer for this shell
+   belongs to the phone phase. */
+.home-shell > main.fg-page.bee-hub-theme {
+  flex: 1;
+  min-width: 0;
+  max-width: none;
+  box-sizing: border-box;
+  padding-inline: var(--space-5);
 }
 
 /* Card titles on bee pages read as UI, not editorial prose — swap out the
