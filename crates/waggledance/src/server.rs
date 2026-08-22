@@ -4802,13 +4802,76 @@ mod asset_response_tests {
             .collect();
         assert!(
             font_mono_decls.len() >= 2,
-            "expected multiple --font-mono declarations (atelier.css and contract.css), found {}",
+            "expected multiple --font-mono declarations (console.css and contract.css), found {}",
             font_mono_decls.len()
         );
         for decl in &font_mono_decls {
             assert!(
                 decl.contains("'Geist Mono', ui-monospace"),
                 "--font-mono must lead with the bundled face before the system stack: {decl}"
+            );
+        }
+    }
+
+    /// (type) The console theme names a bundled face in EVERY family slot it
+    /// owns — the sans half of the guarantee the mono guard above makes.
+    ///
+    /// This cannot be asserted bundle-wide. contract.css deliberately defaults
+    /// `--font-display` / `--font-body` to the neutral `ui-sans-serif` stack so
+    /// the bundle still renders before any theme adapter loads, and the
+    /// canonical `system` typeface-set repeats that stack on purpose. Both are
+    /// correct as they stand, so this test slices the THEME's own block out of
+    /// the bundle and checks only what the theme layer contributes.
+    ///
+    /// The gap it closes is a regression that shipped green: when the console
+    /// theme replaced atelier.css it inherited the type scale but not the
+    /// families, so every non-mono glyph on every page fell back to the OS
+    /// system sans while the embedded Geist woff2 was referenced by no rule at
+    /// all. The mono guard stayed green throughout, because contract.css
+    /// satisfies `--font-mono` on its own. ABSENCE, not mis-ordering, was the
+    /// defect — which is why the load-bearing assertion here is that all four
+    /// slots are PRESENT in the theme block, each leading with a bundled face.
+    #[test]
+    fn console_theme_names_the_bundled_faces_in_every_family_slot() {
+        let css = views::APP_CSS;
+
+        // The sans face itself must be bundled. The trailing `';` keeps this
+        // from matching the Geist Mono @font-face.
+        assert!(
+            css.contains("font-family: 'Geist';"),
+            "served stylesheet must declare a Geist (sans) @font-face — the theme's \
+             --font-display/-body/-accent slots all resolve to it"
+        );
+
+        // Slice the theme's invariant block: its selector through the first
+        // rule-closing brace at column 0.
+        let start = css
+            .find("html[data-theme=\"console\"] {")
+            .expect("the console theme's invariant block must be present in the bundle");
+        let block = &css[start..];
+        let block = &block[..block
+            .find("\n}")
+            .expect("the console theme's invariant block must terminate")];
+
+        for (token, lead) in [
+            ("--font-display:", "'Geist', ui-sans-serif"),
+            ("--font-body:", "'Geist', ui-sans-serif"),
+            ("--font-accent:", "'Geist', ui-sans-serif"),
+            ("--font-mono:", "'Geist Mono', ui-monospace"),
+        ] {
+            let decl = block
+                .lines()
+                .find(|l| l.trim_start().starts_with(token))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the console theme declares no {token} — the family slots have no \
+                         other theme-level home, so dropping one silently falls back to the \
+                         OS system stack and leaves a bundled face unreferenced"
+                    )
+                });
+            assert!(
+                decl.contains(lead),
+                "{token} must lead with the bundled face before the fallback stack: {decl}"
             );
         }
     }

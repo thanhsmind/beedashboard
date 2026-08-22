@@ -104,10 +104,27 @@ html[data-theme="console"] {
   --_shadow-b:   rgba(0, 0, 0, 0.28);
   --_shadow-c:   rgba(0, 0, 0, 0.75);   /* the window shell, the one place with depth */
 
-  /* ── Tier 2 · TYPOGRAPHY ───────────────────────────────────
-     Families are already Geist / Geist Mono and stay as they
-     are. What the console owns is the SCALE: a 13px base,
+  /* ── Tier 2 · TYPOGRAPHY ─────────────────────────────
+     The theme layer is the ONLY place a family slot ever gets a
+     bundled face. contract.css's defaults are the neutral
+     ui-sans-serif stack by design, so a theme that names no
+     family silently ships the OS system sans and leaves the
+     embedded Geist woff2 referenced by no rule at all — which is
+     precisely what happened when this file replaced atelier.css
+     and inherited its type scale but not its families. Do not
+     assume the families are held somewhere else; they are held
+     here, and server.rs pins the sans slots as well as the mono
+     one so a future theme cannot drop them again in silence.
+
+     Geist leads every sans slot and Geist Mono the mono slot,
+     each ahead of the digest's own fallback stack.
+
+     Beyond the families the console owns the SCALE: a 13px base,
      half-step rungs, and only 500/600 doing the tokenised work. */
+  --font-display: 'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-body:    'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-accent:  'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-mono:    'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
   --type-display-size: 32px;    --type-display-leading: 1.1;   --type-display-tracking: -0.025em;  --type-display-weight: var(--weight-semibold);
   --type-title-size: 22px;      --type-title-leading: 1.15;    --type-title-tracking: -0.025em;    --type-title-weight: var(--weight-semibold);
   --type-heading-size: 17px;    --type-heading-leading: 1.25;  --type-heading-tracking: -0.02em;   --type-heading-weight: var(--weight-semibold);
