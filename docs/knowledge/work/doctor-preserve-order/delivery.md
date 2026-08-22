@@ -8,7 +8,7 @@ bee:
   lifecycle: active
   areas: [doctor]
   required_context: [docs/history/doctor-preserve-order/promote-proposals.md]
-  sources: [docs/history/doctor-preserve-order/promote-proposals.md, .bee/cells/archive/doctor-preserve-order/dpo-1.json]
+  sources: [docs/history/doctor-preserve-order/promote-proposals.md]
 ---
 
 # doctor-preserve-order — Delivery
@@ -25,6 +25,10 @@ bee:
 ## Why it stays fixed
 
 The guarantee is structural, not a convention someone must remember: the serialization layer is configured to preserve insertion order, so a future writer cannot reintroduce the reordering by forgetting a rule. One test pins it by seeding deliberately non-alphabetical keys and asserting their relative order survives a fix.
+
+## Where the record lives
+
+The cell record for dpo-1 is bee bookkeeping, not a durable source: its path moves between the hot store and the archive every time the feature is archived or reopened, so citing it here only rots. The durable trail is the commit `ac7ef14` and the promote proposals beside it.
 
 ## Open gap
 
