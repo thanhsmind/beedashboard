@@ -9737,12 +9737,22 @@ mod bee_route_tests {
             hub_body.contains("no-docs-feature"),
             "hub card must still show the slug: {hub_body}"
         );
-        // project-color-identity-4: the subtitle survives on a title-less
-        // card to carry the worktree state, but holds nothing else — the
-        // slug is already the title and must not be printed a second time.
+        // project-color-identity-4 kept a subtitle on a title-less card
+        // purely to carry the worktree state. console-theme-kanban ctk-6
+        // moved that state to the card's own branch row, and this feature
+        // has no worktree at all (D2: "Main" names an absence, so no
+        // branch row renders) — leaving the subtitle with nothing to hold,
+        // and so no reason to render. The guarantee below is the one that
+        // test always cared about and still holds: the slug is the card's
+        // title and is never printed a second time beneath it.
+        // Matched on the opening tags, not the bare class names: the page
+        // carries the board's own `<style>` block, which declares rules
+        // for both classes whether or not any element uses them.
         assert!(
-            hub_body.contains(r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">Main</span></div>"#),
-            "a title-less card must name its worktree state in the subtitle: {hub_body}"
+            !hub_body.contains(r#"<div class="bee-hub__slug""#)
+                && !hub_body.contains(r#"<div class="bee-hub__branch""#),
+            "a title-less card with no worktree must render neither a subtitle nor a branch \
+             row: {hub_body}"
         );
         assert!(
             !hub_body.contains(r#"class="bee-hub__slug">no-docs-feature"#),
