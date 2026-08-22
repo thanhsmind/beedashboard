@@ -5960,14 +5960,166 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&sibling).ok();
     }
 
-    /// (edge, feature-hub fh-1, grown to five columns by kanban-columns D1)
-    /// An entirely empty store — no cells, no lanes, no archive — still
-    /// renders all five groups, each stating its own honest, distinct empty
-    /// line (bee-board-pm D5's "sections never disappear" rule) rather than
-    /// a shared line that could not say which group came up empty. No
-    /// absolute filesystem path leaks into the body (D9).
+    /// (console-theme-kanban ctk-8) The Ready to merge column's whole
+    /// membership rule, proven at the HTTP layer over real store files: a
+    /// feature whose `uat` gate is approved AND whose worktree is still
+    /// granted and unmerged is the state where `bee worktree merge` is
+    /// literally the next action, so it lands in Ready to merge -- and it
+    /// must leave In Progress to get there, since an open grant is itself
+    /// one of In Progress's own liveness pulls and would otherwise swallow
+    /// it first.
+    ///
+    /// The second feature is the other half of the rule: its `uat` gate is
+    /// approved too, but its worktree is already merged (a still-open
+    /// `worktree-cleanup` entry in `deferred-queue.jsonl`, bee's own
+    /// `merged_pending` signal), so merging is NOT its next action and it
+    /// stays in the column its phase earns it. Nothing here synthesises a
+    /// merge-readiness verdict -- both halves read only values the store
+    /// already holds (CONTEXT.md D2).
     #[tokio::test]
-    async fn feature_hub_empty_store_renders_five_honest_empty_groups() {
+    async fn feature_hub_uat_approved_feature_with_an_open_worktree_lands_in_ready_to_merge() {
+        let root = fresh_root("hub-ready-to-merge");
+        write(
+            &root,
+            ".bee/lanes/ready-feat.json",
+            &lane_json(
+                "ready-feat",
+                "swarming",
+                "standard",
+                "merge the worktree",
+                Some(
+                    r#""context": true, "shape": true, "execution": true, "review": true, "uat": true"#,
+                ),
+                None,
+            ),
+        );
+        let open_sibling = make_worktree_sibling("hub-ready-open-wt");
+        write(
+            &open_sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"ready-feat","mode":"standard"}"#,
+        );
+
+        // Same approved `uat` gate, but this grant is already merged and
+        // only awaiting cleanup -- `compounding` is where its phase puts it.
+        write(
+            &root,
+            ".bee/lanes/merged-feat.json",
+            &lane_json(
+                "merged-feat",
+                "compounding",
+                "standard",
+                "compound the learnings",
+                Some(
+                    r#""context": true, "shape": true, "execution": true, "review": true, "uat": true"#,
+                ),
+                None,
+            ),
+        );
+        let merged_sibling = make_worktree_sibling("hub-ready-merged-wt");
+        write(
+            &merged_sibling,
+            ".bee/state.json",
+            r#"{"phase":"compounding","feature":"merged-feat","mode":"standard"}"#,
+        );
+
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["hub-ready-open-wt", "hub-ready-merged-wt"]),
+        );
+        write(
+            &root,
+            ".bee/runtime/workspaces/open.json",
+            &workspace_json(
+                "hub-ready-open-wt",
+                &open_sibling.to_string_lossy(),
+                "wt/ready-feat",
+                &[],
+            ),
+        );
+        write(
+            &root,
+            ".bee/runtime/workspaces/merged.json",
+            &workspace_json(
+                "hub-ready-merged-wt",
+                &merged_sibling.to_string_lossy(),
+                "wt/merged-feat",
+                &[],
+            ),
+        );
+        write(
+            &root,
+            ".bee/deferred-queue.jsonl",
+            &format!(
+                r#"{{"ts":"2026-08-20T06:23:28.188Z","event":"add","id":"6b1f9c22-0f0a-4d1e-9a55-2d2f1b7c0f11","kind":"worktree-cleanup","feature":"merged-feat","cells":[],"areas":[],"files":["{sibling}"],"reason":"already landed, kept per default (D1)"}}"#,
+                sibling = merged_sibling.to_string_lossy().replace('\\', "\\\\"),
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-ready-to-merge");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("data-hub-group=\"ready-to-merge\" data-hub-count=\"1\""),
+            "the uat-approved feature with an open unmerged worktree must be the column's one member: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "data-hub-group=\"ready-to-merge\" href=\"/p/{}/_bee/feature/ready-feat\"",
+                project.id
+            )),
+            "ready-feat must render as a dense Ready to merge row: {body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""),
+            "Ready to merge is tested before In Progress, so its member must have left In Progress entirely: {body}"
+        );
+        assert!(
+            !body.contains(&format!(
+                "bee-hub__detail-link\" href=\"/p/{}/_bee/feature/ready-feat\"",
+                project.id
+            )),
+            "Ready to merge uses the dense row, never the full card anatomy In Progress keeps: {body}"
+        );
+
+        assert!(
+            body.contains("data-hub-group=\"compound\" data-hub-count=\"1\""),
+            "the already-landed feature stays in the column its phase earns it: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "data-hub-group=\"compound\" href=\"/p/{}/_bee/feature/merged-feat\"",
+                project.id
+            )),
+            "merged-feat must render under Compound: {body}"
+        );
+        assert!(
+            !body.contains(&format!(
+                "data-hub-group=\"ready-to-merge\" href=\"/p/{}/_bee/feature/merged-feat\"",
+                project.id
+            )),
+            "an approved uat gate over an ALREADY merged worktree is not merge-readiness: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&open_sibling).ok();
+        std::fs::remove_dir_all(&merged_sibling).ok();
+    }
+
+    /// (edge, feature-hub fh-1, grown to five columns by kanban-columns D1
+    /// and to six groups — five columns plus the folded archive — by
+    /// console-theme-kanban ctk-8) An entirely empty store — no cells, no
+    /// lanes, no archive — still renders every group, each stating its own
+    /// honest, distinct empty line (bee-board-pm D5's "sections never
+    /// disappear" rule) rather than a shared line that could not say which
+    /// group came up empty. No absolute filesystem path leaks into the body
+    /// (D9).
+    #[tokio::test]
+    async fn feature_hub_empty_store_renders_six_honest_empty_groups() {
         let root = fresh_root("hub-empty");
         std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
 
@@ -5977,7 +6129,14 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        for key in ["todo", "in-progress", "review", "compound", "finished"] {
+        for key in [
+            "todo",
+            "in-progress",
+            "review",
+            "compound",
+            "ready-to-merge",
+            "finished",
+        ] {
             assert!(
                 body.contains(&format!("data-hub-group=\"{key}\" data-hub-count=\"0\"")),
                 "group {key} must always render, honestly empty: {body}"
@@ -5987,6 +6146,7 @@ mod bee_route_tests {
         assert!(body.contains("Nothing in progress."), "{body}");
         assert!(body.contains("Nothing in Review."), "{body}");
         assert!(body.contains("Nothing in Compound."), "{body}");
+        assert!(body.contains("Nothing ready to merge."), "{body}");
         assert!(body.contains("Nothing finished yet."), "{body}");
         assert!(
             !body.contains(root.to_string_lossy().as_ref()),

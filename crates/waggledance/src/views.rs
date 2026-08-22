@@ -1875,17 +1875,19 @@ fn bee_hub_style() -> String {
 .bee-strip__label { font-weight: var(--weight-strong); color: var(--color-text); }
 .bee-strip__meta { color: var(--color-text-muted); }
 .bee-strip__row--unresolved .bee-strip__meta { color: var(--color-danger); }
-/* kanban-columns D1/D12, kanban-columns-archive: four explicit tracks in
-   the board's own left-to-right column order (Todo, In Progress, Review,
-   Compound) rather than `repeat(auto-fit, minmax(260px, 1fr))` — that
-   auto-fit sizing was tuned for three equal columns and wraps badly once
-   three of the four are dense row lists needing far less width than the
-   one that still renders cards. In Progress keeps the wider, card-shaped
-   track; the three row columns share a narrower one. Finished is no
-   longer a fifth track here: kanban-columns-archive folds it into
-   `.bee-hub__archive`, a collapsed bar rendered after this grid closes
-   rather than inside it (see [`bee_hub_archive_bar`]). */
-.bee-hub__groups { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.6fr) minmax(200px, 1fr) minmax(200px, 1fr); gap: var(--space-4); }
+/* kanban-columns D1/D12, kanban-columns-archive, console-theme-kanban
+   ctk-8: five explicit tracks in the board's own left-to-right column
+   order (Todo, In Progress, Review, Compound, Ready to merge) rather than
+   `repeat(auto-fit, minmax(260px, 1fr))` -- that auto-fit sizing was tuned
+   for three equal columns and wraps badly once four of the five are dense
+   row lists needing far less width than the one that still renders cards.
+   In Progress keeps the wider, card-shaped track; the four row columns
+   share a narrower one. Finished is still not a track here:
+   kanban-columns-archive folds it into `.bee-hub__archive`, a collapsed
+   bar rendered after this grid closes rather than inside it (see
+   [`bee_hub_archive_bar`]) -- so the fifth track is Ready to merge, not
+   the archive. */
+.bee-hub__groups { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.6fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr); gap: var(--space-4); }
 /* Column header (console-theme-kanban ctk-5): status dot, label,
    optional waiting chip, right-aligned mono count. 48px tall, 16px side
    padding, 10px gap between items. */
@@ -1894,8 +1896,18 @@ fn bee_hub_style() -> String {
 .bee-hub__group[data-hub-group="todo"] .bee-hub__group-dot { background: var(--color-accent-alt-1); color: var(--color-accent-alt-1); }
 .bee-hub__group[data-hub-group="in-progress"] .bee-hub__group-dot { background: var(--color-accent-alt-2); color: var(--color-accent-alt-2); }
 .bee-hub__group[data-hub-group="review"] .bee-hub__group-dot { background: var(--color-accent-alt-3); color: var(--color-accent-alt-3); box-shadow: none; }
-.bee-hub__group[data-hub-group="compound"] .bee-hub__group-dot { background: var(--color-accent-alt-4); color: var(--color-accent-alt-4); }
-.bee-hub__group[data-hub-group="finished"] .bee-hub__group-dot { background: var(--color-accent-alt-5); color: var(--color-accent-alt-5); box-shadow: none; }
+/* console-theme-kanban ctk-8 re-maps the lane hues now that Ready to
+   merge exists as a column of its own: Compound takes the idle slot
+   (`--color-accent-alt-5`) and Ready to merge takes the green slot
+   (`--color-accent-alt-4`) the token was named for. The digest gives idle
+   no glow, so Compound drops it exactly as In Review already had. The
+   archive bar keeps no lane hue at all -- it is chrome, not a lane, and
+   its own `.bee-hub__archive-label` already reads in `--color-text-muted`;
+   the `finished` dot rule that used to sit here went with it, having had
+   no element to paint since kanban-columns-archive folded that column
+   into a `<details>` with no dot. */
+.bee-hub__group[data-hub-group="compound"] .bee-hub__group-dot { background: var(--color-accent-alt-5); color: var(--color-accent-alt-5); box-shadow: none; }
+.bee-hub__group[data-hub-group="ready-to-merge"] .bee-hub__group-dot { background: var(--color-accent-alt-4); color: var(--color-accent-alt-4); }
 .bee-hub__group-label { font-family: var(--font-mono); font-size: var(--type-label-size); font-weight: var(--type-label-weight); letter-spacing: var(--type-label-tracking); text-transform: uppercase; color: var(--color-text); line-height: 1; }
 .bee-hub__group-waiting { font-family: var(--font-mono); font-size: var(--type-tag-size); font-weight: var(--type-tag-weight); color: var(--color-accent-alt-2); background: color-mix(in srgb, var(--color-accent-alt-2) 10%, transparent); padding: 2px 6px; border-radius: var(--radius-pill); line-height: 1; white-space: nowrap; }
 .bee-hub__group-count { margin-left: auto; font-family: var(--font-mono); font-size: var(--type-tag-size); font-weight: var(--type-tag-weight); opacity: 0.6; color: var(--color-text); line-height: 1; }
@@ -2594,8 +2606,9 @@ fn bee_feature_hub_section(
     bee_render_hub_section(project, &placements, &snapshot.backlog.pbis, feature_panes)
 }
 
-/// One feature already sorted into one of the feature hub's five columns
-/// (kanban-columns D1) by [`bee_classify_features`] -- the render inputs
+/// One feature already sorted into one of the feature hub's columns
+/// (kanban-columns D1, grown to five columns plus the folded archive by
+/// console-theme-kanban ctk-8) by [`bee_classify_features`] -- the render inputs
 /// [`bee_hub_card`] or [`bee_hub_finished_row`] need, captured once so the
 /// merge step (`bee_cross_project_features_section`) never re-touches
 /// `BeeSnapshot`. The former `Waiting` variant is gone (D1); the feature it
@@ -2603,8 +2616,15 @@ fn bee_feature_hub_section(
 /// set to its `Waiting on you — ` line (D5, D7, D8). `Review`, `Compound`
 /// and `Todo` share `BeeHubFinishedData` with `Finished` since all four
 /// render through the same dense row (D12) and need nothing beyond a
-/// feature name and its docs.
+/// feature name and its docs -- and so does `ReadyToMerge`
+/// (console-theme-kanban ctk-8), which is a dense-row column like them:
+/// the full card anatomy stays In Progress's alone.
+///
+/// The variants are listed in [`bee_classify_features`]'s own test order,
+/// so `ReadyToMerge` leads -- see that function for why it must be tested
+/// ahead of `InProgress`.
 enum BeeHubPlacement {
+    ReadyToMerge(BeeHubFinishedData),
     InProgress(BeeHubCardData),
     Finished(BeeHubFinishedData),
     Review(BeeHubFinishedData),
@@ -2672,8 +2692,9 @@ struct BeeHubFinishedData {
 /// no filesystem read of its own. Iteration order matches the section this
 /// used to render directly: `snapshot.phase_board` sorted by feature name,
 /// then every archived feature not already placed, sorted by name. Tested
-/// in D11's fixed order: In Progress, then Finished, then Review, then
-/// Compound, then Todo.
+/// in D11's fixed order, which console-theme-kanban ctk-8 extends at the
+/// front: Ready to merge, then In Progress, then Finished, then Review,
+/// then Compound, then Todo.
 /// (merged-worktree-not-live) bee's own terminal phase SET, not the single
 /// value `"compounding-complete"` this hub used to test alone: bee's write
 /// guard (`is_terminal_phase`) treats `{"idle", "compounding-complete"}` as
@@ -2777,9 +2798,42 @@ fn bee_classify_features(
             || archived_features.contains(f.feature.as_str());
         let finished_and_idle = is_finished && live == 0;
 
-        // (kanban-columns D11) Placement is tested in this fixed order: In
-        // Progress, Finished, Review, Compound, Todo.
-        if !finished_and_idle && has_live_work {
+        // (console-theme-kanban ctk-8) Ready to merge is the state where
+        // `bee worktree merge` is literally the next action, and it is
+        // backed by two values the store already holds -- never a
+        // synthesised merge-readiness verdict (CONTEXT.md D2): the `uat`
+        // gate approved in this feature's own `approved_gates`, and a
+        // worktree still granted to it and not yet merged (`worktree_bound`
+        // above, which already excludes `merged_pending` grants).
+        let uat_approved = f
+            .approved_gates
+            .as_ref()
+            .and_then(|g| g.uat)
+            .unwrap_or(false);
+        let ready_to_merge = uat_approved && worktree_bound;
+
+        // (kanban-columns D11, console-theme-kanban ctk-8) Placement is
+        // tested in this fixed order: Ready to merge, In Progress,
+        // Finished, Review, Compound, Todo.
+        //
+        // Ready to merge MUST be tested before In Progress, and the order
+        // is not cosmetic: an open worktree grant is itself one of
+        // `has_live_work`'s pulls (`worktree_bound`), and every Ready to
+        // merge feature has one by definition -- so In Progress would
+        // swallow every candidate first and this branch would never fire.
+        // Do not reorder it back.
+        //
+        // It keeps In Progress's own `!finished_and_idle` guard so a
+        // feature already in the archive still reads as Finished: the
+        // archive is the record that its work landed, and this change
+        // moves features out of In Progress only, never out of Finished.
+        if !finished_and_idle && ready_to_merge {
+            let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
+            placements.push(BeeHubPlacement::ReadyToMerge(BeeHubFinishedData {
+                feature: f.feature.clone(),
+                docs,
+            }));
+        } else if !finished_and_idle && has_live_work {
             // In Progress absorbs the retired Waiting column (D5, D7): a
             // gate stop or a paused handoff no longer moves the feature to
             // a separate column, it only adds the `Waiting on you — ` line
@@ -3014,17 +3068,31 @@ fn bee_render_hub_section(
     let mut in_progress_entries: Vec<InProgressEntry> = Vec::new();
     let mut review_rows: Vec<String> = Vec::new();
     let mut compound_rows: Vec<String> = Vec::new();
+    let mut ready_to_merge_rows: Vec<String> = Vec::new();
     let mut finished_rows: Vec<String> = Vec::new();
     let mut todo_count = 0usize;
     let mut in_progress_count = 0usize;
     let mut in_progress_waiting_count = 0usize;
     let mut review_count = 0usize;
     let mut compound_count = 0usize;
+    let mut ready_to_merge_count = 0usize;
     let mut finished_count = 0usize;
     let no_panes: Vec<TerminalPaneView> = Vec::new();
 
     for placement in placements {
         match placement {
+            BeeHubPlacement::ReadyToMerge(data) => {
+                ready_to_merge_count += 1;
+                ready_to_merge_rows.push(bee_hub_finished_row(
+                    "ready-to-merge",
+                    &bee_hub_feature_href(&project.id, &data.feature),
+                    &data.feature,
+                    data.docs.as_ref(),
+                    None,
+                    None,
+                    None,
+                ));
+            }
             BeeHubPlacement::InProgress(data) => {
                 in_progress_count += 1;
                 let panes = feature_panes
@@ -3139,6 +3207,7 @@ fn bee_render_hub_section(
     let todo_cards = bee_hub_finished_rows(&todo_rows);
     let review_cards = bee_hub_finished_rows(&review_rows);
     let compound_cards = bee_hub_finished_rows(&compound_rows);
+    let ready_to_merge_cards = bee_hub_finished_rows(&ready_to_merge_rows);
     let finished_cards = bee_hub_finished_rows(&finished_rows);
 
     format!(
@@ -3149,6 +3218,7 @@ fn bee_render_hub_section(
     {in_progress_group}
     {review_group}
     {compound_group}
+    {ready_to_merge_group}
   </div>
   {archive_bar}
 </section>"#,
@@ -3184,6 +3254,14 @@ fn bee_render_hub_section(
             &compound_cards,
             "Nothing in Compound."
         ),
+        ready_to_merge_group = bee_hub_group(
+            "Ready to merge",
+            "ready-to-merge",
+            ready_to_merge_count,
+            0,
+            &ready_to_merge_cards,
+            "Nothing ready to merge."
+        ),
         archive_bar = bee_hub_archive_bar(finished_count, &finished_cards),
     )
 }
@@ -3204,7 +3282,8 @@ fn bee_render_hub_section(
 /// merge sorts again. Todo, Review and Compound carry no ship time of their
 /// own, so their rows merge in the same per-project, alphabetical-within-
 /// project order [`bee_classify_features`] already produces, exactly as
-/// In Progress's cards always have. The column counts beside each heading
+/// In Progress's cards always have. Ready to merge merges the same way
+/// (console-theme-kanban ctk-8). The column counts beside each heading
 /// are the sum across projects. Archived-feature names and D10 ship times
 /// come from `rollup.archived_features` (cross-board-1's `read_rollup`) --
 /// this function performs no filesystem read of its own. An empty
@@ -3279,11 +3358,13 @@ pub fn bee_cross_project_features_section(
     let mut in_progress_entries: Vec<InProgressEntry> = Vec::new();
     let mut review_rows: Vec<String> = Vec::new();
     let mut compound_rows: Vec<String> = Vec::new();
+    let mut ready_to_merge_rows: Vec<String> = Vec::new();
     let mut todo_count = 0usize;
     let mut in_progress_count = 0usize;
     let mut in_progress_waiting_count = 0usize;
     let mut review_count = 0usize;
     let mut compound_count = 0usize;
+    let mut ready_to_merge_count = 0usize;
     let no_panes: Vec<TerminalPaneView> = Vec::new();
 
     // Classify every project's placements once; reused below both to build
@@ -3327,6 +3408,18 @@ pub fn bee_cross_project_features_section(
 
         for placement in placements {
             match placement {
+                BeeHubPlacement::ReadyToMerge(data) => {
+                    ready_to_merge_count += 1;
+                    ready_to_merge_rows.push(bee_hub_finished_row(
+                        "ready-to-merge",
+                        &bee_hub_feature_href(&project.id, &data.feature),
+                        &data.feature,
+                        data.docs.as_ref(),
+                        Some(&project.name),
+                        project_color,
+                        None,
+                    ));
+                }
                 BeeHubPlacement::InProgress(data) => {
                     in_progress_count += 1;
                     let panes = project_panes
@@ -3469,6 +3562,7 @@ pub fn bee_cross_project_features_section(
     let todo_cards = bee_hub_finished_rows(&todo_rows);
     let review_cards = bee_hub_finished_rows(&review_rows);
     let compound_cards = bee_hub_finished_rows(&compound_rows);
+    let ready_to_merge_cards = bee_hub_finished_rows(&ready_to_merge_rows);
     let finished_cards = bee_hub_finished_rows(&finished_rows);
     let read_errors_strip = bee_cross_project_read_errors_strip(rollups);
 
@@ -3481,6 +3575,7 @@ pub fn bee_cross_project_features_section(
     {in_progress_group}
     {review_group}
     {compound_group}
+    {ready_to_merge_group}
   </div>
   {archive_bar}
 </section>"#,
@@ -3516,6 +3611,14 @@ pub fn bee_cross_project_features_section(
             0,
             &compound_cards,
             "Nothing in Compound."
+        ),
+        ready_to_merge_group = bee_hub_group(
+            "Ready to merge",
+            "ready-to-merge",
+            ready_to_merge_count,
+            0,
+            &ready_to_merge_cards,
+            "Nothing ready to merge."
         ),
         archive_bar = bee_hub_archive_bar(finished_count, &finished_cards),
     )
@@ -12359,10 +12462,11 @@ mod tests {
     }
 
     /// The archive bar must sit AFTER `.bee-hub__groups` closes, never as a
-    /// track inside it -- the grid keeps exactly four column divs
-    /// (`data-hub-group`: todo, in-progress, review, compound), and the
-    /// finished bar's own `<details data-hub-group="finished" ...>` is
-    /// reachable only past that grid's closing `</div>`.
+    /// track inside it -- the grid keeps exactly the lane column divs
+    /// (`data-hub-group`: todo, in-progress, review, compound and, since
+    /// console-theme-kanban ctk-8, ready-to-merge), and the finished bar's
+    /// own `<details data-hub-group="finished" ...>` is reachable only past
+    /// that grid's closing `</div>`.
     #[test]
     fn bee_feature_hub_section_places_the_archive_bar_after_the_grid_not_inside_it() {
         let root = std::env::temp_dir().join(format!(
@@ -12378,7 +12482,7 @@ mod tests {
 
         let groups_open = html
             .find(r#"<div class="bee-hub__groups">"#)
-            .expect("the four-column grid must render");
+            .expect("the lane-column grid must render");
         let archive_at = html
             .find(r#"<details class="bee-hub__archive""#)
             .expect("the archive bar must render");
@@ -12393,8 +12497,8 @@ mod tests {
         let grid_region = &html[groups_open..archive_at];
         assert_eq!(
             grid_region.matches(r#"data-hub-group=""#).count(),
-            4,
-            "the grid must carry exactly the four dense-row/card columns, never Finished: {html}"
+            5,
+            "the grid must carry exactly the five dense-row/card columns, never Finished: {html}"
         );
         assert!(
             !grid_region.contains(r#"data-hub-group="finished""#),
@@ -12466,9 +12570,14 @@ mod tests {
         );
     }
 
-    /// (console-theme-kanban ctk-5) Column header style rules in bee_hub_style()
-    /// consume the theme's five lane tokens (--color-accent-alt-1..5) with no
-    /// literal hex restatements, give Review no dot glow, and right-align mono counts.
+    /// (console-theme-kanban ctk-5, re-mapped by ctk-8) Column header style
+    /// rules in bee_hub_style() consume the theme's five lane tokens
+    /// (--color-accent-alt-1..5) with no literal hex restatements, give the
+    /// glow-less lanes no dot glow, and right-align mono counts. ctk-8 moved
+    /// Compound onto the idle token and gave the green token to the new
+    /// Ready to merge column; the archive bar surrendered its lane hue
+    /// entirely (it is chrome, not a lane, and its `<details>` carries no
+    /// dot element at all), so no `finished` dot rule is pinned here.
     #[test]
     fn bee_hub_style_carries_console_column_header_token_rules_and_no_glow_for_in_review() {
         let css = bee_hub_style();
@@ -12503,12 +12612,16 @@ mod tests {
             "Review dot must map to --color-accent-alt-3 with NO glow (box-shadow: none): {css}"
         );
         assert!(
-            css.contains(r#".bee-hub__group[data-hub-group="compound"] .bee-hub__group-dot { background: var(--color-accent-alt-4); color: var(--color-accent-alt-4); }"#),
-            "Compound dot must map to --color-accent-alt-4: {css}"
+            css.contains(r#".bee-hub__group[data-hub-group="compound"] .bee-hub__group-dot { background: var(--color-accent-alt-5); color: var(--color-accent-alt-5); box-shadow: none; }"#),
+            "Compound dot must map to --color-accent-alt-5, the idle hue, with NO glow: {css}"
         );
         assert!(
-            css.contains(r#".bee-hub__group[data-hub-group="finished"] .bee-hub__group-dot { background: var(--color-accent-alt-5); color: var(--color-accent-alt-5); box-shadow: none; }"#),
-            "Finished dot must map to --color-accent-alt-5: {css}"
+            css.contains(r#".bee-hub__group[data-hub-group="ready-to-merge"] .bee-hub__group-dot { background: var(--color-accent-alt-4); color: var(--color-accent-alt-4); }"#),
+            "Ready to merge dot must map to --color-accent-alt-4, the green it is named for: {css}"
+        );
+        assert!(
+            !css.contains(r#"[data-hub-group="finished"] .bee-hub__group-dot"#),
+            "the archive bar carries no lane hue -- it is chrome, and its <details> has no dot to paint: {css}"
         );
 
         // Waiting chip in iterating hue with 10% alpha fill
