@@ -232,23 +232,30 @@ pub struct BeeLastScribingRun {
     pub feature: Option<String>,
 }
 
-/// `.bee/state.json`'s `approved_gates` — the four gates a feature's work
-/// passes through (context, shape, execution, review), each approved
+/// `.bee/state.json`'s `approved_gates` — the five gates a feature's work
+/// passes through (context, shape, execution, review, uat), each approved
 /// independently. A gate name entirely absent from the file reads as
 /// `None`, never fabricated as `false`.
+///
+/// `uat` is the acceptance door at merge time. It is read here purely so
+/// the surface can *see* it; it is deliberately not part of the
+/// current-stop walk — see `bee_gate_current_stop` in the `waggledance`
+/// crate for why.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BeeApprovedGates {
     pub context: Option<bool>,
     pub shape: Option<bool>,
     pub execution: Option<bool>,
     pub review: Option<bool>,
+    pub uat: Option<bool>,
 }
 
 /// `.bee/state.json`'s `gate_revoked_at` — the timestamp a gate was revoked
-/// after having been approved, keyed by the same four gate names as
-/// [`BeeApprovedGates`]. A gate name absent here was never revoked (or was
-/// never approved in the first place); this struct alone does not say
-/// which — see [`BeeState::approved_gates`].
+/// after having been approved, keyed by the four gate names this snapshot
+/// reads a revocation for ([`BeeApprovedGates`] additionally carries `uat`,
+/// whose revocation nothing reads today). A gate name absent here was never
+/// revoked (or was never approved in the first place); this struct alone
+/// does not say which — see [`BeeState::approved_gates`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BeeGateRevocations {
     pub context: Option<String>,
@@ -1720,7 +1727,7 @@ fn read_state(bee_dir: &Path, root: &Path, read_errors: &mut Vec<String>) -> Opt
 }
 
 /// Parse an `approved_gates` object shared by `.bee/state.json` and every
-/// `.bee/lanes/<feature>.json` record (bbp-10) — the same four gate names,
+/// `.bee/lanes/<feature>.json` record (bbp-10) — the same five gate names,
 /// each independently optional, never fabricated as `false` when the key is
 /// absent. Factored out so `read_state` and `parse_lane` never drift apart
 /// on this shape.
@@ -1732,6 +1739,7 @@ fn parse_approved_gates(v: &Value) -> Option<BeeApprovedGates> {
             shape: g.get("shape").and_then(Value::as_bool),
             execution: g.get("execution").and_then(Value::as_bool),
             review: g.get("review").and_then(Value::as_bool),
+            uat: g.get("uat").and_then(Value::as_bool),
         })
 }
 
@@ -6530,6 +6538,10 @@ mod tests {
         assert_eq!(gates.shape, Some(true));
         assert_eq!(gates.execution, Some(true));
         assert_eq!(gates.review, Some(false));
+        // (ctk-7) A gate key absent from the object stays `None` — the same
+        // never-fabricated rule the other four already hold to. This
+        // fixture writes no `uat`, and older bee stores will not either.
+        assert_eq!(gates.uat, None);
 
         let route = state.route.as_ref().expect("route should be Some");
         assert_eq!(route.class.as_deref(), Some("feature"));
@@ -7534,7 +7546,8 @@ mod tests {
             &root,
             ".bee/lanes/demo.json",
             r#"{"feature":"demo","phase":"swarming","mode":"standard","next_action":"go",
-                "approved_gates":{"context":true,"shape":true,"execution":false,"review":false},
+                "approved_gates":{"context":true,"shape":true,"execution":false,"review":false,
+                                  "uat":false},
                 "created_at":"2026-08-01T00:00:00.000Z"}"#,
         );
 
@@ -7549,6 +7562,10 @@ mod tests {
         assert_eq!(gates.shape, Some(true));
         assert_eq!(gates.execution, Some(false));
         assert_eq!(gates.review, Some(false));
+        // (ctk-7) The fifth key bee already writes, read like its four
+        // siblings. Absence stays `None` — proven by
+        // `state_full_gates_route_and_next_action_are_read`.
+        assert_eq!(gates.uat, Some(false));
         assert_eq!(lane.created_at.as_deref(), Some("2026-08-01T00:00:00.000Z"));
 
         std::fs::remove_dir_all(&root).ok();

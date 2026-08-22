@@ -1,0 +1,396 @@
+/* ============================================================
+   ADAPTER · Console (the agent-orchestrator developer console)
+      →  html[data-theme="console"]
+   Distilled from docs/history/console-theme-kanban/style-digest.md.
+   Dark-native, cool, low-chroma and compact: a near-neutral
+   zinc canvas, near-white primary fill (no blue button), 1px
+   hairlines everywhere, nearly-flat elevation, a 13px dense
+   base and a mono voice for every count and branch name.
+
+   D1 (decision b27a73c6): waggledance ships ONE theme and this
+   is it. Replacing this one file re-skins every surface — board,
+   project pages and doc reading pages — without touching a
+   single .fg-* component rule.
+
+   SCHEME SHAPE — the console is dark NATIVELY, which inverts
+   Atelier's arrangement. The dark colour layer therefore rides
+   both the bare theme selector (so a document whose data-scheme
+   never got set still lands dark) and the explicit
+   [data-scheme="dark"] selector; the light layer is the
+   counterpart under [data-scheme="light"]. No rule here reads
+   the OS colour-scheme media query — and neither does this
+   comment, because the guard that proves the bundle is free of
+   it is a substring check over the served text. The attribute
+   the no-flash head script resolves before paint is the only
+   thing either scheme's colours ever key off.
+
+   Tier-1 primitives kept private (--_*). Reads/overrides
+   canonical tokens only — no contract token is added, renamed
+   or removed. Per docs/design/AGENTS.md, data-scheme swaps ONLY
+   the colour layer; type, radius, weight, elevation, motion and
+   every Tier-3 character token live in the invariant block below
+   and are identical in both schemes.
+   ============================================================ */
+
+/* ════════════════════════════════════════════════════════════
+   INVARIANT · primitives + everything that is not colour
+   ════════════════════════════════════════════════════════════ */
+html[data-theme="console"] {
+  /* ── Tier 1 · PRIMITIVE (private) ──────────────────────────
+     The one block where a raw hex / rgba() / oklch() literal is
+     permitted (docs/design/AGENTS.md self-check). Everything
+     below this block references these names. */
+
+  /* Dark canvas — the native scheme. Near-neutral zinc, chroma
+     kept under 0.02 so nothing reads as "blue-grey". */
+  --_page:       oklch(0.185 0.006 285.885);  /* page background   */
+  --_panel:      oklch(0.24 0.008 285.885);   /* card / panel      */
+  --_raised:     oklch(0.28 0.008 285.885);   /* popover / raised  */
+  --_rail:       oklch(0.155 0.005 285.823);  /* rail — cooler and darker than the page */
+  --_muted:      oklch(0.274 0.006 286.033);  /* muted fill / active row */
+
+  --_ink:        oklch(0.985 0 0);            /* body text        17.9:1 on --_page */
+  --_ink-2:      oklch(0.705 0.015 286.067);  /* secondary text    7.1:1 on --_page, 5.6:1 on --_raised */
+  --_ink-3:      oklch(0.552 0.016 285.938);  /* subtle meta       3.9:1 — de-emphasis rung, never body copy */
+  --_ink-4:      oklch(0.442 0.017 285.786);  /* passive/disabled  2.4:1 — disabled text is AA-exempt */
+
+  --_chalk:      oklch(0.92 0.004 286.32);    /* primary fill — near-white, deliberately NOT blue */
+  --_chalk-ink:  oklch(0.21 0.006 285.885);   /* text on the primary fill — 7.0:1 */
+
+  --_hair:        oklch(1 0 0 / 7%);          /* the one border weight the console draws */
+  --_hair-strong: oklch(1 0 0 / 14%);         /* see NOTE-BORDER below */
+  --_ring:        oklch(0.552 0.016 285.938); /* focus ring — neutral, not the brand hue */
+
+  /* Light counterpart. */
+  --_l-bg:       oklch(0.985 0 0);
+  --_l-raised:   oklch(1 0 0);
+  --_l-muted:    oklch(0.967 0.001 286.375);
+  --_l-ink:      oklch(0.141 0.005 285.823);  /* 19.0:1 on --_l-bg */
+  --_l-ink-2:    oklch(0.552 0.016 285.938);  /*  4.6:1 on --_l-bg — clears AA */
+  --_l-ink-3:    oklch(0.62 0.016 285.938);   /* derived: the source ships two light text rungs, the contract needs four */
+  --_l-ink-4:    oklch(0.705 0.015 286.067);
+  --_l-primary:  oklch(0.21 0.006 285.885);
+  --_l-border:   oklch(0.945 0.003 286.32);
+  --_l-border-2: oklch(0.92 0.004 286.32);
+
+  /* Status identity — theme-invariant per the digest: the same
+     five hues in both schemes, because a lane's colour is its
+     identity, not its lighting. They are never asked to carry a
+     meaning on their own; every lane and dot the board draws
+     sits beside its own label word (see --status-lane-text). */
+  --_blue:       #60a5fa;   /* working / pending work   */
+  --_orange:     #fb923c;   /* needs you / iterating    */
+  --_yellow:     #facc15;   /* in review (the one dot the digest does NOT glow) */
+  --_green:      #4ade80;   /* ready to merge / merged  */
+  --_grey:       #9ca3af;   /* idle                     */
+
+  /* Supporting hues the digest names for card-local and activity states. */
+  --_sky:        #93c5fd;   /* reviewing  */
+  --_mint:       #86efac;   /* approved / passed */
+  --_amber:      #fcd34d;   /* in review (card-local) */
+  --_violet:     #a78bfa;
+  --_destructive:oklch(0.704 0.191 22.216);
+
+  /* Darkened counterparts so status TEXT clears AA on its own
+     tint in the light scheme (the bright set above sits at
+     2-3:1 on a pale plate and cannot be used for light text). */
+  --_blue-ink:   #1d4ed8;   /* 5.8:1 on its light tint */
+  --_amber-ink:  #92400e;   /* 6.1:1 */
+  --_green-ink:  #166534;   /* 6.1:1 */
+  --_red-ink:    #b91c1c;   /* 5.6:1 */
+
+  --_scrim:      rgba(0, 0, 0, 0.72);
+  --_shadow-a:   rgba(0, 0, 0, 0.05);   /* the card's whole shadow budget */
+  --_shadow-b:   rgba(0, 0, 0, 0.28);
+  --_shadow-c:   rgba(0, 0, 0, 0.75);   /* the window shell, the one place with depth */
+
+  /* ── Tier 2 · TYPOGRAPHY ─────────────────────────────
+     The theme layer is the ONLY place a family slot ever gets a
+     bundled face. contract.css's defaults are the neutral
+     ui-sans-serif stack by design, so a theme that names no
+     family silently ships the OS system sans and leaves the
+     embedded Geist woff2 referenced by no rule at all — which is
+     precisely what happened when this file replaced atelier.css
+     and inherited its type scale but not its families. Do not
+     assume the families are held somewhere else; they are held
+     here, and server.rs pins the sans slots as well as the mono
+     one so a future theme cannot drop them again in silence.
+
+     Geist leads every sans slot and Geist Mono the mono slot,
+     each ahead of the digest's own fallback stack.
+
+     Beyond the families the console owns the SCALE: a 13px base,
+     half-step rungs, and only 500/600 doing the tokenised work. */
+  --font-display: 'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-body:    'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-accent:  'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-mono:    'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --type-display-size: 32px;    --type-display-leading: 1.1;   --type-display-tracking: -0.025em;  --type-display-weight: var(--weight-semibold);
+  --type-title-size: 22px;      --type-title-leading: 1.15;    --type-title-tracking: -0.025em;    --type-title-weight: var(--weight-semibold);
+  --type-heading-size: 17px;    --type-heading-leading: 1.25;  --type-heading-tracking: -0.02em;   --type-heading-weight: var(--weight-semibold);
+  --type-subheading-size: 15px; --type-subheading-leading: 1.3;--type-subheading-tracking: -0.015em;--type-subheading-weight: var(--weight-semibold);
+  --type-heading-sm-size: 13px; --type-heading-sm-leading: 1.42;--type-heading-sm-tracking: -0.01em;--type-heading-sm-weight: var(--weight-semibold);
+  --type-body-size: 13px;       --type-body-leading: 1.55;     --type-body-tracking: 0;            --type-body-weight: var(--weight-regular);
+  --type-body-sm-size: 12px;    --type-body-sm-leading: 1.5;   --type-body-sm-tracking: 0;         --type-body-sm-weight: var(--weight-regular);
+  --type-label-size: 10.5px;    --type-label-leading: 1.2;     --type-label-tracking: 0.12em;      --type-label-weight: var(--weight-medium);
+  --type-caption-size: 11.5px;  --type-caption-leading: 1.42;  --type-caption-tracking: 0;         --type-caption-weight: var(--weight-regular);
+  --type-micro-size: 10px;      --type-micro-leading: 1.3;     --type-micro-tracking: 0.02em;      --type-micro-weight: var(--weight-medium);
+  /* Dense controls at 12px medium; buttons take their own weight from --btn-weight. */
+  --type-ui-size: 12px;         --type-ui-leading: 1.2;        --type-ui-tracking: -0.005em;       --type-ui-weight: var(--weight-medium);
+  /* Mono tag voice — badges, branch fragments, counts. */
+  --type-tag-size: 10.5px;      --type-tag-leading: 1.2;       --type-tag-tracking: 0.04em;        --type-tag-weight: var(--weight-medium);
+  /* Figures top out at the digest's 21px stat-tile number, not the contract's 44px. */
+  --type-figure-sm-size: 19px;  --type-figure-sm-leading: 1;   --type-figure-sm-tracking: -0.02em; --type-figure-sm-weight: var(--weight-bold);
+  --type-figure-md-size: 21px;  --type-figure-md-leading: 1;   --type-figure-md-tracking: -0.025em;--type-figure-md-weight: var(--weight-bold);
+  --type-figure-lg-size: 26px;  --type-figure-lg-leading: 1;   --type-figure-lg-tracking: -0.025em;--type-figure-lg-weight: var(--weight-bold);
+
+  --weight-emphasis: var(--weight-medium);
+  --weight-strong:   var(--weight-semibold);
+
+  /* ── Tier 2 · GEOMETRY ─────────────────────────────────────
+     Radius derives from the digest's 10px card base: 2 (square
+     lane swatches) / 4 / 6 / 10 (cards) / pill. */
+  --radius-xs:   2px;
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   10px;
+
+  /* NOTE-BORDER — the digest says "borders are 1px hairlines
+     everywhere; nothing is thicker", and --border-width-hairline
+     carries that for every card, input and divider. The strong
+     rung deliberately stays 2px: its consumers are accent bars
+     and rule strips (the digest's own section headers use a
+     2.5px coloured bar), not borders, and flattening them to 1px
+     would erase a distinction rather than restyle it. The
+     digest's "strong border" colour is likewise a WEAKER alpha
+     than its hairline (4% vs 7%), which cannot form an ascending
+     pair, so --color-border-strong takes a derived 14%. */
+  --border-width-hairline: 1px;
+  --border-width-strong:   2px;
+
+  /* Nearly flat: a card's whole shadow budget is 1px at 5%. Only
+     the window shell gets real depth. */
+  --elevation-sm: 0 1px 1px var(--_shadow-a);
+  --elevation-md: 0 4px 14px -6px var(--_shadow-b);
+  --elevation-lg: 0 30px 80px -24px var(--_shadow-c);
+
+  /* ── Tier 2 · MOTION — 120ms fast, 150ms normal, 220ms card
+     enter/exit, 250ms layout reflow, on the digest's curves. ── */
+  --motion-fast:       120ms;
+  --motion-settle:     150ms;
+  --motion-open:       220ms;
+  --motion-expressive: 250ms;
+  --ease-standard:   cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  --ease-decelerate: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-expressive: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* ── Tier 2 · DENSITY — the console is a compact tool. ── */
+  --layout-card-pad:    12px;
+  --layout-element-gap: 10px;
+
+  /* ── Tier 3 · CHARACTER — flat, tight, pill-capped.
+     Identical in both schemes: the console keeps its personality
+     when the lights change. ── */
+  --btn-radius: var(--radius-pill);
+  --btn-weight: var(--weight-semibold);
+  --btn-pad-y:  6px;
+  --btn-pad-x:  14px;
+
+  --card-radius:       var(--radius-lg);
+  --card-elevation:    var(--elevation-sm);
+  --card-border-width: var(--border-width-hairline);
+  --card-pad:          var(--layout-card-pad);
+
+  --chip-radius: var(--radius-pill);
+  --chip-weight: var(--weight-medium);
+
+  --input-radius: var(--radius-md);
+  --input-height: 28px;
+
+  --nav-item-radius: var(--radius-md);
+  --media-radius:    var(--radius-md);
+
+  --density-row-pad-y: 7px;
+  --density-card-pad:  var(--layout-card-pad);
+
+  /* Status dot glow — the digest's exact spelling: a blurred
+     halo of the dot's own colour at 60%. */
+  --status-glow: 0 0 8px color-mix(in srgb, currentColor 60%, transparent);
+
+  /* Lane chips: the hue rides the PLATE and the dot; the LABEL
+     stays body ink. That is what the digest's column header
+     actually renders (dot · label · count), and it is why no
+     lane's meaning ever rests on its hue alone — in either
+     scheme, at every fill strength. */
+  --status-lane-fill: 14%;
+  --status-lane-text: var(--color-text);
+
+  --focus-width:  2px;
+  --focus-offset: 2px;
+
+  --num-font:    var(--font-mono);
+  --num-variant: tabular-nums slashed-zero lining-nums;
+
+  /* ── Always-dark surfaces (the code panel) + signature.
+     These belong to neither scheme: the code surface is dark in
+     both, so its text token is set once here. ── */
+  --color-on-dark:       var(--_ink);
+  --signature-dark-bg:   var(--_rail);
+  --signature-dark-text: var(--_ink);
+  --code-keyword: var(--_violet);
+  --code-string:  var(--_mint);
+  --code-fn:      var(--_sky);
+  --code-num:     var(--_amber);
+
+  /* The ambient console glow: the digest's per-column wash, 7%
+     of a lane hue bled into the corner of the page. */
+  --signature-vignette: radial-gradient(ellipse at 88% -12%,
+    color-mix(in srgb, var(--_blue) 7%, transparent), transparent 56%);
+  --signature-gradient-text: linear-gradient(92deg, var(--_sky), var(--_blue));
+  --signature-gradient: conic-gradient(from 90deg,
+    var(--_blue), var(--_violet), var(--_green), var(--_yellow), var(--_orange), var(--_blue));
+  --signature-speed: 5s;
+
+  /* ── Lane identity (Tier 2 accent-alt) — invariant across
+     schemes, one slot per board status. ── */
+  --color-accent-alt-1: var(--_blue);     /* working / pending work  */
+  --color-accent-alt-2: var(--_orange);   /* needs you / iterating   */
+  --color-accent-alt-3: var(--_yellow);   /* in review               */
+  --color-accent-alt-4: var(--_green);    /* ready to merge / merged */
+  --color-accent-alt-5: var(--_grey);     /* idle                    */
+}
+
+/* ════════════════════════════════════════════════════════════
+   COLOUR · DARK — the native console scheme.
+
+   Rides the bare theme selector as well as the explicit one so
+   that a document whose data-scheme never got set (the head
+   script's storage read threw) still lands on the native look
+   rather than the contract's neutral light default.
+   ════════════════════════════════════════════════════════════ */
+html[data-theme="console"],
+html[data-theme="console"][data-scheme="dark"] {
+  /* Surfaces */
+  --color-bg:             var(--_page);
+  --color-surface:        var(--_panel);
+  --color-surface-raised: var(--_raised);
+  --color-surface-sunken: var(--_rail);
+  --color-surface-hover:  color-mix(in srgb, var(--_ink) 4%, transparent);
+  --color-scrim:          var(--_scrim);
+
+  /* Text — body 17.9:1 and muted 7.1:1 on --color-bg (5.6:1 on
+     the raised surface); both clear AA at every size. */
+  --color-text:          var(--_ink);
+  --color-text-muted:    var(--_ink-2);
+  --color-text-subtle:   var(--_ink-3);
+  --color-text-disabled: var(--_ink-4);
+  --color-on-action:     var(--_chalk-ink);
+  --color-on-brand:      var(--_chalk-ink);
+
+  /* Lines */
+  --color-border:             var(--_hair);
+  --color-border-strong:      var(--_hair-strong);
+  --color-border-interactive: var(--_ring);
+
+  /* Interactive — the console's primary is a near-white fill,
+     not a coloured one; the brand/link voice is the working blue. */
+  --color-action:       var(--_chalk);
+  --color-action-hover: var(--_ink);
+  --color-action-press: var(--_muted);
+  --color-brand:        var(--_blue);
+  --color-brand-tint:   color-mix(in srgb, var(--_blue) 12%, var(--_page));
+  --color-link:         var(--_blue);
+  --color-link-hover:   var(--_sky);
+  --color-link-visited: var(--_blue);
+
+  /* Status — the bright set on 8% plates; each pairing measured
+     at 4.8:1 or better, so status text clears AA on its tint. */
+  --color-info:         var(--_blue);
+  --color-info-tint:    color-mix(in srgb, var(--_blue) 8%, var(--_page));
+  --color-warning:      var(--_orange);
+  --color-warning-tint: color-mix(in srgb, var(--_orange) 8%, var(--_page));
+  --color-success:      var(--_green);
+  --color-success-tint: color-mix(in srgb, var(--_green) 8%, var(--_page));
+  --color-danger:       var(--_destructive);
+  --color-danger-tint:  color-mix(in srgb, var(--_destructive) 8%, var(--_page));
+
+  --color-positive:      var(--_green);
+  --color-positive-tint: color-mix(in srgb, var(--_green) 8%, var(--_page));
+  --color-negative:      var(--_destructive);
+  --color-negative-tint: color-mix(in srgb, var(--_destructive) 8%, var(--_page));
+
+  --focus-color:          var(--_ring);
+  --color-selection-bg:   color-mix(in srgb, var(--_blue) 28%, transparent);
+  --color-selection-text: var(--_ink);
+  --scrollbar-thumb:      var(--_hair-strong);
+  --scrollbar-track:      transparent;
+
+  --signature-band-tint: color-mix(in srgb, var(--_blue) 12%, var(--_page));
+}
+
+/* ════════════════════════════════════════════════════════════
+   COLOUR · LIGHT — the counterpart scheme.
+
+   Specificity (0,2,1) beats contract.css's neutral
+   html[data-scheme="dark"] fallback, so an explicit light choice
+   is never polluted by it. Character is untouched: only colours
+   appear below.
+   ════════════════════════════════════════════════════════════ */
+html[data-theme="console"][data-scheme="light"] {
+  /* Surfaces — the console's light scheme carries its separation
+     in the hairlines, not in surface steps; card and page share
+     a value exactly as the source does. */
+  --color-bg:             var(--_l-bg);
+  --color-surface:        var(--_l-bg);
+  --color-surface-raised: var(--_l-raised);
+  --color-surface-sunken: var(--_l-muted);
+  --color-surface-hover:  color-mix(in srgb, var(--_l-ink) 4%, transparent);
+  --color-scrim:          var(--_scrim);
+
+  /* Text — body 19.0:1 and muted 4.6:1 on --color-bg; both clear AA. */
+  --color-text:          var(--_l-ink);
+  --color-text-muted:    var(--_l-ink-2);
+  --color-text-subtle:   var(--_l-ink-3);
+  --color-text-disabled: var(--_l-ink-4);
+  --color-on-action:     var(--_l-bg);
+  --color-on-brand:      var(--_l-bg);
+
+  --color-border:             var(--_l-border);
+  --color-border-strong:      var(--_l-border-2);
+  --color-border-interactive: var(--_l-ink-2);
+
+  --color-action:       var(--_l-primary);
+  --color-action-hover: var(--_l-ink);
+  --color-action-press: var(--_l-ink);
+  --color-brand:        var(--_blue-ink);
+  --color-brand-tint:   color-mix(in srgb, var(--_blue-ink) 10%, var(--_l-bg));
+  --color-link:         var(--_blue-ink);
+  --color-link-hover:   var(--_l-ink);
+  --color-link-visited: var(--_blue-ink);
+
+  /* Status — the darkened inks, each measured at 5.5:1 or better
+     on its own 12% plate. */
+  --color-info:         var(--_blue-ink);
+  --color-info-tint:    color-mix(in srgb, var(--_blue-ink) 12%, var(--_l-bg));
+  --color-warning:      var(--_amber-ink);
+  --color-warning-tint: color-mix(in srgb, var(--_amber-ink) 12%, var(--_l-bg));
+  --color-success:      var(--_green-ink);
+  --color-success-tint: color-mix(in srgb, var(--_green-ink) 12%, var(--_l-bg));
+  --color-danger:       var(--_red-ink);
+  --color-danger-tint:  color-mix(in srgb, var(--_red-ink) 12%, var(--_l-bg));
+
+  --color-positive:      var(--_green-ink);
+  --color-positive-tint: color-mix(in srgb, var(--_green-ink) 12%, var(--_l-bg));
+  --color-negative:      var(--_red-ink);
+  --color-negative-tint: color-mix(in srgb, var(--_red-ink) 12%, var(--_l-bg));
+
+  --focus-color:          var(--_l-ink-2);
+  --color-selection-bg:   color-mix(in srgb, var(--_blue-ink) 20%, transparent);
+  --color-selection-text: var(--_l-ink);
+  --scrollbar-thumb:      var(--_l-border-2);
+  --scrollbar-track:      transparent;
+
+  --signature-band-tint: color-mix(in srgb, var(--_blue-ink) 10%, var(--_l-bg));
+  --signature-vignette:  radial-gradient(ellipse at 88% -12%,
+    color-mix(in srgb, var(--_blue-ink) 5%, transparent), transparent 56%);
+}

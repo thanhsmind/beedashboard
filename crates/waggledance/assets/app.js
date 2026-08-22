@@ -452,6 +452,45 @@
     });
   })();
 
+  // Project rail filter (home page, console-theme-kanban ctk-12): the
+  // rail's search field ships `hidden` from the server. Filtering a list is
+  // a client-side act and this page has no server route for it, so a field
+  // that promised a search scripting could not deliver would be a control
+  // that lies — it is unhidden here, and only here, once the filter is
+  // actually wired. Rows whose text does not contain what was typed are
+  // hidden; a worktree child stays visible whenever its own parent matched,
+  // so a project group never breaks apart mid-filter.
+  (function () {
+    var box = document.querySelector("[data-proj-filter]");
+    if (!box) return;
+    var input = box.querySelector(".home-sidebar__filter");
+    var rows = document.querySelectorAll(".home-sidebar .proj-row");
+    if (!input || !rows.length) return;
+    box.hidden = false;
+    function apply() {
+      var q = input.value.trim().toLowerCase();
+      var groupShown = false;
+      rows.forEach(function (row) {
+        var hit = !q || (row.textContent || "").toLowerCase().indexOf(q) !== -1;
+        if (row.classList.contains("proj-row--branch")) {
+          if (groupShown) hit = true;
+        } else {
+          groupShown = hit;
+        }
+        row.hidden = !hit;
+      });
+    }
+    input.addEventListener("input", apply);
+    // Escape clears the field even where the browser draws no clear button.
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && input.value !== "") {
+        input.value = "";
+        apply();
+      }
+    });
+    apply();
+  })();
+
   // Terminal settings (Settings page, `/api/terminal-config`): D10 requires
   // a JSON body — a plain form POST is a CORS *simple* request (no
   // preflight, no CORS layer on this server), so a page the owner happens

@@ -17,7 +17,7 @@ pub fn layout(title: &str, head_extra: &str, body: &str) -> String {
     let title = esc(title);
     format!(
         r#"<!doctype html>
-<html lang="en" data-theme="atelier" class="fg-root">
+<html lang="en" data-theme="console" class="fg-root">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -146,11 +146,19 @@ pub struct ProjectSuggestion {
 /// `Default` is `Kanban` so that an absent, empty, unknown, or otherwise
 /// unparseable `tab` query value (`server.rs`'s `RegisterFlag` visitor)
 /// always resolves here rather than needing its own fallback branch.
+///
+/// console-theme-kanban (ctk-12): the `Projects` variant is retired. Its
+/// whole body -- the project rows, their nested worktree children, the
+/// folder suggestions, the registration form and its error, and the
+/// Unassigned group -- now renders as [`project_sidebar`], a left rail on
+/// the Kanban tab, so there is no second section left for a third variant
+/// to name. `server.rs`'s query parser still recognises the literal
+/// `tab=projects` and maps it here, onto `Kanban`, so an old bookmark
+/// lands on the page that now carries what it was pointing at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HomeTab {
     #[default]
     Kanban,
-    Projects,
     /// homepage-terminals D1/D8: the third tab, opening one live agent
     /// terminal. Always offered on the strip regardless of herdr's own
     /// state — [`home_tab_strip`] never gates this variant's anchor on
@@ -176,10 +184,13 @@ fn home_tab_strip(selected: HomeTab) -> String {
             label = label,
         )
     };
+    // console-theme-kanban (ctk-12): two anchors, not three. The Projects
+    // tab is retired — its body is now the Kanban tab's own left rail
+    // ([`project_sidebar`]) — so the strip offers the two sections that
+    // still exist. Terminals is untouched and stays reachable.
     format!(
-        r#"<nav class="fg-tabs" aria-label="Home sections">{kanban}{projects}{terminals}</nav>"#,
+        r#"<nav class="fg-tabs" aria-label="Home sections">{kanban}{terminals}</nav>"#,
         kanban = tab_link(HomeTab::Kanban, "/?tab=kanban", "Kanban"),
-        projects = tab_link(HomeTab::Projects, "/?tab=projects", "Projects"),
         // homepage-terminals D8: no gate here — the anchor renders
         // whatever herdr's own state is; only the tab's own body reads it.
         terminals = tab_link(HomeTab::Terminals, "/?tab=terminals", "Terminals"),
@@ -196,17 +207,21 @@ fn home_tab_strip(selected: HomeTab) -> String {
 /// as "nothing qualified" and the Kanban tab renders its own `fg-empty`
 /// state instead of `cross_features_html` (backlog-groom-2 D1) -- the tab
 /// strip, and the Terminals tab riding on it, always render regardless of
-/// whether any project carries a bee board. A registration error forces the
-/// Projects tab regardless of `tab`: the banner [`project_list_main`]
-/// renders lives only there, and a user who just submitted the add-project
-/// form must see why it failed rather than land back on Kanban.
+/// whether any project carries a bee board.
 ///
-/// `bee_hub_style()` / `.bee-hub-theme` are scoped to Kanban only: every
+/// console-theme-kanban (ctk-12): there are two tabs now, not three. The
+/// project list, the folder suggestions, the registration form and its
+/// error banner, and the Unassigned group all moved into
+/// [`project_sidebar`], a left rail that renders on the Kanban tab beside
+/// the board. A registration error still forces a tab regardless of `tab`
+/// — Kanban now, since that is where the rail and its banner live — so a
+/// user who just submitted the add-project form still sees why it failed.
+///
+/// `bee_hub_style()` / `.bee-hub-theme` stay scoped to Kanban only: every
 /// rule the style block declares is itself scoped under the
-/// `.bee-hub-theme` selector (`bee_hub_style`'s own doc), so emitting it on
-/// the Projects tab's render would add a dead `<style>` block with no
-/// selector able to match anything on that page -- there is no reason to
-/// ship it there.
+/// `.bee-hub-theme` selector (`bee_hub_style`'s own doc), and the rail is a
+/// sibling of that scope, not a descendant — the rail's own rules live in
+/// `assets/app.css` beside the `.proj-*` rules it reuses.
 #[allow(clippy::too_many_arguments)] // each param is an independent render input server.rs::index_page already assembles; bundling them loses the doc comments pinned to each one above
 pub fn home_page(
     projects: &[(Project, usize, Vec<TerminalPaneView>)],
@@ -233,8 +248,16 @@ pub fn home_page(
     // same "New shell"/preset buttons the project terminal page offers.
     terminals_presets: &[String],
 ) -> String {
+    // console-theme-kanban (ctk-12), retargeting homepage-tabs edge (b):
+    // this line used to force the Projects tab, because that was the only
+    // tab the register banner rendered on. The banner now lives in the
+    // Kanban tab's own left rail ([`project_sidebar`]'s non-scrolling
+    // head), so the force is retargeted rather than deleted — a reader
+    // who just submitted the add-project form still always lands on the
+    // section that is showing why it failed, even from an explicit
+    // `?tab=terminals`.
     let tab = if register_error.is_some() {
-        HomeTab::Projects
+        HomeTab::Kanban
     } else {
         tab
     };
@@ -243,10 +266,22 @@ pub fn home_page(
             "Kanban",
             format!(
                 r#"{style}
+<div class="home-shell">
+{sidebar}
 <main class="fg-page bee-hub-theme">
   {features}
-</main>"#,
+</main>
+</div>"#,
                 style = bee_hub_style(),
+                // console-theme-kanban (ctk-12): the retired Projects tab,
+                // now a left rail sitting as a sibling of the board rather
+                // than inside it, so `<main>` keeps its own scrolling and
+                // its own `.bee-hub-theme` scope. The rail renders on this
+                // tab alone — Terminals is a live screen, and a project
+                // list beside it would only steal width from the thing the
+                // reader opened that tab for.
+                sidebar =
+                    project_sidebar(projects, unassigned_visible, suggestions, register_error),
                 // D1 (backlog-groom-2): an empty `cross_features_html`
                 // (D9 — no registered project carries a `.bee` board) used
                 // to make the whole page early-return the tabless plain
@@ -261,10 +296,6 @@ pub fn home_page(
                     cross_features_html.to_string()
                 },
             ),
-        ),
-        HomeTab::Projects => (
-            "Projects",
-            project_list_main(projects, unassigned_visible, suggestions, register_error),
         ),
         HomeTab::Terminals => (
             "Terminals",
@@ -287,12 +318,49 @@ pub fn home_page(
     layout_with_drawer(title, "", &body, true)
 }
 
-/// The project list itself — everything the home page's own Projects tab
-/// needs, factored out so [`home_page`] can render it unchanged beneath the
-/// cross-project sections (cross-board D1) without duplicating a single line
-/// of this logic. Returns just the `<main>` element; topbar and `layout`
-/// wrapping stay each caller's own job.
-fn project_list_main(
+/// console-theme-kanban (ctk-12) — was `project_list_main`, the body of
+/// the retired Projects tab. Every element that tab rendered is still here,
+/// moved rather than rebuilt: the project rows with their nested worktree
+/// children, terminal badges and unregister forms; the folder-suggestions
+/// block; the registration form and its error banner; and the Unassigned
+/// group's presence card. Nothing the tab could reach became unreachable.
+///
+/// What changed is the wrapper. The digest's sidebar (`style-digest.md`,
+/// "Sidebar") is reproduced as a shape, not ornament for ornament — and
+/// waggledance's rail carries strictly more than the source design's did,
+/// which is why the group heading, the suggestions block and the presence
+/// card have no counterpart there. Three ornaments are deliberately absent:
+/// there are no window controls (this is a web page, not a desktop shell);
+/// settings already live as a gear in the topbar; and the brand mark and
+/// name the digest pins to the top are the topbar's own `Waggle Dance`
+/// home link, sitting directly above this rail — a second copy twelve
+/// pixels lower would be the same word twice. What the digest pins to the
+/// bottom is Settings; what this rail pins there instead is the
+/// registration form, the one control it actually owns.
+///
+/// The register banner rides in the rail's own non-scrolling head rather
+/// than in its scrolling body: a failed registration has to land in front
+/// of the reader, and the head is on screen at load whatever the body has
+/// been scrolled to. `role="alert"` gives an assistive reader the same
+/// arrival, and [`home_page`] forces the Kanban tab whenever
+/// `register_error` is set, so this rail is always the section rendered.
+///
+/// Accessibility: the rail is a `<nav>` landmark with its own accessible
+/// name; the projects stay a real `<ul>` under a real heading; the one row
+/// that is actually current — the board being rendered right now, since
+/// every project row navigates away from this page — carries
+/// `aria-current="page"` as well as the accent fill; and every control in
+/// here is an anchor, an input or a button, so keyboard order is the
+/// document order with nothing to trap it.
+///
+/// OWED, the phone phase: this rail has no narrow-screen answer yet.
+/// Supplying one means a second `@media` block, and how a two-column shell
+/// collapses on a handset is that phase's decision to make, not this
+/// cell's.
+///
+/// Returns the `<nav>` element alone; the shell around it, the topbar and
+/// `layout` wrapping stay the caller's own job.
+fn project_sidebar(
     projects: &[(Project, usize, Vec<TerminalPaneView>)],
     unassigned_visible: bool,
     suggestions: &[ProjectSuggestion],
@@ -361,7 +429,7 @@ fn project_list_main(
             rows.push_str(&format!(
                 r#"<li class="{row_class}">
   <a class="proj-row__link" href="/p/{id}/">
-    <span class="proj-row__name">{label}</span>
+    {dot}<span class="proj-row__name">{label}</span>
     <span class="proj-row__meta">{count} markdown files · <time class="proj-row__time" datetime="{seen}">{seen_short}</time></span>
   </a>
   {badges}
@@ -377,6 +445,7 @@ fn project_list_main(
                 seen = esc(&p.last_seen_at),
                 seen_short = esc(&short_instant(&p.last_seen_at)),
                 badges = badges,
+                dot = project_row_dot(panes),
             ));
         }
         format!(r#"<ul class="proj-list">{rows}</ul>"#, rows = rows)
@@ -442,20 +511,87 @@ fn project_list_main(
     // error code — the submitted path never reaches this page (see
     // `register_error_message`'s own doc). An unrecognized or absent code
     // renders no banner at all.
+    // console-theme-kanban (ctk-12): `role="alert"` so the refusal reaches a
+    // reader who is not looking at the rail, the way landing on a dedicated
+    // tab used to. The banner renders in the rail's own non-scrolling head
+    // (see this function's doc), and `home_page` forces the Kanban tab
+    // whenever `register_error` is set, so it is always on screen at load.
     let register_banner = match register_error.and_then(register_error_message) {
         Some(msg) => format!(
-            r#"<div class="fg-banner fg-banner--danger"><span class="fg-banner__dot"></span><span class="fg-banner__body">{msg}</span></div>"#,
+            r#"<div class="fg-banner fg-banner--danger" role="alert" id="register-error"><span class="fg-banner__dot"></span><span class="fg-banner__body">{msg}</span></div>"#,
             msg = esc(msg),
         ),
         None => String::new(),
     };
     format!(
-        r#"<main class="fg-page">{register_banner}{add_form}{listing}{suggestions_block}{unassigned_card}</main>"#,
+        r#"<nav class="home-sidebar" aria-label="Projects">
+  <div class="home-sidebar__head">{register_banner}{filter}</div>
+  <div class="home-sidebar__body">
+    <ul class="home-sidebar__nav">
+      <li><a class="home-sidebar__row home-sidebar__row--on" href="/?tab=kanban" aria-current="page">Board</a></li>
+    </ul>
+    <h2 class="home-sidebar__group">Projects</h2>
+    {listing}
+    {suggestions_block}
+    {unassigned_card}
+  </div>
+  <div class="home-sidebar__foot">{add_form}</div>
+</nav>"#,
         register_banner = register_banner,
+        filter = project_filter_field(),
         add_form = project_add_form(),
         listing = listing,
         suggestions_block = suggestions_block,
         unassigned_card = unassigned_card,
+    )
+}
+
+/// console-theme-kanban (ctk-12): the digest's sidebar search field, and
+/// the one control on this rail that cannot work without JavaScript --
+/// filtering a list is a client-side act and this page has no server route
+/// for it. So the field ships `hidden` and `assets/app.js` unhides it once
+/// it has wired the filter up: with scripting off there is no dead input
+/// promising a search that would never happen, and with scripting on the
+/// reader gets a real one. The label is an `aria-label` rather than a
+/// visible `<label>` because the rail has no width to spend on a caption
+/// the placeholder already carries; the input is a real `type="search"`, so
+/// it is in the keyboard order and clears with Escape like any other.
+fn project_filter_field() -> &'static str {
+    r#"<div class="home-sidebar__search" hidden data-proj-filter>
+  <input class="fg-input home-sidebar__filter" type="search" id="proj-filter" name="q" placeholder="Filter projects" aria-label="Filter projects" autocomplete="off">
+</div>"#
+}
+
+/// console-theme-kanban (ctk-12): the digest's status dot on a rail row.
+/// It is the design system's own `.fg-status__dot` rather than a second dot
+/// vocabulary declared beside it — that component already ships the size,
+/// the pill radius, the status glow and the three tone colours this needs,
+/// so the rail contributes only the tone class and the alignment.
+///
+/// Colour never carries the meaning on its own: the dot is `aria-hidden`,
+/// and the words it summarises are the [`project_badges`] pills the same
+/// row renders on its next line, each one a [`status_pill`] printing its
+/// status as text. A row with no agent pane renders neither the dot nor the
+/// pills, so the two can never disagree.
+fn project_row_dot(panes: &[TerminalPaneView]) -> String {
+    // The same `kind != "shell"` filter the badges themselves apply: a
+    // plain shell is not an agent, and a dot for one would claim work that
+    // is not happening.
+    let agents: Vec<&TerminalPaneView> = panes.iter().filter(|p| p.kind != "shell").collect();
+    if agents.is_empty() {
+        return String::new();
+    }
+    // Worst news first, the same precedence the board's own In Progress
+    // ordering uses: blocked outranks working, which outranks quiet.
+    let tone = if agents.iter().any(|p| p.status == "blocked") {
+        "blocked"
+    } else if agents.iter().any(|p| p.status == "working") {
+        "working"
+    } else {
+        "idle"
+    };
+    format!(
+        r#"<span class="fg-status__dot proj-row__dot proj-row__dot--{tone}" aria-hidden="true"></span>"#
     )
 }
 
@@ -550,6 +686,25 @@ fn terminal_badges_nav(
     extra_class: &str,
 ) -> String {
     let panes: Vec<&TerminalPaneView> = panes.iter().filter(|p| p.kind != "shell").collect();
+    terminal_badges_nav_from_refs(project_id, &panes, aria_label, extra_class)
+}
+
+/// (ctk-11) The same nav, over an already-chosen set of panes. Every caller
+/// that wants EVERY agent pane badged -- the project-list row through
+/// [`project_badges`] -- goes through [`terminal_badges_nav`] above, which
+/// drops shell panes and hands the whole remainder here; that path is
+/// unchanged and renders byte-identical markup to before this cell. The
+/// board card is the one caller that splits its panes into two groups first
+/// (see [`bee_hub_terminal_badge_groups`]) and so calls this directly, once
+/// per group, rather than re-filtering a slice it has already partitioned.
+/// The emptiness rule is stated once, here, so neither entry point can
+/// render an empty `<nav>`.
+fn terminal_badges_nav_from_refs(
+    project_id: &str,
+    panes: &[&TerminalPaneView],
+    aria_label: &str,
+    extra_class: &str,
+) -> String {
     if panes.is_empty() {
         return String::new();
     }
@@ -579,6 +734,84 @@ fn terminal_badges_nav(
     }
     out.push_str("</nav>");
     out
+}
+
+/// (ctk-11) The board card's own badge split, and the ONLY caller that
+/// splits: a card in a checkout running five sessions used to spend all
+/// five badges on its collapsed summary, four of which said nothing a
+/// reader scanning the board needed. Only the sessions that are actually
+/// doing something stay on the collapsed card; the rest move inside the
+/// card's expandable body, where a reader who cares can still reach every
+/// one of them.
+///
+/// ACTIVE is `working` and `blocked` -- two of the four states
+/// [`status_pill`] styles. `blocked` is deliberately active even though it
+/// is not literally running: a blocked terminal is the one waiting on the
+/// human, and folding it away would hide the very thing the board exists to
+/// surface. `idle`, `done` and any unknown status are QUIET.
+///
+/// Shell panes (`kind == "shell"`) are dropped BEFORE the split, not by the
+/// nav renderer downstream: they are not sessions this board counts
+/// (board-badges-agents-only), so counting them as folded-away would
+/// overstate what the checkout holds in the honesty line below.
+///
+/// Returns `(active_nav, quiet_nav, quiet_note)`. Each nav is empty when its
+/// own group is -- neither group ever renders an empty frame -- and the note
+/// is empty when nothing was folded away. The note is what keeps the
+/// collapsed card honest (`docs/specs/bee-cockpit.md`, "A capped or
+/// truncated list always states its true total beside the visible subset"):
+/// a card that shows one badge out of five says so, and says how many are
+/// waiting inside, rather than letting the reader take one badge for the
+/// whole checkout.
+fn bee_hub_terminal_badge_groups(
+    project_id: &str,
+    panes: &[TerminalPaneView],
+) -> (String, String, String) {
+    let agents: Vec<&TerminalPaneView> = panes.iter().filter(|p| p.kind != "shell").collect();
+    let (active, quiet): (Vec<&TerminalPaneView>, Vec<&TerminalPaneView>) = agents
+        .iter()
+        .copied()
+        .partition(|p| matches!(p.status.as_str(), "working" | "blocked"));
+    let active_nav = terminal_badges_nav_from_refs(
+        project_id,
+        &active,
+        "Terminals in this checkout",
+        "bee-hub__badges",
+    );
+    let quiet_nav = terminal_badges_nav_from_refs(
+        project_id,
+        &quiet,
+        "Quiet terminals in this checkout",
+        "bee-hub__quiet-badges",
+    );
+    let quiet_note = if quiet.is_empty() {
+        String::new()
+    } else {
+        let noun = if quiet.len() == 1 {
+            "quiet session"
+        } else {
+            "quiet sessions"
+        };
+        // "Nothing to measure renders as a stated absence, never as a zero"
+        // (the same spec's own rule): a checkout whose every session is
+        // quiet says so in words instead of opening on "Showing 0 of 3".
+        let lead = if active.is_empty() {
+            "No active session in this checkout".to_string()
+        } else {
+            format!(
+                "Showing {shown} of {total} sessions in this checkout",
+                shown = active.len(),
+                total = agents.len(),
+            )
+        };
+        format!(
+            r#"<p class="bee-cell__meta bee-hub__quiet-note">{lead} — expand for {count} {noun}</p>"#,
+            lead = lead,
+            count = quiet.len(),
+            noun = noun,
+        )
+    };
+    (active_nav, quiet_nav, quiet_note)
 }
 
 /// A registered project's landing page: a card linking into the bee board
@@ -1813,106 +2046,55 @@ pub fn bee_board_page(
     layout_with_drawer(&format!("{} · bee", project.name), "", &body, false)
 }
 
-/// D3's anthropic.com-inspired palette plus every `.bee-*` layout rule the
-/// bee page family (board and, from feature-hub-2, the feature detail page)
-/// shares — factored out of `bee_board_page` so the detail page can pick up
-/// the exact same `--color-*` token names and card idiom rather than
-/// re-declaring them and risking the two pages drifting apart. Returned as
-/// one `<style>` block; every page that embeds it wraps its own content in
-/// `<main class="fg-page bee-hub-theme">` to opt in (see the palette
-/// comment below for why that scoping class exists at all).
+/// Every `.bee-*` layout rule the bee page family (board and, from
+/// feature-hub-2, the feature detail page) shares, plus the ten
+/// per-project identity hues — factored out of `bee_board_page` so the
+/// detail page can pick up the exact same card idiom rather than
+/// re-declaring it and risking the two pages drifting apart. D1
+/// (console theme, b27a73c6) deleted this block's page-local `--color-*`
+/// override, so every rule here now reads the one shipped theme's tokens;
+/// `.bee-hub-theme` survives only as the scope for the identity hues (see
+/// that rule's own comment). Returned as one `<style>` block; every page
+/// that embeds it wraps its own content in
+/// `<main class="fg-page bee-hub-theme">` to opt in.
 fn bee_hub_style() -> String {
     r#"<style>
 .bee-finished { margin-bottom: var(--space-4); }
-/* D3: anthropic.com-inspired palette (cream page, warm panel, near-black
-   ink, book-cloth coral accent), scoped to the bee page only via the
-   `.bee-hub-theme` class on this page's own `<main>` — every other page
-   keeps its default "atelier" theme untouched. This overrides only the
-   Tier-2 semantic tokens (`--color-*`) the existing `fg-*` components
-   already read, so no markup here or elsewhere had to change to pick it
-   up. Dark reuses the exact same toggle this page already had: the
-   no-flash head script (`layout`) sets `data-scheme` on `<html>` before
-   first paint; this only adds a scoped override keyed off that same
-   attribute, never a second toggle mechanism. */
+/* D1 (console theme, b27a73c6): this page used to carry its own
+   anthropic.com-inspired palette here, overriding the Tier-2 semantic
+   `--color-*` tokens for `.bee-hub-theme`. That override is deleted --
+   the board now inherits colour from the one shipped theme
+   (`assets/atelier/console.css`) exactly like every other page, so no
+   `fg-*` component here reads a page-local colour. `.bee-hub-theme`
+   survives on this page's own `<main>` only as the scope for the
+   per-project identity hues below -- never again for palette. */
 .bee-hub-theme {
-  --color-bg: #FAF9F5;
-  --color-surface: #FFFFFF;
-  --color-surface-raised: #FFFFFF;
-  --color-surface-sunken: #F0EEE6;
-  --color-text: #1A1815;
-  --color-text-muted: #5A5650;
-  --color-text-subtle: #8A8478;
-  --color-border: #E4DFD3;
-  --color-border-strong: #D8D1C0;
-  --color-action: #CC785C;
-  --color-action-hover: #B3654B;
-  --color-action-press: #9C5540;
-  --color-brand: #CC785C;
-  --color-brand-tint: #F3E3DC;
-  --color-link: #CC785C;
-  --color-link-hover: #B3654B;
-  --color-on-action: #FFFFFF;
-  --color-success: #3D7A4E;
-  --color-success-tint: #E1EFE3;
-  --color-warning: #B8791A;
-  --color-warning-tint: #F5E7D0;
-  --color-danger: #C1443B;
-  --color-danger-tint: #F5DEDC;
-  --color-info: #4A7A78;
-  --color-info-tint: #DFEBEA;
-  --color-surface-hover: #F6EFE9;
   /* project-color-identity: ten fixed hues for the cross-project board's
-     own per-project accent -- defined here, not alongside
-     `--color-accent-alt-*` in contract.css: those five tokens are
+     own per-project accent -- defined here, not alongside the five
+     accent-alt lane tokens in contract.css: those five are
      sitewide semantic slots (brand/info/success/warning/danger) every
      theme repoints and every page may read, while a project's board
      colour is a page-local identity nothing outside this page needs, so
      it never grows that sitewide token surface. Picked at one fixed
-     lightness/saturation, evenly spread around the wheel, so each stays
-     legible both as a thin left border and as small text against this
-     page's card surfaces -- deliberately not restated in the
-     `data-scheme="dark"` block below: a per-project colour's whole job
-     is to read as the same identity everywhere it appears, light or
-     dark, unlike the semantic chip tones nearby that do shift with
-     scheme. */
-  --bee-hub-project-1: #9E2E2E;
-  --bee-hub-project-2: #9E712E;
-  --bee-hub-project-3: #889E2E;
-  --bee-hub-project-4: #449E2E;
-  --bee-hub-project-5: #2E9E5B;
-  --bee-hub-project-6: #2E9E9E;
-  --bee-hub-project-7: #2E5B9E;
-  --bee-hub-project-8: #442E9E;
-  --bee-hub-project-9: #882E9E;
-  --bee-hub-project-10: #9E2E71;
-}
-html[data-scheme="dark"] .bee-hub-theme {
-  --color-bg: #241E18;
-  --color-surface: #2D261F;
-  --color-surface-raised: #342C24;
-  --color-surface-sunken: #1C1712;
-  --color-text: #F5F0E6;
-  --color-text-muted: #C9BFAF;
-  --color-text-subtle: #998F7E;
-  --color-border: #40372C;
-  --color-border-strong: #4E4335;
-  --color-action: #D98868;
-  --color-action-hover: #E29A7D;
-  --color-action-press: #C77552;
-  --color-brand: #D98868;
-  --color-brand-tint: #3A2B22;
-  --color-link: #D98868;
-  --color-link-hover: #E29A7D;
-  --color-on-action: #241E18;
-  --color-success: #6FB584;
-  --color-success-tint: #223226;
-  --color-warning: #D9A24E;
-  --color-warning-tint: #362912;
-  --color-danger: #E0796F;
-  --color-danger-tint: #3A211E;
-  --color-info: #7FADAB;
-  --color-info-tint: #22302F;
-  --color-surface-hover: #342C24;
+     lightness/saturation, evenly spread around the wheel, re-expressed
+     here for the console theme's dark-native surfaces (the previous set
+     was tuned against a cream page and reads too dark on the shipped
+     theme's near-black canvas now) so each stays legible both as a
+     thin left border and as small text. One value per hue, no
+     `data-scheme="dark"` counterpart: a per-project colour's whole job is
+     to read as the same identity everywhere it appears, and the console
+     theme's dark canvas is what both schemes are judged against here
+     (see console.css's own status/supporting hues for the same register). */
+  --bee-hub-project-1: #E88273;
+  --bee-hub-project-2: #E8C973;
+  --bee-hub-project-3: #C1E873;
+  --bee-hub-project-4: #7AE873;
+  --bee-hub-project-5: #73E8B1;
+  --bee-hub-project-6: #73D8E8;
+  --bee-hub-project-7: #7392E8;
+  --bee-hub-project-8: #9A73E8;
+  --bee-hub-project-9: #E073E8;
+  --bee-hub-project-10: #E873A9;
 }
 .bee-hub { margin-bottom: var(--space-4); }
 /* board-liveness-3: the live strip's own dense-row idiom, one row per live
@@ -1926,14 +2108,65 @@ html[data-scheme="dark"] .bee-hub-theme {
 .bee-strip__label { font-weight: var(--weight-strong); color: var(--color-text); }
 .bee-strip__meta { color: var(--color-text-muted); }
 .bee-strip__row--unresolved .bee-strip__meta { color: var(--color-danger); }
-/* kanban-columns D1/D12: five explicit tracks in the board's own left-to-
-   right column order (Todo, In Progress, Review, Compound, Finished) rather
-   than `repeat(auto-fit, minmax(260px, 1fr))` — that auto-fit sizing was
-   tuned for three equal columns and wraps badly once four of the five are
-   dense row lists needing far less width than the one that still renders
-   cards. In Progress keeps the wider, card-shaped track; the four row
-   columns share a narrower one. */
+/* kanban-columns D1/D12, kanban-columns-archive, console-theme-kanban
+   ctk-8: five explicit tracks in the board's own left-to-right column
+   order (Todo, In Progress, Review, Compound, Ready to merge) rather than
+   `repeat(auto-fit, minmax(260px, 1fr))` -- that auto-fit sizing was tuned
+   for three equal columns and wraps badly once four of the five are dense
+   row lists needing far less width than the one that still renders cards.
+   In Progress keeps the wider, card-shaped track; the four row columns
+   share a narrower one. Finished is still not a track here:
+   kanban-columns-archive folds it into `.bee-hub__archive`, a collapsed
+   bar rendered after this grid closes rather than inside it (see
+   [`bee_hub_archive_bar`]) -- so the fifth track is Ready to merge, not
+   the archive. */
 .bee-hub__groups { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.6fr) minmax(200px, 1fr) minmax(200px, 1fr) minmax(200px, 1fr); gap: var(--space-4); }
+/* Column header (console-theme-kanban ctk-5): status dot, label,
+   optional waiting chip, right-aligned mono count. 48px tall, 16px side
+   padding, 10px gap between items. */
+.bee-hub__group-header { display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 16px; margin: 0; box-sizing: border-box; }
+.bee-hub__group-dot { width: 7px; height: 7px; border-radius: var(--radius-pill); flex: none; box-shadow: var(--status-glow); }
+.bee-hub__group[data-hub-group="todo"] .bee-hub__group-dot { background: var(--color-accent-alt-1); color: var(--color-accent-alt-1); }
+.bee-hub__group[data-hub-group="in-progress"] .bee-hub__group-dot { background: var(--color-accent-alt-2); color: var(--color-accent-alt-2); }
+.bee-hub__group[data-hub-group="review"] .bee-hub__group-dot { background: var(--color-accent-alt-3); color: var(--color-accent-alt-3); box-shadow: none; }
+/* console-theme-kanban ctk-8 re-maps the lane hues now that Ready to
+   merge exists as a column of its own: Compound takes the idle slot
+   (`--color-accent-alt-5`) and Ready to merge takes the green slot
+   (`--color-accent-alt-4`) the token was named for. The digest gives idle
+   no glow, so Compound drops it exactly as In Review already had. The
+   archive bar keeps no lane hue at all -- it is chrome, not a lane, and
+   its own `.bee-hub__archive-label` already reads in `--color-text-muted`;
+   the `finished` dot rule that used to sit here went with it, having had
+   no element to paint since kanban-columns-archive folded that column
+   into a `<details>` with no dot. */
+.bee-hub__group[data-hub-group="compound"] .bee-hub__group-dot { background: var(--color-accent-alt-5); color: var(--color-accent-alt-5); box-shadow: none; }
+.bee-hub__group[data-hub-group="ready-to-merge"] .bee-hub__group-dot { background: var(--color-accent-alt-4); color: var(--color-accent-alt-4); }
+.bee-hub__group-label { font-family: var(--font-mono); font-size: var(--type-label-size); font-weight: var(--type-label-weight); letter-spacing: var(--type-label-tracking); text-transform: uppercase; color: var(--color-text); line-height: 1; }
+.bee-hub__group-waiting { font-family: var(--font-mono); font-size: var(--type-tag-size); font-weight: var(--type-tag-weight); color: var(--color-accent-alt-2); background: color-mix(in srgb, var(--color-accent-alt-2) 10%, transparent); padding: 2px 6px; border-radius: var(--radius-pill); line-height: 1; white-space: nowrap; }
+.bee-hub__group-count { margin-left: auto; font-family: var(--font-mono); font-size: var(--type-tag-size); font-weight: var(--type-tag-weight); opacity: 0.6; color: var(--color-text); line-height: 1; }
+/* kanban-columns-archive: the folded Finished bar — a native `<details>`
+   (no JS) spanning the full board width beneath `.bee-hub__groups` rather
+   than sitting in it as a fifth track. `data-hub-group`/`data-hub-count`
+   stay on this element exactly as they sat on the old `.bee-hub__group`
+   div, so every existing assertion pinning that substring still resolves;
+   its open body reuses `.bee-hub__cards` (via `bee_hub_group_body`) so the
+   rows read exactly like the retired Finished column did. The summary
+   states the group's true total even while closed, per
+   `docs/specs/bee-cockpit.md`'s "collapsing a list is never allowed to
+   understate what it holds". */
+.bee-hub__archive { margin-top: var(--space-4); border-top: var(--border-width-hairline) solid var(--color-border); }
+.bee-hub__archive-summary { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-3) var(--space-2); cursor: pointer; list-style: none; }
+.bee-hub__archive-summary::-webkit-details-marker { display: none; }
+.bee-hub__archive-summary:focus-visible { outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }
+.bee-hub__archive-label { font-family: var(--font-mono); font-size: var(--type-label-size); font-weight: var(--type-label-weight); letter-spacing: var(--type-label-tracking); text-transform: uppercase; color: var(--color-text-muted); }
+.bee-hub__archive-summary .fg-chip { margin-left: auto; }
+/* The digest's archive-expand curve (140ms on `cubic-bezier(0.25, 0.46,
+   0.45, 0.94)`) has no exact duration token in console.css (only 120/150/
+   220/250ms are tokenised) — `--motion-settle` is the nearest, paired with
+   `--ease-standard`, the token that already carries that exact curve. */
+.bee-hub__archive-summary .bee-hub__chev { transition: transform var(--motion-settle) var(--ease-standard); }
+.bee-hub__archive[open] .bee-hub__archive-summary .bee-hub__chev { transform: rotate(90deg); }
+.bee-hub__archive-body { padding: 0 var(--space-2) var(--space-3); }
 /* hub-fallbacks: a grid/flex item's own default `min-width: auto` sizes it
    to its content's min-content width — normally harmless, but a clamped
    `.bee-hub__desc` below is `white-space: nowrap` at its own min-content
@@ -1949,7 +2182,20 @@ html[data-scheme="dark"] .bee-hub-theme {
    background, radius, padding) so the card's own `<a>` and its terminal
    badge `<nav>` both land inside one painted box instead of the badges
    sitting as a bare row underneath it — see `bee_hub_card`'s doc comment. */
-.bee-hub__shell { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+/* console-theme-kanban ctk-6: the shell drops `.fg-card`'s own uniform
+   `--card-pad` so each band of the console card anatomy can carry the
+   digest's own asymmetric padding (header 14px sides / 12px top / 10px
+   bottom, meta block 14px sides / 8px vertical). `.fg-card` still paints
+   the box itself -- its border, its `--card-radius` (10px, the digest's
+   card radius) and its `--card-elevation` (one soft 1px shadow, the
+   digest's near-flat elevation) already ARE the console values, so
+   nothing here restates them. The 14px/10px/8px/6px steps are not on the
+   `--space-*` scale (4/8/12/16/24) and are the digest's own half-step
+   card metrics, so they stay raw structural geometry, exactly as the
+   column header's 48px/16px/10px/7px did in ctk-5. `gap` drops to 0
+   because the bands now own their own separation (a hairline, or their
+   own padding) rather than a shared column gap between them. */
+.bee-hub__shell { display: flex; flex-direction: column; gap: 0; min-width: 0; padding: 0; }
 /* card-collapse-inprogress: `.bee-hub__card` now names the `<details>`
    itself rather than the old whole-card `<a>` -- the flex-column layout
    moved to `.bee-hub__body` below (only that inner div still needs to
@@ -1963,14 +2209,28 @@ html[data-scheme="dark"] .bee-hub-theme {
    persisted state); the `list-style`/`::-webkit-details-marker` pair
    strips the browser's own default marker so only `.bee-hub__chev` below
    draws one. */
-.bee-hub__summary { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); cursor: pointer; list-style: none; }
+/* console-theme-kanban ctk-6: the console card's header row -- 12px top,
+   10px bottom, 14px sides, 10px between the title and the run-state badge
+   beside it, per the digest's card metrics. The chevron is pushed to the
+   right edge by its own auto margin rather than by `justify-content:
+   space-between`, which with three items (title, badge, chevron) would
+   have spread the badge away from the title it annotates instead of
+   keeping the pair together. Scoped to `.bee-hub__summary` so the archive
+   bar's own chevron (ctk-5) keeps sitting after its count chip. */
+.bee-hub__summary { display: flex; align-items: center; gap: 10px; padding: 12px 14px 10px; cursor: pointer; list-style: none; min-width: 0; }
+.bee-hub__summary .bee-hub__chev { margin-left: auto; }
 .bee-hub__summary::-webkit-details-marker { display: none; }
 .bee-hub__summary:focus-visible { outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }
-/* Card titles are list entries under a `.bee-panel__subhead` column header,
-   not headings of their own -- cap them at the same size as that header
-   (they'd otherwise inherit the larger `--type-heading-size` from
-   `.fg-card__title`, outweighing the column name above them). */
-.bee-hub__summary .fg-card__title { font-size: var(--type-heading-sm-size); }
+/* Card titles are list entries under a column header, not headings of
+   their own -- they'd otherwise inherit the far larger
+   `--type-heading-size` from `.fg-card__title` and outweigh the column
+   name above them. ctk-6 takes them to the digest's own card-title
+   register (11.5-12.5px semibold, tight leading and tracking) through the
+   `ui` role, which carries exactly those values; the column header above
+   is mono uppercase at `--type-label-size`, so the title still reads as
+   the larger of the two. `min-width: 0` keeps this flex item inside the
+   hub-fallbacks shrink chain. */
+.bee-hub__summary .fg-card__title { font-size: var(--type-ui-size); font-weight: var(--weight-strong); line-height: var(--type-ui-leading); letter-spacing: var(--type-ui-tracking); min-width: 0; overflow-wrap: anywhere; }
 /* Same rotation `.chap-folders__chev` uses (app.css) for its own disclosure
    chevron, keyed off the native `[open]` attribute a `<details>` toggles
    itself rather than that pattern's own `.is-open` class. */
@@ -1982,7 +2242,35 @@ html[data-scheme="dark"] .bee-hub-theme {
    whole-card `<a>` used. `min-width: 0` keeps the hub-fallbacks shrink
    chain intact now that `.bee-hub__desc` sits one flex level deeper than
    before. */
-.bee-hub__body { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+/* console-theme-kanban ctk-6: the meta block -- 14px sides, 6px between
+   rows, and its own hairline divider inset to those same 14px sides. The
+   divider is a `::before` INSIDE this padded box rather than a
+   `border-top` on it, which is what makes it inset by exactly the block's
+   own side padding instead of running edge to edge. Its 2px bottom margin
+   plus the block's own 6px row gap add up to the digest's 8px between the
+   divider and the first meta row, and the header row above already ends
+   with its own 10px bottom padding, so nothing is needed on this side of
+   it. */
+.bee-hub__body { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 0 14px 12px; }
+.bee-hub__body::before { content: ""; display: block; height: var(--border-width-hairline); background: var(--color-border); margin-bottom: 2px; }
+/* ctk-6: the branch row -- the meta block's own first line, the digest's
+   fork glyph plus the branch name in the MONO face at its small size
+   (`--type-micro-size`, 10px, inside the digest's 9.5-10.5px branch-line
+   band), truncated with an ellipsis rather than wrapped so a long branch
+   never grows the card. Rendered only where a worktree exists; see
+   `bee_hub_card`'s `branch_html` for why "Main" renders no row at all. */
+.bee-hub__branch { display: flex; align-items: center; gap: var(--space-1); min-width: 0; color: var(--color-text-muted); }
+.bee-hub__branch svg { flex: none; }
+.bee-hub__branch-name { font-family: var(--font-mono); font-size: var(--type-micro-size); line-height: var(--type-micro-leading); letter-spacing: var(--type-micro-tracking); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ctk-6: the console card's footer, set off by a hairline above it -- the
+   activity glyph and its label on the left, the relative time pushed to
+   the right edge by its own auto margin, and the live pulse dot in
+   between where `bee_hub_is_working_now` already put it. The time reads in
+   the mono face, as every timestamp in the digest's own footers does. */
+.bee-hub__footer { display: flex; align-items: center; gap: var(--space-1); min-width: 0; margin-top: 2px; padding-top: 8px; border-top: var(--border-width-hairline) solid var(--color-border); color: var(--color-text-subtle); font-size: var(--type-micro-size); line-height: var(--type-micro-leading); }
+.bee-hub__footer svg { flex: none; }
+.bee-hub__activity-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bee-hub__activity-time { margin-left: auto; flex: none; font-family: var(--font-mono); letter-spacing: var(--type-micro-tracking); }
 /* D4: the feature-detail link row -- the one place the card still reaches
    its own detail page now that the `<details>` can no longer be that link
    itself. */
@@ -1996,15 +2284,45 @@ html[data-scheme="dark"] .bee-hub-theme {
 /* card-badge-inside: cancels the shared badge-nav class's own full-width
    flex-basis and right/bottom padding (app.css) for this context,
    replacing them with a hairline top rule that separates the badges from
-   the card's content inside the shared shell. */
-.bee-hub__badges { border-top: var(--border-width-hairline) solid var(--color-border); padding: var(--space-2) 0 0 0; flex: 0 0 auto; }
-.bee-hub__progress-label { margin: 0; font-size: var(--type-caption-size); color: var(--color-text-subtle); }
+   the card's content inside the shared shell.
+   ctk-6: the shell no longer carries `--card-pad` of its own, so the side
+   padding this used to inherit from it is now stated here -- at the same
+   14px the header and meta block above use, so the badges line up with
+   the card's own content rather than sitting flush to its border. */
+.bee-hub__badges { border-top: var(--border-width-hairline) solid var(--color-border); padding: var(--space-2) 14px; flex: 0 0 auto; }
+/* ctk-11: the quiet group's own nav, inside the card's expandable body
+   rather than at the shell's foot -- so it wants the body's own flow, not
+   `.bee-hub__badges`' hairline-and-side-padding foot treatment (the body
+   already pads itself). It keeps the shared badge-nav markup, and therefore
+   that shared class's flex layout, and only cancels its full-width basis
+   and outer padding so it sits in the body like every other line there.
+   (The shared class is deliberately not named in this comment: several
+   guards assert the board's own inline CSS mentions no badge-container
+   class, so a page with no badges says nothing about badges anywhere.) */
+.bee-hub__quiet-badges { padding: 0; flex: 0 0 auto; }
+/* ctk-11: the honesty line that rides beside the collapsed card's active
+   badges -- muted and small, because it is a caveat on the badges above it,
+   never a signal of its own. It carries the foot's hairline and side
+   padding when it stands alone (every session quiet, so there is no badge
+   nav to draw that rule), and drops both when it follows the nav, which has
+   already drawn them. */
+.bee-hub__quiet-note { border-top: var(--border-width-hairline) solid var(--color-border); margin: 0; padding: var(--space-2) 14px; color: var(--color-text-muted); }
+.bee-hub__badges + .bee-hub__quiet-note { border-top: 0; padding-top: 0; }
+/* ctk-6: the cell-count line is the digest's counts slot -- mono, at the
+   digest's 10-10.5px meta size. `bee_hub_card` renders no markup here at
+   all for a feature with no cells, so this line never states a zeroed
+   division artifact -- a guarantee asserted page-wide against the exact
+   literal, which is why this comment does not spell it either. */
+.bee-hub__progress-label { margin: 0; font-family: var(--font-mono); font-size: var(--type-tag-size); letter-spacing: var(--type-tag-tracking); color: var(--color-text-muted); }
 .bee-hub__reason { font-style: italic; }
 /* kanban-live-signals D2: the run_state badge rides in the collapsed
    `<summary>` beside the title (see `bee_hub_card`'s own doc comment) --
    the same `.fg-chip` tone modifiers every other badge on this board
-   already uses, never a palette of its own. */
-.bee-hub__run-state { margin-left: var(--space-2); }
+   already uses, never a palette of its own.
+   ctk-6: the header row's own 10px flex gap now does the spacing this
+   used to state as a margin, so all this rule still owes the badge is a
+   refusal to shrink when the title beside it is long. */
+.bee-hub__run-state { flex: none; }
 /* kanban-live-signals D1: a small "working now" dot beside the Last
    activity line -- `.fg-status__dot`'s own sizing (components.css) plus a
    gentle pulse animation, since a plain static dot would read identically
@@ -2028,14 +2346,56 @@ html[data-scheme="dark"] .bee-hub-theme {
    one-line idiom rather than the full `.bee-hub__card` shape only In
    Progress still keeps; plus the nested-details toggle
    ([`bee_hub_finished_rows`]) that pages each of the four ten rows at a
-   time. */
-.bee-hub__row { display: block; color: var(--color-text); font-size: var(--type-body-sm-size); text-decoration: none; padding: var(--space-1) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); overflow-wrap: anywhere; }
+   time.
+   console-theme-kanban ctk-6 gives these rows the console treatment at
+   ROW density and nothing more: the project identity swatch, the title,
+   and (Finished only) the ship time. Deliberately no branch line and no
+   relative time — the user chose density for these three columns, this
+   renderer is handed neither value today, and plumbing a field through
+   only to hide it on most rows is exactly what D2 argues against. The
+   row becomes a flex line so the ship time can sit at the right edge on
+   its own auto margin instead of on a float, which took the time out of
+   flow and let a long title run underneath it. `--density-row-pad-y` is
+   the theme's own row rhythm, the token this row's hand-picked
+   `--space-1` predates.
+   ctk-9/ctk-10: the row reads as ONE continuous text run — neither two
+   columns nor a cut line. Before ctk-9 the project span was `flex: none`
+   while the title was a bare text node, so the title became a second flex
+   item with its own narrow box and wrapped inside it — a long title
+   stacked into three or four ragged lines beside a lonely project chip.
+   ctk-9 answered that with the card's branch-line idiom
+   (`.bee-hub__branch-name`): an element of its own that takes the leftover
+   width and truncates with an ellipsis — which cut titles the user wants
+   to read in full. ctk-10 keeps the column fix and drops the cut: the row
+   stops being a flex container at all and becomes ordinary block-level
+   text flow, so the project chip (still `inline-flex`, for its 6px
+   identity dot), the title and the ship time are inline content in one run
+   that uses the column's full width and wraps onto further lines. Nothing
+   here may truncate — no `text-overflow`, no `white-space: nowrap`.
+   `overflow-wrap: anywhere` comes back with the wrapping: it breaks the
+   one unbroken slug that would otherwise overflow, and (unlike
+   `break-word`) it also shrinks the row's min-content width, which is what
+   the `min-width: 0` chain up through `.bee-hub__cards`/`.bee-hub__group`
+   into the grid's own `minmax(200px, 1fr)` tracks needs to keep a long
+   title shrinking the text instead of growing the column (the trap
+   `.bee-hub__slug` above records). The ship time trails the text in flow
+   rather than riding `margin-left: auto`: a wrapped run has no single
+   right edge for a floated corner to anchor to. */
+.bee-hub__row { display: block; min-width: 0; overflow-wrap: anywhere; color: var(--color-text); font-size: var(--type-body-sm-size); text-decoration: none; padding: var(--density-row-pad-y) var(--space-2); border-bottom: var(--border-width-hairline) solid var(--color-border); }
 .bee-hub__row:hover { color: var(--color-action); }
 /* cross-board D5/D10: the cross-project board's own project label and ship
    time on a Finished row — absent on every per-project board row, which
-   passes neither and renders unchanged. */
-.bee-hub__row-project { color: var(--color-text-subtle); font-size: var(--type-caption-size); }
-.bee-hub__row-time { color: var(--color-text-subtle); font-size: var(--type-caption-size); float: right; }
+   passes neither and renders unchanged.
+   ctk-6: the project label leads with the digest's square lane swatch in
+   the project's own identity hue, drawn as a `::before` on the label
+   itself rather than as a second element, so the dense row's markup is
+   untouched (`bee_hub_finished_row` still emits exactly a link, its
+   project span and its time) and the swatch can never be read out as
+   content — it is the same fact the label beside it already says in
+   words. `--radius-xs` is 2px, the digest's own square-swatch radius. */
+.bee-hub__row-project { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--color-text-subtle); font-size: var(--type-caption-size); }
+.bee-hub__row-project::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: var(--radius-xs); background: currentColor; }
+.bee-hub__row-time { color: var(--color-text-subtle); font-family: var(--font-mono); font-size: var(--type-micro-size); letter-spacing: var(--type-micro-tracking); }
 .bee-hub__more { margin-top: var(--space-1); }
 .bee-hub__more-summary { cursor: pointer; list-style: none; color: var(--color-text-subtle); font-size: var(--type-caption-size); padding: var(--space-1) var(--space-2); }
 .bee-hub__more-summary::-webkit-details-marker { display: none; }
@@ -2067,13 +2427,14 @@ html[data-scheme="dark"] .bee-hub-theme {
    carries no colour of its own; a per-project board card never gets a
    `--pN` modifier at all, so it never gets a border or a colour here. */
 .bee-hub__project { margin: 0; font-size: var(--type-caption-size); }
-/* project-color-identity: the worktree half of the project line reads
-   muted rather than the project's own accent colour -- the accent already
-   does one job (telling projects apart at a glance) and a second coloured
-   run of text on the same short line would fight it for attention, so the
-   worktree state stays the same subdued tone `.bee-hub__slug` already
-   uses elsewhere on this card. */
-.bee-hub__project-worktree { color: var(--color-text-subtle); }
+/* project-color-identity kept the worktree state muted rather than
+   accented, because the project accent already does one job (telling
+   projects apart at a glance) and a second coloured run on the same short
+   line would fight it for attention. ctk-6 moved that state off this line
+   entirely and onto the card's own `.bee-hub__branch` row above, which
+   carries the same reasoning forward: it reads `--color-text-muted`, never
+   `--project-accent`, so the one coloured thing on a card stays the
+   project it belongs to. */
 .bee-hub__shell--p1 { --project-accent: var(--bee-hub-project-1); }
 .bee-hub__shell--p2 { --project-accent: var(--bee-hub-project-2); }
 .bee-hub__shell--p3 { --project-accent: var(--bee-hub-project-3); }
@@ -2123,7 +2484,12 @@ html[data-scheme="dark"] .bee-hub-theme {
 .bee-panel__list { display: flex; flex-direction: column; gap: var(--space-2); }
 .bee-severity--p1 { font-weight: var(--weight-strong); }
 .bee-asof { color: var(--color-text-subtle); font-size: var(--type-body-sm-size); }
-.bee-progress { height: 8px; border-radius: var(--radius-pill); background: var(--color-surface-sunken); overflow: hidden; }
+/* ctk-6: the cell-count bar reads at the console's own hairline register
+   rather than the 8px slab it was -- the digest's board carries no chunky
+   meters, and the counts line beside it is what states the actual
+   numbers. Like the count line, `bee_hub_card` renders it not at all when
+   the feature has no cells. */
+.bee-progress { height: 3px; border-radius: var(--radius-pill); background: var(--color-surface-sunken); overflow: hidden; }
 .bee-progress__bar { height: 100%; background: var(--color-success); }
 .bee-done-summary:focus-visible { outline: var(--focus-width) solid var(--focus-color); outline-offset: var(--focus-offset); }
 /* feature-hub-2: the feature detail page's own header, chip row and
@@ -2514,8 +2880,9 @@ fn bee_feature_hub_section(
     bee_render_hub_section(project, &placements, &snapshot.backlog.pbis, feature_panes)
 }
 
-/// One feature already sorted into one of the feature hub's five columns
-/// (kanban-columns D1) by [`bee_classify_features`] -- the render inputs
+/// One feature already sorted into one of the feature hub's columns
+/// (kanban-columns D1, grown to five columns plus the folded archive by
+/// console-theme-kanban ctk-8) by [`bee_classify_features`] -- the render inputs
 /// [`bee_hub_card`] or [`bee_hub_finished_row`] need, captured once so the
 /// merge step (`bee_cross_project_features_section`) never re-touches
 /// `BeeSnapshot`. The former `Waiting` variant is gone (D1); the feature it
@@ -2523,8 +2890,15 @@ fn bee_feature_hub_section(
 /// set to its `Waiting on you — ` line (D5, D7, D8). `Review`, `Compound`
 /// and `Todo` share `BeeHubFinishedData` with `Finished` since all four
 /// render through the same dense row (D12) and need nothing beyond a
-/// feature name and its docs.
+/// feature name and its docs -- and so does `ReadyToMerge`
+/// (console-theme-kanban ctk-8), which is a dense-row column like them:
+/// the full card anatomy stays In Progress's alone.
+///
+/// The variants are listed in [`bee_classify_features`]'s own test order,
+/// so `ReadyToMerge` leads -- see that function for why it must be tested
+/// ahead of `InProgress`.
 enum BeeHubPlacement {
+    ReadyToMerge(BeeHubFinishedData),
     InProgress(BeeHubCardData),
     Finished(BeeHubFinishedData),
     Review(BeeHubFinishedData),
@@ -2592,8 +2966,9 @@ struct BeeHubFinishedData {
 /// no filesystem read of its own. Iteration order matches the section this
 /// used to render directly: `snapshot.phase_board` sorted by feature name,
 /// then every archived feature not already placed, sorted by name. Tested
-/// in D11's fixed order: In Progress, then Finished, then Review, then
-/// Compound, then Todo.
+/// in D11's fixed order, which console-theme-kanban ctk-8 extends at the
+/// front: Ready to merge, then In Progress, then Finished, then Review,
+/// then Compound, then Todo.
 /// (merged-worktree-not-live) bee's own terminal phase SET, not the single
 /// value `"compounding-complete"` this hub used to test alone: bee's write
 /// guard (`is_terminal_phase`) treats `{"idle", "compounding-complete"}` as
@@ -2697,9 +3072,42 @@ fn bee_classify_features(
             || archived_features.contains(f.feature.as_str());
         let finished_and_idle = is_finished && live == 0;
 
-        // (kanban-columns D11) Placement is tested in this fixed order: In
-        // Progress, Finished, Review, Compound, Todo.
-        if !finished_and_idle && has_live_work {
+        // (console-theme-kanban ctk-8) Ready to merge is the state where
+        // `bee worktree merge` is literally the next action, and it is
+        // backed by two values the store already holds -- never a
+        // synthesised merge-readiness verdict (CONTEXT.md D2): the `uat`
+        // gate approved in this feature's own `approved_gates`, and a
+        // worktree still granted to it and not yet merged (`worktree_bound`
+        // above, which already excludes `merged_pending` grants).
+        let uat_approved = f
+            .approved_gates
+            .as_ref()
+            .and_then(|g| g.uat)
+            .unwrap_or(false);
+        let ready_to_merge = uat_approved && worktree_bound;
+
+        // (kanban-columns D11, console-theme-kanban ctk-8) Placement is
+        // tested in this fixed order: Ready to merge, In Progress,
+        // Finished, Review, Compound, Todo.
+        //
+        // Ready to merge MUST be tested before In Progress, and the order
+        // is not cosmetic: an open worktree grant is itself one of
+        // `has_live_work`'s pulls (`worktree_bound`), and every Ready to
+        // merge feature has one by definition -- so In Progress would
+        // swallow every candidate first and this branch would never fire.
+        // Do not reorder it back.
+        //
+        // It keeps In Progress's own `!finished_and_idle` guard so a
+        // feature already in the archive still reads as Finished: the
+        // archive is the record that its work landed, and this change
+        // moves features out of In Progress only, never out of Finished.
+        if !finished_and_idle && ready_to_merge {
+            let docs = snapshot.feature_docs.get(f.feature.as_str()).cloned();
+            placements.push(BeeHubPlacement::ReadyToMerge(BeeHubFinishedData {
+                feature: f.feature.clone(),
+                docs,
+            }));
+        } else if !finished_and_idle && has_live_work {
             // In Progress absorbs the retired Waiting column (D5, D7): a
             // gate stop or a paused handoff no longer moves the feature to
             // a separate column, it only adds the `Waiting on you — ` line
@@ -2934,21 +3342,41 @@ fn bee_render_hub_section(
     let mut in_progress_entries: Vec<InProgressEntry> = Vec::new();
     let mut review_rows: Vec<String> = Vec::new();
     let mut compound_rows: Vec<String> = Vec::new();
+    let mut ready_to_merge_rows: Vec<String> = Vec::new();
     let mut finished_rows: Vec<String> = Vec::new();
     let mut todo_count = 0usize;
     let mut in_progress_count = 0usize;
+    let mut in_progress_waiting_count = 0usize;
     let mut review_count = 0usize;
     let mut compound_count = 0usize;
+    let mut ready_to_merge_count = 0usize;
     let mut finished_count = 0usize;
     let no_panes: Vec<TerminalPaneView> = Vec::new();
 
     for placement in placements {
         match placement {
+            BeeHubPlacement::ReadyToMerge(data) => {
+                ready_to_merge_count += 1;
+                ready_to_merge_rows.push(bee_hub_finished_row(
+                    "ready-to-merge",
+                    &bee_hub_feature_href(&project.id, &data.feature),
+                    &data.feature,
+                    data.docs.as_ref(),
+                    None,
+                    None,
+                    None,
+                ));
+            }
             BeeHubPlacement::InProgress(data) => {
                 in_progress_count += 1;
                 let panes = feature_panes
                     .get(data.feature.as_str())
                     .unwrap_or(&no_panes);
+                let is_waiting = data.reason.as_deref().is_some_and(|r| !r.is_empty())
+                    || panes.iter().any(|p| p.status == "blocked");
+                if is_waiting {
+                    in_progress_waiting_count += 1;
+                }
                 let key = bee_hub_in_progress_sort_key(
                     &data.feature,
                     data.last_activity.as_deref(),
@@ -3053,6 +3481,7 @@ fn bee_render_hub_section(
     let todo_cards = bee_hub_finished_rows(&todo_rows);
     let review_cards = bee_hub_finished_rows(&review_rows);
     let compound_cards = bee_hub_finished_rows(&compound_rows);
+    let ready_to_merge_cards = bee_hub_finished_rows(&ready_to_merge_rows);
     let finished_cards = bee_hub_finished_rows(&finished_rows);
 
     format!(
@@ -3063,14 +3492,23 @@ fn bee_render_hub_section(
     {in_progress_group}
     {review_group}
     {compound_group}
-    {finished_group}
+    {ready_to_merge_group}
   </div>
+  {archive_bar}
 </section>"#,
-        todo_group = bee_hub_group("Todo", "todo", todo_count, &todo_cards, "Nothing in Todo."),
+        todo_group = bee_hub_group(
+            "Todo",
+            "todo",
+            todo_count,
+            0,
+            &todo_cards,
+            "Nothing in Todo."
+        ),
         in_progress_group = bee_hub_group(
             "In Progress",
             "in-progress",
             in_progress_count,
+            in_progress_waiting_count,
             &in_progress_cards,
             "Nothing in progress."
         ),
@@ -3078,6 +3516,7 @@ fn bee_render_hub_section(
             "Review",
             "review",
             review_count,
+            0,
             &review_cards,
             "Nothing in Review."
         ),
@@ -3085,25 +3524,29 @@ fn bee_render_hub_section(
             "Compound",
             "compound",
             compound_count,
+            0,
             &compound_cards,
             "Nothing in Compound."
         ),
-        finished_group = bee_hub_group(
-            "Finished",
-            "finished",
-            finished_count,
-            &finished_cards,
-            "Nothing finished yet."
+        ready_to_merge_group = bee_hub_group(
+            "Ready to merge",
+            "ready-to-merge",
+            ready_to_merge_count,
+            0,
+            &ready_to_merge_cards,
+            "Nothing ready to merge."
         ),
+        archive_bar = bee_hub_archive_bar(finished_count, &finished_cards),
     )
 }
 
 /// The cross-project board's Features section
-/// (`docs/history/cross-board/CONTEXT.md` D1/D3/D4/D5/D7/D10, grown to five
-/// columns by kanban-columns D1/D9): runs [`bee_classify_features`] once
-/// per `(project, rollup)` pair -- the exact column rules the per-project
+/// (`docs/history/cross-board/CONTEXT.md` D1/D3/D4/D5/D7/D10, grown to four
+/// columns plus the folded Finished bar by kanban-columns D1/D9 and
+/// kanban-columns-archive): runs [`bee_classify_features`] once per
+/// `(project, rollup)` pair -- the exact column rules the per-project
 /// board applies to itself, D9's single shared classification rule -- then
-/// merges the results into five flat, multi-project columns instead of one
+/// merges the results into four flat, multi-project columns instead of one
 /// block per project (D4), labels every card and every dense row with its
 /// own project's name (D5), and orders and caps the merged Finished
 /// sequence per D10/D7: every feature with a ship time first, most recently
@@ -3113,13 +3556,15 @@ fn bee_render_hub_section(
 /// merge sorts again. Todo, Review and Compound carry no ship time of their
 /// own, so their rows merge in the same per-project, alphabetical-within-
 /// project order [`bee_classify_features`] already produces, exactly as
-/// In Progress's cards always have. The column counts beside each heading
+/// In Progress's cards always have. Ready to merge merges the same way
+/// (console-theme-kanban ctk-8). The column counts beside each heading
 /// are the sum across projects. Archived-feature names and D10 ship times
 /// come from `rollup.archived_features` (cross-board-1's `read_rollup`) --
 /// this function performs no filesystem read of its own. An empty
-/// `rollups` still renders the same five empty columns [`bee_hub_group`]
-/// always shows for a column with nothing in it; whether to call this at
-/// all when nothing qualifies (D9) is the caller's decision.
+/// `rollups` still renders the same four empty columns [`bee_hub_group`]
+/// always shows for a column with nothing in it, plus
+/// [`bee_hub_archive_bar`]'s own honest empty line for Finished; whether to
+/// call this at all when nothing qualifies (D9) is the caller's decision.
 ///
 /// `feature_panes` (card-terminals-1) is the already-resolved join
 /// (`server.rs::project_feature_panes`): for each project id, a map from
@@ -3187,10 +3632,13 @@ pub fn bee_cross_project_features_section(
     let mut in_progress_entries: Vec<InProgressEntry> = Vec::new();
     let mut review_rows: Vec<String> = Vec::new();
     let mut compound_rows: Vec<String> = Vec::new();
+    let mut ready_to_merge_rows: Vec<String> = Vec::new();
     let mut todo_count = 0usize;
     let mut in_progress_count = 0usize;
+    let mut in_progress_waiting_count = 0usize;
     let mut review_count = 0usize;
     let mut compound_count = 0usize;
+    let mut ready_to_merge_count = 0usize;
     let no_panes: Vec<TerminalPaneView> = Vec::new();
 
     // Classify every project's placements once; reused below both to build
@@ -3234,11 +3682,28 @@ pub fn bee_cross_project_features_section(
 
         for placement in placements {
             match placement {
+                BeeHubPlacement::ReadyToMerge(data) => {
+                    ready_to_merge_count += 1;
+                    ready_to_merge_rows.push(bee_hub_finished_row(
+                        "ready-to-merge",
+                        &bee_hub_feature_href(&project.id, &data.feature),
+                        &data.feature,
+                        data.docs.as_ref(),
+                        Some(&project.name),
+                        project_color,
+                        None,
+                    ));
+                }
                 BeeHubPlacement::InProgress(data) => {
                     in_progress_count += 1;
                     let panes = project_panes
                         .and_then(|m| m.get(data.feature.as_str()))
                         .unwrap_or(&no_panes);
+                    let is_waiting = data.reason.as_deref().is_some_and(|r| !r.is_empty())
+                        || panes.iter().any(|p| p.status == "blocked");
+                    if is_waiting {
+                        in_progress_waiting_count += 1;
+                    }
                     let key = bee_hub_in_progress_sort_key(
                         &data.feature,
                         data.last_activity.as_deref(),
@@ -3371,6 +3836,7 @@ pub fn bee_cross_project_features_section(
     let todo_cards = bee_hub_finished_rows(&todo_rows);
     let review_cards = bee_hub_finished_rows(&review_rows);
     let compound_cards = bee_hub_finished_rows(&compound_rows);
+    let ready_to_merge_cards = bee_hub_finished_rows(&ready_to_merge_rows);
     let finished_cards = bee_hub_finished_rows(&finished_rows);
     let read_errors_strip = bee_cross_project_read_errors_strip(rollups);
 
@@ -3383,15 +3849,24 @@ pub fn bee_cross_project_features_section(
     {in_progress_group}
     {review_group}
     {compound_group}
-    {finished_group}
+    {ready_to_merge_group}
   </div>
+  {archive_bar}
 </section>"#,
         read_errors_strip = read_errors_strip,
-        todo_group = bee_hub_group("Todo", "todo", todo_count, &todo_cards, "Nothing in Todo."),
+        todo_group = bee_hub_group(
+            "Todo",
+            "todo",
+            todo_count,
+            0,
+            &todo_cards,
+            "Nothing in Todo."
+        ),
         in_progress_group = bee_hub_group(
             "In Progress",
             "in-progress",
             in_progress_count,
+            in_progress_waiting_count,
             &in_progress_cards,
             "Nothing in progress."
         ),
@@ -3399,6 +3874,7 @@ pub fn bee_cross_project_features_section(
             "Review",
             "review",
             review_count,
+            0,
             &review_cards,
             "Nothing in Review."
         ),
@@ -3406,16 +3882,19 @@ pub fn bee_cross_project_features_section(
             "Compound",
             "compound",
             compound_count,
+            0,
             &compound_cards,
             "Nothing in Compound."
         ),
-        finished_group = bee_hub_group(
-            "Finished",
-            "finished",
-            finished_count,
-            &finished_cards,
-            "Nothing finished yet."
+        ready_to_merge_group = bee_hub_group(
+            "Ready to merge",
+            "ready-to-merge",
+            ready_to_merge_count,
+            0,
+            &ready_to_merge_cards,
+            "Nothing ready to merge."
         ),
+        archive_bar = bee_hub_archive_bar(finished_count, &finished_cards),
     )
 }
 
@@ -3455,7 +3934,17 @@ fn bee_hub_feature_cells<'a, 'b>(
 /// was rejected: it would also hide a feature whose interview really did
 /// stop for an answer and never went further, which is the case the Waiting
 /// group exists to catch.
+///
+/// (ctk-7) `BeeApprovedGates` also carries `uat`, and this walk deliberately
+/// does not scan it. `uat` is the acceptance door at merge time; whether an
+/// unapproved one should ALSO read as a `Waiting on you` stop is an open
+/// product question, and answering it by omission would silently flip every
+/// feature that has not been accepted yet into "waiting on the human". So
+/// `uat` is excluded here for the same reason `review` is excluded at the
+/// call site — a gate on its own schedule is not a blocking stop — and the
+/// exclusion stays deliberate until that question is actually decided.
 fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static str, &'static str)> {
+    // Four entries, not five: `uat` is intentionally absent — see above.
     const GATES: [(&str, &str); 4] = [
         ("context", "Explore"),
         ("shape", "Shape"),
@@ -3469,6 +3958,8 @@ fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static s
                 "shape" => g.shape,
                 "execution" => g.execution,
                 "review" => g.review,
+                // `uat` included: a gate outside GATES never reads as approved
+                // here, so it can neither be skipped past nor become a stop.
                 _ => None,
             })
             .unwrap_or(false)
@@ -3479,32 +3970,70 @@ fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static s
 }
 
 /// One group column of the feature hub (`bee_feature_hub_section`): a
-/// header naming the group and its true count, then its cards, or one
-/// honest empty line when the group holds nothing right now (bee-board-pm
-/// D5's "sections never disappear" rule) — an empty group renders its own
-/// wording, never a shared "Nothing here." that could not tell a reader
-/// which group came up empty.
+/// console column header (status dot in locked lane hue, uppercase mono label,
+/// optional waiting chip, right-aligned mono count) and its cards or one
+/// honest empty line (bee-board-pm D5).
 fn bee_hub_group(
     label: &str,
     key: &str,
     count: usize,
+    waiting_count: usize,
     cards_html: &str,
     empty_line: &str,
 ) -> String {
-    let body = if cards_html.is_empty() {
+    let body = bee_hub_group_body(cards_html, empty_line);
+    let waiting_chip = if waiting_count > 0 {
+        format!(r#"<span class="bee-hub__group-waiting">{waiting_count} waiting</span>"#)
+    } else {
+        String::new()
+    };
+    format!(
+        r#"<div class="bee-hub__group" data-hub-group="{key}" data-hub-count="{count}"><h4 class="bee-hub__group-header"><span class="bee-hub__group-dot" aria-hidden="true"></span><span class="bee-hub__group-label">{label}</span>{waiting_chip}<span class="bee-hub__group-count">{count}</span></h4>{body}</div>"#,
+        key = key,
+        count = count,
+        label = esc(label),
+        waiting_chip = waiting_chip,
+        body = body,
+    )
+}
+
+/// A hub group's body — its cards, or its own honest empty line
+/// (bee-board-pm D5) when it holds nothing — factored out of
+/// [`bee_hub_group`] so [`bee_hub_archive_bar`] renders the folded
+/// Finished bar's open content through the exact same path rather than
+/// duplicating it.
+fn bee_hub_group_body(cards_html: &str, empty_line: &str) -> String {
+    if cards_html.is_empty() {
         format!(r#"<p class="fg-empty">{}</p>"#, esc(empty_line))
     } else {
         format!(
             r#"<div class="bee-hub__cards">{cards_html}</div>"#,
             cards_html = cards_html
         )
-    };
+    }
+}
+
+/// The Finished group's own collapsed bar (kanban-columns-archive, plan
+/// phase 3 + CONTEXT.md's carried Finished question): folds what used to
+/// be the board's fifth grid column into a `<details>` spanning the full
+/// board width, rendered right after `.bee-hub__groups` closes in both
+/// [`bee_render_hub_section`] and [`bee_cross_project_features_section`]
+/// rather than as a track inside it. The summary states the group's true
+/// total even while collapsed — `docs/specs/bee-cockpit.md`'s "collapsing
+/// a list is never allowed to understate what it holds" — and
+/// `data-hub-group`/`data-hub-count` stay on this element exactly as they
+/// sat on the old `.bee-hub__group` div, so every existing assertion
+/// pinning that substring still resolves. Opening it reveals precisely
+/// what the retired Finished column rendered: the same `cards_html` this
+/// is handed, already paged ten-at-a-time by its caller via
+/// [`bee_hub_finished_rows`]/[`bee_hub_finished_more`] — this function
+/// never touches ordering or paging, only where the result lands on the
+/// page.
+fn bee_hub_archive_bar(count: usize, cards_html: &str) -> String {
     format!(
-        r#"<div class="bee-hub__group" data-hub-group="{key}" data-hub-count="{count}"><h4 class="bee-panel__subhead">{label} <span class="fg-chip fg-chip--neutral">{count}</span></h4>{body}</div>"#,
-        key = key,
+        r#"<details class="bee-hub__archive" data-hub-group="finished" data-hub-count="{count}"><summary class="bee-hub__archive-summary"><span class="bee-hub__archive-label">ARCHIVE</span><span class="fg-chip fg-chip--neutral">{count}</span><span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__archive-body">{body}</div></details>"#,
         count = count,
-        label = esc(label),
-        body = body,
+        body = bee_hub_group_body(cards_html, "Nothing finished yet."),
     )
 }
 
@@ -3630,6 +4159,31 @@ fn bee_cross_project_board_project_colors<'a>(
 /// [`bee_hub_deferred_badge`] in the card's own body -- never the
 /// `<summary>`, whose content model cannot nest a `<details>` the way that
 /// badge's click-to-reveal detail needs.
+///
+/// console-theme-kanban ctk-6 rebuilds the card's ANATOMY onto the console
+/// shape without threading a single new field: everything below is still
+/// exactly what [`BeeHubCardData`] already carried here. Two things move.
+/// `worktree_label` leaves the project/slug subtitle and becomes the card's
+/// own mono BRANCH ROW in the meta block, rendered only where a worktree
+/// actually exists (`"Main"` names its absence and so renders no row --
+/// D2); the subtitle keeps the project name / slug alone, and a title-less
+/// per-project card now renders no subtitle at all rather than one holding
+/// only a worktree word. And `last_activity` leaves its bare paragraph for
+/// a FOOTER set off by a hairline: activity glyph, label, the same pulse
+/// dot, and the relative time on the right. The cell-count line
+/// (`progress_html`) keeps its own "no markup at all when `total == 0`"
+/// rule -- a card with no cells states nothing rather than `0/0`.
+///
+/// What the console screenshots show and this card deliberately does NOT
+/// render, because bee's store holds no such value and D2 forbids inventing
+/// one: a pull-request number or state, a comment count, an avatar stack, a
+/// CI checks line, and any merge-readiness verdict. Ready-to-merge is said
+/// by the column a feature sits in, never by a chip and never by the
+/// screenshots' `Merge PR` button -- the cockpit is read-only
+/// (`docs/specs/bee-cockpit.md`) and nothing on this card writes. A
+/// feature-level test verdict is absent for a second reason on top of that
+/// one: `BeeCell.tests` is a PER-CELL value with no feature-level
+/// aggregate, so it belongs on the cell page, not on a board card.
 struct BeeHubCardArgs<'a> {
     project_id: &'a str,
     feature: &'a str,
@@ -3693,23 +4247,57 @@ fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
     // separator -- the slug is already the card's title, and hub-fallbacks
     // forbids a second copy of it, but that is no reason for the card to
     // go without the one thing the subtitle now carries.
+    // console-theme-kanban ctk-6: the worktree half is GONE from this
+    // subtitle -- it is now the card's own mono branch row (`branch_html`
+    // below), the console anatomy's own meta-block slot for it, where a
+    // branch name reads as the code identifier it is instead of as a
+    // trailing clause on the project line. project-color-identity-3/4's
+    // reason for putting it here in the first place ("a per-project board
+    // still needs to say which of its features has an open worktree") is
+    // not weakened by the move: the branch row renders on BOTH boards,
+    // with or without a project label, so the card still says it -- and
+    // says it in one place rather than three arms of this match. What
+    // survives here is exactly what the subtitle was for before the
+    // worktree moved in: the project name on a cross-project board, the
+    // slug beside a human title on a per-project one, and nothing at all
+    // for a title-less per-project card (hub-fallbacks: its own title
+    // already IS the slug, and a second copy below would be a redundant
+    // subtitle).
     let subtitle_html = match project_label {
         Some(label) => format!(
-            r#"<div class="bee-hub__project">{label}<span class="bee-hub__project-worktree"> / {worktree}</span></div>"#,
+            r#"<div class="bee-hub__project">{label}</div>"#,
             label = esc(label),
-            worktree = esc(worktree_label),
         ),
         None => match title {
             Some(_) => format!(
-                r#"<div class="bee-hub__slug">{feature}<span class="bee-hub__project-worktree"> / {worktree}</span></div>"#,
+                r#"<div class="bee-hub__slug">{feature}</div>"#,
                 feature = esc(feature),
-                worktree = esc(worktree_label),
             ),
-            None => format!(
-                r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">{worktree}</span></div>"#,
-                worktree = esc(worktree_label),
-            ),
+            None => String::new(),
         },
+    };
+    // console-theme-kanban ctk-6 (D2): the branch row -- the console card's
+    // own meta-block first line, the fork glyph plus the branch in the mono
+    // face at the digest's small size, truncated rather than wrapped.
+    // D2's "only what the store backs" is what decides whether it renders
+    // at all: [`bee_hub_worktree_label`] answers with a branch name, the
+    // bare word `"worktree"` (a worktree with no branch recorded), or
+    // `"merged"` -- all three name a worktree that exists -- and with
+    // `"Main"` for the one case where the feature has NO worktree of its
+    // own. `"Main"` is therefore not a branch this card knows; it is the
+    // absence of one, and a row spelling it would be exactly the
+    // placeholder-for-a-missing-source D2 forbids. So `"Main"` renders no
+    // row at all, and every other spelling renders verbatim.
+    // The glyph is an inline aria-hidden stroke SVG in this file's existing
+    // icon idiom (see `agent_drawer_toggle`), keeping a purely decorative
+    // subtree out of the tab order and the accessible name.
+    let branch_html = if worktree_label.is_empty() || worktree_label == "Main" {
+        String::new()
+    } else {
+        format!(
+            r#"<div class="bee-hub__branch"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg><span class="bee-hub__branch-name">{worktree}</span></div>"#,
+            worktree = esc(worktree_label),
+        )
     };
     // card-collapse-inprogress D1/D2: the card's own name alone (its
     // CONTEXT title, or the slug fallback) is all the collapsed header
@@ -3757,15 +4345,28 @@ fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
     } else {
         String::new()
     };
-    let activity_html = match last_activity {
+    // console-theme-kanban ctk-6: the console card's own footer, set off by
+    // a hairline above it -- an activity glyph, its label, the live pulse
+    // dot where [`bee_hub_is_working_now`] already put it, and the relative
+    // time pushed to the right edge. The glyph is the digest's generic
+    // activity mark and deliberately NOT one of its check/warning variants:
+    // those encode a CI or test verdict, and this board has no such value
+    // to read (D2) -- the glyph says "activity", which is precisely what
+    // `last_activity` is. `bee_fmt_trace_time`'s formatting is unchanged,
+    // and an absent timestamp still renders its own honest line with no
+    // time beside it rather than a fabricated one.
+    let activity_glyph = r#"<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>"#;
+    let footer_html = match last_activity {
         Some(iso) => format!(
-            r#"<p class="bee-cell__meta">Last activity {}{pulse}</p>"#,
-            esc(&bee_fmt_trace_time(iso)),
+            r#"<div class="bee-hub__footer">{glyph}<span class="bee-hub__activity-label">Last activity</span>{pulse}<span class="bee-hub__activity-time">{when}</span></div>"#,
+            glyph = activity_glyph,
+            when = esc(&bee_fmt_trace_time(iso)),
             pulse = pulse_html,
         ),
         None => format!(
-            r#"<p class="bee-cell__meta">No activity recorded.{pulse}</p>"#,
-            pulse = pulse_html
+            r#"<div class="bee-hub__footer">{glyph}<span class="bee-hub__activity-label">No activity recorded.</span>{pulse}</div>"#,
+            glyph = activity_glyph,
+            pulse = pulse_html,
         ),
     };
     // kanban-live-signals D2: rendered in the collapsed `<summary>` itself
@@ -3814,12 +4415,15 @@ fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
     // `<nav>` at all. card-badge-inside: the extra `bee-hub__badges` class
     // draws the hairline rule that separates the badges from the card's
     // own content while both sit inside the shared `bee-hub__shell` box.
-    let terminal_badges_html = terminal_badges_nav(
-        project_id,
-        panes,
-        "Terminals in this checkout",
-        "bee-hub__badges",
-    );
+    // ctk-11 splits that nav in two (see `bee_hub_terminal_badge_groups`):
+    // only the working and blocked panes keep this sibling position, so a
+    // checkout running one agent beside four idle terminals spends its
+    // collapsed summary on the one that is doing something. The quiet
+    // group's own nav goes inside the `<details>` body below, and the note
+    // rides here beside the active badges so the collapsed card never
+    // understates how many sessions its checkout carries.
+    let (terminal_badges_html, quiet_badges_html, quiet_note_html) =
+        bee_hub_terminal_badge_groups(project_id, panes);
     // card-collapse-inprogress D1/D3/D6: a native `<details>` with no
     // `open` attribute renders every card collapsed on every page load,
     // with no persisted state and no JavaScript -- clicking the
@@ -3828,7 +4432,7 @@ fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
     // the top of the expandable body, since a `<details>`/`<summary>`
     // pair, unlike the old whole-card `<a>`, cannot itself be a link.
     format!(
-        r#"<div class="{shell_class}"><details class="bee-hub__card" data-hub-group="{group_key}"><summary class="bee-hub__summary">{title_html}{run_state_html}<span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/{pid}/_bee/feature/{feature_href}">Feature detail<span aria-hidden="true"> →</span></a>{subtitle_html}{desc_html}{progress_html}{reason_html}{blocked_reason_html}{deferred_html}{activity_html}</div></details>{terminal_badges_html}</div>"#,
+        r#"<div class="{shell_class}"><details class="bee-hub__card" data-hub-group="{group_key}"><summary class="bee-hub__summary">{title_html}{run_state_html}<span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/{pid}/_bee/feature/{feature_href}">Feature detail<span aria-hidden="true"> →</span></a>{subtitle_html}{desc_html}{branch_html}{progress_html}{reason_html}{blocked_reason_html}{deferred_html}{quiet_badges_html}{footer_html}</div></details>{terminal_badges_html}{quiet_note_html}</div>"#,
         shell_class = shell_class,
         group_key = group_key,
         title_html = title_html,
@@ -3837,12 +4441,15 @@ fn bee_hub_card(args: &BeeHubCardArgs<'_>) -> String {
         feature_href = esc(feature),
         subtitle_html = subtitle_html,
         desc_html = desc_html,
+        branch_html = branch_html,
         progress_html = progress_html,
         reason_html = reason_html,
         blocked_reason_html = blocked_reason_html,
         deferred_html = deferred_html,
-        activity_html = activity_html,
+        quiet_badges_html = quiet_badges_html,
+        footer_html = footer_html,
         terminal_badges_html = terminal_badges_html,
+        quiet_note_html = quiet_note_html,
     )
 }
 
@@ -3905,7 +4512,15 @@ fn bee_hub_project_bee_href(project_id: &str) -> String {
 /// [`bee_cross_project_board_project_colors`], built once by the caller and
 /// threaded down exactly as [`bee_hub_card`] receives it, never hashed
 /// separately here), so a project reads in one fixed colour everywhere it
-/// appears.
+/// appears. ctk-9/ctk-10: the name rides in its own `bee-hub__row-name`
+/// span rather than as a bare text node — ctk-9 needed an element to hang
+/// layout rules on, and ctk-10 keeps it because it is the address the
+/// wrapping guard pins. The name is never abbreviated here: the row is one
+/// continuous text run that wraps in full (see `.bee-hub__row` in
+/// [`bee_hub_style`]), and the row still carries the same full name as its
+/// `title` attribute for the hover reading. Both spellings run through
+/// [`esc`] — a feature title is free text from the store, and `esc`
+/// escapes `"` as well, which is what makes it safe in an attribute.
 #[allow(clippy::too_many_arguments)]
 fn bee_hub_finished_row(
     group_key: &str,
@@ -3942,9 +4557,10 @@ fn bee_hub_finished_row(
         None => String::new(),
     };
     format!(
-        r#"<a class="bee-hub__row" data-hub-group="{group_key}" href="{href}">{project_html}{name}{time_html}</a>"#,
+        r#"<a class="bee-hub__row" data-hub-group="{group_key}" href="{href}" title="{full}">{project_html}<span class="bee-hub__row-name">{name}</span>{time_html}</a>"#,
         group_key = group_key,
         href = href,
+        full = esc(name),
         project_html = project_html,
         name = esc(name),
         time_html = time_html,
@@ -6331,7 +6947,7 @@ pub const APP_CSS: &str = concat!(
     "\n",
     include_str!("../assets/atelier/editorial.css"),
     "\n",
-    include_str!("../assets/atelier/atelier.css"),
+    include_str!("../assets/atelier/console.css"),
     "\n",
     include_str!("../assets/app.css"),
 );
@@ -6464,6 +7080,14 @@ mod tests {
     /// backlog-groom-2 D1: a populated board renders exactly as before — the
     /// tab strip plus the cross-project section verbatim, never the empty
     /// state.
+    ///
+    /// console-theme-kanban (ctk-12): repaired, not weakened. The probe was
+    /// the bare class `fg-empty`, which stopped identifying the board's own
+    /// empty state the moment the project rail joined this page — the rail
+    /// renders its own `fg-empty` when no project is registered, which is
+    /// exactly the fixture here. The guarantee is unchanged; the assertion
+    /// now names the board's empty-state sentence, which is what it always
+    /// meant.
     #[test]
     fn home_page_with_populated_board_renders_kanban_section_unchanged() {
         let marker = r#"<div data-feature-hub="cross-project">MARKER-CONTENT</div>"#;
@@ -6485,7 +7109,7 @@ mod tests {
             "a populated cross-project section must render verbatim: {body}"
         );
         assert!(
-            !body.contains("fg-empty"),
+            !body.contains("No project here has a bee board yet."),
             "a populated board must not show the Kanban empty state: {body}"
         );
     }
@@ -6583,11 +7207,197 @@ mod tests {
         }
     }
 
-    /// projects-list-tidy: the Projects tab spends no line on a page
-    /// heading (the tab strip already says where you are), and a project
-    /// with agents running renders above one without — using the same
-    /// kind != "shell" filter as the row badges, so a shell-only project
-    /// stays in the idle partition.
+    /// console-theme-kanban (ctk-12), the cell's load-bearing claim:
+    /// retiring the Projects tab must make NOTHING it could reach
+    /// unreachable. Every element that tab rendered — the project rows with
+    /// their nested worktree children, terminal badges and unregister
+    /// forms; the folder-suggestions block; the registration form; and the
+    /// Unassigned group's presence card — has to come back on the Kanban
+    /// tab, beside the board rather than instead of it. One fixture carries
+    /// all five at once, because the failure this guards against is exactly
+    /// the one where four of them move and the fifth is forgotten.
+    #[test]
+    fn kanban_tab_rail_carries_everything_the_retired_projects_tab_could_reach() {
+        let parent = sample_project();
+        let mut branch = sample_project();
+        branch.id = "proj-1--wt--feature-x".into();
+        branch.name = "Proj One feature-x".into();
+        let projects = vec![
+            (parent, 3, vec![pane_with_status("working")]),
+            (branch, 1, Vec::new()),
+        ];
+        let suggestions = vec![ProjectSuggestion {
+            path: "/tmp/unregistered-folder".into(),
+            pane_count: 2,
+        }];
+        let body = home_page(
+            &projects,
+            true,
+            &suggestions,
+            None,
+            r#"<div data-feature-hub="cross-project">BOARD</div>"#,
+            HomeTab::Kanban,
+            &[],
+            None,
+            true,
+            &[],
+        );
+
+        // The board itself is still here — the rail joined the Kanban tab,
+        // it did not replace it.
+        assert!(
+            body.contains("BOARD"),
+            "the board must still render: {body}"
+        );
+        assert!(
+            body.contains(r#"<nav class="home-sidebar" aria-label="Projects">"#),
+            "the Kanban tab must render the project rail: {body}"
+        );
+
+        for (needle, what) in [
+            (r#"<ul class="proj-list">"#, "the project list"),
+            ("Proj One", "the project's own name"),
+            (
+                r#"class="proj-row proj-row--branch""#,
+                "the nested worktree child",
+            ),
+            ("feature-x", "the worktree child's branch name"),
+            (r#"href="/p/proj-1/""#, "the row's link to its project"),
+            (r#"class="proj-row__badges"#, "the row's terminal badges"),
+            (
+                r#"action="/api/projects/proj-1/unregister""#,
+                "the unregister form",
+            ),
+            ("Suggested projects", "the folder-suggestions block"),
+            ("/tmp/unregistered-folder", "the suggested folder's path"),
+            (
+                r#"<form class="proj-suggestion__register" method="post" action="/api/projects/register">"#,
+                "the one-press register form on a suggestion",
+            ),
+            (
+                r#"<form class="proj-add" method="post""#,
+                "the registration form",
+            ),
+            ("Unassigned agents", "the Unassigned group's presence card"),
+            (
+                r#"href="/_terminal/unassigned""#,
+                "the Unassigned group's link",
+            ),
+        ] {
+            assert!(
+                body.contains(needle),
+                "{what} must still be reachable from the Kanban tab's rail ({needle}): {body}"
+            );
+        }
+
+        // The registration form is the control the rail pins to its bottom,
+        // where the digest pins Settings — waggledance's settings already
+        // live as a gear in the topbar.
+        let foot_at = body
+            .find(r#"<div class="home-sidebar__foot">"#)
+            .expect("the rail must have a foot");
+        let form_at = body
+            .find(r#"<form class="proj-add""#)
+            .expect("the add form");
+        assert!(
+            foot_at < form_at,
+            "the registration form must be pinned in the rail's foot: {body}"
+        );
+    }
+
+    /// console-theme-kanban (ctk-12): the rail is navigation, and has to
+    /// behave like it. A named landmark, a real list under a real heading,
+    /// one row that says it is the current page, and no piece of meaning
+    /// carried by colour alone — the status dot is decorative by
+    /// construction and the words it summarises are the badge pills on the
+    /// row's own next line. Every control is an anchor, an input or a
+    /// button, so keyboard order is document order with nothing to trap it.
+    #[test]
+    fn project_rail_is_a_named_landmark_whose_current_row_and_dots_never_speak_by_colour_alone() {
+        let mut working = sample_project();
+        working.id = "proj-working".into();
+        let mut blocked = sample_project();
+        blocked.id = "proj-blocked".into();
+        let mut quiet = sample_project();
+        quiet.id = "proj-quiet".into();
+        let projects = vec![
+            (working, 1, vec![pane_with_status("working")]),
+            (blocked, 1, vec![pane_with_status("blocked")]),
+            (quiet, 1, Vec::new()),
+        ];
+        let rail = project_sidebar(&projects, false, &[], None);
+
+        assert!(
+            rail.starts_with(r#"<nav class="home-sidebar" aria-label="Projects">"#),
+            "the rail must be a navigation landmark with its own name: {rail}"
+        );
+        assert!(
+            rail.contains(r#"<h2 class="home-sidebar__group">Projects</h2>"#)
+                && rail.contains(r#"<ul class="proj-list">"#),
+            "the projects must stay a real list under a real heading: {rail}"
+        );
+        assert_eq!(
+            rail.matches(r#"aria-current="page""#).count(),
+            1,
+            "exactly one row in the rail may claim to be the current page: {rail}"
+        );
+        assert!(
+            rail.contains(
+                r#"<a class="home-sidebar__row home-sidebar__row--on" href="/?tab=kanban" aria-current="page">Board</a>"#
+            ),
+            "the current row must announce itself, not merely be filled with the accent: {rail}"
+        );
+
+        // Colour-only meaning: every dot is aria-hidden, and a dot only
+        // ever appears on a row that also prints its status as words.
+        assert_eq!(
+            rail.matches(r#"class="fg-status__dot proj-row__dot"#)
+                .count(),
+            2,
+            "a dot must render for the two rows with an agent pane, and only those: {rail}"
+        );
+        assert_eq!(
+            rail.matches("proj-row__dot--").count(),
+            2,
+            "every dot must carry a tone modifier: {rail}"
+        );
+        for tone in ["working", "blocked"] {
+            let dot = format!(
+                r#"<span class="fg-status__dot proj-row__dot proj-row__dot--{tone}" aria-hidden="true"></span>"#
+            );
+            assert!(
+                rail.contains(&dot),
+                "the {tone} dot must render, and must be aria-hidden: {rail}"
+            );
+            assert!(
+                rail.contains(&format!(">{tone}</span>")),
+                "the {tone} dot's meaning must also be present as words: {rail}"
+            );
+        }
+        assert!(
+            !rail.contains("proj-row__dot--idle"),
+            "the quiet project has no agent pane, so it must carry no dot at all: {rail}"
+        );
+
+        // Nothing in the rail is a div pretending to be a control: the only
+        // interactive elements are anchors, inputs and buttons.
+        assert!(
+            !rail.contains("onclick=") && !rail.contains(r##"href="#""##),
+            "the rail must carry no script-only or dead controls: {rail}"
+        );
+    }
+
+    /// projects-list-tidy: the project list spends no line on a page
+    /// heading (the rail's own group label already says what it is), and a
+    /// project with agents running renders above one without — using the
+    /// same kind != "shell" filter as the row badges, so a shell-only
+    /// project stays in the idle partition.
+    ///
+    /// console-theme-kanban (ctk-12): repaired at the list's new address.
+    /// `project_list_main` became [`project_sidebar`] when the Projects tab
+    /// was retired into the Kanban board's left rail; both guarantees this
+    /// pins survived that move intact, so the test moved with the subject
+    /// rather than being retired with the tab.
     #[test]
     fn project_list_drops_heading_and_floats_agent_active_projects_first() {
         let idle = sample_project();
@@ -6608,10 +7418,10 @@ mod tests {
             (idle, 3, vec![shell_pane]),
             (active, 5, vec![pane_with_status("working")]),
         ];
-        let html = project_list_main(&projects, false, &[], None);
+        let html = project_sidebar(&projects, false, &[], None);
         assert!(
             !html.contains("fg-pagehead__title"),
-            "the Projects tab must render no page heading: {html}"
+            "the project rail must render no page heading: {html}"
         );
         let two = html
             .find("Proj Two")
@@ -8238,12 +9048,16 @@ mod tests {
     /// awaiting your decision" and sat under Waiting on you.
     #[test]
     fn gate_stop_skips_a_gate_a_later_approval_already_passed() {
+        // (ctk-7) `uat` is not a parameter: this probe is about the
+        // four-gate walk, and `uat` must not participate in it. Both of its
+        // values are covered by `gate_stop_ignores_the_uat_gate_entirely`.
         let gates =
             |c: Option<bool>, s: Option<bool>, e: Option<bool>, r: Option<bool>| BeeApprovedGates {
                 context: c,
                 shape: s,
                 execution: e,
                 review: r,
+                uat: None,
             };
 
         // The reported shape: explore unstamped, but shape and execution
@@ -8278,6 +9092,39 @@ mod tests {
 
         // No record at all reads as nothing approved yet.
         assert_eq!(bee_gate_current_stop(None), Some(("context", "Explore")));
+    }
+
+    /// (ctk-7) The `uat` gate is readable off the store now, and this walk
+    /// must keep ignoring it. Whether an unapproved acceptance gate should
+    /// read as `Waiting on you` is an open product question; until it is
+    /// answered, adding the field changes no card's stop.
+    #[test]
+    fn gate_stop_ignores_the_uat_gate_entirely() {
+        let gates = |uat: Option<bool>| BeeApprovedGates {
+            context: Some(true),
+            shape: Some(true),
+            execution: Some(true),
+            review: Some(true),
+            uat,
+        };
+
+        // Everything through review approved: nothing is owed, whatever the
+        // acceptance gate says. An unapproved `uat` must NOT become a stop.
+        assert_eq!(bee_gate_current_stop(Some(&gates(Some(false)))), None);
+        assert_eq!(bee_gate_current_stop(Some(&gates(None))), None);
+        assert_eq!(bee_gate_current_stop(Some(&gates(Some(true)))), None);
+
+        // Nor may an approved `uat` supersede an earlier unapproved gate:
+        // the walk starts after the last approved gate in ITS order, and
+        // `uat` is not in that order.
+        let mid = BeeApprovedGates {
+            context: Some(true),
+            shape: Some(false),
+            execution: Some(false),
+            review: Some(false),
+            uat: Some(true),
+        };
+        assert_eq!(bee_gate_current_stop(Some(&mid)), Some(("shape", "Shape")));
     }
 
     /// (waiting-means-stopped-1) The bug this cell fixes: an unapproved
@@ -9532,6 +10379,12 @@ mod tests {
 
     /// (hub-finished-compact) A Finished row is exactly a name and a link —
     /// none of `bee_hub_card`'s chip, progress bar or activity markup.
+    /// ctk-9 moved the name into its own `bee-hub__row-name` span and put
+    /// the full name on the row's `title` attribute (ctk-10 keeps both, and
+    /// drops the truncation that first motivated the span); the guarantee
+    /// this test protects — a dense row carries the name, the link, and
+    /// nothing of the full card — is unchanged, so the expected literal is
+    /// repaired at the name's new address rather than loosened.
     #[test]
     fn bee_hub_finished_row_renders_only_a_name_and_link() {
         let row = bee_hub_finished_row(
@@ -9545,7 +10398,7 @@ mod tests {
         );
         assert_eq!(
             row,
-            r#"<a class="bee-hub__row" data-hub-group="finished" href="/p/proj-1/_bee/feature/shipped-feat">shipped-feat</a>"#
+            r#"<a class="bee-hub__row" data-hub-group="finished" href="/p/proj-1/_bee/feature/shipped-feat" title="shipped-feat"><span class="bee-hub__row-name">shipped-feat</span></a>"#
         );
         assert!(
             !row.contains("bee-hub__chips") && !row.contains("fg-chip") && !row.contains("bee-progress") && !row.contains("Last activity"),
@@ -9571,7 +10424,7 @@ mod tests {
         );
         assert_eq!(
             row,
-            r#"<a class="bee-hub__row" data-hub-group="todo" href="/p/proj-1/_bee/feature/todo-feat">todo-feat</a>"#
+            r#"<a class="bee-hub__row" data-hub-group="todo" href="/p/proj-1/_bee/feature/todo-feat" title="todo-feat"><span class="bee-hub__row-name">todo-feat</span></a>"#
         );
     }
 
@@ -9596,10 +10449,108 @@ mod tests {
             None,
             None,
         );
-        assert!(row.contains(">Human Title</a>"), "{row}");
+        // ctk-9: the title's address moved from a bare text node before
+        // `</a>` into its own `bee-hub__row-name` span (ctk-10 leaves that
+        // address alone, it only stops the span from cutting). Naming it in
+        // the expected literal keeps this as tight as `>Human Title</a>`
+        // was — a bare `>Human Title</span>` would also be satisfied by the
+        // project span beside it.
+        assert!(
+            row.contains(r#"<span class="bee-hub__row-name">Human Title</span>"#),
+            "{row}"
+        );
         assert!(
             !row.contains(">slug-feat<"),
             "the slug must not also render once a title exists: {row}"
+        );
+    }
+
+    /// (ctk-9, corrected by ctk-10) The dense row reads as ONE continuous
+    /// text run: the project chip and the title flow together across the
+    /// column's full width and wrap onto further lines when long — neither
+    /// the two-column layout ctk-9 removed nor the ellipsis ctk-9 put in
+    /// its place. The name still sits in its own element (that is the
+    /// address this guard pins) and the full text still rides the row's
+    /// `title` attribute for the hover reading. Free text from the store,
+    /// so the attribute is escaped like the visible text is.
+    #[test]
+    fn bee_hub_finished_row_wraps_its_full_title_instead_of_truncating_it() {
+        let docs = waggledance_core::bee::BeeFeatureDocs {
+            title: Some(r#"A "very" long <title> & then some"#.to_string()),
+            description: None,
+            docs: vec![],
+        };
+        let row = bee_hub_finished_row(
+            "todo",
+            "/p/proj-1/_bee/feature/long-feat",
+            "long-feat",
+            Some(&docs),
+            Some("Project A"),
+            Some(3),
+            None,
+        );
+        let escaped = "A &quot;very&quot; long &lt;title&gt; &amp; then some";
+        assert!(
+            row.contains(&format!(
+                r#"<span class="bee-hub__row-name">{escaped}</span>"#
+            )),
+            "the title keeps an element of its own, rendered in full: {row}"
+        );
+        assert!(
+            row.contains(&format!(r#" title="{escaped}">"#)),
+            "the full title must also ride the row's title attribute, escaped: {row}"
+        );
+        // The row still links to the detail page where the rest of the
+        // feature lives, and still carries its group key and project chip.
+        assert!(
+            row.contains(r#"href="/p/proj-1/_bee/feature/long-feat""#)
+                && row.contains(r#"data-hub-group="todo""#)
+                && row.contains(r#"<span class="bee-hub__row-project bee-hub__row-project--p3">"#),
+            "the row keeps its link, group key and project chip: {row}"
+        );
+
+        let css = bee_hub_style();
+        // Nothing in the dense row may cut its text: no rule on the row or
+        // any of its parts truncates, ellipsises or forbids the wrap.
+        for rule in css.split('}') {
+            let Some((selector, body)) = rule.split_once('{') else {
+                continue;
+            };
+            if !selector.contains(".bee-hub__row") {
+                continue;
+            }
+            assert!(
+                !body.contains("text-overflow")
+                    && !body.contains("ellipsis")
+                    && !body.contains("white-space: nowrap"),
+                "no dense-row rule may cut the title: {selector}{{{body}}}"
+            );
+        }
+        // The rules that make it one wrapping run: the row is ordinary
+        // block-level text flow (not a flex container handing each part its
+        // own box), and a single unbroken slug still breaks rather than
+        // overflowing the column.
+        let row_rule = css
+            .split(".bee-hub__row {")
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .expect("the .bee-hub__row rule must exist");
+        assert!(
+            row_rule.contains("display: block") && !row_rule.contains("display: flex"),
+            "the row must lay its parts out as inline text flow, not as flex columns: {row_rule}"
+        );
+        assert!(
+            row_rule.contains("overflow-wrap: anywhere"),
+            "a long unbroken token must break instead of overflowing the column: {row_rule}"
+        );
+        let time_rule = css
+            .split(".bee-hub__row-time {")
+            .nth(1)
+            .and_then(|s| s.split('}').next())
+            .expect("the .bee-hub__row-time rule must exist");
+        assert!(
+            !time_rule.contains("margin-left: auto"),
+            "the ship time trails the text in flow: a wrapped run has no right edge to pin it to: {time_rule}"
         );
     }
 
@@ -10732,6 +11683,194 @@ mod tests {
         );
     }
 
+    /// (ctk-11, must-have) The badge split: a checkout running one working
+    /// agent beside idle/done/unknown ones spends its COLLAPSED card on the
+    /// working one alone, and the quiet ones move inside the `<details>`
+    /// body where expanding the card still reaches every one of them. A
+    /// `blocked` pane counts as active for this purpose (it is the one
+    /// waiting on a person), and the collapsed card states how many
+    /// sessions it folded away rather than letting one badge stand for five.
+    #[test]
+    fn bee_hub_card_folds_quiet_panes_into_the_body_and_keeps_active_ones_collapsed() {
+        let pane = |id: &str, status: &str| TerminalPaneView {
+            pane_id: id.into(),
+            kind: "claude".into(),
+            name: "n".into(),
+            status: status.into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+            title: String::new(),
+        };
+        let panes = vec![
+            pane("w1:working", "working"),
+            pane("w1:idle", "idle"),
+            pane("w1:done", "done"),
+            pane("w1:unknown", "unknown"),
+            pane("w1:blocked", "blocked"),
+        ];
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &panes,
+            run_state: None,
+            waiting_on_live: false,
+            last_tool_call: None,
+            deferred: &[],
+        });
+        let details_end = card_html
+            .find("</details>")
+            .expect("the card's own details must close");
+        let at = |pane_id: &str| {
+            card_html
+                .find(&format!(r#"href="/p/proj-a/_terminal/pane/{pane_id}""#))
+                .unwrap_or_else(|| {
+                    panic!("{pane_id} must badge somewhere on the card: {card_html}")
+                })
+        };
+        for active in ["w1:working", "w1:blocked"] {
+            assert!(
+                at(active) > details_end,
+                "{active} must keep the collapsed card's own sibling nav: {card_html}"
+            );
+        }
+        for quiet in ["w1:idle", "w1:done", "w1:unknown"] {
+            assert!(
+                at(quiet) < details_end,
+                "{quiet} must move inside the details body, reachable only by expanding: {card_html}"
+            );
+        }
+        assert!(
+            card_html.contains(r#"aria-label="Terminals in this checkout""#)
+                && card_html.contains(r#"aria-label="Quiet terminals in this checkout""#),
+            "each group needs its own accessible label so a screen reader can tell them apart: {card_html}"
+        );
+        assert!(
+            card_html
+                .contains("Showing 2 of 5 sessions in this checkout — expand for 3 quiet sessions"),
+            "the collapsed card must state its true total and how many it folded away: {card_html}"
+        );
+        assert!(
+            card_html.contains("bee-hub__badges") && card_html.contains("bee-hub__quiet-badges"),
+            "the active group keeps the shell-foot nav class and the quiet group carries its own: {card_html}"
+        );
+    }
+
+    /// (ctk-11, must-have) Neither group ever renders an empty frame, and a
+    /// shell pane joins neither group nor the folded count — the board
+    /// counts agent sessions only (board-badges-agents-only), so a checkout
+    /// whose only extra terminal is a plain shell has nothing folded away
+    /// and says nothing.
+    #[test]
+    fn bee_hub_card_badge_groups_never_render_an_empty_frame_or_count_a_shell() {
+        let pane = |id: &str, kind: &str, status: &str| TerminalPaneView {
+            pane_id: id.into(),
+            kind: kind.into(),
+            name: "n".into(),
+            status: status.into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+            title: String::new(),
+        };
+        let card = |panes: &[TerminalPaneView]| {
+            bee_hub_card(&BeeHubCardArgs {
+                project_id: "proj-a",
+                feature: "feat-a",
+                group_key: "in-progress",
+                done: 1,
+                total: 2,
+                last_activity: None,
+                worktree_label: "Main",
+                reason: None,
+                docs: None,
+                project_label: None,
+                project_color: None,
+                panes,
+                run_state: None,
+                waiting_on_live: false,
+                last_tool_call: None,
+                deferred: &[],
+            })
+        };
+
+        let all_active = card(&[pane("w1:p1", "claude", "working")]);
+        assert!(
+            !all_active.contains("bee-hub__quiet-badges") && !all_active.contains("quiet session"),
+            "no quiet pane means no inner nav and no folded-away note at all: {all_active}"
+        );
+
+        let all_quiet = card(&[pane("w1:p1", "claude", "idle")]);
+        assert!(
+            !all_quiet.contains("bee-hub__badges"),
+            "no active pane means no sibling nav at all, exactly like a card with no panes: {all_quiet}"
+        );
+        assert!(
+            all_quiet.contains("No active session in this checkout — expand for 1 quiet session"),
+            "an all-quiet checkout states its absence in words, never as 'Showing 0': {all_quiet}"
+        );
+
+        let shell_beside_agent = card(&[
+            pane("w1:p1", "claude", "working"),
+            pane("w1:p2", "shell", "shell"),
+        ]);
+        assert!(
+            !shell_beside_agent.contains("bee-hub__quiet-badges")
+                && !shell_beside_agent.contains("quiet session")
+                && !shell_beside_agent.contains("pane/w1:p2"),
+            "a plain shell joins neither group and is never counted as folded away: {shell_beside_agent}"
+        );
+    }
+
+    /// (ctk-11) The project-list row is the other caller of the shared badge
+    /// nav and it does NOT split: every agent pane in the project keeps its
+    /// badge there, whatever its status, exactly as before this cell.
+    #[test]
+    fn project_badges_still_show_every_agent_pane_whatever_its_status() {
+        let pane = |id: &str, status: &str| TerminalPaneView {
+            pane_id: id.into(),
+            kind: "claude".into(),
+            name: "n".into(),
+            status: status.into(),
+            cwd: String::new(),
+            workspace: "w1".into(),
+            tab: "t1".into(),
+            title: String::new(),
+        };
+        let html = project_badges(
+            "proj-a",
+            &[
+                pane("w1:working", "working"),
+                pane("w1:idle", "idle"),
+                pane("w1:done", "done"),
+            ],
+        );
+        for id in ["w1:working", "w1:idle", "w1:done"] {
+            assert!(
+                html.contains(&format!("pane/{id}")),
+                "the project row must keep badging every agent pane, including {id}: {html}"
+            );
+        }
+        assert_eq!(
+            html.matches("<nav").count(),
+            1,
+            "the project row renders one nav over all its panes, never a split: {html}"
+        );
+        assert!(
+            !html.contains("quiet"),
+            "the project row states no folded-away count, because it folds nothing: {html}"
+        );
+    }
+
     /// inprogress-priority-order-2 (D8, must-have): a card carrying a
     /// `"blocked"` pane and no gate/handoff reason of its own gains exactly
     /// one reason line, reading `Waiting on you — a terminal is blocked`,
@@ -11423,10 +12562,14 @@ mod tests {
         );
     }
 
-    /// A card rendered with a project label carries the project name and
-    /// its worktree in the subtitle (not the slug), carries no chip row at
-    /// all, and its shell carries the `bee-hub__shell--pN` modifier the
-    /// caller handed it.
+    /// A card rendered with a project label carries the project name in
+    /// the subtitle (not the slug), carries no chip row at all, and its
+    /// shell carries the `bee-hub__shell--pN` modifier the caller handed
+    /// it. console-theme-kanban ctk-6 moved the worktree half of that
+    /// subtitle onto the card's own mono branch row, so this test now
+    /// checks BOTH halves of the guarantee it always protected — the
+    /// project name renders, and the worktree state is still said, in its
+    /// new place.
     #[test]
     fn bee_hub_card_with_project_label_shows_project_worktree_subtitle_and_shell_modifier() {
         let card_html = bee_hub_card(&BeeHubCardArgs {
@@ -11448,10 +12591,18 @@ mod tests {
             deferred: &[],
         });
         assert!(
+            card_html.contains(r#"<div class="bee-hub__project">Project A</div>"#),
+            "the project name must render as the card's subtitle: {card_html}"
+        );
+        assert!(
             card_html.contains(
-                r#"<div class="bee-hub__project">Project A<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div>"#
+                r#"<span class="bee-hub__branch-name">wt/hold-holder-attribution</span>"#
             ),
-            "the project name and its worktree branch must render in the subtitle: {card_html}"
+            "the worktree branch must still be said, now on the card's own branch row: {card_html}"
+        );
+        assert!(
+            !card_html.contains("bee-hub__project-worktree"),
+            "the retired subtitle worktree span must not render alongside the branch row: {card_html}"
         );
         assert!(
             !card_html.contains("bee-hub__slug"),
@@ -11503,19 +12654,18 @@ mod tests {
             "a title-less card must still render its slug as the card's own name: {card_html}"
         );
         assert!(
-            card_html.contains(
-                r#"<div class="bee-hub__project">Project A<span class="bee-hub__project-worktree"> / Main</span></div>"#
-            ),
+            card_html.contains(r#"<div class="bee-hub__project">Project A</div>"#),
             "a title-less card with a project label must still carry the project subtitle: {card_html}"
         );
     }
 
     /// A card rendered with no project label keeps its colour and shell
-    /// byte-identical to before this feature (no modifier class), but
-    /// project-color-identity-3 now folds the worktree state into the same
-    /// `bee-hub__slug` subtitle -- a per-project board still needs to say
-    /// which of its own features has an open worktree even though it never
-    /// shows a project name to hang that information off.
+    /// free of any `--pN` modifier, shows the slug beside its human title,
+    /// and still says which of its own features has an open worktree --
+    /// console-theme-kanban ctk-6 moved that last fact out of the subtitle
+    /// and onto the card's own branch row, so this whole-markup assertion
+    /// is also the one place the full console card anatomy is pinned end
+    /// to end: header row, subtitle, branch row, counts slot, footer.
     #[test]
     fn bee_hub_card_with_no_project_label_shows_slug_and_worktree_subtitle() {
         let docs = waggledance_core::bee::BeeFeatureDocs {
@@ -11543,9 +12693,28 @@ mod tests {
         });
         assert_eq!(
             card_html,
-            r#"<div class="fg-card bee-hub__shell"><details class="bee-hub__card" data-hub-group="in-progress"><summary class="bee-hub__summary"><div class="fg-card__title">Human Title</div><span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/proj-a/_bee/feature/feat-a">Feature detail<span aria-hidden="true"> →</span></a><div class="bee-hub__slug">feat-a<span class="bee-hub__project-worktree"> / wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><p class="bee-cell__meta">No activity recorded.</p></div></details></div>"#,
-            "a card with no project label must keep the byte-identical shell/colour and now carry its worktree state in the slug subtitle: {card_html}"
+            r#"<div class="fg-card bee-hub__shell"><details class="bee-hub__card" data-hub-group="in-progress"><summary class="bee-hub__summary"><div class="fg-card__title">Human Title</div><span class="bee-hub__chev" aria-hidden="true">›</span></summary><div class="bee-hub__body"><a class="bee-hub__detail-link" href="/p/proj-a/_bee/feature/feat-a">Feature detail<span aria-hidden="true"> →</span></a><div class="bee-hub__slug">feat-a</div><div class="bee-hub__branch"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg><span class="bee-hub__branch-name">wt/hold-holder-attribution</span></div><div class="bee-progress"><div class="bee-progress__bar" style="width: 50%"></div></div><p class="bee-hub__progress-label">1/2 cells done</p><div class="bee-hub__footer"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg><span class="bee-hub__activity-label">No activity recorded.</span></div></div></details></div>"#,
+            "a card with no project label must keep the byte-identical shell/colour and now carry its worktree state on its own branch row: {card_html}"
         );
+        // console-theme-kanban ctk-6 (D2): the five things the console
+        // screenshots put on a card that bee's store holds no value for.
+        // Pinned on the one whole-markup card assertion in this file so a
+        // later restyle cannot quietly reintroduce any of them.
+        for unbacked in [
+            "Merge PR",
+            "pull request",
+            "#123",
+            "avatar",
+            "Checks passed",
+            "comment",
+            "Ready to merge",
+        ] {
+            assert!(
+                !card_html.to_lowercase().contains(&unbacked.to_lowercase()),
+                "no PR, avatar, checks, comment or merge-readiness element may render — \
+                 bee's store backs none of them (D2): found {unbacked} in {card_html}"
+            );
+        }
         assert!(
             !card_html.contains("bee-hub__shell--p"),
             "no project label must mean no colour modifier: {card_html}"
@@ -11560,12 +12729,13 @@ mod tests {
         );
     }
 
-    /// (hub-fallbacks, project-color-identity-4) A title-less card with no
-    /// project label keeps its subtitle for the worktree state alone: its
-    /// own title is already the slug, so a second copy beneath it would be
-    /// a redundant subtitle -- but the worktree state is the one thing the
-    /// card cannot say anywhere else, so it renders with no slug half and
-    /// so no separator.
+    /// (hub-fallbacks, project-color-identity-4, console-theme-kanban
+    /// ctk-6) A title-less card with no project label still says its
+    /// worktree state -- the one thing it cannot say anywhere else -- and
+    /// still refuses to print its slug a second time under a title that
+    /// already is the slug. ctk-6 changes only WHERE the first of those
+    /// lands: the branch row, not a subtitle that would then hold nothing
+    /// else at all.
     #[test]
     fn bee_hub_card_with_no_project_label_and_no_title_names_its_worktree_alone() {
         let card_html = bee_hub_card(&BeeHubCardArgs {
@@ -11587,25 +12757,147 @@ mod tests {
             deferred: &[],
         });
         assert!(
-            card_html.contains(
-                r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">merged</span></div>"#
-            ),
-            "a title-less card must name its worktree state with no slug half: {card_html}"
+            card_html.contains(r#"<span class="bee-hub__branch-name">merged</span>"#),
+            "a title-less card must still name its worktree state, on its branch row: {card_html}"
+        );
+        assert!(
+            !card_html.contains("bee-hub__slug") && !card_html.contains("bee-hub__project\""),
+            "with the worktree state on its own row, the subtitle holds nothing and must not \
+             render at all: {card_html}"
         );
         assert_eq!(
             card_html.matches("feat-a<").count(),
             1,
             "the slug is already the title, so it must not be printed a second time: {card_html}"
         );
+    }
+
+    /// (console-theme-kanban ctk-6, D2 + must-have) A feature with NO
+    /// worktree of its own renders no branch row at all. `"Main"` is the
+    /// one spelling [`bee_hub_worktree_label`] uses to name that absence
+    /// rather than a branch, and D2 forbids a placeholder standing in for
+    /// a source the store does not hold -- so the row is omitted entirely
+    /// rather than spelling a word where a branch name would go.
+    #[test]
+    fn bee_hub_card_with_no_worktree_renders_no_branch_row() {
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: None,
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            waiting_on_live: false,
+            last_tool_call: None,
+            deferred: &[],
+        });
         assert!(
-            !card_html.contains(" / "),
-            "with no slug half there is nothing to separate from: {card_html}"
+            !card_html.contains("bee-hub__branch"),
+            "a feature with no worktree must render no branch row at all: {card_html}"
+        );
+        assert!(
+            !card_html.contains("Main"),
+            "and must not spell the absence out anywhere else on the card either: {card_html}"
+        );
+    }
+
+    /// (console-theme-kanban ctk-6, D2 + must-have) A feature with zero
+    /// cells renders no count element at all -- never `0/0`, and never an
+    /// empty progress bar either. The counts slot states a real reading or
+    /// says nothing.
+    #[test]
+    fn bee_hub_card_with_zero_cells_renders_no_count_element() {
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 0,
+            total: 0,
+            last_activity: None,
+            worktree_label: "wt/feat-a",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            waiting_on_live: false,
+            last_tool_call: None,
+            deferred: &[],
+        });
+        assert!(
+            !card_html.contains("0/0"),
+            "a feature with no cells must never render a 0/0 reading: {card_html}"
+        );
+        assert!(
+            !card_html.contains("bee-hub__progress-label") && !card_html.contains("bee-progress"),
+            "with no cells there is no count element and no bar at all: {card_html}"
+        );
+        // The rest of the anatomy still renders — omitting the counts slot
+        // is not the card going quiet.
+        assert!(
+            card_html.contains(r#"<span class="bee-hub__branch-name">wt/feat-a</span>"#)
+                && card_html.contains(r#"<div class="bee-hub__footer">"#),
+            "the branch row and footer must still render on a card with no cells: {card_html}"
+        );
+    }
+
+    /// (console-theme-kanban ctk-6) The card's footer is the console
+    /// anatomy's own last band: the activity glyph, its label, and the
+    /// relative time `bee_fmt_trace_time` formats, sitting apart from the
+    /// meta block above it.
+    #[test]
+    fn bee_hub_card_footer_carries_the_activity_glyph_and_its_relative_time() {
+        let ten_minutes_ago = (time::OffsetDateTime::now_utc() - time::Duration::minutes(10))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        let card_html = bee_hub_card(&BeeHubCardArgs {
+            project_id: "proj-a",
+            feature: "feat-a",
+            group_key: "in-progress",
+            done: 1,
+            total: 2,
+            last_activity: Some(&ten_minutes_ago),
+            worktree_label: "Main",
+            reason: None,
+            docs: None,
+            project_label: None,
+            project_color: None,
+            panes: &[],
+            run_state: None,
+            waiting_on_live: false,
+            last_tool_call: None,
+            deferred: &[],
+        });
+        let expected_time = bee_fmt_trace_time(&ten_minutes_ago);
+        assert!(
+            card_html.contains(&format!(
+                r#"<span class="bee-hub__activity-label">Last activity</span><span class="bee-hub__activity-time">{expected_time}</span>"#
+            )),
+            "the footer must carry the activity label and the relative time \
+             `bee_fmt_trace_time` formatted: {card_html}"
+        );
+        assert!(
+            card_html.contains(r#"<div class="bee-hub__footer"><svg"#),
+            "the footer must open with its own aria-hidden activity glyph: {card_html}"
         );
     }
 
     /// All four worktree-line spellings [`bee_hub_worktree_label`] can hand
-    /// `bee_hub_card` render through the slug subtitle unchanged, on the
-    /// per-project board's own `project_label: None` path.
+    /// `bee_hub_card`, on the per-project board's own `project_label: None`
+    /// path. console-theme-kanban ctk-6 splits them by what they mean
+    /// rather than treating all four alike: the three that name a worktree
+    /// that EXISTS (a branch name, the bare `"worktree"`, `"merged"`) each
+    /// render verbatim on the branch row, and `"Main"` -- the one spelling
+    /// that names the absence of a worktree -- renders no row at all,
+    /// since D2 forbids a word standing in where the store holds no value.
     #[test]
     fn bee_hub_card_with_no_project_label_renders_all_four_worktree_spellings() {
         let docs = waggledance_core::bee::BeeFeatureDocs {
@@ -11613,7 +12905,12 @@ mod tests {
             description: None,
             docs: vec![],
         };
-        for worktree_label in ["hold-holder-attribution", "worktree", "merged", "Main"] {
+        for (worktree_label, expect_row) in [
+            ("hold-holder-attribution", true),
+            ("worktree", true),
+            ("merged", true),
+            ("Main", false),
+        ] {
             let card_html = bee_hub_card(&BeeHubCardArgs {
                 project_id: "proj-a",
                 feature: "feat-a",
@@ -11632,11 +12929,19 @@ mod tests {
                 last_tool_call: None,
                 deferred: &[],
             });
-            let expected =
-                format!(r#"<span class="bee-hub__project-worktree"> / {worktree_label}</span>"#);
-            assert!(
+            let expected = format!(r#"<span class="bee-hub__branch-name">{worktree_label}</span>"#);
+            assert_eq!(
                 card_html.contains(&expected),
-                "the {worktree_label} spelling must render verbatim in the slug subtitle: {card_html}"
+                expect_row,
+                "the {worktree_label} spelling must {} verbatim on the branch row: {card_html}",
+                if expect_row { "render" } else { "not render" }
+            );
+            assert_eq!(
+                card_html.contains("bee-hub__branch"),
+                expect_row,
+                "only a worktree that exists earns a branch row; {worktree_label} must \
+                 {}: {card_html}",
+                if expect_row { "have one" } else { "have none" }
             );
         }
     }
@@ -11693,9 +12998,26 @@ mod tests {
             ),
             "missing the subtitle/Finished-span colour rule: {css}"
         );
+        // console-theme-kanban ctk-6: this used to pin
+        // `.bee-hub__project-worktree {`, the muted worktree half of the
+        // project line. That element is gone -- the worktree state is the
+        // card's own branch row now -- but the guarantee it protected is
+        // not: the project accent must stay the ONE coloured thing on a
+        // card, so the worktree line must read a muted text token and
+        // never `--project-accent`. Checked at its new address.
+        let branch_rule_at = css
+            .find(".bee-hub__branch {")
+            .expect("the board must declare the card's own branch row rule");
+        let branch_rule_end = css[branch_rule_at..]
+            .find('}')
+            .map(|i| branch_rule_at + i)
+            .unwrap_or(css.len());
+        let branch_rule = &css[branch_rule_at..branch_rule_end];
         assert!(
-            css.contains(".bee-hub__project-worktree {"),
-            "missing the project line's own muted worktree-half rule: {css}"
+            branch_rule.contains("color: var(--color-text-muted)")
+                && !branch_rule.contains("--project-accent"),
+            "the worktree line must stay muted and never take the project accent, so the \
+             project colour remains the one coloured thing on a card: {branch_rule}"
         );
     }
 
@@ -11792,11 +13114,15 @@ mod tests {
         assert_eq!(bee_hub_worktree_label("solo-feat", &[], &[], false), "Main");
     }
 
-    /// (hub-finished-compact, integration) The paging arithmetic itself is
-    /// proven at the unit level above; this proves `bee_feature_hub_section`
-    /// really wires the Finished group's rows through
-    /// `bee_hub_finished_rows` end to end, rather than dumping every
-    /// archived feature into the open flow.
+    /// (hub-finished-compact, integration; shape updated by
+    /// kanban-columns-archive) The paging arithmetic itself is proven at
+    /// the unit level above; this proves `bee_feature_hub_section` really
+    /// wires the Finished group's rows through `bee_hub_finished_rows` end
+    /// to end, rather than dumping every archived feature into the open
+    /// flow. The folded Finished bar ([`bee_hub_archive_bar`]) is itself a
+    /// `<details>` now, so 12 rows produce two: the outer archive bar plus
+    /// one nested inside it holding the two overflow rows -- not one, as
+    /// before the bar existed.
     #[test]
     fn hub_finished_group_pages_more_than_ten_archived_features_behind_a_details() {
         let root = std::env::temp_dir().join(format!(
@@ -11846,8 +13172,8 @@ mod tests {
         );
         assert_eq!(
             html.matches("<details").count(),
-            1,
-            "12 finished features must page into exactly one <details>: {html}"
+            2,
+            "12 finished features must page into exactly one nested <details>, plus the archive bar's own outer <details>: {html}"
         );
         assert!(html.contains("Show 2 more · 2 left"), "{html}");
         for n in 0..12 {
@@ -11857,6 +13183,284 @@ mod tests {
             );
         }
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// kanban-columns-archive: the Finished group folds into a collapsed
+    /// bar spanning the board rather than sitting in `.bee-hub__groups` as
+    /// a fifth track, and that bar must never understate what it holds
+    /// while closed (`docs/specs/bee-cockpit.md`: "collapsing a list is
+    /// never allowed to understate what it holds"). Existing coverage
+    /// already proves the row-level `data-hub-group="finished"` content and
+    /// the paging arithmetic (`bee_hub_finished_rows_pages_twenty_five_...`,
+    /// `hub_finished_group_pages_more_than_ten_...`); this is the gap those
+    /// leave: the bar's own container shape.
+    #[test]
+    fn bee_hub_archive_bar_renders_collapsed_and_states_its_true_count_while_closed() {
+        let bar = bee_hub_archive_bar(7, "<a>a-finished-row</a>");
+
+        // Collapsed by default: a native `<details>` with no `open`
+        // attribute on its own opening tag.
+        let open_tag_end = bar.find('>').expect("opening tag must close");
+        let open_tag = &bar[..open_tag_end];
+        assert!(
+            open_tag.starts_with("<details class=\"bee-hub__archive\""),
+            "the bar must be a <details> carrying its own archive class: {bar}"
+        );
+        assert!(
+            !open_tag.contains("open"),
+            "the bar must render collapsed by default, no `open` attribute: {bar}"
+        );
+
+        // States its true count on the summary even while closed --
+        // data-hub-group/data-hub-count sit on the same collapsed tag, not
+        // gated behind expansion.
+        assert!(
+            open_tag.contains(r#"data-hub-group="finished" data-hub-count="7""#),
+            "the true count must be reachable on the closed element itself: {bar}"
+        );
+        assert!(
+            bar.contains(">ARCHIVE<") || bar.contains("ARCHIVE</span>"),
+            "the summary must name itself ARCHIVE: {bar}"
+        );
+        assert!(
+            bar.contains(">7</span>"),
+            "the summary must show the count 7 beside the ARCHIVE label, not hidden inside the collapsed body: {bar}"
+        );
+
+        // Expanding it reveals exactly the rows it was handed, untouched.
+        assert!(
+            bar.contains("<a>a-finished-row</a>"),
+            "the bar's body must carry the same rows the caller handed it: {bar}"
+        );
+    }
+
+    /// The archive bar must sit AFTER `.bee-hub__groups` closes, never as a
+    /// track inside it -- the grid keeps exactly the lane column divs
+    /// (`data-hub-group`: todo, in-progress, review, compound and, since
+    /// console-theme-kanban ctk-8, ready-to-merge), and the finished bar's
+    /// own `<details data-hub-group="finished" ...>` is reachable only past
+    /// that grid's closing `</div>`.
+    #[test]
+    fn bee_feature_hub_section_places_the_archive_bar_after_the_grid_not_inside_it() {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-archive-shape-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
+
+        let groups_open = html
+            .find(r#"<div class="bee-hub__groups">"#)
+            .expect("the lane-column grid must render");
+        let archive_at = html
+            .find(r#"<details class="bee-hub__archive""#)
+            .expect("the archive bar must render");
+        assert!(
+            archive_at > groups_open,
+            "the archive bar must sit after the grid opens, not before it: {html}"
+        );
+        // Everything between the grid's own opening tag and the archive
+        // bar's opening tag is the grid's content (the archive bar renders
+        // immediately after `.bee-hub__groups` closes, so this span never
+        // reaches past its own closing `</div>`).
+        let grid_region = &html[groups_open..archive_at];
+        assert_eq!(
+            grid_region.matches(r#"data-hub-group=""#).count(),
+            5,
+            "the grid must carry exactly the five dense-row/card columns, never Finished: {html}"
+        );
+        assert!(
+            !grid_region.contains(r#"data-hub-group="finished""#),
+            "Finished must never render inside the grid: {grid_region}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (console-theme-kanban ctk-5) Every column header emits the console
+    /// anatomy: a status dot in its locked lane hue, the label word (real
+    /// heading element, never meaning by colour alone), optional `N waiting`
+    /// chip, and right-aligned count in mono.
+    #[test]
+    fn bee_hub_group_renders_console_header_anatomy_with_dot_label_waiting_chip_and_mono_count() {
+        // Without waiting chip (waiting_count = 0)
+        let todo = bee_hub_group("Todo", "todo", 3, 0, "<p>card</p>", "Empty.");
+        assert!(
+            todo.contains(
+                r#"<div class="bee-hub__group" data-hub-group="todo" data-hub-count="3">"#
+            ),
+            "data-hub-group and data-hub-count must remain on the wrapper div: {todo}"
+        );
+        assert!(
+            todo.contains(r#"<h4 class="bee-hub__group-header">"#),
+            "header must be a real h4 heading element: {todo}"
+        );
+        assert!(
+            todo.contains(r#"<span class="bee-hub__group-dot" aria-hidden="true"></span>"#),
+            "status dot must render ahead of the label: {todo}"
+        );
+        assert!(
+            todo.contains(r#"<span class="bee-hub__group-label">Todo</span>"#),
+            "label word must be present beside the dot: {todo}"
+        );
+        assert!(
+            !todo.contains("bee-hub__group-waiting"),
+            "no waiting chip when waiting_count is 0: {todo}"
+        );
+        assert!(
+            todo.contains(r#"<span class="bee-hub__group-count">3</span>"#),
+            "count must render in its own span: {todo}"
+        );
+
+        // With waiting chip on In Progress (waiting_count > 0)
+        let in_progress =
+            bee_hub_group("In Progress", "in-progress", 5, 2, "<p>card</p>", "Empty.");
+        assert!(
+            in_progress.contains(r#"<span class="bee-hub__group-waiting">2 waiting</span>"#),
+            "waiting chip must render when waiting_count > 0: {in_progress}"
+        );
+        assert!(
+            in_progress.contains(r#"<span class="bee-hub__group-label">In Progress</span>"#),
+            "label must be present: {in_progress}"
+        );
+        assert!(
+            in_progress.contains(r#"<span class="bee-hub__group-count">5</span>"#),
+            "total count must be present: {in_progress}"
+        );
+
+        // Verify order: dot < label < waiting < count
+        let dot_pos = in_progress.find("bee-hub__group-dot").unwrap();
+        let label_pos = in_progress.find("bee-hub__group-label").unwrap();
+        let waiting_pos = in_progress.find("bee-hub__group-waiting").unwrap();
+        let count_pos = in_progress.find("bee-hub__group-count").unwrap();
+        assert!(
+            dot_pos < label_pos && label_pos < waiting_pos && waiting_pos < count_pos,
+            "header anatomy order must be dot -> label -> waiting chip -> count: {in_progress}"
+        );
+    }
+
+    /// (console-theme-kanban ctk-5, re-mapped by ctk-8) Column header style
+    /// rules in bee_hub_style() consume the theme's five lane tokens
+    /// (--color-accent-alt-1..5) with no literal hex restatements, give the
+    /// glow-less lanes no dot glow, and right-align mono counts. ctk-8 moved
+    /// Compound onto the idle token and gave the green token to the new
+    /// Ready to merge column; the archive bar surrendered its lane hue
+    /// entirely (it is chrome, not a lane, and its `<details>` carries no
+    /// dot element at all), so no `finished` dot rule is pinned here.
+    #[test]
+    fn bee_hub_style_carries_console_column_header_token_rules_and_no_glow_for_in_review() {
+        let css = bee_hub_style();
+
+        // 48px height, 16px padding, 10px gap
+        assert!(
+            css.contains(".bee-hub__group-header {")
+                && css.contains("height: 48px;")
+                && css.contains("padding: 0 16px;")
+                && css.contains("gap: 10px;"),
+            "header layout metrics (48px tall, 16px pad, 10px gap) must be present: {css}"
+        );
+
+        // Status dot glow default
+        assert!(
+            css.contains(".bee-hub__group-dot {")
+                && css.contains("box-shadow: var(--status-glow);"),
+            "status dots must carry --status-glow by default: {css}"
+        );
+
+        // The five lane tokens
+        assert!(
+            css.contains(r#".bee-hub__group[data-hub-group="todo"] .bee-hub__group-dot { background: var(--color-accent-alt-1); color: var(--color-accent-alt-1); }"#),
+            "Todo dot must map to --color-accent-alt-1: {css}"
+        );
+        assert!(
+            css.contains(r#".bee-hub__group[data-hub-group="in-progress"] .bee-hub__group-dot { background: var(--color-accent-alt-2); color: var(--color-accent-alt-2); }"#),
+            "In Progress dot must map to --color-accent-alt-2: {css}"
+        );
+        assert!(
+            css.contains(r#".bee-hub__group[data-hub-group="review"] .bee-hub__group-dot { background: var(--color-accent-alt-3); color: var(--color-accent-alt-3); box-shadow: none; }"#),
+            "Review dot must map to --color-accent-alt-3 with NO glow (box-shadow: none): {css}"
+        );
+        assert!(
+            css.contains(r#".bee-hub__group[data-hub-group="compound"] .bee-hub__group-dot { background: var(--color-accent-alt-5); color: var(--color-accent-alt-5); box-shadow: none; }"#),
+            "Compound dot must map to --color-accent-alt-5, the idle hue, with NO glow: {css}"
+        );
+        assert!(
+            css.contains(r#".bee-hub__group[data-hub-group="ready-to-merge"] .bee-hub__group-dot { background: var(--color-accent-alt-4); color: var(--color-accent-alt-4); }"#),
+            "Ready to merge dot must map to --color-accent-alt-4, the green it is named for: {css}"
+        );
+        assert!(
+            !css.contains(r#"[data-hub-group="finished"] .bee-hub__group-dot"#),
+            "the archive bar carries no lane hue -- it is chrome, and its <details> has no dot to paint: {css}"
+        );
+
+        // Waiting chip in iterating hue with 10% alpha fill
+        assert!(
+            css.contains(".bee-hub__group-waiting {")
+                && css.contains("color: var(--color-accent-alt-2);")
+                && css.contains(
+                    "background: color-mix(in srgb, var(--color-accent-alt-2) 10%, transparent);"
+                ),
+            "waiting chip must use --color-accent-alt-2 with 10% alpha fill: {css}"
+        );
+
+        // Count pushed right in mono at 60% opacity
+        assert!(
+            css.contains(".bee-hub__group-count {")
+                && css.contains("margin-left: auto;")
+                && css.contains("font-family: var(--font-mono);")
+                && css.contains("opacity: 0.6;"),
+            "count must be pushed right (margin-left: auto) in mono at 60% opacity: {css}"
+        );
+    }
+
+    /// (console-theme-kanban ctk-5) Board sections render the waiting chip
+    /// on In Progress only when a real count backs it (D2).
+    #[test]
+    fn bee_feature_hub_section_renders_waiting_chip_only_when_backed_by_real_waiting_cards() {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-waiting-chip-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+
+        // Case 1: An In Progress feature with a stopped gate (waiting on you)
+        write(
+            ".bee/state.json",
+            r#"{
+                "feature": "active-feat",
+                "phase": "exploring",
+                "approved_gates": {"context": false, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        let hb = (time::OffsetDateTime::now_utc() - time::Duration::minutes(20))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            ".bee/sessions/default.json",
+            &format!(r#"{{"id": "default", "last_heartbeat": "{hb}", "workspace_id": "main"}}"#),
+        );
+
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
+
+        assert!(
+            html.contains(r#"<span class="bee-hub__group-waiting">1 waiting</span>"#),
+            "In Progress column header must show '1 waiting' chip when backed by a waiting card: {html}"
+        );
+
+        // Clean up
         let _ = std::fs::remove_dir_all(&root);
     }
 

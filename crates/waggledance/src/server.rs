@@ -645,13 +645,16 @@ struct RegisterFlag {
     /// D10's fixed error code from a refused `register_project` redirect —
     /// never the submitted path (see `views::register_error_message`).
     register_error: Option<String>,
-    /// homepage-tabs (homepage-terminals: now three): which home page
-    /// section `/` renders. Parsed the same defensive way as
-    /// `register_error` below — a repeated key never 400s the whole
+    /// homepage-tabs (homepage-terminals: now three; console-theme-kanban
+    /// ctk-12: back to two, with the third value kept as a redirect):
+    /// which home page section `/` renders. Parsed the same defensive way
+    /// as `register_error` below — a repeated key never 400s the whole
     /// request, it just keeps walking — and any value that is not exactly
     /// `"kanban"`, `"projects"` or `"terminals"` when the walk finishes
     /// resolves to `HomeTab::Kanban` (its `Default`), same as an absent or
-    /// empty query string does.
+    /// empty query string does. `"projects"` itself now resolves there too:
+    /// the tab it named is retired and its whole body is the Kanban tab's
+    /// left rail.
     tab: views::HomeTab,
     /// homepage-terminals D5: the pane selected on the Terminals tab —
     /// `/?tab=terminals&pane=<pane_id>`. Parsed defensively like `tab`
@@ -702,12 +705,22 @@ impl<'de> serde::Deserialize<'de> for RegisterFlag {
                         "register_error" => register_error = Some(value),
                         // homepage-tabs: last value for a repeated key wins,
                         // exactly like `register_error` above; any value
-                        // besides these three exact strings resolves to the
+                        // besides these exact strings resolves to the
                         // `Default` (Kanban) rather than erroring.
+                        //
+                        // console-theme-kanban (ctk-12): `"projects"` is
+                        // kept as a recognised value, not dropped into the
+                        // catch-all, and maps onto Kanban. The Projects tab
+                        // is retired and everything it rendered is now the
+                        // Kanban tab's own left rail, so a bookmarked
+                        // `/?tab=projects` lands on the page that carries
+                        // what the bookmark was pointing at. Spelling it as
+                        // its own arm rather than letting `_` swallow it
+                        // keeps the redirect visible to the next reader
+                        // instead of looking like an unrecognised value.
                         "tab" => {
                             tab = match value.as_str() {
-                                "kanban" => views::HomeTab::Kanban,
-                                "projects" => views::HomeTab::Projects,
+                                "kanban" | "projects" => views::HomeTab::Kanban,
                                 "terminals" => views::HomeTab::Terminals,
                                 _ => views::HomeTab::default(),
                             }
@@ -4774,15 +4787,15 @@ mod asset_response_tests {
     }
 
     #[test]
-    fn served_stylesheet_bundles_jetbrains_mono_and_leads_font_mono_token() {
+    fn served_stylesheet_bundles_geist_mono_and_leads_font_mono_token() {
         // A device monospace font often lacks box-drawing glyphs, so a
         // browser substitutes a fallback of a different advance width and
         // the terminal grid misaligns even when nothing wraps. The face must
-        // be bundled offline — no external font URL — exactly like Manrope.
+        // be bundled offline — no external font URL — exactly like Geist.
         let css = views::APP_CSS;
         assert!(
-            css.contains("font-family: 'JetBrains Mono';"),
-            "served stylesheet must declare a JetBrains Mono @font-face"
+            css.contains("font-family: 'Geist Mono';"),
+            "served stylesheet must declare a Geist Mono @font-face"
         );
         assert!(
             css.contains("src: url(data:font/woff2;base64,"),
@@ -4802,13 +4815,76 @@ mod asset_response_tests {
             .collect();
         assert!(
             font_mono_decls.len() >= 2,
-            "expected multiple --font-mono declarations (atelier.css and contract.css), found {}",
+            "expected multiple --font-mono declarations (console.css and contract.css), found {}",
             font_mono_decls.len()
         );
         for decl in &font_mono_decls {
             assert!(
-                decl.contains("'JetBrains Mono', ui-monospace"),
+                decl.contains("'Geist Mono', ui-monospace"),
                 "--font-mono must lead with the bundled face before the system stack: {decl}"
+            );
+        }
+    }
+
+    /// (type) The console theme names a bundled face in EVERY family slot it
+    /// owns — the sans half of the guarantee the mono guard above makes.
+    ///
+    /// This cannot be asserted bundle-wide. contract.css deliberately defaults
+    /// `--font-display` / `--font-body` to the neutral `ui-sans-serif` stack so
+    /// the bundle still renders before any theme adapter loads, and the
+    /// canonical `system` typeface-set repeats that stack on purpose. Both are
+    /// correct as they stand, so this test slices the THEME's own block out of
+    /// the bundle and checks only what the theme layer contributes.
+    ///
+    /// The gap it closes is a regression that shipped green: when the console
+    /// theme replaced atelier.css it inherited the type scale but not the
+    /// families, so every non-mono glyph on every page fell back to the OS
+    /// system sans while the embedded Geist woff2 was referenced by no rule at
+    /// all. The mono guard stayed green throughout, because contract.css
+    /// satisfies `--font-mono` on its own. ABSENCE, not mis-ordering, was the
+    /// defect — which is why the load-bearing assertion here is that all four
+    /// slots are PRESENT in the theme block, each leading with a bundled face.
+    #[test]
+    fn console_theme_names_the_bundled_faces_in_every_family_slot() {
+        let css = views::APP_CSS;
+
+        // The sans face itself must be bundled. The trailing `';` keeps this
+        // from matching the Geist Mono @font-face.
+        assert!(
+            css.contains("font-family: 'Geist';"),
+            "served stylesheet must declare a Geist (sans) @font-face — the theme's \
+             --font-display/-body/-accent slots all resolve to it"
+        );
+
+        // Slice the theme's invariant block: its selector through the first
+        // rule-closing brace at column 0.
+        let start = css
+            .find("html[data-theme=\"console\"] {")
+            .expect("the console theme's invariant block must be present in the bundle");
+        let block = &css[start..];
+        let block = &block[..block
+            .find("\n}")
+            .expect("the console theme's invariant block must terminate")];
+
+        for (token, lead) in [
+            ("--font-display:", "'Geist', ui-sans-serif"),
+            ("--font-body:", "'Geist', ui-sans-serif"),
+            ("--font-accent:", "'Geist', ui-sans-serif"),
+            ("--font-mono:", "'Geist Mono', ui-monospace"),
+        ] {
+            let decl = block
+                .lines()
+                .find(|l| l.trim_start().starts_with(token))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the console theme declares no {token} — the family slots have no \
+                         other theme-level home, so dropping one silently falls back to the \
+                         OS system stack and leaves a bundled face unreferenced"
+                    )
+                });
+            assert!(
+                decl.contains(lead),
+                "{token} must lead with the bundled face before the fallback stack: {decl}"
             );
         }
     }
@@ -5897,14 +5973,166 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&sibling).ok();
     }
 
-    /// (edge, feature-hub fh-1, grown to five columns by kanban-columns D1)
-    /// An entirely empty store — no cells, no lanes, no archive — still
-    /// renders all five groups, each stating its own honest, distinct empty
-    /// line (bee-board-pm D5's "sections never disappear" rule) rather than
-    /// a shared line that could not say which group came up empty. No
-    /// absolute filesystem path leaks into the body (D9).
+    /// (console-theme-kanban ctk-8) The Ready to merge column's whole
+    /// membership rule, proven at the HTTP layer over real store files: a
+    /// feature whose `uat` gate is approved AND whose worktree is still
+    /// granted and unmerged is the state where `bee worktree merge` is
+    /// literally the next action, so it lands in Ready to merge -- and it
+    /// must leave In Progress to get there, since an open grant is itself
+    /// one of In Progress's own liveness pulls and would otherwise swallow
+    /// it first.
+    ///
+    /// The second feature is the other half of the rule: its `uat` gate is
+    /// approved too, but its worktree is already merged (a still-open
+    /// `worktree-cleanup` entry in `deferred-queue.jsonl`, bee's own
+    /// `merged_pending` signal), so merging is NOT its next action and it
+    /// stays in the column its phase earns it. Nothing here synthesises a
+    /// merge-readiness verdict -- both halves read only values the store
+    /// already holds (CONTEXT.md D2).
     #[tokio::test]
-    async fn feature_hub_empty_store_renders_five_honest_empty_groups() {
+    async fn feature_hub_uat_approved_feature_with_an_open_worktree_lands_in_ready_to_merge() {
+        let root = fresh_root("hub-ready-to-merge");
+        write(
+            &root,
+            ".bee/lanes/ready-feat.json",
+            &lane_json(
+                "ready-feat",
+                "swarming",
+                "standard",
+                "merge the worktree",
+                Some(
+                    r#""context": true, "shape": true, "execution": true, "review": true, "uat": true"#,
+                ),
+                None,
+            ),
+        );
+        let open_sibling = make_worktree_sibling("hub-ready-open-wt");
+        write(
+            &open_sibling,
+            ".bee/state.json",
+            r#"{"phase":"swarming","feature":"ready-feat","mode":"standard"}"#,
+        );
+
+        // Same approved `uat` gate, but this grant is already merged and
+        // only awaiting cleanup -- `compounding` is where its phase puts it.
+        write(
+            &root,
+            ".bee/lanes/merged-feat.json",
+            &lane_json(
+                "merged-feat",
+                "compounding",
+                "standard",
+                "compound the learnings",
+                Some(
+                    r#""context": true, "shape": true, "execution": true, "review": true, "uat": true"#,
+                ),
+                None,
+            ),
+        );
+        let merged_sibling = make_worktree_sibling("hub-ready-merged-wt");
+        write(
+            &merged_sibling,
+            ".bee/state.json",
+            r#"{"phase":"compounding","feature":"merged-feat","mode":"standard"}"#,
+        );
+
+        write(
+            &root,
+            ".bee/runtime/worktree-grants.json",
+            &grants_json(&["hub-ready-open-wt", "hub-ready-merged-wt"]),
+        );
+        write(
+            &root,
+            ".bee/runtime/workspaces/open.json",
+            &workspace_json(
+                "hub-ready-open-wt",
+                &open_sibling.to_string_lossy(),
+                "wt/ready-feat",
+                &[],
+            ),
+        );
+        write(
+            &root,
+            ".bee/runtime/workspaces/merged.json",
+            &workspace_json(
+                "hub-ready-merged-wt",
+                &merged_sibling.to_string_lossy(),
+                "wt/merged-feat",
+                &[],
+            ),
+        );
+        write(
+            &root,
+            ".bee/deferred-queue.jsonl",
+            &format!(
+                r#"{{"ts":"2026-08-20T06:23:28.188Z","event":"add","id":"6b1f9c22-0f0a-4d1e-9a55-2d2f1b7c0f11","kind":"worktree-cleanup","feature":"merged-feat","cells":[],"areas":[],"files":["{sibling}"],"reason":"already landed, kept per default (D1)"}}"#,
+                sibling = merged_sibling.to_string_lossy().replace('\\', "\\\\"),
+            ),
+        );
+
+        let st = build_state();
+        let project = register(&st, &root, "hub-ready-to-merge");
+        let resp = get(router(st), &format!("/p/{}/_bee", project.id)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+
+        assert!(
+            body.contains("data-hub-group=\"ready-to-merge\" data-hub-count=\"1\""),
+            "the uat-approved feature with an open unmerged worktree must be the column's one member: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "data-hub-group=\"ready-to-merge\" href=\"/p/{}/_bee/feature/ready-feat\"",
+                project.id
+            )),
+            "ready-feat must render as a dense Ready to merge row: {body}"
+        );
+        assert!(
+            body.contains("data-hub-group=\"in-progress\" data-hub-count=\"0\""),
+            "Ready to merge is tested before In Progress, so its member must have left In Progress entirely: {body}"
+        );
+        assert!(
+            !body.contains(&format!(
+                "bee-hub__detail-link\" href=\"/p/{}/_bee/feature/ready-feat\"",
+                project.id
+            )),
+            "Ready to merge uses the dense row, never the full card anatomy In Progress keeps: {body}"
+        );
+
+        assert!(
+            body.contains("data-hub-group=\"compound\" data-hub-count=\"1\""),
+            "the already-landed feature stays in the column its phase earns it: {body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "data-hub-group=\"compound\" href=\"/p/{}/_bee/feature/merged-feat\"",
+                project.id
+            )),
+            "merged-feat must render under Compound: {body}"
+        );
+        assert!(
+            !body.contains(&format!(
+                "data-hub-group=\"ready-to-merge\" href=\"/p/{}/_bee/feature/merged-feat\"",
+                project.id
+            )),
+            "an approved uat gate over an ALREADY merged worktree is not merge-readiness: {body}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&open_sibling).ok();
+        std::fs::remove_dir_all(&merged_sibling).ok();
+    }
+
+    /// (edge, feature-hub fh-1, grown to five columns by kanban-columns D1
+    /// and to six groups — five columns plus the folded archive — by
+    /// console-theme-kanban ctk-8) An entirely empty store — no cells, no
+    /// lanes, no archive — still renders every group, each stating its own
+    /// honest, distinct empty line (bee-board-pm D5's "sections never
+    /// disappear" rule) rather than a shared line that could not say which
+    /// group came up empty. No absolute filesystem path leaks into the body
+    /// (D9).
+    #[tokio::test]
+    async fn feature_hub_empty_store_renders_six_honest_empty_groups() {
         let root = fresh_root("hub-empty");
         std::fs::create_dir_all(root.join(".bee/cells")).unwrap();
 
@@ -5914,7 +6142,14 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
-        for key in ["todo", "in-progress", "review", "compound", "finished"] {
+        for key in [
+            "todo",
+            "in-progress",
+            "review",
+            "compound",
+            "ready-to-merge",
+            "finished",
+        ] {
             assert!(
                 body.contains(&format!("data-hub-group=\"{key}\" data-hub-count=\"0\"")),
                 "group {key} must always render, honestly empty: {body}"
@@ -5924,6 +6159,7 @@ mod bee_route_tests {
         assert!(body.contains("Nothing in progress."), "{body}");
         assert!(body.contains("Nothing in Review."), "{body}");
         assert!(body.contains("Nothing in Compound."), "{body}");
+        assert!(body.contains("Nothing ready to merge."), "{body}");
         assert!(body.contains("Nothing finished yet."), "{body}");
         assert!(
             !body.contains(root.to_string_lossy().as_ref()),
@@ -6326,14 +6562,20 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// (theme, feature-hub fh-1, D3) Both scheme variants of the new
-    /// anthropic.com-inspired palette render in the board's own stylesheet
-    /// — light (scoped to `.bee-hub-theme`) and dark (scoped to
-    /// `html[data-scheme="dark"] .bee-hub-theme`, reusing the existing
-    /// no-flash `data-scheme` toggle, never a second mechanism) — and both
-    /// carry the same book-cloth coral family for their action color.
+    /// (theme, feature-hub fh-1, D1 b27a73c6) The board used to carry a
+    /// page-local `--color-*` override for `.bee-hub-theme` (and its own
+    /// `html[data-scheme="dark"] .bee-hub-theme` counterpart); D1 deletes
+    /// it so the board's colours come from the one shipped theme like
+    /// every other page. This test used to pin that override's literal
+    /// hex values (a cream `--color-bg: #FAF9F5;`, a coral
+    /// `--color-action: #CC785C;`, a warm-brown dark `--color-bg:
+    /// #241E18;`); it is re-shaped, not weakened, to guard the new truth:
+    /// the rendered board carries no `--color-*` declaration of its own at
+    /// all, while the ten per-project identity hues — never part of the
+    /// deleted palette — still render under the same `.bee-hub-theme`
+    /// scope and the board's `<main>` still carries that scope class.
     #[tokio::test]
-    async fn feature_hub_theme_tokens_render_for_both_light_and_dark() {
+    async fn feature_hub_page_carries_no_palette_override_and_still_declares_project_hues() {
         let root = fresh_root("hub-theme");
         write(
             &root,
@@ -6348,24 +6590,30 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains(".bee-hub-theme {") && body.contains("--color-bg: #FAF9F5;"),
-            "the light palette must define the cream page background: {body}"
+            !body.contains("html[data-scheme=\"dark\"] .bee-hub-theme {"),
+            "the deleted page-local dark palette block must not reappear: {body}"
         );
+        let open = body
+            .find(".bee-hub-theme {")
+            .expect("the scope class must still be declared, now for identity hues only");
+        let close = body[open..]
+            .find('}')
+            .map(|i| open + i)
+            .expect(".bee-hub-theme rule must be closed");
+        let rule_body = &body[open..close];
         assert!(
-            body.contains("--color-action: #CC785C;"),
-            "the light palette must use the book-cloth coral accent: {body}"
+            !rule_body.contains("--color-"),
+            "the .bee-hub-theme rule must define no page-local --color-* token of its own — colour comes from the shipped theme alone: {rule_body}"
         );
-        assert!(
-            body.contains("html[data-scheme=\"dark\"] .bee-hub-theme {"),
-            "the dark palette must be scoped through the existing data-scheme toggle: {body}"
-        );
-        assert!(
-            body.contains("--color-bg: #241E18;"),
-            "the dark palette must define its own deep warm-brown background: {body}"
-        );
+        for n in 1..=10 {
+            assert!(
+                body.contains(&format!("--bee-hub-project-{n}:")),
+                "the per-project identity hue {n} must still be declared: {body}"
+            );
+        }
         assert!(
             body.contains("<main class=\"fg-page bee-hub-theme\">"),
-            "the board's own <main> must carry the palette scope class: {body}"
+            "the board's own <main> must still carry the identity-hue scope class: {body}"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -6467,9 +6715,20 @@ mod bee_route_tests {
             )),
             "the card must badge the pane running in its own checkout: {body}"
         );
+        // ctk-11: `agent_start` seeds an IDLE pane, and an idle session no
+        // longer spends a slot on the collapsed card -- it badges in the
+        // quiet group inside the card's expandable body instead. The
+        // guarantee this test was written for (the pane in this checkout
+        // badges THIS card, under a label naming the checkout rather than
+        // the feature) is unchanged; only which of the two groups' labels
+        // carries it moved.
         assert!(
-            body.contains("Terminals in this checkout"),
+            body.contains("Quiet terminals in this checkout"),
             "the badge group's accessible label must name the checkout: {body}"
+        );
+        assert!(
+            body.contains("No active session in this checkout — expand for 1 quiet session"),
+            "a card whose only session is quiet must say so rather than render a bare card: {body}"
         );
 
         std::fs::remove_dir_all(&config_dir).ok();
@@ -9662,12 +9921,22 @@ mod bee_route_tests {
             hub_body.contains("no-docs-feature"),
             "hub card must still show the slug: {hub_body}"
         );
-        // project-color-identity-4: the subtitle survives on a title-less
-        // card to carry the worktree state, but holds nothing else — the
-        // slug is already the title and must not be printed a second time.
+        // project-color-identity-4 kept a subtitle on a title-less card
+        // purely to carry the worktree state. console-theme-kanban ctk-6
+        // moved that state to the card's own branch row, and this feature
+        // has no worktree at all (D2: "Main" names an absence, so no
+        // branch row renders) — leaving the subtitle with nothing to hold,
+        // and so no reason to render. The guarantee below is the one that
+        // test always cared about and still holds: the slug is the card's
+        // title and is never printed a second time beneath it.
+        // Matched on the opening tags, not the bare class names: the page
+        // carries the board's own `<style>` block, which declares rules
+        // for both classes whether or not any element uses them.
         assert!(
-            hub_body.contains(r#"<div class="bee-hub__slug"><span class="bee-hub__project-worktree">Main</span></div>"#),
-            "a title-less card must name its worktree state in the subtitle: {hub_body}"
+            !hub_body.contains(r#"<div class="bee-hub__slug""#)
+                && !hub_body.contains(r#"<div class="bee-hub__branch""#),
+            "a title-less card with no worktree must render neither a subtitle nor a branch \
+             row: {hub_body}"
         );
         assert!(
             !hub_body.contains(r#"class="bee-hub__slug">no-docs-feature"#),
@@ -17518,9 +17787,10 @@ mod bee_route_tests {
         std::fs::create_dir_all(&root).unwrap();
         register(&st, &root, "demo");
 
-        // backlog-groom-2 D1: no `.bee/` here, so the default Kanban tab
-        // shows its own empty state now — the row markup this test cares
-        // about lives on the Projects tab.
+        // backlog-groom-2 D1: no `.bee/` here, so the Kanban tab shows its
+        // own empty state. console-theme-kanban (ctk-12): the row markup
+        // this test cares about lives in the Kanban tab's left rail now,
+        // and `?tab=projects` — the retired tab's own URL — resolves there.
         let body = body_string(get(router(st), "/?tab=projects").await).await;
         let script = include_str!("../assets/app.js");
 
@@ -17534,6 +17804,25 @@ mod bee_route_tests {
                 ".proj-row__delete",
                 "<form class=\"proj-row__delete\"",
                 "the delete confirmation",
+            ),
+            // console-theme-kanban (ctk-12): the rail's filter field ships
+            // `hidden` and is unhidden only by the script that wires it, so
+            // a drift between the two selectors is exactly the failure that
+            // would leave a dead search box on the page.
+            (
+                "[data-proj-filter]",
+                "<div class=\"home-sidebar__search\" hidden data-proj-filter>",
+                "the project-rail filter's unhide",
+            ),
+            (
+                ".home-sidebar__filter",
+                "class=\"fg-input home-sidebar__filter\"",
+                "the project-rail filter's input",
+            ),
+            (
+                ".home-sidebar .proj-row",
+                "<nav class=\"home-sidebar\" aria-label=\"Projects\">",
+                "the project-rail filter's row set",
             ),
         ] {
             assert!(
@@ -17585,16 +17874,21 @@ mod bee_route_tests {
     /// merge rather than one block per project — and emits no Live section
     /// at all, cross-project or otherwise.
     ///
-    /// homepage-tabs: Features and the project list now live on separate
-    /// tabs, so `/` (default Kanban) carries only Features and `/?tab=projects`
-    /// carries only the project list — this proves both sections still
-    /// render, on their own tab, rather than in one combined response.
+    /// homepage-tabs: Features and the project list used to live on
+    /// separate tabs, and this test proved they never rendered in one
+    /// combined response.
     ///
-    /// homepage-terminals: the strip now carries a third tab — proven here
-    /// too, so a reader of this test sees the Kanban/Projects mutual
-    /// exclusion is unaffected by Terminals joining the strip.
+    /// console-theme-kanban (ctk-12): that mutual-exclusion guarantee is
+    /// RETIRED — deliberately, not by accident. The Projects tab no longer
+    /// exists; its whole body is now the Kanban tab's own left rail, so one
+    /// combined response is exactly what the page is supposed to be. The
+    /// test is renamed and inverted rather than deleted, because the half
+    /// that still matters is the same half it always was: both sections
+    /// must actually render, from real `.bee/` data, and the Terminals tab
+    /// must carry neither of them. The old `/?tab=projects` URL is proven
+    /// here too, landing on that same combined page rather than erroring.
     #[tokio::test]
-    async fn home_page_renders_cross_project_features_on_kanban_and_projects_on_its_own_tab() {
+    async fn home_page_renders_cross_project_features_beside_the_project_rail_on_kanban() {
         let dir = fresh_root("home-cross-several");
         let st = build_state_with_dir(&dir);
         let root_a = dir.join("proj-a");
@@ -17618,8 +17912,8 @@ mod bee_route_tests {
             )
             });
         assert!(
-            !body.contains("<ul class=\"proj-list\">"),
-            "the Kanban tab must not also render the project list: {body}"
+            body.contains("<ul class=\"proj-list\">"),
+            "the Kanban tab must render the project rail's list beside the board: {body}"
         );
         assert!(
             body.contains("feat-a") && body.contains("feat-b"),
@@ -17635,14 +17929,19 @@ mod bee_route_tests {
             "the home page must emit no Live section at all: {body}"
         );
 
-        let projects_body = body_string(get(app.clone(), "/?tab=projects").await).await;
-        assert!(
-            projects_body.contains("<ul class=\"proj-list\">"),
-            "the Projects tab must render the project list: {projects_body}"
+        // The retired tab's own URL: a bookmark on `/?tab=projects` must
+        // still resolve, and must land on the page that now carries what it
+        // was pointing at — byte-identical to the default Kanban response.
+        let legacy_resp = get(app.clone(), "/?tab=projects").await;
+        assert_eq!(
+            legacy_resp.status(),
+            StatusCode::OK,
+            "an old /?tab=projects bookmark must still resolve"
         );
-        assert!(
-            !projects_body.contains(r#"data-feature-hub="cross-project""#),
-            "the Projects tab must not also render the Features section: {projects_body}"
+        let legacy_body = body_string(legacy_resp).await;
+        assert_eq!(
+            legacy_body, body,
+            "/?tab=projects must resolve to the Kanban page that now carries the project rail"
         );
 
         // homepage-terminals: the third tab renders neither of the other
@@ -17810,9 +18109,22 @@ mod bee_route_tests {
 
     /// homepage-tabs: the tab strip itself — exactly one `fg-tab--on` and
     /// one `aria-current="page"`, both on the tab actually selected, and
-    /// real anchors to `/?tab=kanban` / `/?tab=projects` / `/?tab=terminals`
-    /// (homepage-terminals) so the page works with JavaScript off and
-    /// survives the homepage's own `location.reload()`.
+    /// real anchors so the page works with JavaScript off and survives the
+    /// homepage's own `location.reload()`.
+    ///
+    /// console-theme-kanban (ctk-12): repaired for a two-tab strip. The
+    /// Projects anchor is retired with its tab — its body is now the Kanban
+    /// tab's left rail — so what this pins is Kanban and Terminals, that
+    /// the strip carries no third anchor at all, and that the retired tab's
+    /// own URL still selects Kanban rather than leaving the strip with
+    /// nothing marked current.
+    ///
+    /// The `aria-current` count is now scoped to the strip's own `<nav>`
+    /// rather than counted across the whole document. That is what the
+    /// assertion always meant — its own message says "exactly one TAB" —
+    /// and the page legitimately carries a second one now: the rail is a
+    /// separate navigation landmark, and the row marking where the reader
+    /// is inside it is correct, not a duplicate of the strip's.
     #[tokio::test]
     async fn home_page_tab_strip_marks_exactly_one_tab_selected() {
         let dir = fresh_root("home-tab-strip");
@@ -17822,6 +18134,20 @@ mod bee_route_tests {
         write_bee_project_fixture(&root, "feat-a");
         register(&st, &root, "Project A");
         let app = router(st);
+
+        // The strip's own markup, cut out of the page: `aria-current` is a
+        // per-landmark claim, so counting it document-wide would fold the
+        // rail's own current-row into the strip's count.
+        fn strip_of(body: &str) -> &str {
+            let open = body
+                .find(r#"<nav class="fg-tabs" aria-label="Home sections">"#)
+                .expect("the tab strip must render");
+            let close = body[open..]
+                .find("</nav>")
+                .map(|i| open + i)
+                .expect("the tab strip must be closed");
+            &body[open..close]
+        }
 
         let kanban_body = body_string(get(app.clone(), "/").await).await;
         assert!(
@@ -17834,7 +18160,9 @@ mod bee_route_tests {
             "exactly one tab must be marked selected: {kanban_body}"
         );
         assert_eq!(
-            kanban_body.matches(r#"aria-current="page""#).count(),
+            strip_of(&kanban_body)
+                .matches(r#"aria-current="page""#)
+                .count(),
             1,
             "exactly one tab must carry aria-current: {kanban_body}"
         );
@@ -17845,8 +18173,15 @@ mod bee_route_tests {
             "Kanban must be the selected tab by default: {kanban_body}"
         );
         assert!(
-            kanban_body.contains(r#"<a class="fg-tab" href="/?tab=projects">Projects</a>"#),
-            "Projects must be the plain, unselected tab: {kanban_body}"
+            !kanban_body.contains("/?tab=projects"),
+            "the retired Projects tab must not appear on the strip: {kanban_body}"
+        );
+        assert_eq!(
+            strip_of(&kanban_body)
+                .matches(r#"<a class="fg-tab"#)
+                .count(),
+            2,
+            "the strip must offer exactly two tabs: {kanban_body}"
         );
         // homepage-terminals D1/D8: the third tab is always on the strip,
         // plain and unselected here, whatever herdr's own state is.
@@ -17855,23 +18190,29 @@ mod bee_route_tests {
             "Terminals must always be offered, plain and unselected on Kanban: {kanban_body}"
         );
 
-        let projects_body = body_string(get(app.clone(), "/?tab=projects").await).await;
+        // The retired tab's own URL still resolves, and selects Kanban —
+        // the section that now carries what that URL was pointing at.
+        let legacy_resp = get(app.clone(), "/?tab=projects").await;
         assert_eq!(
-            projects_body.matches("fg-tab--on").count(),
+            legacy_resp.status(),
+            StatusCode::OK,
+            "an old /?tab=projects bookmark must still resolve"
+        );
+        let legacy_body = body_string(legacy_resp).await;
+        assert_eq!(
+            legacy_body.matches("fg-tab--on").count(),
             1,
-            "exactly one tab must be marked selected on the Projects tab too: {projects_body}"
+            "exactly one tab must be marked selected for the retired tab's URL too: {legacy_body}"
         );
         assert!(
-            projects_body.contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=projects" aria-current="page">Projects</a>"#),
-            "Projects must be the selected tab when asked for: {projects_body}"
+            legacy_body.contains(
+                r#"<a class="fg-tab fg-tab--on" href="/?tab=kanban" aria-current="page">Kanban</a>"#
+            ),
+            "/?tab=projects must select Kanban, where the project rail lives: {legacy_body}"
         );
         assert!(
-            projects_body.contains(r#"<a class="fg-tab" href="/?tab=kanban">Kanban</a>"#),
-            "Kanban must be the plain, unselected tab: {projects_body}"
-        );
-        assert!(
-            projects_body.contains(r#"<a class="fg-tab" href="/?tab=terminals">Terminals</a>"#),
-            "Terminals must always be offered, plain and unselected on Projects: {projects_body}"
+            legacy_body.contains(r#"<nav class="home-sidebar" aria-label="Projects">"#),
+            "/?tab=projects must land on the page carrying the project rail: {legacy_body}"
         );
 
         // homepage-terminals: Terminals itself, selected — the strip still
@@ -17928,17 +18269,27 @@ mod bee_route_tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// homepage-tabs edge (b): a registration error forces the Projects tab
-    /// — where the banner lives — even when `tab=kanban` is explicitly
-    /// asked for, so a user who just submitted the add-project form always
-    /// sees why it failed.
+    /// homepage-tabs edge (b): a registration error forces the tab where
+    /// the banner lives, even when another tab is explicitly asked for, so
+    /// a user who just submitted the add-project form always sees why it
+    /// failed.
+    ///
+    /// console-theme-kanban (ctk-12): repaired, and the guarantee is
+    /// unchanged — only the destination moved. The banner used to live on
+    /// the Projects tab; it now lives in the Kanban tab's left rail, in the
+    /// rail's own non-scrolling head, so the force retargets to Kanban.
+    /// This pins the whole chain the reader depends on: the forced tab, the
+    /// banner rendering, the banner sitting inside the rail rather than
+    /// somewhere the rail's scroll could hide it, and `role="alert"` so a
+    /// screen reader is told about it on arrival too.
     ///
     /// homepage-terminals: proven a second time with `tab=terminals`, since
     /// D8 means the Terminals tab is otherwise always reachable — this
     /// shows `register_error` still overrides it, and that Terminals stays
     /// on the strip (plain, unselected) even while forced off.
     #[tokio::test]
-    async fn home_page_register_error_forces_the_projects_tab_over_an_explicit_kanban_request() {
+    async fn home_page_register_error_forces_the_tab_carrying_the_banner_over_an_explicit_request()
+    {
         let dir = fresh_root("home-tab-register-error");
         let st = build_state_with_dir(&dir);
         let root = dir.join("proj-a");
@@ -17951,28 +18302,49 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
         assert!(
-            body.contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=projects" aria-current="page">Projects</a>"#),
-            "a register_error must force the Projects tab even when tab=kanban was asked for: {body}"
+            body.contains(
+                r#"<a class="fg-tab fg-tab--on" href="/?tab=kanban" aria-current="page">Kanban</a>"#
+            ),
+            "a register_error must land on the tab whose rail carries the banner: {body}"
         );
         assert!(
-            !body.contains(r#"data-feature-hub="cross-project""#),
-            "the forced Projects tab must not also render the Features section: {body}"
+            body.contains(
+                r#"<div class="fg-banner fg-banner--danger" role="alert" id="register-error">"#
+            ),
+            "the register_error banner must render, and announce itself: {body}"
         );
+        // The banner has to be inside the rail's own non-scrolling head —
+        // that is what puts it on screen at load rather than somewhere the
+        // rail's scrolling body could have hidden it.
+        let head_at = body
+            .find(r#"<div class="home-sidebar__head">"#)
+            .expect("the rail's head must render");
+        let body_at = body
+            .find(r#"<div class="home-sidebar__body">"#)
+            .expect("the rail's body must render");
+        let banner_at = body
+            .find("fg-banner--danger")
+            .expect("the banner must render");
         assert!(
-            body.contains("fg-banner--danger"),
-            "the register_error banner must be visible on the forced Projects tab: {body}"
+            head_at < banner_at && banner_at < body_at,
+            "the register_error banner must sit in the rail's non-scrolling head: {body}"
         );
         assert!(
             body.contains(r#"<a class="fg-tab" href="/?tab=terminals">Terminals</a>"#),
-            "Terminals must stay on the strip, plain, even while register_error forces Projects: {body}"
+            "Terminals must stay on the strip, plain, even while register_error forces Kanban: {body}"
         );
 
         let terminals_forced_body =
             body_string(get(app, "/?tab=terminals&register_error=denied").await).await;
         assert!(
-            terminals_forced_body
-                .contains(r#"<a class="fg-tab fg-tab--on" href="/?tab=projects" aria-current="page">Projects</a>"#),
-            "a register_error must force the Projects tab even when tab=terminals was asked for: {terminals_forced_body}"
+            terminals_forced_body.contains(
+                r#"<a class="fg-tab fg-tab--on" href="/?tab=kanban" aria-current="page">Kanban</a>"#
+            ),
+            "a register_error must force the banner's tab even when tab=terminals was asked for: {terminals_forced_body}"
+        );
+        assert!(
+            terminals_forced_body.contains("fg-banner--danger"),
+            "the forced page must actually carry the banner: {terminals_forced_body}"
         );
 
         std::fs::remove_dir_all(&dir).ok();
@@ -19196,8 +19568,12 @@ mod bee_route_tests {
             feat_wt_card_at < wt_badge_at,
             "the worktree's own pane must badge feat-wt's card, its own checkout: {section}"
         );
+        // ctk-11: these fixtures' panes are `agent_start`'s idle default,
+        // so they badge in the quiet group inside each card's expandable
+        // body. The containment join every assertion above checks is
+        // untouched -- only the label of the group carrying the badge moved.
         assert!(
-            section.contains("Terminals in this checkout"),
+            section.contains("Quiet terminals in this checkout"),
             "the badge group's accessible label must name the checkout, never the feature: {section}"
         );
 
@@ -19575,9 +19951,14 @@ mod bee_route_tests {
         // feature at all — not even the word "Unassigned". Byte-identical
         // to baseline: off means no herdr call, so nothing here changed.
         // backlog-groom-2 D1: no project is registered here, so the default
-        // Kanban tab now shows its own empty state — the Unassigned marker
-        // and the suggestion block this test cares about both live in
-        // `project_list_main`, which only renders on the Projects tab.
+        // Kanban tab shows its own empty state beside the rail.
+        // console-theme-kanban (ctk-12): the Unassigned marker and the
+        // suggestion block this test cares about live in
+        // `views::project_sidebar`, the left rail that the retired Projects
+        // tab became. The `?tab=projects` URL below is deliberately left as
+        // it was — it now resolves to Kanban, which is where that rail
+        // renders, so this test still points at its own subject and proves
+        // the old URL keeps working while it does so.
         let mut st_off = build_state_with_dir(&dir);
         st_off.herdr = fake.clone();
         let resp_off = get(router(st_off), "/?tab=projects").await;
@@ -21389,6 +21770,31 @@ mod bee_route_tests {
         max
     }
 
+    /// Distinct tone modifier classes extracted from every `fg-chip fg-chip--<tone>` span.
+    fn chip_tones(body: &str) -> std::collections::BTreeSet<String> {
+        const MARK: &str = "class=\"fg-chip fg-chip--";
+        let mut out = std::collections::BTreeSet::new();
+        let mut rest = body;
+        while let Some(idx) = rest.find(MARK) {
+            let after = &rest[idx + MARK.len()..];
+            let Some(gt) = after.find('>') else { break };
+            let class_str = &after[..gt];
+            let tone = class_str
+                .split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                .next()
+                .unwrap_or_default();
+            if !tone.is_empty() {
+                out.insert(tone.to_string());
+            }
+            let after_tag = &after[gt + 1..];
+            let Some(close) = after_tag.find("</span>") else {
+                break;
+            };
+            rest = &after_tag[close + "</span>".len()..];
+        }
+        out
+    }
+
     /// Every `fg-chip fg-chip--<tone>` span's visible text content, in
     /// document order — the colour probe's raw material. A tone chip with
     /// nothing but whitespace between its tags would be exactly the
@@ -21624,8 +22030,8 @@ mod bee_route_tests {
 
     /// (theme) `.bee/`'s dark-scheme rules are present in the shared
     /// stylesheet under BOTH the theme-agnostic axis (`html[data-scheme=
-    /// "dark"]`, `contract.css`) and the atelier-specific one
-    /// (`html[data-theme="atelier"][data-scheme="dark"]`, `atelier.css`) —
+    /// "dark"]`, `contract.css`) and the console-specific one
+    /// (`html[data-theme="console"][data-scheme="dark"]`, `console.css`) —
     /// and neither is gated behind a `prefers-color-scheme` media query
     /// anywhere in the bundle. That absence is the "beats the OS in both
     /// directions" guarantee made structural rather than incidental: the
@@ -21648,8 +22054,14 @@ mod bee_route_tests {
             "the theme-agnostic dark-scheme axis must be present in the bundle"
         );
         assert!(
-            css.contains("html[data-theme=\"atelier\"][data-scheme=\"dark\"]"),
-            "the atelier theme's own dark-scheme override must be present in the bundle"
+            css.contains("html[data-theme=\"console\"][data-scheme=\"dark\"]"),
+            "the console theme's own dark-scheme override must be present in the bundle"
+        );
+        assert!(
+            css.contains("html[data-theme=\"console\"][data-scheme=\"light\"]"),
+            "the console theme is dark-native, so its LIGHT layer is the counterpart that has \
+             to beat contract.css's neutral dark fallback — without it, choosing light under \
+             an OS-dark preference would leak the fallback's colours back in"
         );
         assert!(
             !css.contains("prefers-color-scheme"),
@@ -21661,7 +22073,7 @@ mod bee_route_tests {
     }
 
     /// (theme) The board's own rendered page carries the explicit
-    /// `data-theme="atelier"` attribute and the no-flash script that always
+    /// `data-theme="console"` attribute and the no-flash script that always
     /// resolves to one definite `data-scheme` value (never leaving it
     /// unset for a CSS media query to fill in) — the per-page half of the
     /// same guarantee the stylesheet test above proves for the CSS itself.
@@ -21681,8 +22093,8 @@ mod bee_route_tests {
         let body = body_string(resp).await;
 
         assert!(
-            body.contains(r#"data-theme="atelier""#),
-            "the board page must carry the explicit atelier theme attribute: {body}"
+            body.contains(r#"data-theme="console""#),
+            "the board page must carry the explicit console theme attribute: {body}"
         );
         assert!(
             body.contains("setAttribute('data-scheme'"),
@@ -21696,14 +22108,18 @@ mod bee_route_tests {
     /// (colour) Every severity/state chip the board renders carries a word
     /// alongside its tone class — never a bare colour with no text a
     /// colour-blind reader could fall back on. The fixture trips several
-    /// different tones at once (a stuck cell's Critical attention item, a
-    /// recorded gate-bypass Warning, plus the neutral "Needs attention"
-    /// count chip) so this is not just proving the one tone the happiest
-    /// fixture would hit.
+    /// distinct tones at once (a blocked feature's Warning run-state badge
+    /// alongside the review queue's neutral count chips — note that column
+    /// counts are plain text rather than chips now) so this is not just
+    /// proving the one tone the happiest fixture would hit.
     #[tokio::test]
     async fn board_severity_and_state_chips_always_carry_a_word_not_color_alone() {
         let root = fresh_root("colour-chips");
-        write(&root, ".bee/config.json", r#"{"gate_bypass": "total"}"#);
+        write(
+            &root,
+            ".bee/state.json",
+            r#"{"feature": "demo", "run_state": "blocked"}"#,
+        );
         write(
             &root,
             ".bee/cells/a.json",
@@ -21716,11 +22132,20 @@ mod bee_route_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_string(resp).await;
 
+        let tones = chip_tones(&body);
+        assert!(
+            tones.len() >= 2,
+            "fixture must trip several distinct tone classes to be a real probe, found {tones:?}: {body}"
+        );
+        assert!(
+            tones.contains("warning") && tones.contains("neutral"),
+            "fixture must trip both warning and neutral tones, found {tones:?}: {body}"
+        );
+
         let chips = chip_texts(&body);
         assert!(
-            chips.len() >= 3,
-            "fixture must trip several tone chips to be a real probe, found {}: {body}",
-            chips.len()
+            !chips.is_empty(),
+            "fixture must trip at least one tone chip to be a real probe, found 0: {body}"
         );
         for text in &chips {
             assert!(
