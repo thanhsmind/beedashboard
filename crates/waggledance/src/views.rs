@@ -1886,6 +1886,19 @@ fn bee_hub_style() -> String {
    `.bee-hub__archive`, a collapsed bar rendered after this grid closes
    rather than inside it (see [`bee_hub_archive_bar`]). */
 .bee-hub__groups { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(280px, 1.6fr) minmax(200px, 1fr) minmax(200px, 1fr); gap: var(--space-4); }
+/* Column header (console-theme-kanban ctk-5): status dot, label,
+   optional waiting chip, right-aligned mono count. 48px tall, 16px side
+   padding, 10px gap between items. */
+.bee-hub__group-header { display: flex; align-items: center; gap: 10px; height: 48px; padding: 0 16px; margin: 0; box-sizing: border-box; }
+.bee-hub__group-dot { width: 7px; height: 7px; border-radius: var(--radius-pill); flex: none; box-shadow: var(--status-glow); }
+.bee-hub__group[data-hub-group="todo"] .bee-hub__group-dot { background: var(--color-accent-alt-1); color: var(--color-accent-alt-1); }
+.bee-hub__group[data-hub-group="in-progress"] .bee-hub__group-dot { background: var(--color-accent-alt-2); color: var(--color-accent-alt-2); }
+.bee-hub__group[data-hub-group="review"] .bee-hub__group-dot { background: var(--color-accent-alt-3); color: var(--color-accent-alt-3); box-shadow: none; }
+.bee-hub__group[data-hub-group="compound"] .bee-hub__group-dot { background: var(--color-accent-alt-4); color: var(--color-accent-alt-4); }
+.bee-hub__group[data-hub-group="finished"] .bee-hub__group-dot { background: var(--color-accent-alt-5); color: var(--color-accent-alt-5); box-shadow: none; }
+.bee-hub__group-label { font-family: var(--font-mono); font-size: var(--type-label-size); font-weight: var(--type-label-weight); letter-spacing: var(--type-label-tracking); text-transform: uppercase; color: var(--color-text); line-height: 1; }
+.bee-hub__group-waiting { font-family: var(--font-mono); font-size: var(--type-tag-size); font-weight: var(--type-tag-weight); color: var(--color-accent-alt-2); background: color-mix(in srgb, var(--color-accent-alt-2) 10%, transparent); padding: 2px 6px; border-radius: var(--radius-pill); line-height: 1; white-space: nowrap; }
+.bee-hub__group-count { margin-left: auto; font-family: var(--font-mono); font-size: var(--type-tag-size); font-weight: var(--type-tag-weight); opacity: 0.6; color: var(--color-text); line-height: 1; }
 /* kanban-columns-archive: the folded Finished bar — a native `<details>`
    (no JS) spanning the full board width beneath `.bee-hub__groups` rather
    than sitting in it as a fifth track. `data-hub-group`/`data-hub-count`
@@ -2912,6 +2925,7 @@ fn bee_render_hub_section(
     let mut finished_rows: Vec<String> = Vec::new();
     let mut todo_count = 0usize;
     let mut in_progress_count = 0usize;
+    let mut in_progress_waiting_count = 0usize;
     let mut review_count = 0usize;
     let mut compound_count = 0usize;
     let mut finished_count = 0usize;
@@ -2924,6 +2938,11 @@ fn bee_render_hub_section(
                 let panes = feature_panes
                     .get(data.feature.as_str())
                     .unwrap_or(&no_panes);
+                let is_waiting = data.reason.as_deref().map_or(false, |r| !r.is_empty())
+                    || panes.iter().any(|p| p.status == "blocked");
+                if is_waiting {
+                    in_progress_waiting_count += 1;
+                }
                 let key = bee_hub_in_progress_sort_key(
                     &data.feature,
                     data.last_activity.as_deref(),
@@ -3041,11 +3060,12 @@ fn bee_render_hub_section(
   </div>
   {archive_bar}
 </section>"#,
-        todo_group = bee_hub_group("Todo", "todo", todo_count, &todo_cards, "Nothing in Todo."),
+        todo_group = bee_hub_group("Todo", "todo", todo_count, 0, &todo_cards, "Nothing in Todo."),
         in_progress_group = bee_hub_group(
             "In Progress",
             "in-progress",
             in_progress_count,
+            in_progress_waiting_count,
             &in_progress_cards,
             "Nothing in progress."
         ),
@@ -3053,6 +3073,7 @@ fn bee_render_hub_section(
             "Review",
             "review",
             review_count,
+            0,
             &review_cards,
             "Nothing in Review."
         ),
@@ -3060,6 +3081,7 @@ fn bee_render_hub_section(
             "Compound",
             "compound",
             compound_count,
+            0,
             &compound_cards,
             "Nothing in Compound."
         ),
@@ -3160,6 +3182,7 @@ pub fn bee_cross_project_features_section(
     let mut compound_rows: Vec<String> = Vec::new();
     let mut todo_count = 0usize;
     let mut in_progress_count = 0usize;
+    let mut in_progress_waiting_count = 0usize;
     let mut review_count = 0usize;
     let mut compound_count = 0usize;
     let no_panes: Vec<TerminalPaneView> = Vec::new();
@@ -3210,6 +3233,11 @@ pub fn bee_cross_project_features_section(
                     let panes = project_panes
                         .and_then(|m| m.get(data.feature.as_str()))
                         .unwrap_or(&no_panes);
+                    let is_waiting = data.reason.as_deref().map_or(false, |r| !r.is_empty())
+                        || panes.iter().any(|p| p.status == "blocked");
+                    if is_waiting {
+                        in_progress_waiting_count += 1;
+                    }
                     let key = bee_hub_in_progress_sort_key(
                         &data.feature,
                         data.last_activity.as_deref(),
@@ -3358,11 +3386,12 @@ pub fn bee_cross_project_features_section(
   {archive_bar}
 </section>"#,
         read_errors_strip = read_errors_strip,
-        todo_group = bee_hub_group("Todo", "todo", todo_count, &todo_cards, "Nothing in Todo."),
+        todo_group = bee_hub_group("Todo", "todo", todo_count, 0, &todo_cards, "Nothing in Todo."),
         in_progress_group = bee_hub_group(
             "In Progress",
             "in-progress",
             in_progress_count,
+            in_progress_waiting_count,
             &in_progress_cards,
             "Nothing in progress."
         ),
@@ -3370,6 +3399,7 @@ pub fn bee_cross_project_features_section(
             "Review",
             "review",
             review_count,
+            0,
             &review_cards,
             "Nothing in Review."
         ),
@@ -3377,6 +3407,7 @@ pub fn bee_cross_project_features_section(
             "Compound",
             "compound",
             compound_count,
+            0,
             &compound_cards,
             "Nothing in Compound."
         ),
@@ -3444,24 +3475,31 @@ fn bee_gate_current_stop(gates: Option<&BeeApprovedGates>) -> Option<(&'static s
 }
 
 /// One group column of the feature hub (`bee_feature_hub_section`): a
-/// header naming the group and its true count, then its cards, or one
-/// honest empty line when the group holds nothing right now (bee-board-pm
-/// D5's "sections never disappear" rule) — an empty group renders its own
-/// wording, never a shared "Nothing here." that could not tell a reader
-/// which group came up empty.
+/// console column header (status dot in locked lane hue, uppercase mono label,
+/// optional waiting chip, right-aligned mono count) and its cards or one
+/// honest empty line (bee-board-pm D5).
 fn bee_hub_group(
     label: &str,
     key: &str,
     count: usize,
+    waiting_count: usize,
     cards_html: &str,
     empty_line: &str,
 ) -> String {
     let body = bee_hub_group_body(cards_html, empty_line);
+    let waiting_chip = if waiting_count > 0 {
+        format!(
+            r#"<span class="bee-hub__group-waiting">{waiting_count} waiting</span>"#
+        )
+    } else {
+        String::new()
+    };
     format!(
-        r#"<div class="bee-hub__group" data-hub-group="{key}" data-hub-count="{count}"><h4 class="bee-panel__subhead">{label} <span class="fg-chip fg-chip--neutral">{count}</span></h4>{body}</div>"#,
+        r#"<div class="bee-hub__group" data-hub-group="{key}" data-hub-count="{count}"><h4 class="bee-hub__group-header"><span class="bee-hub__group-dot" aria-hidden="true"></span><span class="bee-hub__group-label">{label}</span>{waiting_chip}<span class="bee-hub__group-count">{count}</span></h4>{body}</div>"#,
         key = key,
         count = count,
         label = esc(label),
+        waiting_chip = waiting_chip,
         body = body,
     )
 }
@@ -11954,6 +11992,181 @@ mod tests {
             "Finished must never render inside the grid: {grid_region}"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// (console-theme-kanban ctk-5) Every column header emits the console
+    /// anatomy: a status dot in its locked lane hue, the label word (real
+    /// heading element, never meaning by colour alone), optional `N waiting`
+    /// chip, and right-aligned count in mono.
+    #[test]
+    fn bee_hub_group_renders_console_header_anatomy_with_dot_label_waiting_chip_and_mono_count() {
+        // Without waiting chip (waiting_count = 0)
+        let todo = bee_hub_group("Todo", "todo", 3, 0, "<p>card</p>", "Empty.");
+        assert!(
+            todo.contains(r#"<div class="bee-hub__group" data-hub-group="todo" data-hub-count="3">"#),
+            "data-hub-group and data-hub-count must remain on the wrapper div: {todo}"
+        );
+        assert!(
+            todo.contains(r#"<h4 class="bee-hub__group-header">"#),
+            "header must be a real h4 heading element: {todo}"
+        );
+        assert!(
+            todo.contains(r#"<span class="bee-hub__group-dot" aria-hidden="true"></span>"#),
+            "status dot must render ahead of the label: {todo}"
+        );
+        assert!(
+            todo.contains(r#"<span class="bee-hub__group-label">Todo</span>"#),
+            "label word must be present beside the dot: {todo}"
+        );
+        assert!(
+            !todo.contains("bee-hub__group-waiting"),
+            "no waiting chip when waiting_count is 0: {todo}"
+        );
+        assert!(
+            todo.contains(r#"<span class="bee-hub__group-count">3</span>"#),
+            "count must render in its own span: {todo}"
+        );
+
+        // With waiting chip on In Progress (waiting_count > 0)
+        let in_progress = bee_hub_group(
+            "In Progress",
+            "in-progress",
+            5,
+            2,
+            "<p>card</p>",
+            "Empty.",
+        );
+        assert!(
+            in_progress.contains(r#"<span class="bee-hub__group-waiting">2 waiting</span>"#),
+            "waiting chip must render when waiting_count > 0: {in_progress}"
+        );
+        assert!(
+            in_progress.contains(r#"<span class="bee-hub__group-label">In Progress</span>"#),
+            "label must be present: {in_progress}"
+        );
+        assert!(
+            in_progress.contains(r#"<span class="bee-hub__group-count">5</span>"#),
+            "total count must be present: {in_progress}"
+        );
+
+        // Verify order: dot < label < waiting < count
+        let dot_pos = in_progress.find("bee-hub__group-dot").unwrap();
+        let label_pos = in_progress.find("bee-hub__group-label").unwrap();
+        let waiting_pos = in_progress.find("bee-hub__group-waiting").unwrap();
+        let count_pos = in_progress.find("bee-hub__group-count").unwrap();
+        assert!(
+            dot_pos < label_pos && label_pos < waiting_pos && waiting_pos < count_pos,
+            "header anatomy order must be dot -> label -> waiting chip -> count: {in_progress}"
+        );
+    }
+
+    /// (console-theme-kanban ctk-5) Column header style rules in bee_hub_style()
+    /// consume the theme's five lane tokens (--color-accent-alt-1..5) with no
+    /// literal hex restatements, give Review no dot glow, and right-align mono counts.
+    #[test]
+    fn bee_hub_style_carries_console_column_header_token_rules_and_no_glow_for_in_review() {
+        let css = bee_hub_style();
+
+        // 48px height, 16px padding, 10px gap
+        assert!(
+            css.contains(".bee-hub__group-header {")
+                && css.contains("height: 48px;")
+                && css.contains("padding: 0 16px;")
+                && css.contains("gap: 10px;"),
+            "header layout metrics (48px tall, 16px pad, 10px gap) must be present: {css}"
+        );
+
+        // Status dot glow default
+        assert!(
+            css.contains(".bee-hub__group-dot {")
+                && css.contains("box-shadow: var(--status-glow);"),
+            "status dots must carry --status-glow by default: {css}"
+        );
+
+        // The five lane tokens
+        assert!(
+            css.contains(r#".bee-hub__group[data-hub-group="todo"] .bee-hub__group-dot { background: var(--color-accent-alt-1); color: var(--color-accent-alt-1); }"#),
+            "Todo dot must map to --color-accent-alt-1: {css}"
+        );
+        assert!(
+            css.contains(r#".bee-hub__group[data-hub-group="in-progress"] .bee-hub__group-dot { background: var(--color-accent-alt-2); color: var(--color-accent-alt-2); }"#),
+            "In Progress dot must map to --color-accent-alt-2: {css}"
+        );
+        assert!(
+            css.contains(r#".bee-hub__group[data-hub-group="review"] .bee-hub__group-dot { background: var(--color-accent-alt-3); color: var(--color-accent-alt-3); box-shadow: none; }"#),
+            "Review dot must map to --color-accent-alt-3 with NO glow (box-shadow: none): {css}"
+        );
+        assert!(
+            css.contains(r#".bee-hub__group[data-hub-group="compound"] .bee-hub__group-dot { background: var(--color-accent-alt-4); color: var(--color-accent-alt-4); }"#),
+            "Compound dot must map to --color-accent-alt-4: {css}"
+        );
+        assert!(
+            css.contains(r#".bee-hub__group[data-hub-group="finished"] .bee-hub__group-dot { background: var(--color-accent-alt-5); color: var(--color-accent-alt-5); box-shadow: none; }"#),
+            "Finished dot must map to --color-accent-alt-5: {css}"
+        );
+
+        // Waiting chip in iterating hue with 10% alpha fill
+        assert!(
+            css.contains(".bee-hub__group-waiting {")
+                && css.contains("color: var(--color-accent-alt-2);")
+                && css.contains("background: color-mix(in srgb, var(--color-accent-alt-2) 10%, transparent);"),
+            "waiting chip must use --color-accent-alt-2 with 10% alpha fill: {css}"
+        );
+
+        // Count pushed right in mono at 60% opacity
+        assert!(
+            css.contains(".bee-hub__group-count {")
+                && css.contains("margin-left: auto;")
+                && css.contains("font-family: var(--font-mono);")
+                && css.contains("opacity: 0.6;"),
+            "count must be pushed right (margin-left: auto) in mono at 60% opacity: {css}"
+        );
+    }
+
+    /// (console-theme-kanban ctk-5) Board sections render the waiting chip
+    /// on In Progress only when a real count backs it (D2).
+    #[test]
+    fn bee_feature_hub_section_renders_waiting_chip_only_when_backed_by_real_waiting_cards() {
+        let root = std::env::temp_dir().join(format!(
+            "waggledance-views-hub-waiting-chip-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+
+        // Case 1: An In Progress feature with a stopped gate (waiting on you)
+        write(
+            ".bee/state.json",
+            r#"{
+                "feature": "active-feat",
+                "phase": "exploring",
+                "approved_gates": {"context": false, "shape": false, "execution": false, "review": false}
+            }"#,
+        );
+        let hb = (time::OffsetDateTime::now_utc() - time::Duration::minutes(20))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        write(
+            ".bee/sessions/default.json",
+            &format!(r#"{{"id": "default", "last_heartbeat": "{hb}", "workspace_id": "main"}}"#),
+        );
+
+        let snapshot = waggledance_core::bee::read_snapshot(&root);
+        let mut project = sample_project();
+        project.root_path = root.clone();
+        let html = bee_feature_hub_section(&project, &snapshot, &std::collections::HashMap::new());
+
+        assert!(
+            html.contains(r#"<span class="bee-hub__group-waiting">1 waiting</span>"#),
+            "In Progress column header must show '1 waiting' chip when backed by a waiting card: {html}"
+        );
+
+        // Clean up
         let _ = std::fs::remove_dir_all(&root);
     }
 
